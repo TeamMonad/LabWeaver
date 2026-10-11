@@ -20,9 +20,20 @@ http {
     ssl_protocols TLSv1.2 TLSv1.3;
 
     # The guest-facing API is limited to the protocol paths required by the
-    # NVIDIA client. Administrative /-/ endpoints, including client-token,
-    # fall through to the 404 handler and remain reachable only through the
-    # backend loopback socket for an operator using kubectl exec.
+    # NVIDIA client plus the exact GET client-token endpoint. All other /-/
+    # management endpoints fall through to the 404 handler and remain
+    # reachable only through the backend loopback socket for an operator.
+    location = /-/client-token {
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto https;
+      limit_except GET {
+        deny all;
+      }
+      proxy_pass http://127.0.0.1:8080;
+    }
+
     location ^~ /auth/v1/ {
       proxy_set_header Host $http_host;
       proxy_set_header X-Real-IP $remote_addr;

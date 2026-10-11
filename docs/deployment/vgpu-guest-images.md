@@ -54,16 +54,22 @@ publishing remains an explicit administrator operation after the local output
 is inspected.
 
 The command deliberately has no DLS token, TLS CA, or DLS signing root input.
-The VM bootstrap retrieves the client token and DLS signing root from the
-Secret references exposed by the `fastapi-dls-client` ConfigMap before applying
-the patcher. The signing root used by `gridd-unlock-patcher` is different from
-the nginx TLS `ca.crt` in `fastapi-dls-tls`; never substitute the TLS CA. The
-token and certificate are runtime material and must not be copied into the
-guest image or repository.
+The deployment-owned `vmVgpuLicensing` provider configuration stores only the
+license endpoint and Kubernetes Secret references. At VM creation time the
+runtime obtains a fresh FastAPI-DLS client token through `GET /-/client-token`
+and writes it, together with the referenced CA material, only to the private
+cloud-init Secret for that VM. The retained
+`fastapi-dls-client-token` Secret remains operator-managed bootstrap and
+rotation state; the fresh VM path does not read it and it is not copied into
+the image or the public resource plan.
+The signing root used by `gridd-unlock-patcher` is different from the nginx
+TLS `ca.crt` in `fastapi-dls-tls`; never substitute the TLS CA. No token or
+certificate belongs in the guest image or repository.
 
 The optional cluster-internal FastAPI-DLS role uses the stable references
 `fastapi-dls-client-token` (Secret key `client-token`),
 `fastapi-dls-tls` (key `ca.crt` for nginx TLS trust), and
-`fastapi-dls-signing-root` (key `ca.crt` for the guest patcher). Its backend
-management endpoints remain loopback-only; guest traffic is limited to
-`/auth/v1/` and `/leasing/v1/`.
+`fastapi-dls-signing-root` (key `ca.crt` for the guest patcher). The nginx
+proxy exposes only the exact GET `/-/client-token`, `/auth/v1/`, and
+`/leasing/v1/` paths to the already restricted runtime/application network;
+all other `/-/` management paths remain 404.

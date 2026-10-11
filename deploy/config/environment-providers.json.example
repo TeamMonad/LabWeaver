@@ -60,6 +60,25 @@
       "maxBases": 8,
       "maxCapacityBytes": 137438953472
     },
+    "vmVgpuLicensing": {
+      "mode": "fastapi_dls",
+      "licenseUrl": "https://fastapi-dls.labweaver-gpu-license.svc.cluster.local/",
+      "tokenSecretRef": {
+        "namespace": "labweaver-gpu-license",
+        "name": "fastapi-dls-client-token",
+        "key": "client-token"
+      },
+      "tlsCaSecretRef": {
+        "namespace": "labweaver-gpu-license",
+        "name": "fastapi-dls-tls",
+        "key": "ca.crt"
+      },
+      "fastapiDlsSigningRootCaSecretRef": {
+        "namespace": "labweaver-gpu-license",
+        "name": "fastapi-dls-signing-root",
+        "key": "ca.crt"
+      }
+    },
     "collectorWorkspaceRoot": "/home/lab/workspace",
     "sshUserCaPublicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ",
     "sshUserCaPrivateKeyPath": "/etc/labweaver/secrets/collector-ssh-user-ca-key",

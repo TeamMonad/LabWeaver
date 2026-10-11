@@ -10,6 +10,7 @@ use artifact_store::S3ImmutableObjectStore;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::{ArtifactRef, Revision, UtcTimestamp};
+use futures_util::StreamExt;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use reqwest::{Certificate, Client, Method, StatusCode, Url};
 use serde::Deserialize;
@@ -932,8 +933,16 @@ impl KubernetesContainerExecutor {
             .ok_or_else(rejected)?;
         let base_userdata = secret_data_field(&base_secret.document, "userdata")?;
         let networkdata = secret_data_field(&base_secret.document, "networkdata")?;
-        let token = self.read_secret_data(&licensing.token_secret_ref).await?;
         let tls_ca = self.read_secret_data(&licensing.tls_ca_secret_ref).await?;
+        let token = match licensing.mode {
+            KubeVirtVmVgpuLicenseMode::NvidiaDls => {
+                self.read_secret_data(&licensing.token_secret_ref).await?
+            }
+            KubeVirtVmVgpuLicenseMode::FastapiDls => {
+                self.read_fastapi_dls_client_token(&licensing.license_url, &tls_ca)
+                    .await?
+            }
+        };
         let signing_root = match licensing.mode {
             KubeVirtVmVgpuLicenseMode::NvidiaDls => None,
             KubeVirtVmVgpuLicenseMode::FastapiDls => Some(
@@ -985,6 +994,64 @@ impl KubernetesContainerExecutor {
             return Err(rejected());
         }
         Ok(data)
+    }
+
+    async fn read_fastapi_dls_client_token(
+        &self,
+        license_url: &Url,
+        tls_ca: &[u8],
+    ) -> Result<Vec<u8>, ProviderFailure> {
+        if license_url.scheme() != "https"
+            || license_url.host_str().is_none()
+            || !license_url.username().is_empty()
+            || license_url.password().is_some()
+            || license_url.query().is_some()
+            || license_url.fragment().is_some()
+        {
+            return Err(rejected());
+        }
+        let token_url = license_url
+            .join("/-/client-token")
+            .map_err(|_| rejected())?;
+        let certificate = Certificate::from_pem(tls_ca).map_err(|_| rejected())?;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(true)
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(certificate)
+            .timeout(Duration::from_millis(
+                self.configuration.request_timeout_milliseconds,
+            ))
+            .build()
+            .map_err(|_| rejected())?;
+        let response = client
+            .get(token_url)
+            .send()
+            .await
+            .map_err(|_| unavailable())?;
+        if response.status() != StatusCode::OK {
+            return Err(status_failure(response.status()));
+        }
+        if response.content_length().is_some_and(|length| {
+            usize::try_from(length).map_or(true, |length| length > MAX_VGPU_BOOTSTRAP_SECRET_BYTES)
+        }) {
+            return Err(rejected());
+        }
+        let mut stream = response.bytes_stream();
+        let mut token = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| unavailable())?;
+            let next = token.len().checked_add(chunk.len()).ok_or_else(rejected)?;
+            if next > MAX_VGPU_BOOTSTRAP_SECRET_BYTES {
+                return Err(rejected());
+            }
+            token.extend_from_slice(&chunk);
+        }
+        if token.is_empty() {
+            return Err(rejected());
+        }
+        Ok(token)
     }
 
     /// Imports and identity-checks the base disk the plan's clone `DataVolume` sources from.
@@ -3378,13 +3445,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vm_vgpu_apply_reads_named_secrets_and_only_applies_private_bootstrap()
+    async fn fastapi_dls_fetches_fresh_token_for_private_cloud_init()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let token = executor
+            .read_fastapi_dls_client_token(&mock.endpoint, mock.ca_pem.as_bytes())
+            .await
+            .map_err(|error| format!("fresh FastAPI-DLS bootstrap rejected: {error:?}"))?;
+
+        let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls);
+        let rendered = render_vm_vgpu_cloud_init(
+            b"#cloud-config\nwrite_files:\n  - path: /etc/base\n    content: base\nruncmd:\n",
+            &token,
+            mock.ca_pem.as_bytes(),
+            Some(b"-----BEGIN CERTIFICATE-----\nsigning\n-----END CERTIFICATE-----\n"),
+            &licensing,
+        )
+        .map_err(|error| format!("fresh token private bootstrap rejected: {error:?}"))?;
+        assert!(rendered.contains(&BASE64_STANDARD.encode("fresh-client-token")));
+        assert!(!rendered.contains(&BASE64_STANDARD.encode("secret-client-token")));
+        let events = mock.events.lock().await.clone();
+        assert!(events.iter().any(|event| event == "GET /-/client-token"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.ends_with("/secrets/fastapi-dls-client-token"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fastapi_dls_rejects_invalid_token_responses() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let wrong_certificate = generate_simple_self_signed(vec!["localhost".to_owned()])?;
+        let wrong_ca = wrong_certificate.cert.pem();
+
+        for (case, status, body, location, bad_ca, expected_code) in [
+            (
+                "non200",
+                StatusCode::BAD_GATEWAY,
+                b"ignored".to_vec(),
+                None,
+                false,
+                ProviderFailureCode::Unavailable,
+            ),
+            (
+                "redirect",
+                StatusCode::FOUND,
+                Vec::new(),
+                Some("https://localhost/-/client-token".to_owned()),
+                false,
+                ProviderFailureCode::Unavailable,
+            ),
+            (
+                "oversize",
+                StatusCode::OK,
+                vec![b'x'; MAX_VGPU_BOOTSTRAP_SECRET_BYTES + 1],
+                None,
+                false,
+                ProviderFailureCode::Rejected,
+            ),
+            (
+                "empty",
+                StatusCode::OK,
+                Vec::new(),
+                None,
+                false,
+                ProviderFailureCode::Rejected,
+            ),
+            (
+                "badCA",
+                StatusCode::OK,
+                b"fresh-client-token".to_vec(),
+                None,
+                true,
+                ProviderFailureCode::Unavailable,
+            ),
+        ] {
+            *mock.license_response.lock().await = MockLicenseResponse {
+                status,
+                body,
+                location,
+            };
+            mock.events.lock().await.clear();
+            let ca = if bad_ca {
+                wrong_ca.as_bytes()
+            } else {
+                mock.ca_pem.as_bytes()
+            };
+            let failure = executor
+                .read_fastapi_dls_client_token(&mock.endpoint, ca)
+                .await
+                .expect_err(case);
+            assert_eq!(failure.code, expected_code, "{case} failure classification");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nvidia_dls_apply_reads_named_secrets_and_only_applies_private_bootstrap()
     -> Result<(), Box<dyn std::error::Error>> {
         let mock = spawn_mock_kubernetes().await?;
         let (_files, executor) = test_kubevirt_executor(&mock).await?;
         let environment_id = contracts::EnvironmentId::new();
         let namespace = format!("lw-env-{environment_id}");
-        let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls);
+        let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::NvidiaDls);
         let plan = vm_vgpu_plan_for_test(environment_id, &namespace, licensing);
 
         let mut fence = stop_fence(environment_id);
@@ -3468,10 +3636,11 @@ mod tests {
                 .any(|event| event.ends_with("/secrets/fastapi-dls-tls"))
         );
         assert!(
-            events
+            !events
                 .iter()
                 .any(|event| event.ends_with("/secrets/fastapi-dls-signing-root"))
         );
+        assert!(!events.iter().any(|event| event == "GET /-/client-token"));
         Ok(())
     }
 
@@ -3625,6 +3794,15 @@ mod tests {
         get_responses: Arc<Mutex<std::collections::BTreeMap<String, Option<Value>>>>,
         lifecycle: Option<Arc<Mutex<LifecycleKubernetes>>>,
         kubevirt_read: Arc<Mutex<Option<(StatusCode, Duration)>>>,
+        ca_pem: String,
+        license_response: Arc<Mutex<MockLicenseResponse>>,
+    }
+
+    #[derive(Clone)]
+    struct MockLicenseResponse {
+        status: StatusCode,
+        body: Vec<u8>,
+        location: Option<String>,
     }
 
     struct MockKubernetes {
@@ -3636,6 +3814,7 @@ mod tests {
         get_responses: Arc<Mutex<std::collections::BTreeMap<String, Option<Value>>>>,
         task: tokio::task::JoinHandle<()>,
         kubevirt_read: Arc<Mutex<Option<(StatusCode, Duration)>>>,
+        license_response: Arc<Mutex<MockLicenseResponse>>,
     }
 
     impl Drop for MockKubernetes {
@@ -3664,6 +3843,11 @@ mod tests {
         let applied_quota = Arc::new(Mutex::new(None));
         let get_responses = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let kubevirt_read = Arc::new(Mutex::new(None));
+        let license_response = Arc::new(Mutex::new(MockLicenseResponse {
+            status: StatusCode::OK,
+            body: b"fresh-client-token".to_vec(),
+            location: None,
+        }));
         let state = MockKubernetesState {
             deployment_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events: Arc::clone(&events),
@@ -3672,6 +3856,8 @@ mod tests {
             get_responses: Arc::clone(&get_responses),
             lifecycle: lifecycle.map(|fixture| Arc::new(Mutex::new(fixture))),
             kubevirt_read: Arc::clone(&kubevirt_read),
+            ca_pem: ca_pem.clone(),
+            license_response: Arc::clone(&license_response),
         };
         let router = Router::new()
             .fallback(mock_kubernetes_handler)
@@ -3688,9 +3874,11 @@ mod tests {
             get_responses,
             task,
             kubevirt_read,
+            license_response,
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn mock_kubernetes_handler(
         State(state): State<MockKubernetesState>,
         request: Request<Body>,
@@ -3722,6 +3910,19 @@ mod tests {
             )
         };
         state.events.lock().await.push(event);
+        if method == Method::GET && path == "/-/client-token" {
+            if request.headers().contains_key("authorization") {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            let license = state.license_response.lock().await.clone();
+            let mut response = (license.status, license.body).into_response();
+            if let Some(location) = license.location
+                && let Ok(location) = location.parse()
+            {
+                response.headers_mut().insert("location", location);
+            }
+            return response;
+        }
         if let Some(fixture) = &state.lifecycle {
             return lifecycle_kubernetes_response(&mut *fixture.lock().await, request).await;
         }
@@ -3737,7 +3938,7 @@ mod tests {
                 .store(true, std::sync::atomic::Ordering::Release);
         }
         if method == Method::GET
-            && let Some(response) = mock_vgpu_secret_response(&path)
+            && let Some(response) = mock_vgpu_secret_response(&state, &path)
         {
             return response;
         }
@@ -3844,14 +4045,11 @@ mod tests {
         Some(axum::Json(document).into_response())
     }
 
-    fn mock_vgpu_secret_response(path: &str) -> Option<Response> {
+    fn mock_vgpu_secret_response(state: &MockKubernetesState, path: &str) -> Option<Response> {
         let (key, content) = if path.ends_with("/secrets/fastapi-dls-client-token") {
             ("client-token", "secret-client-token")
         } else if path.ends_with("/secrets/fastapi-dls-tls") {
-            (
-                "ca.crt",
-                "-----BEGIN CERTIFICATE-----\ntls\n-----END CERTIFICATE-----\n",
-            )
+            ("ca.crt", state.ca_pem.as_str())
         } else if path.ends_with("/secrets/fastapi-dls-signing-root") {
             (
                 "ca.crt",

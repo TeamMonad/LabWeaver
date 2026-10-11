@@ -25,6 +25,7 @@
       - fastapi_dls_signing_root_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - fastapi_dls_signing_root_secret_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - fastapi_dls_signing_root_secret_key is match('^[A-Za-z0-9._-]+$')
+      - fastapi_dls_application_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - fastapi_dls_allowed_client_namespace_selector is mapping
       - fastapi_dls_allowed_client_namespace_selector | length > 0
       - fastapi_dls_allowed_client_pod_selector is mapping
@@ -56,6 +57,7 @@
         name: "{{ fastapi_dls_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
+          labweaver.io/infrastructure: "true"
           app.kubernetes.io/managed-by: ansible
   when: fastapi_dls_enabled | bool
 
@@ -614,7 +616,9 @@
          < 11 * 365 * 86400 or
          (fastapi_dls_client_token_payload.get('exp', 0) | int - fastapi_dls_client_token_payload.get('iat', 0) | int)
          > 13 * 365 * 86400 or
-         fastapi_dls_client_token_payload.get('exp', 0) | int <= (now(utc=true).timestamp() | int) }}
+         fastapi_dls_client_token_payload.get('exp', 0) | int <= (now(utc=true).timestamp() | int) or
+         ((fastapi_dls_client_token_payload.get('iat', 0) | int) + 3600)
+         <= (now(utc=true).timestamp() | int) }}
   when:
     - fastapi_dls_enabled | bool
     - fastapi_dls_client_token_present | bool

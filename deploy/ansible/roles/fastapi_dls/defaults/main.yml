@@ -22,14 +22,18 @@ fastapi_dls_data_pvc_name: fastapi-dls-data
 fastapi_dls_tls_secret_name: fastapi-dls-tls
 fastapi_dls_client_config_name: fastapi-dls-client
 fastapi_dls_client_license_url: ""
-# The internal addon owns these two references. It retains a valid long-lived
-# client token and refreshes it only when its service identity has changed.
+# The internal addon owns these two references. It retains the operator-managed
+# client token and refreshes it on identity mismatch or after the one-hour
+# client registration window; VM creation obtains a fresh token separately.
 fastapi_dls_client_token_secret_name: fastapi-dls-client-token
 fastapi_dls_client_token_secret_namespace: "{{ fastapi_dls_namespace }}"
 fastapi_dls_client_token_secret_key: client-token
 fastapi_dls_signing_root_secret_name: fastapi-dls-signing-root
 fastapi_dls_signing_root_secret_namespace: "{{ fastapi_dls_namespace }}"
 fastapi_dls_signing_root_secret_key: ca.crt
+# Reuse the platform application's existing namespace when the addon is run
+# from the platform play; keep the reviewed deployment default explicit.
+fastapi_dls_application_namespace: "{{ platform_application_namespace | default('labweaver-system') }}"
 # Runtime VM namespaces are generated per environment. Their stable labels are
 # the policy boundary; do not enumerate namespace names or omit the pod match.
 fastapi_dls_allowed_client_namespace_selector:
