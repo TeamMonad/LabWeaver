@@ -37,6 +37,8 @@
       - rsa_keygen_bits:2048
       - -out
       - "{{ fastapi_dls_tls_temp.path }}/webserver.key"
+  args:
+    creates: "{{ fastapi_dls_tls_temp.path }}/webserver.key"
   no_log: true
 
 - name: Generate the FastAPI-DLS server certificate request
@@ -52,6 +54,8 @@
       - "{{ fastapi_dls_tls_temp.path }}/webserver.csr"
       - -config
       - "{{ fastapi_dls_tls_temp.path }}/server.cnf"
+  args:
+    creates: "{{ fastapi_dls_tls_temp.path }}/webserver.csr"
   no_log: true
 
 - name: Sign the FastAPI-DLS server certificate with the retained CA
@@ -76,6 +80,8 @@
       - "{{ fastapi_dls_tls_temp.path }}/server.ext"
       - -extensions
       - v3_server
+  args:
+    creates: "{{ fastapi_dls_tls_temp.path }}/webserver.crt"
   no_log: true
 
 - name: Read the issued FastAPI-DLS TLS material

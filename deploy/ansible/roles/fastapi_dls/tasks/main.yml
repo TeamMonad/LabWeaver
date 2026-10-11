@@ -198,6 +198,8 @@
           - rsa_keygen_bits:2048
           - -out
           - "{{ fastapi_dls_tls_temp.path }}/ca.key"
+      args:
+        creates: "{{ fastapi_dls_tls_temp.path }}/ca.key"
       when: fastapi_dls_tls_secret.resources | length == 0
       no_log: true
 
@@ -217,6 +219,8 @@
           - "3650"
           - -config
           - "{{ fastapi_dls_tls_temp.path }}/ca.cnf"
+      args:
+        creates: "{{ fastapi_dls_tls_temp.path }}/ca.crt"
       when: fastapi_dls_tls_secret.resources | length == 0
       no_log: true
 
