@@ -4,6 +4,8 @@ LabWeaver 是 Agent 原生的教学与科研工作环境平台。六个独立服
 
 v3 重构由 [Issue #180](https://github.com/TeamMonad/LabWeaver/issues/180) 跟踪。目标能力不等于已经通过实机验证；实际变更、测试和未验证范围以关联 PR 为准。
 
+下一阶段见 [Sprint5 重构方案](docs/plans/sprint5-refactor-plan.md)。按细分 Issue 和 PR 交付产品功能、完整用户文档与部署运维文档，功能合入 develop，阶段稳定后由维护者发布到 main。
+
 ## 开发
 
 使用仓库固定的 Rust 工具链与前端 package scripts。优先运行受影响范围：
@@ -22,6 +24,7 @@ pnpm --dir web test
 ## 文档
 
 - [用户操作说明](docs/usage.md)
+- [Sprint5 重构方案](docs/plans/sprint5-refactor-plan.md)
 - [开发约定](AGENTS.md)
 - [服务边界](docs/architecture/service-boundaries.md)
 - [数据所有权](docs/architecture/data-ownership.md)

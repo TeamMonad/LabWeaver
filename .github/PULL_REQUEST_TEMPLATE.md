@@ -1,6 +1,7 @@
 ## Related issue
 
-- Closes #180
+- Related issue:
+- Use `Closes #...` only when this PR completes that issue.
 
 ## Goal and scope
 
@@ -19,6 +20,11 @@
 - Commands run and results:
 - Manual checks (if any):
 - Known unverified areas:
+
+## Documentation
+
+- User, API, or deployment instructions updated:
+- Obsolete instructions removed:
 
 ## Risk and recovery
 
