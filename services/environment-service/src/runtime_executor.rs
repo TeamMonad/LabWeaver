@@ -491,6 +491,7 @@ impl KubernetesContainerExecutor {
             .authorized(
                 self.client
                     .patch(url)
+                    .query(&[("fieldManager", FIELD_MANAGER)])
                     .header("content-type", "application/merge-patch+json")
                     .json(&json!({
                         "metadata":{"uid":uid, "resourceVersion":resource_version},
@@ -3895,6 +3896,12 @@ mod tests {
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
         let is_deployment_patch = method == Method::PATCH && path.ends_with("/deployments/runtime");
+        let is_container_stop_patch = is_deployment_patch
+            && request
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                == Some("application/merge-patch+json");
         let is_private_secret_patch =
             method == Method::PATCH && path.ends_with("/secrets/vm-vgpu-cloud-init");
         let is_workspace_claim = path.ends_with("/persistentvolumeclaims/workspace");
@@ -3911,10 +3918,16 @@ mod tests {
         } else {
             format!(
                 "{method} {path}{}",
-                if path == "/apis/kubevirt.io/v1/kubevirts" {
-                    "?limit=2"
+                if is_container_stop_patch {
+                    request
+                        .uri()
+                        .query()
+                        .map(|query| format!("?{query}"))
+                        .unwrap_or_default()
+                } else if path == "/apis/kubevirt.io/v1/kubevirts" {
+                    "?limit=2".to_owned()
                 } else {
-                    ""
+                    String::new()
                 }
             )
         };
@@ -4301,7 +4314,7 @@ mod tests {
         let container_plan = ContainerResourcePlan {
             environment_id,
             project_id,
-            namespace,
+            namespace: namespace.clone(),
             image: String::new(),
             resources: vec![],
             plan_sha256: Sha256Digest::of_bytes(b"stop-container"),
@@ -4327,6 +4340,11 @@ mod tests {
         );
         let events = mock.events.lock().await;
         assert!(events.iter().any(|event| event.ends_with("/pods")));
+        assert!(events.iter().any(|event| {
+            event == &format!(
+                "PATCH /apis/apps/v1/namespaces/{namespace}/deployments/runtime?fieldManager={FIELD_MANAGER}"
+            )
+        }));
         assert!(!events.iter().any(|event| event.starts_with("DELETE")));
         Ok(())
     }
