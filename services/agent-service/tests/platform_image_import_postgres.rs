@@ -387,6 +387,8 @@ async fn run_import(
                 .entries
                 .into_iter()
                 .find(|entry| Some(entry.catalog_id) == status.catalog_id);
+            _worker.abort();
+            let _ = _worker.await;
             return Ok((status, entry));
         }
         assert!(
