@@ -297,6 +297,9 @@
             labels:
               app.kubernetes.io/name: fastapi-dls
               app.kubernetes.io/part-of: labweaver-infrastructure
+            annotations:
+              checksum/fastapi-dls-proxy-config: >-
+                {{ lookup('template', 'nginx.conf.j2') | hash('sha256') }}
           spec:
             automountServiceAccountToken: false
             containers:
