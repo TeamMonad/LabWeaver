@@ -1,5 +1,6 @@
 """Rendered checks for the optional cluster-internal FastAPI-DLS addon."""
 
+import hashlib
 from pathlib import Path
 import re
 import unittest
@@ -16,6 +17,7 @@ except (ImportError, ModuleNotFoundError):
 
 
 ROOT = Path(__file__).resolve().parents[2]
+ROLE_DIR = ROOT / "deploy/ansible/roles/fastapi_dls"
 
 
 def load_yaml(path: Path):
@@ -37,7 +39,14 @@ def render_file(path: Path, **values):
 def render_definition(definition, **values):
     if Templar is None or DataLoader is None:
         raise unittest.SkipTest("ansible-core is required for definition rendering")
-    templar = Templar(loader=DataLoader(), variables=values)
+    loader = DataLoader()
+    loader.set_basedir(str(ROLE_DIR))
+    context = {
+        "role_path": str(ROLE_DIR),
+        "ansible_search_path": [str(ROLE_DIR)],
+        **values,
+    }
+    templar = Templar(loader=loader, variables=context)
 
     def render(value):
         if isinstance(value, dict):
@@ -81,6 +90,10 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
             deployment["spec"]["strategy"],
             {"type": "Recreate", "rollingUpdate": None},
         )
+        proxy_template = (ROLE_DIR / "templates/nginx.conf.j2").read_text(encoding="utf-8")
+        annotations = deployment["spec"]["template"]["metadata"]["annotations"]
+        checksum = annotations["checksum/fastapi-dls-proxy-config"]
+        self.assertEqual(checksum, hashlib.sha256(proxy_template.encode()).hexdigest())
         backend = next(container for container in containers if container["name"] == "fastapi-dls")
         proxy = next(container for container in containers if container["name"] == "tls-proxy")
         env = {item["name"]: item["value"] for item in backend["env"]}
@@ -134,6 +147,7 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
             render_file(
                 ROOT / "deploy/ansible/roles/fastapi_dls/templates/network-policy.yml.j2",
                 fastapi_dls_namespace="labweaver-gpu-license",
+                fastapi_dls_application_namespace="labweaver-system",
                 fastapi_dls_allowed_client_namespace_selector={
                     "labweaver.io/managed": "true",
                     "labweaver.io/environment": "true",
@@ -167,11 +181,15 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
             proxy,
             r"location \^~ /leasing/v1/ \{[\s\S]*?proxy_pass http://127\.0\.0\.1:8080;",
         )
+        self.assertRegex(
+            proxy,
+            r"location = /-/client-token \{[\s\S]*?limit_except GET \{\s*deny all;\s*\}[\s\S]*?proxy_pass http://127\.0\.0\.1:8080;",
+        )
         self.assertRegex(proxy, r"location / \{\s*return 404;\s*\}")
         self.assertNotRegex(proxy, r"location\s+\^~\s+/-/")
 
         ingress = policy["spec"]["ingress"]
-        self.assertEqual(len(ingress), 1)
+        self.assertEqual(len(ingress), 2)
         source = ingress[0]["from"][0]
         self.assertEqual(
             source["namespaceSelector"]["matchLabels"],
@@ -186,6 +204,16 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
             {"app": "runtime", "labweaver.io/gpu-mode": "vm_vgpu"},
         )
         self.assertEqual(ingress[0]["ports"], [{"port": 8443, "protocol": "TCP"}])
+        executor_source = ingress[1]["from"][0]
+        self.assertEqual(
+            executor_source["namespaceSelector"]["matchLabels"],
+            {"kubernetes.io/metadata.name": "labweaver-system"},
+        )
+        self.assertEqual(
+            executor_source["podSelector"]["matchLabels"],
+            {"app.kubernetes.io/name": "kubevirt-executor"},
+        )
+        self.assertEqual(ingress[1]["ports"], [{"port": 8443, "protocol": "TCP"}])
 
     def test_guest_configuration_renders_references_without_token_material(self) -> None:
         config_task = task_named(
