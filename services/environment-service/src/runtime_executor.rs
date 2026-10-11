@@ -1851,8 +1851,9 @@ fn render_vm_vgpu_cloud_init(
         "FeatureType=1\nClientConfigTokenPath={}\n",
         KubeVirtVmVgpuLicensingConfiguration::token_directory_path()
     ));
+    // NVIDIA's Linux client requires the token to be owner-rwx and group/other-readable.
     let mut write_files = format!(
-        "  - path: /usr/local/share/ca-certificates/labweaver-vgpu-license.crt\n    owner: root:root\n    permissions: '0644'\n    encoding: b64\n    content: {tls_ca_b64}\n  - path: {gridd_config_path}\n    owner: root:root\n    permissions: '0644'\n    encoding: b64\n    content: {gridd_config_b64}\n  - path: {token_path}\n    owner: root:root\n    permissions: '0600'\n    encoding: b64\n    content: {token_b64}\n",
+        "  - path: /usr/local/share/ca-certificates/labweaver-vgpu-license.crt\n    owner: root:root\n    permissions: '0644'\n    encoding: b64\n    content: {tls_ca_b64}\n  - path: {gridd_config_path}\n    owner: root:root\n    permissions: '0644'\n    encoding: b64\n    content: {gridd_config_b64}\n  - path: {token_path}\n    owner: root:root\n    permissions: '0744'\n    encoding: b64\n    content: {token_b64}\n",
         gridd_config_path = KubeVirtVmVgpuLicensingConfiguration::gridd_config_path(),
         token_path = KubeVirtVmVgpuLicensingConfiguration::token_path(),
     );
@@ -2650,6 +2651,10 @@ mod tests {
 
         assert!(rendered.contains("/usr/local/share/ca-certificates/labweaver-vgpu-license.crt"));
         assert!(rendered.contains(KubeVirtVmVgpuLicensingConfiguration::token_path()));
+        assert!(rendered.contains(&format!(
+            "  - path: {}\n    owner: root:root\n    permissions: '0744'\n",
+            KubeVirtVmVgpuLicensingConfiguration::token_path()
+        )));
         assert!(rendered.contains(KubeVirtVmVgpuLicensingConfiguration::gridd_config_path()));
         assert!(rendered.contains(&BASE64_STANDARD.encode(format!(
             "FeatureType=1\nClientConfigTokenPath={}\n",
@@ -2681,6 +2686,10 @@ mod tests {
         .expect("valid official DLS bootstrap");
 
         assert!(rendered.contains(KubeVirtVmVgpuLicensingConfiguration::token_path()));
+        assert!(rendered.contains(&format!(
+            "  - path: {}\n    owner: root:root\n    permissions: '0744'\n",
+            KubeVirtVmVgpuLicensingConfiguration::token_path()
+        )));
         assert!(!rendered.contains("gridd-unlock-patcher"));
         assert!(
             !rendered.contains(KubeVirtVmVgpuLicensingConfiguration::fastapi_signing_root_path())
