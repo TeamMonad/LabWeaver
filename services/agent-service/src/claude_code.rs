@@ -65,7 +65,7 @@ If the materials declare resources.gpu, preserve its class and count exactly in 
 
 Container runtime nesting is exactly this shape and closes only at the end: "runtime":{"kind":"container","provider_binding":"NAME","service_port":8080,"build_recipe":{"mode":"generated","files":[{"path":"Dockerfile","content":"FROM ..."},{"path":"other","content":"..."}]}}. The files array closes with exactly one ], the build_recipe object closes with exactly one }, and the runtime object closes with exactly one }; never emit a second closing ] after the build_recipe object. When both a files array and an entries array appear, close each array independently and do not merge their brackets.
 
-The generated files array must be a self-contained build context: every relative path named by a COPY, ADD, or `COPY --from` source in the Dockerfile must appear as a generated file whose content is the exact material file content. When the materials include a complete Dockerfile, reproduce it verbatim and include every path it copies, including files under directories such as student/, reference/, tests/, scripts/, profiles/, workspace-seed/, and README.md. Never emit a Dockerfile that copies a path you do not also provide as a generated file.
+The generated files array must be a self-contained build context: every relative path named by a COPY, ADD, or `COPY --from` source in the Dockerfile must appear as a generated file whose content is the exact material file content. Apply this rule only when mode generated is required because the supplied package does not contain the complete context. When the package already contains the complete Dockerfile and every path it reads, use mode package and do not reproduce those file contents. If mode generated is required, reproduce the Dockerfile verbatim and include every path it copies, including files under directories such as student/, reference/, tests/, scripts/, profiles/, workspace-seed/, and README.md. Never emit a Dockerfile that copies a path you do not also provide as a generated file.
 
 When the materials request a virtual_machine, use this structurally valid shape and change only values needed by the materials while preserving every property name and discriminator:
 {"apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"sprint2-vm","class":"experiment","resources":{"cpuMillicores":2000,"memoryBytes":4294967296,"storageBytes":10737418240},"network":{"mode":"deny_all"},"entries":[{"name":"ssh","protocol":"ssh","servicePort":22}],"security":{"userPolicy":"non_root_required","rootFilesystemPolicy":"mutable_required","privilegeEscalationPolicy":"deny","publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},"runtime":{"kind":"virtual_machine","provider_binding":"kubevirt-primary-v1","base_disk":{"binding":"ubuntu-24.04-v1","sourceRegistryDigest":"docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5","capacityBytes":10737418240},"storage_class_binding":"vm-rwo-primary-v1","ssh_port":22},"retention":{"policyId":"01900000-0000-7000-8000-000000000902","policyRevision":1,"class":"run_evidence","retainUntil":"2027-08-31T00:00:00.000Z","disposition":"delete"}}"#;
@@ -1893,8 +1893,10 @@ impl ClaudeCodeRuntime {
                          build_recipe }}, runtime }} with no extra ]; do not emit ]}}]. \
                          Return only a corrected single \
                          JSON object that strictly satisfies the schema above; do not explain or \
-                         repeat prior content. For any generated \
-                         container build recipe, the files array must contain the Dockerfile at \
+                         repeat prior content. If the supplied package already contains the \
+                         complete Dockerfile and every file it reads, choose mode package and do \
+                         not return those file contents. Only use mode generated when that \
+                         package context is incomplete; then the files array must contain the Dockerfile at \
                          the exact required path and every relative path that a COPY or ADD \
                          instruction reads, and no instruction may be continued onto a line \
                          that begins with &&, ||, or ; without a trailing backslash. A \
@@ -2209,8 +2211,26 @@ impl ClaudeCodeRuntime {
             .as_deref()
             .ok_or_else(|| failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone()))
             .and_then(|result| {
-                serde_json::from_str::<Value>(result).map_err(|_| {
-                    failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone())
+                serde_json::from_str::<Value>(result).map_err(|error| {
+                    let (error_category, line, column, byte_offset) =
+                        candidate_json_error_location(result, &error);
+                    tracing::warn!(
+                        event = "agent.claude_code.candidate_json_invalid",
+                        component = "agent-service",
+                        operation = "candidate.parse",
+                        outcome = "rejected",
+                        failure_stage = "candidate_json_parse",
+                        error_category,
+                        line,
+                        column,
+                        byte_offset,
+                        diagnostic_code = "LLM_SCHEMA_INVALID",
+                        retryable = true,
+                    );
+                    let mut failure =
+                        failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone());
+                    failure.repair_detail = Some(candidate_json_repair_detail(result, &error));
+                    failure
                 })
             })?;
         if contains_protected_field(&output) {
@@ -3162,6 +3182,50 @@ fn valid_tool_result_user_event(event: &Value) -> bool {
             })
 }
 
+fn candidate_json_error_location(
+    candidate: &str,
+    error: &serde_json::Error,
+) -> (&'static str, usize, usize, usize) {
+    let line = error.line();
+    let column = error.column();
+    let byte_offset = json_error_byte_offset(candidate, line, column, error.is_eof());
+    let category = if error.is_eof() {
+        "eof"
+    } else if error.is_syntax() {
+        "syntax"
+    } else if error.is_data() {
+        "data"
+    } else {
+        "io"
+    };
+    (category, line, column, byte_offset)
+}
+
+fn candidate_json_repair_detail(candidate: &str, error: &serde_json::Error) -> String {
+    let (category, line, column, byte_offset) = candidate_json_error_location(candidate, error);
+    format!(
+        "The candidate JSON is invalid: category={category}, line={line}, column={column}, byte_offset={byte_offset} (0-based UTF-8 bytes). Inspect and repair the JSON token at this exact location, including the delimiter, string escape, or closing structure required there; do not return the previous candidate or any surrounding explanation. If the supplied package already contains the complete Dockerfile and every file it reads, choose mode package and do not re-encode those files."
+    )
+}
+
+fn json_error_byte_offset(candidate: &str, line: usize, column: usize, eof: bool) -> usize {
+    let bytes = candidate.as_bytes();
+    let mut line_start = 0;
+    for _ in 1..line {
+        let Some(relative_newline) = bytes[line_start..].iter().position(|byte| *byte == b'\n')
+        else {
+            return bytes.len();
+        };
+        line_start += relative_newline + 1;
+    }
+    let column_offset = if eof {
+        column
+    } else {
+        column.saturating_sub(1)
+    };
+    line_start.saturating_add(column_offset).min(bytes.len())
+}
+
 fn failure_with_audit(
     error: ClaudeCodeRuntimeError,
     mut audit: ClaudeCodeAudit,
@@ -3894,9 +3958,10 @@ mod tests {
     use super::{
         CLAUDE_RUNTIME_PATH, ClaudeCodeCommand, ClaudeCodeProcessError, ClaudeCodeProcessOutput,
         ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError, RunCancellation, TokioClaudeCodeProcess,
-        decimal_to_microusd, evaluation_schema_diagnostic, execute_process, microusd_to_usd,
-        platform_image_prompt, provider_evaluation_schema_for, read_stream_until_result,
-        recipe_failure_runtime_error, recipe_repair_detail, usd_number_to_microusd,
+        candidate_json_repair_detail, decimal_to_microusd, evaluation_schema_diagnostic,
+        execute_process, microusd_to_usd, platform_image_prompt, provider_evaluation_schema_for,
+        read_stream_until_result, recipe_failure_runtime_error, recipe_repair_detail,
+        usd_number_to_microusd,
     };
     use crate::candidate_materializer::CandidateMaterializationError;
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
@@ -4428,6 +4493,50 @@ mod tests {
         let parsed = super::parse_stream_output(stream_with(&prose).as_bytes())?;
         assert_ne!(parsed.candidate.as_deref(), Some(candidate));
         Ok(())
+    }
+
+    #[test]
+    fn candidate_json_syntax_detail_uses_utf8_byte_offset_without_echoing_content() {
+        let candidate = "{\n  \"title\": \"猫\"\n  \"runtime\": null\n}";
+        let error = serde_json::from_str::<serde_json::Value>(candidate)
+            .expect_err("the candidate must be syntactically invalid");
+        let expected_offset = candidate.find("\"runtime\"").unwrap_or_default();
+        let expected_line = candidate[..expected_offset]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            .saturating_add(1);
+        let expected_line_start = candidate[..expected_offset]
+            .rfind('\n')
+            .map_or(0, |newline| newline + 1);
+        let expected_column = expected_offset
+            .saturating_sub(expected_line_start)
+            .saturating_add(1);
+        let detail = candidate_json_repair_detail(candidate, &error);
+
+        assert!(error.is_syntax());
+        assert!(detail.contains("category=syntax"));
+        assert!(detail.contains(&format!("line={expected_line}")));
+        assert!(detail.contains(&format!("column={expected_column}")));
+        assert!(detail.contains(&format!("byte_offset={expected_offset}")));
+        assert!(!detail.contains("猫"));
+        assert!(!detail.contains(candidate));
+    }
+
+    #[test]
+    fn candidate_json_eof_detail_is_fail_closed_without_echoing_content() {
+        let candidate = r#"{"title":"猫""#;
+        let error = serde_json::from_str::<serde_json::Value>(candidate)
+            .expect_err("the candidate must be incomplete");
+        let expected_offset = candidate.len();
+        let detail = candidate_json_repair_detail(candidate, &error);
+
+        assert!(error.is_eof());
+        assert!(detail.contains("category=eof"));
+        assert!(detail.contains("line=1"));
+        assert!(detail.contains(&format!("byte_offset={expected_offset}")));
+        assert!(!detail.contains("猫"));
+        assert!(!detail.contains(candidate));
     }
 
     #[test]

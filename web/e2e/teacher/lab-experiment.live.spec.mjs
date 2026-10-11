@@ -660,7 +660,7 @@ test('student completes a published lab experiment through its browser entry', a
             requiredTrackKind: requestedRetryTrack,
             requiredTrackAttemptNumber: 2,
           }
-        } else if (runHasManualRetry(run)) {
+        } else if (runHasManualRetry(run) && run.state !== 'succeeded') {
           throw new Error('LAB_EXPERIMENT_RESUME_ENVIRONMENT_RETRY_ALREADY_USED')
         }
         completed = await waitForExperimentRun(
