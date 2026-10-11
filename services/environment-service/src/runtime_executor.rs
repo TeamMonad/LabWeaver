@@ -283,6 +283,7 @@ impl KubernetesContainerExecutor {
     ) -> Result<(), ProviderFailure> {
         validate_resource(plan, resource)?;
         let url = self.resource_url(resource)?;
+        let resource_id = format!("{}/{}/{}", plan.namespace, resource.kind, resource.name);
         let response = self
             .authorized(
                 self.client
@@ -299,8 +300,7 @@ impl KubernetesContainerExecutor {
                     diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
                     failure_stage = "apply",
                     environment_id = %plan.environment_id,
-                    resource_kind = %resource.kind,
-                    resource_name = %resource.name,
+                    resource_id = %resource_id,
                     error_kind = "provider_transport",
                     retryable = true
                 );
@@ -314,9 +314,8 @@ impl KubernetesContainerExecutor {
                 diagnostic_code = failure.diagnostic_code(),
                 failure_stage = "apply",
                 environment_id = %plan.environment_id,
-                resource_kind = %resource.kind,
-                resource_name = %resource.name,
-                status_code = status.as_u16(),
+                resource_id = %resource_id,
+                http_status = status.as_u16(),
                 error_kind = "provider_response",
                 retryable = failure.retryable
             );
@@ -335,6 +334,7 @@ impl KubernetesContainerExecutor {
             .iter()
             .find(|resource| resource.kind == "Deployment")
             .ok_or_else(rejected)?;
+        let resource_id = format!("{}/{}/{}", plan.namespace, deployment.kind, deployment.name);
         let response = self
             .authorized(self.client.get(self.resource_url(deployment)?))
             .send()
@@ -345,8 +345,7 @@ impl KubernetesContainerExecutor {
                     diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
                     failure_stage = "observe",
                     environment_id = %plan.environment_id,
-                    resource_kind = %deployment.kind,
-                    resource_name = %deployment.name,
+                    resource_id = %resource_id,
                     error_kind = "provider_transport",
                     retryable = true
                 );
@@ -365,9 +364,8 @@ impl KubernetesContainerExecutor {
                 diagnostic_code = failure.diagnostic_code(),
                 failure_stage = "observe",
                 environment_id = %plan.environment_id,
-                resource_kind = %deployment.kind,
-                resource_name = %deployment.name,
-                status_code = response.status().as_u16(),
+                resource_id = %resource_id,
+                http_status = response.status().as_u16(),
                 error_kind = "provider_response",
                 retryable = failure.retryable
             );
@@ -878,6 +876,15 @@ impl KubernetesContainerExecutor {
     ) -> Result<(), ProviderFailure> {
         validate_kubevirt_resource(plan, resource)?;
         let url = self.kubevirt_resource_url(resource)?;
+        let resource_id = format!(
+            "{}/{}/{}",
+            resource
+                .namespace
+                .as_deref()
+                .unwrap_or(plan.namespace.as_str()),
+            resource.kind,
+            resource.name
+        );
         check_kubevirt_permit(permit).await?;
         let response = self
             .authorized(
@@ -895,8 +902,7 @@ impl KubernetesContainerExecutor {
                     diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
                     failure_stage = "apply",
                     environment_id = %plan.environment_id,
-                    resource_kind = %resource.kind,
-                    resource_name = %resource.name,
+                    resource_id = %resource_id,
                     error_kind = "provider_transport",
                     retryable = true
                 );
@@ -910,9 +916,8 @@ impl KubernetesContainerExecutor {
                 diagnostic_code = failure.diagnostic_code(),
                 failure_stage = "apply",
                 environment_id = %plan.environment_id,
-                resource_kind = %resource.kind,
-                resource_name = %resource.name,
-                status_code = status.as_u16(),
+                resource_id = %resource_id,
+                http_status = status.as_u16(),
                 error_kind = "provider_response",
                 retryable = failure.retryable
             );
