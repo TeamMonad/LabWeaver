@@ -4496,10 +4496,12 @@ mod tests {
     }
 
     #[test]
-    fn candidate_json_syntax_detail_uses_utf8_byte_offset_without_echoing_content() {
+    fn candidate_json_syntax_detail_uses_utf8_byte_offset_without_echoing_content()
+    -> Result<(), Box<dyn Error>> {
         let candidate = "{\n  \"title\": \"猫\"\n  \"runtime\": null\n}";
         let error = serde_json::from_str::<serde_json::Value>(candidate)
-            .expect_err("the candidate must be syntactically invalid");
+            .err()
+            .ok_or_else(|| std::io::Error::other("the candidate must be syntactically invalid"))?;
         let expected_offset = candidate.find("\"runtime\"").unwrap_or_default();
         let expected_line = candidate[..expected_offset]
             .bytes()
@@ -4521,13 +4523,16 @@ mod tests {
         assert!(detail.contains(&format!("byte_offset={expected_offset}")));
         assert!(!detail.contains("猫"));
         assert!(!detail.contains(candidate));
+        Ok(())
     }
 
     #[test]
-    fn candidate_json_eof_detail_is_fail_closed_without_echoing_content() {
+    fn candidate_json_eof_detail_is_fail_closed_without_echoing_content()
+    -> Result<(), Box<dyn Error>> {
         let candidate = r#"{"title":"猫""#;
         let error = serde_json::from_str::<serde_json::Value>(candidate)
-            .expect_err("the candidate must be incomplete");
+            .err()
+            .ok_or_else(|| std::io::Error::other("the candidate must be incomplete"))?;
         let expected_offset = candidate.len();
         let detail = candidate_json_repair_detail(candidate, &error);
 
@@ -4537,6 +4542,7 @@ mod tests {
         assert!(detail.contains(&format!("byte_offset={expected_offset}")));
         assert!(!detail.contains("猫"));
         assert!(!detail.contains(candidate));
+        Ok(())
     }
 
     #[test]
