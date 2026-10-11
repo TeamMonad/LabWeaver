@@ -49,7 +49,7 @@ fn execution_binding() -> Result<EvaluationExecutionBinding, Box<dyn Error>> {
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: "2027-01-01T00:00:00.000Z".parse()?,
+            retain_until: Some("2027-01-01T00:00:00.000Z".parse()?),
             disposition: RetentionDisposition::Delete,
         },
         completed_at: "2026-01-01T00:00:00.000Z".parse()?,

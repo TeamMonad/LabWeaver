@@ -16,12 +16,13 @@ use contracts::http::{
     InternalAgentLlmReviewRequest, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
-    InternalPlatformImageImportRequest, InternalPlatformImageRegistrationRequest,
-    InternalPlatformImageRepinRequest, PlatformImageCatalog,
+    InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
+    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest, PageQuery,
+    PlatformImageCatalog,
 };
 use contracts::{
     AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, PlatformImageId, ProblemDetails,
-    UtcTimestamp,
+    ProjectId, UtcTimestamp,
 };
 use serde_json::Value;
 use sqlx::Row;
@@ -30,7 +31,8 @@ use time::OffsetDateTime;
 use crate::build_store::{BuildStoreError, PgBuildStore};
 use crate::generated_artifacts::{GeneratedArtifactStore, GeneratedArtifactStoreError};
 use crate::llm_review::{LlmReviewStore, LlmReviewStoreError};
-use crate::platform_image_import::{self, PlatformImageImportError};
+use crate::platform_image_import::PlatformImageImportError;
+use crate::platform_image_jobs::{PlatformImageImportJobError, PlatformImageImportJobStore};
 use crate::platform_images::{
     DisablePlatformImage, PgPlatformImageCatalog, PlatformImageRegistry,
     PlatformImageRegistryError, PlatformImageStoreError, RegisterPlatformImage, RepinPlatformImage,
@@ -65,6 +67,8 @@ pub struct AgentApiState {
     pub platform_registry: Option<PlatformImageRegistry>,
     /// Immutable object store holding the Control-staged image archives.
     pub objects: Arc<dyn artifact_store::ImmutableObjectStore>,
+    /// Agent-owned durable platform image import jobs.
+    pub platform_image_import_jobs: PlatformImageImportJobStore,
 }
 
 impl std::fmt::Debug for AgentApiState {
@@ -79,6 +83,10 @@ impl std::fmt::Debug for AgentApiState {
 pub fn router(state: Arc<AgentApiState>) -> Router {
     let router = Router::new()
         .route("/internal/v1/agent-runs", post(create_run))
+        .route(
+            "/internal/v1/projects/{project_id}/agent-runs",
+            get(list_project_runs),
+        )
         .route("/internal/v1/agent-runs/{run_id}", get(get_run))
         .route("/internal/v1/agent-runs/{run_id}/cancel", post(cancel_run))
         .route(
@@ -132,8 +140,16 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
             post(disable_platform_image),
         )
         .route(
-            "/internal/v1/platform-images/imports",
-            post(import_platform_image),
+            "/internal/v1/platform-images/import-jobs",
+            post(enqueue_platform_image_import),
+        )
+        .route(
+            "/internal/v1/platform-images/import-jobs/{upload_id}",
+            get(get_platform_image_import_job),
+        )
+        .route(
+            "/internal/v1/platform-images/import-jobs/{upload_id}/cancel",
+            post(cancel_platform_image_import_job),
         )
         .with_state(state);
     telemetry::instrument_http(router, "agent-service", "agent-api")
@@ -195,6 +211,25 @@ async fn get_run(
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
     Ok(Json(state.store.load(run_id).await?).into_response())
+}
+
+async fn list_project_runs(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(project_id): Path<ProjectId>,
+    Query(query): Query<PageQuery>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let (page, page_size, offset) = query
+        .normalized()
+        .map_err(|_| AgentApiError::history_page_invalid())?;
+    Ok(Json(
+        state
+            .store
+            .list_project_runs(project_id, page, page_size, offset)
+            .await?,
+    )
+    .into_response())
 }
 
 async fn cancel_run(
@@ -460,21 +495,48 @@ async fn list_platform_images(
     Ok(Json(PlatformImageCatalog { entries }).into_response())
 }
 
-async fn import_platform_image(
+async fn enqueue_platform_image_import(
     State(state): State<Arc<AgentApiState>>,
     caller: Option<Extension<auth::ServiceIdentity>>,
-    Json(request): Json<InternalPlatformImageImportRequest>,
+    headers: HeaderMap,
+    Json(request): Json<InternalPlatformImageImportEnqueueRequest>,
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
-    let entry = platform_image_import::import_platform_image(
-        state.platform_registry()?,
-        &state.platform_images,
-        state.objects.as_ref(),
-        &request,
-        now()?,
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(entry)).into_response())
+    let _ = idempotency(&headers)?;
+    let status = state
+        .platform_image_import_jobs
+        .enqueue(&request, now()?)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(status)).into_response())
+}
+
+async fn get_platform_image_import_job(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(upload_id): Path<contracts::UploadSessionId>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let status = state.platform_image_import_jobs.status(upload_id).await?;
+    Ok(Json(status).into_response())
+}
+
+async fn cancel_platform_image_import_job(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(upload_id): Path<contracts::UploadSessionId>,
+    headers: HeaderMap,
+    Json(request): Json<InternalPlatformImageImportCancelRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let _ = idempotency(&headers)?;
+    if request.upload_id != upload_id {
+        return Err(AgentApiError::contract());
+    }
+    let status = state
+        .platform_image_import_jobs
+        .cancel(upload_id, now()?)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(status)).into_response())
 }
 
 async fn repin_platform_image(
@@ -611,6 +673,13 @@ impl AgentApiError {
             retryable: false,
         }
     }
+    fn history_page_invalid() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            diagnostic: "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
+            retryable: false,
+        }
+    }
     fn denied() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -717,6 +786,11 @@ impl From<PlatformImageStoreError> for AgentApiError {
 impl From<PlatformImageImportError> for AgentApiError {
     fn from(error: PlatformImageImportError) -> Self {
         match error {
+            PlatformImageImportError::Cancelled => Self {
+                status: StatusCode::CONFLICT,
+                diagnostic: error.diagnostic_code(),
+                retryable: false,
+            },
             PlatformImageImportError::ObjectStore(_) => Self::persistence(),
             PlatformImageImportError::Layout(error) => Self {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -730,6 +804,22 @@ impl From<PlatformImageImportError> for AgentApiError {
             },
             PlatformImageImportError::Registry(error) => error.into(),
             PlatformImageImportError::Catalog(error) => error.into(),
+        }
+    }
+}
+
+impl From<PlatformImageImportJobError> for AgentApiError {
+    fn from(error: PlatformImageImportJobError) -> Self {
+        let status = match error {
+            PlatformImageImportJobError::NotFound => StatusCode::NOT_FOUND,
+            PlatformImageImportJobError::Conflict => StatusCode::CONFLICT,
+            PlatformImageImportJobError::InvalidRequest => StatusCode::UNPROCESSABLE_ENTITY,
+            PlatformImageImportJobError::Persistence(_) => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        Self {
+            status,
+            diagnostic: error.diagnostic_code(),
+            retryable: matches!(error, PlatformImageImportJobError::Persistence(_)),
         }
     }
 }

@@ -253,6 +253,8 @@ pub async fn insert_project_owner_membership(
         course_id,
         project_id,
         actor_id,
+        username: None,
+        display_name: None,
         role,
         state: MembershipState::Active,
         revision,
@@ -310,6 +312,8 @@ fn project_membership_from_row(
             .transpose()?,
         project_id: project_id(row.try_get("project_id")?)?,
         actor_id: actor_id(row.try_get("actor_id")?)?,
+        username: None,
+        display_name: None,
         role: parse_role(row.try_get::<String, _>("role")?.as_str())?,
         state: parse_membership_state(row.try_get::<String, _>("state")?.as_str())?,
         revision: revision(row.try_get("revision")?)?,
@@ -365,16 +369,34 @@ pub async fn upsert_actor(
     issuer: &str,
     subject: &str,
 ) -> Result<LocalActor, RepositoryError> {
+    upsert_actor_with_metadata(pool, issuer, subject, None, None).await
+}
+
+/// Creates or finds an actor from a verified issuer subject and refreshes the
+/// non-sensitive username/name projection when the authority supplies it.
+pub async fn upsert_actor_with_metadata(
+    pool: &PgPool,
+    issuer: &str,
+    subject: &str,
+    username: Option<&str>,
+    display_name: Option<&str>,
+) -> Result<LocalActor, RepositoryError> {
     let subject_hash = hex_sha256(subject.as_bytes());
     let actor_id = Uuid::now_v7();
     let row = sqlx::query(
-        "INSERT INTO access.actors (actor_id, issuer, subject_sha256) VALUES ($1, $2, $3) \
-         ON CONFLICT (issuer, subject_sha256) DO UPDATE SET issuer = EXCLUDED.issuer \
+        "INSERT INTO access.actors (actor_id, issuer, subject_sha256, username, display_name) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (issuer, subject_sha256) DO UPDATE SET \
+             username = COALESCE(EXCLUDED.username, access.actors.username), \
+             display_name = COALESCE(EXCLUDED.display_name, access.actors.display_name), \
+             issuer = EXCLUDED.issuer \
          WHERE access.actors.disabled_at IS NULL RETURNING actor_id",
     )
     .bind(actor_id)
     .bind(issuer)
     .bind(subject_hash)
+    .bind(username)
+    .bind(display_name)
     .fetch_optional(pool)
     .await?
     .ok_or(RepositoryError::ActorDisabled)?;

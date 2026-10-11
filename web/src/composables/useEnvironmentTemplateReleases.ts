@@ -1,7 +1,28 @@
 import { reactive, ref, watch, type Ref } from 'vue'
-import { listEnvironmentTemplateReleases } from '@/generated/contracts'
+import {
+  listEnvironmentTemplateReleases,
+  withdrawEnvironmentTemplateRelease as withdrawEnvironmentTemplateReleaseRequest,
+} from '@/generated/contracts'
 import type { EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
+import { idempotencyKey, ifMatch } from '@/utils/format'
+
+export const ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWAL_REASON = 'TEACHER_WITHDRAWN'
+
+export function withdrawEnvironmentTemplateReleaseByUi(
+  projectId: string,
+  releaseId: string,
+  releaseVersion: number,
+) {
+  return withdrawEnvironmentTemplateReleaseRequest({
+    path: { projectId, releaseId },
+    headers: {
+      'Idempotency-Key': idempotencyKey(),
+      'If-Match': ifMatch(releaseVersion),
+    },
+    body: { reasonCode: ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWAL_REASON },
+  })
+}
 
 interface EnvironmentTemplateReleaseCollection {
   items: EnvironmentTemplateReleaseViewSchema[]

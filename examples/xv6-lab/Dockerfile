@@ -18,11 +18,9 @@ RUN apt-get update \
 COPY xv6 /opt/labweaver/xv6
 COPY scripts /opt/labweaver/scripts
 COPY student /opt/labweaver/student
-COPY tests /opt/labweaver/tests
 COPY README.md /opt/labweaver/workspace-seed/README.md
 COPY profiles /opt/labweaver/workspace-seed/profiles
 COPY student /opt/labweaver/workspace-seed/student
-COPY tests /opt/labweaver/workspace-seed/tests
 
 RUN mkdir -p /work /workspace /tmp \
     && chmod 0755 /opt/labweaver/scripts/*.sh /opt/labweaver/xv6/test-xv6.py \

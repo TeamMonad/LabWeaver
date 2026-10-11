@@ -1,7 +1,39 @@
 {
+  "$defs": {
+    "CompletePlatformImageUploadPart": {
+      "additionalProperties": false,
+      "description": "ETag receipt for one completed multipart part.",
+      "properties": {
+        "etag": {
+          "type": "string"
+        },
+        "partNumber": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "partNumber",
+        "etag"
+      ],
+      "type": "object"
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Completion request for one staged OCI archive upload.",
+  "properties": {
+    "parts": {
+      "items": {
+        "$ref": "#/$defs/CompletePlatformImageUploadPart"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "parts"
+  ],
   "title": "CompletePlatformImageUploadRequest",
   "type": "object"
 }

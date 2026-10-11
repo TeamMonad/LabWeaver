@@ -31,6 +31,13 @@
               审核与发布
             </RouterLink>
           </div>
+          <DiagnosticBanner
+            v-if="withdrawalOutcome"
+            :code="withdrawalOutcome.code"
+            :message="withdrawalOutcome.message"
+            :retryable="withdrawalOutcome.retryable"
+            :severity="withdrawalOutcome.code.includes('FAILED') || withdrawalOutcome.code.includes('CONFLICT') ? 'error' : 'info'"
+          />
 
           <AsyncStateView
             :state="releases.releases"
@@ -48,7 +55,18 @@
                     <code>{{ release.id }}</code>
                     <p>发布于 {{ formatTimestamp(release.publishedAt) }} · 发布者 {{ release.publishedBy }}</p>
                   </div>
-                  <span class="release-state">已发布</span>
+                  <div class="release-card__actions">
+                    <span class="release-state">已发布</span>
+                    <button
+                      type="button"
+                      class="text-button"
+                      :aria-label="`撤回环境模板 v${release.version}`"
+                      :disabled="withdrawalInFlight"
+                      @click="openWithdrawal(release)"
+                    >
+                      撤回
+                    </button>
+                  </div>
                 </article>
               </div>
               <div v-else class="empty-release" role="status">
@@ -93,16 +111,31 @@
         </section>
       </template>
     </AsyncStateView>
+
+    <ConfirmDialog
+      :open="withdrawalTarget !== null"
+      title="撤回环境模板版本？"
+      :description="withdrawalDescription"
+      confirm-text="撤回版本"
+      cancel-text="取消"
+      severity="warning"
+      @cancel="cancelWithdrawal"
+      @confirm="confirmWithdrawal"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
-import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
+import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import { useEnvironmentTemplateReleases, withdrawEnvironmentTemplateReleaseByUi } from '@/composables/useEnvironmentTemplateReleases'
 import { useProjects } from '@/composables/useProjects'
 import { formatTimestamp } from '@/utils/format'
+import { extractProblemDetails, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
+import type { EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
 
 const projects = useProjects()
 const projectOptions = computed(() => projects.projects.kind === 'success' ? projects.projects.data : [])
@@ -131,6 +164,10 @@ const projectId = computed(() => {
 const currentProject = computed(() => projectOptions.value.find((project) => project.id === projectId.value) ?? null)
 const courseId = computed(() => currentProject.value?.courseId ?? undefined)
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
+const withdrawalTarget = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
+const withdrawalOutcome = ref<DiagnosticViewModel | null>(null)
+const withdrawalInFlight = ref(false)
+const withdrawnReleaseIds = ref<Set<string>>(new Set())
 
 watch(
   [projectOptions, routeProjectId],
@@ -150,9 +187,66 @@ watch(() => projects.selectedProjectId, (selectedId) => {
   void router.replace({ query: { ...route.query, projectId: selectedId ?? undefined } })
 })
 
+watch(projectId, () => {
+  withdrawalTarget.value = null
+  withdrawalOutcome.value = null
+  withdrawnReleaseIds.value = new Set()
+})
+
 const publishedReleases = computed(() => releases.releases.kind === 'success'
-  ? releases.releases.data.filter((release) => !release.withdrawal)
+  ? releases.releases.data.filter((release) => !release.withdrawal && !withdrawnReleaseIds.value.has(release.id))
   : [])
+
+const withdrawalDescription = computed(() => {
+  const release = withdrawalTarget.value
+  if (!release) return ''
+  return `撤回环境模板 v${release.version} 后，新的环境不能使用此版本；已有环境不会自动释放，已有访问授权不会自动撤销，已建立连接不会因撤回自动断开；它们仍受原授权、会话和环境生命周期限制。已有环境可以停止，但启动、重启或依赖此版本的 Work 提交会被拒绝。确认在当前项目中撤回吗？`
+})
+
+function openWithdrawal(release: EnvironmentTemplateReleaseViewSchema) {
+  if (release.projectId !== projectId.value || release.withdrawal || withdrawnReleaseIds.value.has(release.id)) return
+  withdrawalOutcome.value = null
+  withdrawalTarget.value = release
+}
+
+function cancelWithdrawal() {
+  withdrawalTarget.value = null
+}
+
+async function confirmWithdrawal() {
+  const release = withdrawalTarget.value
+  const currentProjectId = projectId.value
+  if (!release || !currentProjectId || release.projectId !== currentProjectId || release.withdrawal || withdrawalInFlight.value) return
+  withdrawalTarget.value = null
+  withdrawalInFlight.value = true
+  try {
+    const result = await withdrawEnvironmentTemplateReleaseByUi(currentProjectId, release.id, release.version)
+    if (result.error) {
+      if (projectId.value !== currentProjectId) return
+      const problem = extractProblemDetails(result.error)
+      withdrawalOutcome.value = makeDiagnostic(
+        problem?.diagnosticCode ?? 'RELEASE_WITHDRAW_FAILED',
+        problem?.detail ?? '撤回环境模板失败',
+        problem?.retryable ?? true,
+      )
+      return
+    }
+    if (projectId.value !== currentProjectId) return
+    withdrawnReleaseIds.value = new Set([...withdrawnReleaseIds.value, release.id])
+    withdrawalOutcome.value = makeDiagnostic('RELEASE_WITHDRAWN', `环境模板 v${release.version} 已撤回。`, false)
+    await releases.load()
+  } catch (error) {
+    if (projectId.value !== currentProjectId) return
+    const problem = extractProblemDetails(error)
+    withdrawalOutcome.value = makeDiagnostic(
+      problem?.diagnosticCode ?? 'RELEASE_WITHDRAW_FAILED',
+      problem?.detail ?? '撤回环境模板失败',
+      problem?.retryable ?? true,
+    )
+  } finally {
+    withdrawalInFlight.value = false
+  }
+}
 
 function projectLink(path: string) {
   return {
@@ -245,6 +339,13 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
   min-width: 0;
 }
 
+.release-card__actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
 .release-card__title {
   display: flex;
   align-items: center;
@@ -329,8 +430,13 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
   }
 
   .section-heading .outlined-button,
+  .release-card__actions,
   .release-card .text-button {
     width: 100%;
+  }
+
+  .release-card__actions {
+    justify-content: space-between;
   }
 }
 </style>

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-pub const BUILD_EXECUTOR_PROTOCOL_VERSION: u8 = 2;
+pub const BUILD_EXECUTOR_PROTOCOL_VERSION: u8 = 3;
 
 /// Immutable identity shared by every provider stage and cleanup attempt.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,7 +53,7 @@ impl BuildExecutionFence {
         })
     }
 
-    fn request_context(
+    pub(crate) fn request_context(
         self,
         build_request_id: BuildRequestId,
         stage: BuildProviderStage,
@@ -274,6 +274,21 @@ pub struct BuildPipeline<P> {
 }
 
 impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
+    pub(crate) async fn recover_cleanup(
+        &self,
+        command: &AgentBuildRequested,
+        fence: BuildExecutionFence,
+    ) -> Result<(), BuildPipelineError> {
+        command
+            .validate()
+            .map_err(|_| BuildPipelineError::new(BuildFailureCode::CommandInvalid, false, false))?;
+        let identity = BuildIdentity(Sha256Digest::of_bytes(
+            command.request.id.as_uuid().as_bytes(),
+        ));
+        self.cleanup_success(command.request.id, identity, fence)
+            .await
+    }
+
     pub fn new(provider: P, policy: BuildPipelinePolicy) -> Result<Self, BuildPipelineError> {
         policy.validate()?;
         if provider.builder_binding() != policy.builder_binding
@@ -394,8 +409,9 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             BuildSource::Dockerfile { .. } => {
                 let build_context =
                     fence.request_context(command.request.id, BuildProviderStage::Build);
-                self.stage(
+                self.stage_with_timeout(
                     cancellation,
+                    Duration::from_millis(command.request.max_duration_milliseconds),
                     self.provider
                         .build_candidate(&build_context, command, identity),
                 )
@@ -404,8 +420,9 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             BuildSource::ExportedOci { .. } => {
                 let import_context =
                     fence.request_context(command.request.id, BuildProviderStage::Import);
-                self.stage(
+                self.stage_with_timeout(
                     cancellation,
+                    Duration::from_millis(command.request.max_duration_milliseconds),
                     self.provider
                         .import_candidate(&import_context, command, identity),
                 )
@@ -502,6 +519,19 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
     where
         F: Future<Output = Result<T, BuildProviderFailure>>,
     {
+        self.stage_with_timeout(cancellation, self.policy.stage_timeout, future)
+            .await
+    }
+
+    async fn stage_with_timeout<T, F>(
+        &self,
+        cancellation: &BuildCancellation,
+        timeout: Duration,
+        future: F,
+    ) -> Result<T, BuildPipelineError>
+    where
+        F: Future<Output = Result<T, BuildProviderFailure>>,
+    {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(BuildPipelineError::new(
@@ -509,10 +539,14 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 false,
                 true,
             )),
-            result = tokio::time::timeout(self.policy.stage_timeout, future) => match result {
+            result = tokio::time::timeout(timeout, future) => match result {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(failure)) => Err(BuildPipelineError::new(
-                    BuildFailureCode::Provider(failure.code),
+                    match failure.code {
+                        BuildProviderFailureCode::Cancelled => BuildFailureCode::Cancelled,
+                        BuildProviderFailureCode::TimedOut => BuildFailureCode::TimedOut,
+                        code => BuildFailureCode::Provider(code),
+                    },
                     failure.retryable
                         && matches!(failure.code, BuildProviderFailureCode::Unavailable),
                     true,
@@ -534,21 +568,19 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         mut original: BuildPipelineError,
     ) -> BuildPipelineError {
         let context = fence.request_context(build_request_id, BuildProviderStage::Cleanup);
-        match tokio::time::timeout(
+        if let Ok(Ok(())) = tokio::time::timeout(
             self.policy.stage_timeout,
             self.provider
                 .cleanup_candidate(&context, build_request_id, identity),
         )
         .await
         {
-            Ok(Ok(())) => {
-                original.cleanup_verified = true;
-                original
-            }
-            Ok(Err(_)) | Err(_) => {
-                BuildPipelineError::new(BuildFailureCode::CleanupFailed, false, false)
-            }
+            original.cleanup_verified = true;
+        } else {
+            original.cleanup_verified = false;
+            original.retryable = false;
         }
+        original
     }
 
     async fn cleanup_success(
@@ -640,6 +672,9 @@ pub struct BuildProviderFailure {
 #[serde(rename_all = "snake_case")]
 pub enum BuildProviderFailureCode {
     Unavailable,
+    TimedOut,
+    Cancelled,
+    ExecutionUnknown,
     Rejected,
     IdentityMismatch,
     OutputInvalid,
@@ -650,6 +685,9 @@ impl BuildProviderFailure {
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self.code {
+            BuildProviderFailureCode::TimedOut => "LW_AGENT_BUILD_TIMEOUT",
+            BuildProviderFailureCode::Cancelled => "LW_AGENT_BUILD_CANCELLED",
+            BuildProviderFailureCode::ExecutionUnknown => "LW_AGENT_BUILD_EXECUTION_UNKNOWN",
             BuildProviderFailureCode::Unavailable => "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
             BuildProviderFailureCode::Rejected => "LW_AGENT_BUILD_REJECTED",
             BuildProviderFailureCode::IdentityMismatch => {
@@ -733,6 +771,15 @@ impl BuildFailureCode {
             Self::ArtifactInvalid => "LW_AGENT_BUILD_ARTIFACT_INVALID",
             Self::CleanupFailed => "LW_AGENT_BUILD_CLEANUP_FAILED",
             Self::ClockInvalid => "LW_AGENT_BUILD_CLOCK_INVALID",
+            Self::Provider(
+                code @ (BuildProviderFailureCode::TimedOut
+                | BuildProviderFailureCode::Cancelled
+                | BuildProviderFailureCode::ExecutionUnknown),
+            ) => BuildProviderFailure {
+                code,
+                retryable: false,
+            }
+            .diagnostic_code(),
         }
     }
 }

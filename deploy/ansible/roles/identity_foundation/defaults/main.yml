@@ -1,9 +1,18 @@
 ---
 identity_foundation_enabled: false
 identity_foundation_verify_only: false
+# Apply only the reviewed organization-directory reader mapping to the
+# existing Keycloak realm. This mode deliberately skips realm, client,
+# credential, workload, gateway, DNS, and manifest reconciliation.
+identity_foundation_realm_roles_only: false
 identity_namespace: keycloak-system # noqa: var-naming[no-role-prefix]
 identity_name: labweaver-keycloak # noqa: var-naming[no-role-prefix]
 identity_hostname: keycloak.labweaver.internal # noqa: var-naming[no-role-prefix]
+# Optional public address that fronts `identity_hostname`. When set, the role
+# additionally verifies the advertised issuer through that entry (the public
+# Gateway certificate in the system trust store) instead of only through the
+# internal identity VIP, so a public hostname change is proven end to end.
+identity_public_address: "" # noqa: var-naming[no-role-prefix]
 identity_gateway_vip: 10.20.0.222 # noqa: var-naming[no-role-prefix]
 identity_gateway_class: cilium # noqa: var-naming[no-role-prefix]
 # Management subnet allowed to reach Keycloak directly and through the identity
@@ -15,6 +24,10 @@ identity_admin_allowed_cidr: 10.20.0.0/16 # noqa: var-naming[no-role-prefix]
 # demo/minimal deployment; production stacks must include labweaver-system.
 identity_allow_platform_namespaces: [] # noqa: var-naming[no-role-prefix]
 identity_realm: workloads # noqa: var-naming[no-role-prefix]
+# Full reconciliation starts one Keycloak CLI JVM for each administrative
+# operation. Give the idempotent provisioning Job a finite 30-minute deadline;
+# the Ansible wait adds a fixed five-minute observation margin.
+identity_provision_job_active_deadline_seconds: 1800 # noqa: var-naming[no-role-prefix]
 # Every LabWeaver service has one confidential client.  The client ID is also
 # the audience used by that service's inbound verifier.  Secrets are supplied
 # through the root-only locator and are copied into namespace-local Secrets;
@@ -111,7 +124,7 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
     roles: [resource.environment.manage]
   - caller: labweaver-environment
     target: labweaver-resource
-    roles: [resource.usage.record]
+    roles: [resource.usage.record, resource.environment.resolve, resource.environment.release]
   - caller: labweaver-environment
     target: labweaver-environment
     roles: [environment.console.execute]
@@ -124,6 +137,12 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
   - caller: labweaver-evaluation
     target: labweaver-evaluation
     roles: [evaluation.step.complete]
+# Keycloak Admin REST access is restricted to the two read-only realm-management
+# roles required by the organization directory.  These are realm client roles,
+# rather than LabWeaver service-to-service permissions.
+identity_service_realm_role_assignments: # noqa: var-naming[no-role-prefix]
+  - caller: labweaver-access
+    roles: [query-users, view-users]
 identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256 # noqa: var-naming[no-role-prefix]
 identity_storage_class: local-path # noqa: var-naming[no-role-prefix]
 identity_postgres_storage: 20Gi # noqa: var-naming[no-role-prefix]

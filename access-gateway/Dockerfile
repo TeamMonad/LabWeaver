@@ -8,7 +8,8 @@ ARG SOURCE_DATE_EPOCH
 ENV CARGO_INCREMENTAL=0 \
     RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
-RUN apk add --no-cache musl-dev=1.2.5-r11
+COPY containers/alpine-3.21-pkgs /vendor/alpine
+RUN apk add --no-network --allow-untrusted /vendor/alpine/musl-dev-1.2.5-r11.apk
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY .cargo .cargo
@@ -34,9 +35,20 @@ RUN --network=none \
 
 FROM ${GATEWAY_RUNTIME} AS runtime
 ARG SOURCE_COMMIT
-RUN apk add --no-cache \
-      openssh-client-default=9.9_p2-r0 \
-      openssh-server=9.9_p2-r0 \
+COPY containers/alpine-3.21-pkgs /vendor/alpine
+RUN apk add --no-network --allow-untrusted \
+      /vendor/alpine/openssh-keygen-9.9_p2-r0.apk \
+      /vendor/alpine/openssh-server-common-9.9_p2-r0.apk \
+      /vendor/alpine/openssh-client-common-9.9_p2-r0.apk \
+      /vendor/alpine/openssh-client-default-9.9_p2-r0.apk \
+      /vendor/alpine/openssh-server-9.9_p2-r0.apk \
+      /vendor/alpine/libedit-20240808.3.1-r0.apk \
+      /vendor/alpine/ncurses-libs-6.5_p20241006-r3.apk \
+      /vendor/alpine/libformw-6.5_p20241006-r3.apk \
+      /vendor/alpine/libmenuw-6.5_p20241006-r3.apk \
+      /vendor/alpine/libncursesw-6.5_p20241006-r3.apk \
+      /vendor/alpine/libpanelw-6.5_p20241006-r3.apk \
+      /vendor/alpine/ncurses-terminfo-base-6.5_p20241006-r3.apk \
     && adduser -D -H -s /sbin/nologin gateway-auth \
     && adduser -D -H -s /bin/sh gateway \
     && passwd -d gateway \
@@ -44,7 +56,7 @@ RUN apk add --no-cache \
     && mkdir -p /run/sshd /etc/labweaver
 COPY --from=builder /out/labweaver-gateway /usr/local/bin/labweaver-gateway
 COPY access-gateway/sshd_config /etc/ssh/sshd_config
-COPY access-gateway/target-ssh.conf /etc/labweaver/target-ssh.conf
+COPY --chmod=0644 access-gateway/target-ssh.conf /etc/labweaver/target-ssh.conf
 COPY --chmod=0555 access-gateway/entrypoint.sh /usr/local/bin/labweaver-gateway-entrypoint
 COPY --chmod=0555 access-gateway/command-wrapper.sh /usr/local/bin/labweaver-gateway-command
 LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \

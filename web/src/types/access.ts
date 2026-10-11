@@ -11,7 +11,7 @@ export type EnvironmentInstanceWithFreeze = EnvironmentInstanceSchema & {
 export function buildSshCommand(endpointGrant: EndpointGrant): string | null {
   if (!endpointGrant.alias) return null
   if (!endpointGrant.sshGatewayHostname || endpointGrant.sshGatewayPort !== 2222) return null
-  return `ssh -p ${endpointGrant.sshGatewayPort} ${endpointGrant.alias}@${endpointGrant.sshGatewayHostname}`
+  return `ssh -t -p ${endpointGrant.sshGatewayPort} gateway@${endpointGrant.sshGatewayHostname} connect ${endpointGrant.alias}`
 }
 
 /** Browser connect URL for an HTTPS endpoint grant. Returns null when the

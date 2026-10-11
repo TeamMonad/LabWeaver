@@ -6,6 +6,8 @@ export type ClientOptions = {
 
 export type AgentLlmReviewQuery = AgentLlmReviewQuerySchema;
 
+export type AgentRunHistoryPage = AgentRunHistoryPageSchema;
+
 export type AgentWorkExecutionIntentMetadata = AgentWorkExecutionIntentMetadataSchema;
 
 export type AgentWorkExecutionIntentQuery = AgentWorkExecutionIntentQuerySchema;
@@ -68,15 +70,23 @@ export type InternalEvaluationRunMutationRequest = InternalEvaluationRunMutation
 
 export type InternalImageArtifactResolution = InternalImageArtifactResolutionSchema;
 
+export type InternalPlatformImageImportJobStatus = InternalPlatformImageImportJobStatusSchema;
+
 export type InternalPublishEvaluationReleaseRequest = InternalPublishEvaluationReleaseRequestSchema;
 
 export type InternalWithdrawEvaluationReleaseRequest = InternalWithdrawEvaluationReleaseRequestSchema;
+
+export type LogoutBrowserSessionResponse = LogoutBrowserSessionResponseSchema;
 
 export type OperationAccepted = {
     operationId: string;
     revision: number;
     statusUrl: string;
 };
+
+export type OrganizationUser = OrganizationUserSchema;
+
+export type OrganizationUserPage = OrganizationUserPageSchema;
 
 export type PlatformImageCatalog = PlatformImageCatalogSchema;
 
@@ -87,6 +97,8 @@ export type PlatformImageEntry = PlatformImageEntrySchema;
 export type PlatformImageEntryView = PlatformImageEntryViewSchema;
 
 export type PlatformImageUploadSession = PlatformImageUploadSessionSchema;
+
+export type PlatformImageUploadStatus = PlatformImageUploadStatusSchema;
 
 export type ProblemDetails = {
     detail: string;
@@ -230,21 +242,127 @@ export type Revision = number;
 export type UtcTimestamp = string;
 
 /**
+ * AgentRunHistoryPage
+ *
+ * Page of Agent-owned project run history.
+ */
+export type AgentRunHistoryPageSchema = {
+    hasMore: boolean;
+    items: Array<AgentRunHistoryItem>;
+    page: number;
+    pageSize: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type AgentRunHistoryPageSchemaActorId = string;
+
+/**
+ * Bounded project-scoped history item.  Full run details remain available
+ * through the existing `getProjectAgentRun` operation.
+ */
+export type AgentRunHistoryItem = {
+    /**
+     * Course association copied from the Agent-owned run row so Control can
+     * enforce the same project/course binding as the detail endpoint.
+     */
+    courseId?: AgentRunHistoryPageSchemaCourseId | null;
+    createdAt: AgentRunHistoryPageSchemaUtcTimestamp;
+    id: AgentRunId;
+    projectId: AgentRunHistoryPageSchemaProjectId;
+    purpose: AgentRunPurpose;
+    state: AgentRunState;
+    updatedAt: AgentRunHistoryPageSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type AgentRunId = string;
+
+/**
+ * Immutable purpose selected by Control for one Agent run.
+ *
+ * The purpose is authoritative: callers cannot substitute an environment class, target
+ * environment, actor, or runtime through an untyped request field. Experiment Authoring creates
+ * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
+ * WorkConfiguration targets one existing Work environment and produces one configuration plan.
+ */
+export type AgentRunPurpose = {
+    environmentClass: EnvironmentClass;
+    kind: 'authoring';
+} | {
+    actorId: AgentRunHistoryPageSchemaActorId;
+    environmentId: AgentRunHistoryPageSchemaEnvironmentId;
+    environmentRevision: AgentRunHistoryPageSchemaRevision;
+    kind: 'work_configuration';
+    /**
+     * Runtime selected by the authoritative Work environment.
+     *
+     * Control resolves this value from the environment instance before dispatching the
+     * run. Agent uses it as the immutable execution routing key, so a missing or altered
+     * runtime cannot silently select a different executor.
+     */
+    runtimeKind: RuntimeKind;
+};
+
+/**
+ * Aggregate AgentRun state derived from both tracks.
+ */
+export type AgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type AgentRunHistoryPageSchemaCourseId = string;
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentClass = 'experiment' | 'work';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type AgentRunHistoryPageSchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type AgentRunHistoryPageSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AgentRunHistoryPageSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type RuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type AgentRunHistoryPageSchemaUtcTimestamp = string;
+
+/**
  * AgentRun
  *
  * One idempotent, auditable dual-candidate Agent run.
  */
 export type AgentRunSchema = {
     courseId?: AgentRunSchemaCourseId | null;
-    id: AgentRunId;
+    id: AgentRunSchemaAgentRunId;
     packageId: ProblemPackageId;
     plan?: WorkConfigurationPlan | null;
     policyId: PolicyId;
     policyRevision: AgentRunSchemaRevision;
     projectId: AgentRunSchemaProjectId;
-    purpose: AgentRunPurpose;
+    purpose: AgentRunSchemaAgentRunPurpose;
     revision: AgentRunSchemaRevision;
-    state: AgentRunState;
+    state: AgentRunSchemaAgentRunState;
     tracks: Array<AgentTrack>;
 };
 
@@ -276,7 +394,7 @@ export type AgentAttemptState = 'pending' | 'running' | 'repairing' | 'awaiting_
 /**
  * Strongly typed UUIDv7 identifier for `AgentRunId`.
  */
-export type AgentRunId = string;
+export type AgentRunSchemaAgentRunId = string;
 
 /**
  * Immutable purpose selected by Control for one Agent run.
@@ -286,8 +404,8 @@ export type AgentRunId = string;
  * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
  * WorkConfiguration targets one existing Work environment and produces one configuration plan.
  */
-export type AgentRunPurpose = {
-    environmentClass: EnvironmentClass;
+export type AgentRunSchemaAgentRunPurpose = {
+    environmentClass: AgentRunSchemaEnvironmentClass;
     kind: 'authoring';
 } | {
     actorId: AgentRunSchemaActorId;
@@ -301,13 +419,13 @@ export type AgentRunPurpose = {
      * run. Agent uses it as the immutable execution routing key, so a missing or altered
      * runtime cannot silently select a different executor.
      */
-    runtimeKind: RuntimeKind;
+    runtimeKind: AgentRunSchemaRuntimeKind;
 };
 
 /**
  * Aggregate AgentRun state derived from both tracks.
  */
-export type AgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled';
+export type AgentRunSchemaAgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled';
 
 /**
  * Independent track and its retained attempts.
@@ -367,7 +485,7 @@ export type AgentRunSchemaCourseId = string;
 /**
  * Environment business class retained from the v2.1 architecture.
  */
-export type EnvironmentClass = 'experiment' | 'work';
+export type AgentRunSchemaEnvironmentClass = 'experiment' | 'work';
 
 /**
  * Strongly typed UUIDv7 identifier for `EnvironmentId`.
@@ -407,7 +525,7 @@ export type AgentRunSchemaRevision = number;
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
-export type RuntimeKind = 'container' | 'virtual_machine';
+export type AgentRunSchemaRuntimeKind = 'container' | 'virtual_machine';
 
 /**
  * Immutable generated configuration plan for one existing Work environment.
@@ -585,6 +703,13 @@ export type AuthoringApproval = {
     environmentCandidateRevision: AuthoringApprovalPublicationStatusSchemaRevision;
     evaluationCandidateId: AuthoringApprovalPublicationStatusSchemaCandidateId;
     evaluationCandidateRevision: AuthoringApprovalPublicationStatusSchemaRevision;
+    /**
+     * Exact per-experiment Evaluation runner image frozen with this approval.
+     *
+     * Container experiments must carry their own built runner image. VM experiments use the
+     * deployment-owned Evaluation runtime and leave this absent.
+     */
+    evaluationRunnerImageArtifact?: ImageArtifact | null;
     /**
      * Exact Evaluation execution identity frozen when this approval is completed.
      */
@@ -767,6 +892,13 @@ export type AuthoringApprovalSchema = {
     environmentCandidateRevision: AuthoringApprovalSchemaRevision;
     evaluationCandidateId: AuthoringApprovalSchemaCandidateId;
     evaluationCandidateRevision: AuthoringApprovalSchemaRevision;
+    /**
+     * Exact per-experiment Evaluation runner image frozen with this approval.
+     *
+     * Container experiments must carry their own built runner image. VM experiments use the
+     * deployment-owned Evaluation runtime and leave this absent.
+     */
+    evaluationRunnerImageArtifact?: AuthoringApprovalSchemaImageArtifact | null;
     /**
      * Exact Evaluation execution identity frozen when this approval is completed.
      */
@@ -1351,16 +1483,24 @@ export type EnvironmentEndpointSchemaUtcTimestamp = string;
  * PostgreSQL-authoritative environment view.
  */
 export type EnvironmentInstanceSchema = {
+    approvedResources: WorkloadResources;
     capacityBinding?: string | null;
     class: EnvironmentInstanceSchemaEnvironmentClass;
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId?: EnvironmentInstanceSchemaCourseId | null;
     desiredState: DesiredEnvironmentState;
     displayLabel: string;
-    eligibilityExpiresAt: EnvironmentInstanceSchemaUtcTimestamp;
+    eligibilityExpiresAt: string | null;
     endpoints: Array<EnvironmentEndpoint>;
     failedPhase?: ObservedEnvironmentState | null;
     generation: number;
+    /**
+     * Resource-resolved Experiment GPU allocation held while this instance exists, when present.
+     *
+     * Work environments never use this field; their allocation remains on the Lease
+     * authorization. A present value is validated against the immutable instance identity.
+     */
+    gpuAllocation?: GpuAllocation | null;
     id: EnvironmentInstanceSchemaEnvironmentId;
     lastDiagnosticCode?: string | null;
     leaseId?: EnvironmentInstanceSchemaLeaseId | null;
@@ -1372,6 +1512,10 @@ export type EnvironmentInstanceSchema = {
     providerBinding: string;
     releaseId: EnvironmentInstanceSchemaReleaseId;
     releaseVersion: number;
+    /**
+     * Set only after Environment has released its Resource reservation at terminal deletion.
+     */
+    resourceReservationReleased?: boolean;
     revision: EnvironmentInstanceSchemaRevision;
     runtimeKind: EnvironmentInstanceSchemaRuntimeKind;
 };
@@ -2459,7 +2603,7 @@ export type RetentionClass = 'course_material' | 'build_evidence' | 'run_evidenc
 /**
  * Required action after retention expires.
  */
-export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -2482,9 +2626,10 @@ export type RetentionSnapshot = {
      */
     policyRevision: FrozenSubmissionSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: FrozenSubmissionSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -2545,15 +2690,15 @@ export type GpuCatalogEntrySchemaRevision = number;
  * Access-owned membership grant for one Project actor.
  */
 export type AddProjectMembershipRequestSchema = {
-    actorId: AddProjectMembershipRequestSchemaActorId;
     expiresAt?: AddProjectMembershipRequestSchemaUtcTimestamp | null;
     role: AddProjectMembershipRequestSchemaPlatformRole;
+    /**
+     * Exact issuer username resolved by Access before the membership
+     * transaction.  Local actor identifiers are never accepted from a
+     * browser request.
+     */
+    username: string;
 };
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type AddProjectMembershipRequestSchemaActorId = string;
 
 /**
  * Base role asserted by the configured OIDC issuer.
@@ -2809,6 +2954,114 @@ export type AuthoringPublicationAdmissionQuerySchemaProjectId = string;
 export type AuthoringPublicationAdmissionQuerySchemaRevision = number;
 
 /**
+ * CancelCandidateBuildRequest
+ *
+ * The state and revision the caller actually reviewed before requesting cancellation.
+ */
+export type CancelCandidateBuildRequestSchema = {
+    buildRequestId: CancelCandidateBuildRequestSchemaBuildRequestId;
+    expectedRevision: CancelCandidateBuildRequestSchemaRevision;
+    expectedState: InternalAgentBuildState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type CancelCandidateBuildRequestSchemaBuildRequestId = string;
+
+/**
+ * Agent-owned durable state used as an optimistic precondition for build cancellation.
+ */
+export type InternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CancelCandidateBuildRequestSchemaRevision = number;
+
+/**
+ * CancelPlatformImageUploadRequest
+ *
+ * Revision-fenced cancellation of a platform image upload.
+ */
+export type CancelPlatformImageUploadRequestSchema = {
+    expectedRevision: CancelPlatformImageUploadRequestSchemaRevision;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CancelPlatformImageUploadRequestSchemaRevision = number;
+
+/**
+ * CandidateBuildTask
+ *
+ * Authoritative Agent task state for one project-scoped candidate build.
+ */
+export type CandidateBuildTaskSchema = {
+    candidateId: CandidateBuildTaskSchemaCandidateId;
+    status: CandidateBuildTaskSchemaInternalAgentBuildCancellationResult;
+    target: CandidateBuildTarget;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type CandidateBuildTaskSchemaBuildRequestId = string;
+
+/**
+ * One existing build target attached to an immutable candidate.
+ */
+export type CandidateBuildTarget = 'environment' | 'evaluation_runner';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type CandidateBuildTaskSchemaCandidateId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CandidateBuildTaskSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type CandidateBuildTaskSchemaDiagnosticCode = string;
+
+/**
+ * Durable result returned for an accepted or exactly replayed build cancellation.
+ */
+export type CandidateBuildTaskSchemaInternalAgentBuildCancellationResult = {
+    buildRequestId: CandidateBuildTaskSchemaBuildRequestId;
+    cancellationRequested: boolean;
+    cleanupVerified?: boolean | null;
+    courseId?: CandidateBuildTaskSchemaCourseId | null;
+    diagnosticCode?: CandidateBuildTaskSchemaDiagnosticCode | null;
+    projectId: CandidateBuildTaskSchemaProjectId;
+    revision: CandidateBuildTaskSchemaRevision;
+    state: CandidateBuildTaskSchemaInternalAgentBuildState;
+};
+
+/**
+ * Agent-owned durable state used as an optimistic precondition for build cancellation.
+ */
+export type CandidateBuildTaskSchemaInternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CandidateBuildTaskSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CandidateBuildTaskSchemaRevision = number;
+
+/**
  * CandidateDecisionRequest
  */
 export type CandidateDecisionRequestSchema = {
@@ -2843,6 +3096,13 @@ export type CompleteAuthoringApprovalRequestSchema = {
     environmentCandidateRevision: CompleteAuthoringApprovalRequestSchemaRevision;
     evaluationCandidateId: CompleteAuthoringApprovalRequestSchemaCandidateId;
     evaluationCandidateRevision: CompleteAuthoringApprovalRequestSchemaRevision;
+    /**
+     * Exact per-experiment Evaluation runner image selected for a Container experiment.
+     *
+     * Container experiments must select the runner artifact produced by their own runner build;
+     * VM experiments omit it and use the deployment-owned Evaluation runtime.
+     */
+    evaluationRunnerImageArtifact?: CompleteAuthoringApprovalRequestSchemaImageArtifact | null;
     imageArtifact: CompleteAuthoringApprovalRequestSchemaImageArtifact;
     packageId: CompleteAuthoringApprovalRequestSchemaProblemPackageId;
     packageRevision: CompleteAuthoringApprovalRequestSchemaRevision;
@@ -2924,7 +3184,15 @@ export type CompleteAuthoringApprovalRequestSchemaVirtualMachineDiskFormat = 'qc
  * Completion request for one staged OCI archive upload.
  */
 export type CompletePlatformImageUploadRequestSchema = {
-    [key: string]: never;
+    parts: Array<CompletePlatformImageUploadPart>;
+};
+
+/**
+ * ETag receipt for one completed multipart part.
+ */
+export type CompletePlatformImageUploadPart = {
+    etag: string;
+    partNumber: number;
 };
 
 /**
@@ -3332,6 +3600,7 @@ export type CreateProblemPackageUploadRequestSchema = {
     courseId?: CreateProblemPackageUploadRequestSchemaCourseId | null;
     files: Array<ProblemPackageUploadFile>;
     projectId: CreateProblemPackageUploadRequestSchemaProjectId;
+    retentionChoice: ProblemPackageRetentionChoice;
     retentionPolicyRevision: CreateProblemPackageUploadRequestSchemaRevision;
 };
 
@@ -3339,6 +3608,11 @@ export type CreateProblemPackageUploadRequestSchema = {
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type CreateProblemPackageUploadRequestSchemaCourseId = string;
+
+/**
+ * Explicit retention choice made when a new CourseMaterial package upload starts.
+ */
+export type ProblemPackageRetentionChoice = 'finite' | 'permanent';
 
 export type ProblemPackageUploadFile = {
     mediaType: string;
@@ -3600,6 +3874,20 @@ export type DisablePlatformImageRequestSchema = {
     expectedDigest: string;
     reason: string;
 };
+
+/**
+ * EndResourceRateRequest
+ *
+ * Closes one open immutable rate version at a future timestamp.
+ */
+export type EndResourceRateRequestSchema = {
+    effectiveUntil: EndResourceRateRequestSchemaUtcTimestamp;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EndResourceRateRequestSchemaUtcTimestamp = string;
 
 /**
  * SnapshotPage
@@ -3910,6 +4198,14 @@ export type EnvironmentSpec = {
 };
 
 /**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type EnvironmentCandidateViewSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
  * Complete immutable runtime artifact identity.
  */
 export type EnvironmentCandidateViewSchemaImageArtifact = {
@@ -3961,6 +4257,10 @@ export type PublicExposurePolicy = 'deny';
  */
 export type ResourceRequirements = {
     cpuMillicores: number;
+    /**
+     * Policy-catalogued GPU class and count. It never carries a Kubernetes resource name.
+     */
+    gpu?: EnvironmentCandidateViewSchemaGpuRequest | null;
     memoryBytes: number;
     storageBytes: number;
 };
@@ -3973,7 +4273,7 @@ export type EnvironmentCandidateViewSchemaRetentionClass = 'course_material' | '
 /**
  * Required action after retention expires.
  */
-export type EnvironmentCandidateViewSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type EnvironmentCandidateViewSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -3996,9 +4296,10 @@ export type EnvironmentCandidateViewSchemaRetentionSnapshot = {
      */
     policyRevision: EnvironmentCandidateViewSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: EnvironmentCandidateViewSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -4345,7 +4646,7 @@ export type EnvironmentSummary = {
     currentOperation?: EnvironmentSummaryPageSchemaEnvironmentOperationSnapshot | null;
     desiredState: EnvironmentSummaryPageSchemaDesiredEnvironmentState;
     displayLabel: string;
-    eligibilityExpiresAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+    eligibilityExpiresAt: string | null;
     id: EnvironmentSummaryPageSchemaEnvironmentId;
     lastChangedStreamSequence: EnvironmentSummaryPageSchemaStreamSequence;
     observedState: EnvironmentSummaryPageSchemaObservedEnvironmentState;
@@ -4631,6 +4932,17 @@ export type EnvironmentWorkConfigurationTargetQuerySchemaRevision = number;
 export type EvaluationCandidateViewSchema = {
     approvals: Array<EvaluationCandidateViewSchemaCandidateApproval>;
     candidate: EvaluationCandidate;
+    /**
+     * Per-experiment runner build resolved by Control from the authoritative build projection.
+     *
+     * This remains null for deployment-owned VM evaluation, which has no per-experiment runner
+     * image, and while a Container experiment's runner build is incomplete.
+     */
+    runnerBuild?: EvaluationCandidateViewSchemaCandidateBuildView | null;
+    /**
+     * Exact runner artifact a teacher can approve for a Container experiment.
+     */
+    runnerImageArtifact?: EvaluationCandidateViewSchemaImageArtifact | null;
     trustRevision: EvaluationCandidateViewSchemaRevision;
 };
 
@@ -4701,6 +5013,42 @@ export type EvaluationCandidateViewSchemaAggregationSpec = {
 export type EvaluationCandidateViewSchemaApprovalId = string;
 
 /**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type EvaluationCandidateViewSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type EvaluationCandidateViewSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: EvaluationCandidateViewSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type EvaluationCandidateViewSchemaBuildRequestId = string;
+
+/**
  * Human decision bound to an exact candidate and dependency identity.
  */
 export type EvaluationCandidateViewSchemaCandidateApproval = {
@@ -4713,6 +5061,22 @@ export type EvaluationCandidateViewSchemaCandidateApproval = {
     policyRevision: EvaluationCandidateViewSchemaRevision;
     reason: string;
     trustRevision: EvaluationCandidateViewSchemaRevision;
+};
+
+/**
+ * Public state of the deterministic Container build attached to one approved candidate.
+ */
+export type EvaluationCandidateViewSchemaCandidateBuildState = 'requested' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Control-owned build projection exposed for teacher review without leaking object keys or
+ * executor internals.
+ */
+export type EvaluationCandidateViewSchemaCandidateBuildView = {
+    artifact?: EvaluationCandidateViewSchemaImageArtifact | null;
+    cleanupVerified?: boolean | null;
+    diagnosticCode?: EvaluationCandidateViewSchemaDiagnosticCode | null;
+    state: EvaluationCandidateViewSchemaCandidateBuildState;
 };
 
 /**
@@ -4841,6 +5205,14 @@ export type EvaluationCandidateViewSchemaDeterministicRunnerSpec = {
     readOnly: boolean;
 };
 
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type EvaluationCandidateViewSchemaDiagnosticCode = string;
+
 export type EvaluationCandidateViewSchemaEvaluationApiVersion = 'evaluation.labweaver.io/v1';
 
 /**
@@ -4865,6 +5237,14 @@ export type EvaluationCandidate = {
     projectId: EvaluationCandidateViewSchemaProjectId;
     revision: EvaluationCandidateViewSchemaRevision;
     runId: EvaluationCandidateViewSchemaAgentRunId;
+    /**
+     * Generated build context for this experiment's own Evaluation runner image.
+     *
+     * Only Container experiments carry a runner image; deployment-owned VM evaluation leaves this
+     * absent. Control resolves the object key from the Agent artifact authority before enqueueing
+     * the second single-image build.
+     */
+    runnerBuildContext?: EvaluationCandidateViewSchemaArtifactRef | null;
     spec: EvaluationCandidateViewSchemaEvaluationSpec;
 };
 
@@ -4941,6 +5321,27 @@ export type EvaluationCandidateViewSchemaFactAssertion = {
 export type EvaluationCandidateViewSchemaGateFailurePolicy = 'stop';
 
 /**
+ * Complete immutable runtime artifact identity.
+ */
+export type EvaluationCandidateViewSchemaImageArtifact = {
+    build_request_id: EvaluationCandidateViewSchemaBuildRequestId;
+    digest: string;
+    id: EvaluationCandidateViewSchemaImageArtifactId;
+    kind: 'container';
+    repository: string;
+} | {
+    base_disk: EvaluationCandidateViewSchemaVirtualMachineBaseDisk;
+    format: EvaluationCandidateViewSchemaVirtualMachineDiskFormat;
+    id: EvaluationCandidateViewSchemaImageArtifactId;
+    kind: 'virtual_machine';
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
+ */
+export type EvaluationCandidateViewSchemaImageArtifactId = string;
+
+/**
  * Conditions that force manual teacher review.
  */
 export type EvaluationCandidateViewSchemaManualReviewReason = 'infrastructureError' | 'invalidEvidence';
@@ -5006,6 +5407,23 @@ export type EvaluationCandidateViewSchemaTestGroup = {
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EvaluationCandidateViewSchemaUtcTimestamp = string;
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type EvaluationCandidateViewSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    sourceRegistryDigest: string;
+};
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type EvaluationCandidateViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
  * FreezeSubmissionRequest
@@ -5115,7 +5533,7 @@ export type GeneratedArtifactRecordSchemaCourseId = string;
 /**
  * Immutable output class recorded by Agent for generated objects.
  */
-export type GeneratedArtifactKind = 'build_context' | 'work_script' | 'verification_script';
+export type GeneratedArtifactKind = 'build_context' | 'evaluation_runner_build_context' | 'work_script' | 'verification_script';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
@@ -5142,7 +5560,7 @@ export type InternalAgentBuildCancellationRequestSchema = {
     buildRequestId: InternalAgentBuildCancellationRequestSchemaBuildRequestId;
     courseId?: InternalAgentBuildCancellationRequestSchemaCourseId | null;
     expectedRevision: InternalAgentBuildCancellationRequestSchemaRevision;
-    expectedState: InternalAgentBuildState;
+    expectedState: InternalAgentBuildCancellationRequestSchemaInternalAgentBuildState;
     projectId: InternalAgentBuildCancellationRequestSchemaProjectId;
     requestedAt: InternalAgentBuildCancellationRequestSchemaUtcTimestamp;
 };
@@ -5165,7 +5583,7 @@ export type InternalAgentBuildCancellationRequestSchemaCourseId = string;
 /**
  * Agent-owned durable state used as an optimistic precondition for build cancellation.
  */
-export type InternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type InternalAgentBuildCancellationRequestSchemaInternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -5190,7 +5608,9 @@ export type InternalAgentBuildCancellationRequestSchemaUtcTimestamp = string;
 export type InternalAgentBuildCancellationResultSchema = {
     buildRequestId: InternalAgentBuildCancellationResultSchemaBuildRequestId;
     cancellationRequested: boolean;
+    cleanupVerified?: boolean | null;
     courseId?: InternalAgentBuildCancellationResultSchemaCourseId | null;
+    diagnosticCode?: InternalAgentBuildCancellationResultSchemaDiagnosticCode | null;
     projectId: InternalAgentBuildCancellationResultSchemaProjectId;
     revision: InternalAgentBuildCancellationResultSchemaRevision;
     state: InternalAgentBuildCancellationResultSchemaInternalAgentBuildState;
@@ -5205,6 +5625,14 @@ export type InternalAgentBuildCancellationResultSchemaBuildRequestId = string;
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type InternalAgentBuildCancellationResultSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type InternalAgentBuildCancellationResultSchemaDiagnosticCode = string;
 
 /**
  * Agent-owned durable state used as an optimistic precondition for build cancellation.
@@ -5971,6 +6399,14 @@ export type InternalAgentRunOutcomeSchemaEvaluationCandidate = {
     projectId: InternalAgentRunOutcomeSchemaProjectId;
     revision: InternalAgentRunOutcomeSchemaRevision;
     runId: InternalAgentRunOutcomeSchemaAgentRunId;
+    /**
+     * Generated build context for this experiment's own Evaluation runner image.
+     *
+     * Only Container experiments carry a runner image; deployment-owned VM evaluation leaves this
+     * absent. Control resolves the object key from the Agent artifact authority before enqueueing
+     * the second single-image build.
+     */
+    runnerBuildContext?: InternalAgentRunOutcomeSchemaArtifactRef | null;
     spec: InternalAgentRunOutcomeSchemaEvaluationSpec;
 };
 
@@ -6064,6 +6500,14 @@ export type InternalAgentRunOutcomeSchemaFactAssertion = {
 export type InternalAgentRunOutcomeSchemaGateFailurePolicy = 'stop';
 
 /**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type InternalAgentRunOutcomeSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
  * Frozen LLM usage for one attempt.
  */
 export type InternalAgentRunOutcomeSchemaLlmUsage = {
@@ -6124,6 +6568,10 @@ export type InternalAgentRunOutcomeSchemaRequiredStatus = 'passed';
  */
 export type InternalAgentRunOutcomeSchemaResourceRequirements = {
     cpuMillicores: number;
+    /**
+     * Policy-catalogued GPU class and count. It never carries a Kubernetes resource name.
+     */
+    gpu?: InternalAgentRunOutcomeSchemaGpuRequest | null;
     memoryBytes: number;
     storageBytes: number;
 };
@@ -6136,7 +6584,7 @@ export type InternalAgentRunOutcomeSchemaRetentionClass = 'course_material' | 'b
 /**
  * Required action after retention expires.
  */
-export type InternalAgentRunOutcomeSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type InternalAgentRunOutcomeSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -6159,9 +6607,10 @@ export type InternalAgentRunOutcomeSchemaRetentionSnapshot = {
      */
     policyRevision: InternalAgentRunOutcomeSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: InternalAgentRunOutcomeSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -6760,7 +7209,7 @@ export type InternalCreateAgentRunRequestSchemaRetentionClass = 'course_material
 /**
  * Required action after retention expires.
  */
-export type InternalCreateAgentRunRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type InternalCreateAgentRunRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -6783,9 +7232,10 @@ export type InternalCreateAgentRunRequestSchemaRetentionSnapshot = {
      */
     policyRevision: InternalCreateAgentRunRequestSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: InternalCreateAgentRunRequestSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -6990,6 +7440,39 @@ export type InternalImageArtifactResolutionSchemaVirtualMachineBaseDisk = {
  * Supported VM base-disk encodings.
  */
 export type InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * InternalPlatformImageImportJobStatus
+ *
+ * Short Agent response used by Control while polling a durable import job.
+ */
+export type InternalPlatformImageImportJobStatusSchema = {
+    catalogId?: PlatformImageId | null;
+    diagnostic?: string | null;
+    revision: InternalPlatformImageImportJobStatusSchemaRevision;
+    state: PlatformImageImportJobState;
+    uploadId: UploadSessionId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageId = string;
+
+/**
+ * Agent-owned lifecycle state for one durable platform image import job.
+ */
+export type PlatformImageImportJobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalPlatformImageImportJobStatusSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UploadSessionId`.
+ */
+export type UploadSessionId = string;
 
 /**
  * InternalPublishEvaluationReleaseRequest
@@ -7399,7 +7882,7 @@ export type InternalPublishEvaluationReleaseRequestSchemaRetentionClass = 'cours
 /**
  * Required action after retention expires.
  */
-export type InternalPublishEvaluationReleaseRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type InternalPublishEvaluationReleaseRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -7422,9 +7905,10 @@ export type InternalPublishEvaluationReleaseRequestSchemaRetentionSnapshot = {
      */
     policyRevision: InternalPublishEvaluationReleaseRequestSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: InternalPublishEvaluationReleaseRequestSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -7577,7 +8061,7 @@ export type PlatformImageCatalogViewSchemaPlatformImageEntryView = {
      * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
      */
     capacityBytes?: number | null;
-    catalogId: PlatformImageId;
+    catalogId: PlatformImageCatalogViewSchemaPlatformImageId;
     /**
      * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
      */
@@ -7605,7 +8089,7 @@ export type PlatformImageCatalogViewSchemaPlatformImageEntryView = {
 /**
  * Strongly typed UUIDv7 identifier for `PlatformImageId`.
  */
-export type PlatformImageId = string;
+export type PlatformImageCatalogViewSchemaPlatformImageId = string;
 
 /**
  * Reviewed platform image kinds.
@@ -7825,8 +8309,9 @@ export type PlatformImageUploadSessionSchema = {
     kind: PlatformImageUploadSessionSchemaPlatformImageKind;
     revision: PlatformImageUploadSessionSchemaRevision;
     targetReference: string;
-    uploadId: UploadSessionId;
+    uploadId: PlatformImageUploadSessionSchemaUploadSessionId;
     uploadTarget: PlatformImageUploadTarget;
+    uploadedParts: Array<PlatformImageUploadedPart>;
 };
 
 /**
@@ -7835,14 +8320,33 @@ export type PlatformImageUploadSessionSchema = {
 export type PlatformImageUploadSessionSchemaPlatformImageKind = 'container' | 'virtual_machine';
 
 /**
- * Short-lived per-object upload authority for one OCI archive.
+ * One short-lived presigned multipart part authority for one OCI archive.
  */
-export type PlatformImageUploadTarget = {
+export type PlatformImageUploadPartTarget = {
     expiresAt: PlatformImageUploadSessionSchemaUtcTimestamp;
+    partNumber: number;
     requiredHeaders: {
         [key: string]: string;
     };
     uploadUrl: string;
+};
+
+/**
+ * Short-lived multipart upload authority for one OCI archive.
+ */
+export type PlatformImageUploadTarget = {
+    expiresAt: PlatformImageUploadSessionSchemaUtcTimestamp;
+    partSizeBytes: number;
+    parts: Array<PlatformImageUploadPartTarget>;
+};
+
+/**
+ * Actual part observed by the object store during upload status refresh.
+ */
+export type PlatformImageUploadedPart = {
+    etag: string;
+    partNumber: number;
+    sizeBytes: number;
 };
 
 /**
@@ -7853,7 +8357,7 @@ export type PlatformImageUploadSessionSchemaRevision = number;
 /**
  * Strongly typed UUIDv7 identifier for `UploadSessionId`.
  */
-export type UploadSessionId = string;
+export type PlatformImageUploadSessionSchemaUploadSessionId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -7864,6 +8368,76 @@ export type PlatformImageUploadSessionSchemaUtcTimestamp = string;
  * Supported VM base-disk encodings.
  */
 export type PlatformImageUploadSessionSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * PlatformImageUploadStatus
+ *
+ * Public status of a platform image upload and its asynchronous import.
+ */
+export type PlatformImageUploadStatusSchema = {
+    catalogId?: PlatformImageUploadStatusSchemaPlatformImageId | null;
+    diagnostic?: string | null;
+    revision: PlatformImageUploadStatusSchemaRevision;
+    state: PlatformImageUploadState;
+    uploadId: PlatformImageUploadStatusSchemaUploadSessionId;
+    uploadTarget?: PlatformImageUploadStatusSchemaPlatformImageUploadTarget | null;
+    uploadedParts?: Array<PlatformImageUploadStatusSchemaPlatformImageUploadedPart>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageId = string;
+
+/**
+ * One short-lived presigned multipart part authority for one OCI archive.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageUploadPartTarget = {
+    expiresAt: PlatformImageUploadStatusSchemaUtcTimestamp;
+    partNumber: number;
+    requiredHeaders: {
+        [key: string]: string;
+    };
+    uploadUrl: string;
+};
+
+/**
+ * Control-owned lifecycle state for a platform image upload.
+ */
+export type PlatformImageUploadState = 'pending' | 'queued' | 'freezing' | 'importing' | 'cancelling' | 'imported' | 'failed' | 'cancelled';
+
+/**
+ * Short-lived multipart upload authority for one OCI archive.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageUploadTarget = {
+    expiresAt: PlatformImageUploadStatusSchemaUtcTimestamp;
+    partSizeBytes: number;
+    parts: Array<PlatformImageUploadStatusSchemaPlatformImageUploadPartTarget>;
+};
+
+/**
+ * Actual part observed by the object store during upload status refresh.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageUploadedPart = {
+    etag: string;
+    partNumber: number;
+    sizeBytes: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type PlatformImageUploadStatusSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UploadSessionId`.
+ */
+export type PlatformImageUploadStatusSchemaUploadSessionId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformImageUploadStatusSchemaUtcTimestamp = string;
 
 /**
  * ProblemPackageUploadSession
@@ -7920,83 +8494,6 @@ export type ProblemPackageUploadSessionSchemaUploadSessionId = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ProblemPackageUploadSessionSchemaUtcTimestamp = string;
-
-/**
- * RecordResourceUsageRequest
- *
- * Provider usage submitted by a trusted Resource meter or reconciler.
- */
-export type RecordResourceUsageRequestSchema = {
-    courseId?: RecordResourceUsageRequestSchemaCourseId | null;
-    kind: ResourceUsageKind;
-    leaseId?: RecordResourceUsageRequestSchemaLeaseId | null;
-    measuredFrom: RecordResourceUsageRequestSchemaUtcTimestamp;
-    measuredUntil: RecordResourceUsageRequestSchemaUtcTimestamp;
-    measurement: UsageMeasurement;
-    projectId: RecordResourceUsageRequestSchemaProjectId;
-    requestId: RecordResourceUsageRequestSchemaResourceRequestId;
-    sourceEventId: RecordResourceUsageRequestSchemaEventId;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type RecordResourceUsageRequestSchemaCourseId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `EventId`.
- */
-export type RecordResourceUsageRequestSchemaEventId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `LeaseId`.
- */
-export type RecordResourceUsageRequestSchemaLeaseId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type RecordResourceUsageRequestSchemaProjectId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
- */
-export type RecordResourceUsageRequestSchemaResourceRequestId = string;
-
-/**
- * Metering scope for one usage interval.
- *
- * Compute and retained-storage intervals are independent meters and may overlap in time.
- * A known record must set non-applicable dimensions to zero so a stored interval cannot be
- * interpreted as both compute and storage usage.
- */
-export type ResourceUsageKind = 'compute' | 'storage';
-
-/**
- * Quantities captured from a provider meter. Values are integral base units.
- */
-export type ResourceUsageQuantities = {
-    cpuMillicoreSeconds: number;
-    gpuUnitSeconds: number;
-    memoryByteSeconds: number;
-    storageByteSeconds: number;
-};
-
-/**
- * Known or explicitly unknown provider measurement.
- */
-export type UsageMeasurement = {
-    quantities: ResourceUsageQuantities;
-    state: 'known';
-} | {
-    reason: string;
-    state: 'unknown';
-};
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type RecordResourceUsageRequestSchemaUtcTimestamp = string;
 
 /**
  * RegisterPlatformImageRequest
@@ -8744,6 +9241,67 @@ export type EnvironmentExecutionBindingSchemaRuntimeKind = 'container' | 'virtua
 export type EnvironmentExecutionBindingSchemaUtcTimestamp = string;
 
 /**
+ * LogoutBrowserSessionResponse
+ *
+ * Exact provider RP-Initiated Logout URL for top-level browser navigation.
+ */
+export type LogoutBrowserSessionResponseSchema = {
+    logoutUrl: string;
+};
+
+/**
+ * OrganizationUserPage
+ *
+ * Bounded organization-directory search result.
+ */
+export type OrganizationUserPageSchema = {
+    hasMore: boolean;
+    items: Array<OrganizationUserPageSchemaOrganizationUser>;
+    page: number;
+    pageSize: number;
+};
+
+/**
+ * Identity metadata returned by the organization directory.  Provider
+ * subjects and local actor identifiers stay on the server side.
+ */
+export type OrganizationUserPageSchemaOrganizationUser = {
+    /**
+     * Human-readable name resolved from the issuer profile.
+     */
+    displayName: string;
+    /**
+     * Whether the issuer currently permits the account to authenticate.
+     */
+    enabled: boolean;
+    /**
+     * Current issuer username used for exact membership selection.
+     */
+    username: string;
+};
+
+/**
+ * OrganizationUser
+ *
+ * Identity metadata returned by the organization directory.  Provider
+ * subjects and local actor identifiers stay on the server side.
+ */
+export type OrganizationUserSchema = {
+    /**
+     * Human-readable name resolved from the issuer profile.
+     */
+    displayName: string;
+    /**
+     * Whether the issuer currently permits the account to authenticate.
+     */
+    enabled: boolean;
+    /**
+     * Current issuer username used for exact membership selection.
+     */
+    username: string;
+};
+
+/**
  * ProblemPackage
  *
  * Immutable, atomically completed teacher material package.
@@ -8831,7 +9389,7 @@ export type ProblemPackageSchemaRetentionClass = 'course_material' | 'build_evid
 /**
  * Required action after retention expires.
  */
-export type ProblemPackageSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type ProblemPackageSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -8854,9 +9412,10 @@ export type ProblemPackageSchemaRetentionSnapshot = {
      */
     policyRevision: ProblemPackageSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: ProblemPackageSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -8961,6 +9520,33 @@ export type ProjectLlmEgressPolicySchemaStudentContentMode = 'manifest_allowlist
 export type ProjectLlmEgressPolicySchemaUtcTimestamp = string;
 
 /**
+ * ProjectLlmPolicyOptions
+ *
+ * Non-secret deployment-owned defaults used to author a project LLM policy.
+ */
+export type ProjectLlmPolicyOptionsSchema = {
+    claudeCodeVersion: string;
+    defaultModel: string;
+    maxInFlightPerWorker: number;
+    models: Array<ProjectLlmPolicyModelOption>;
+    runtimeBinding: string;
+};
+
+/**
+ * One deployment-approved model that a project manager may select.
+ */
+export type ProjectLlmPolicyModelOption = {
+    /**
+     * User-facing name for the model. This must not contain credentials or runtime secrets.
+     */
+    label: string;
+    /**
+     * Stable model name accepted by the configured LLM runtime.
+     */
+    model: string;
+};
+
+/**
  * ProjectMembership
  *
  * Project-local scope. A project may optionally be associated with teaching.
@@ -8974,6 +9560,10 @@ export type ProjectMembershipSchema = {
      * Optional teaching course association.
      */
     courseId?: ProjectMembershipSchemaCourseId | null;
+    /**
+     * Human-readable issuer name, present on project membership views.
+     */
+    displayName?: string | null;
     /**
      * Optional hard expiry.
      */
@@ -8994,6 +9584,11 @@ export type ProjectMembershipSchema = {
      * Current lifecycle state.
      */
     state: MembershipState;
+    /**
+     * Issuer username, present on project membership views when identity
+     * metadata is available.  Authorization snapshots leave this unset.
+     */
+    username?: string | null;
 };
 
 /**
@@ -9490,49 +10085,47 @@ export type ResourceRequestSchemaWorkloadResources = {
 };
 
 /**
- * ResourceUsageRecord
+ * ResourceUsagePage
  *
- * Provider usage observation bound to a Project and optional teaching Course.
+ * Bounded project usage view. `has_more` is true when another page exists;
+ * callers never need an unbounded usage query.
  */
-export type ResourceUsageRecordSchema = {
-    courseId?: ResourceUsageRecordSchemaCourseId | null;
-    id: ResourceUsageRecordSchemaUsageRecordId;
-    kind: ResourceUsageRecordSchemaResourceUsageKind;
-    leaseId?: ResourceUsageRecordSchemaLeaseId | null;
-    measuredFrom: ResourceUsageRecordSchemaUtcTimestamp;
-    measuredUntil: ResourceUsageRecordSchemaUtcTimestamp;
-    measurement: ResourceUsageRecordSchemaUsageMeasurement;
-    observedAt: ResourceUsageRecordSchemaUtcTimestamp;
-    projectId: ResourceUsageRecordSchemaProjectId;
-    requestId: ResourceUsageRecordSchemaResourceRequestId;
-    settlement: ResourceUsageRecordSchemaUsageSettlementState;
-    sourceEventId: ResourceUsageRecordSchemaEventId;
+export type ResourceUsagePageSchema = {
+    hasMore: boolean;
+    items: Array<ResourceUsageRecord>;
+    page: number;
+    pageSize: number;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
-export type ResourceUsageRecordSchemaCourseId = string;
+export type ResourceUsagePageSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type ResourceUsagePageSchemaEnvironmentId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `EventId`.
  */
-export type ResourceUsageRecordSchemaEventId = string;
+export type ResourceUsagePageSchemaEventId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `LeaseId`.
  */
-export type ResourceUsageRecordSchemaLeaseId = string;
+export type ResourceUsagePageSchemaLeaseId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
-export type ResourceUsageRecordSchemaProjectId = string;
+export type ResourceUsagePageSchemaProjectId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
  */
-export type ResourceUsageRecordSchemaResourceRequestId = string;
+export type ResourceUsagePageSchemaResourceRequestId = string;
 
 /**
  * Metering scope for one usage interval.
@@ -9541,12 +10134,12 @@ export type ResourceUsageRecordSchemaResourceRequestId = string;
  * A known record must set non-applicable dimensions to zero so a stored interval cannot be
  * interpreted as both compute and storage usage.
  */
-export type ResourceUsageRecordSchemaResourceUsageKind = 'compute' | 'storage';
+export type ResourceUsageKind = 'compute' | 'storage';
 
 /**
  * Quantities captured from a provider meter. Values are integral base units.
  */
-export type ResourceUsageRecordSchemaResourceUsageQuantities = {
+export type ResourceUsageQuantities = {
     cpuMillicoreSeconds: number;
     gpuUnitSeconds: number;
     memoryByteSeconds: number;
@@ -9554,10 +10147,45 @@ export type ResourceUsageRecordSchemaResourceUsageQuantities = {
 };
 
 /**
+ * Provider usage observation bound to a Project and optional teaching Course.
+ */
+export type ResourceUsageRecord = {
+    courseId?: ResourceUsagePageSchemaCourseId | null;
+    id: ResourceUsagePageSchemaUsageRecordId;
+    kind: ResourceUsageKind;
+    measuredFrom: ResourceUsagePageSchemaUtcTimestamp;
+    measuredUntil: ResourceUsagePageSchemaUtcTimestamp;
+    measurement: UsageMeasurement;
+    observedAt: ResourceUsagePageSchemaUtcTimestamp;
+    projectId: ResourceUsagePageSchemaProjectId;
+    settlement: ResourceUsagePageSchemaUsageSettlementState;
+    sourceEventId: ResourceUsagePageSchemaEventId;
+    target: ResourceUsageTarget;
+};
+
+/**
+ * Durable owner of one usage interval.
+ *
+ * Work and task meters point at the Resource request and (for trusted internal
+ * delivery) its Lease. Experiment meters point directly at the Environment
+ * reservation; Resource resolves the project, course, owner, approved
+ * resources, and GPU allocation from its saved authorization instead of
+ * accepting those fields from a meter payload.
+ */
+export type ResourceUsageTarget = {
+    kind: 'resource_request';
+    leaseId?: ResourceUsagePageSchemaLeaseId | null;
+    requestId: ResourceUsagePageSchemaResourceRequestId;
+} | {
+    environmentId: ResourceUsagePageSchemaEnvironmentId;
+    kind: 'experiment_environment';
+};
+
+/**
  * Known or explicitly unknown provider measurement.
  */
-export type ResourceUsageRecordSchemaUsageMeasurement = {
-    quantities: ResourceUsageRecordSchemaResourceUsageQuantities;
+export type UsageMeasurement = {
+    quantities: ResourceUsageQuantities;
     state: 'known';
 } | {
     reason: string;
@@ -9567,17 +10195,17 @@ export type ResourceUsageRecordSchemaUsageMeasurement = {
 /**
  * Strongly typed UUIDv7 identifier for `UsageRecordId`.
  */
-export type ResourceUsageRecordSchemaUsageRecordId = string;
+export type ResourceUsagePageSchemaUsageRecordId = string;
 
 /**
  * Settlement state for one immutable usage observation.
  */
-export type ResourceUsageRecordSchemaUsageSettlementState = 'pending' | 'settled' | 'unsettled';
+export type ResourceUsagePageSchemaUsageSettlementState = 'pending' | 'settled' | 'unsettled';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
-export type ResourceUsageRecordSchemaUtcTimestamp = string;
+export type ResourceUsagePageSchemaUtcTimestamp = string;
 
 /**
  * SshPublicKey
@@ -10288,6 +10916,146 @@ export type CreatePlatformImageUploadResponses = {
 
 export type CreatePlatformImageUploadResponse = CreatePlatformImageUploadResponses[keyof CreatePlatformImageUploadResponses];
 
+export type GetPlatformImageUploadData = {
+    body?: never;
+    path: {
+        uploadId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/images/uploads/{uploadId}';
+};
+
+export type GetPlatformImageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetPlatformImageUploadError = GetPlatformImageUploadErrors[keyof GetPlatformImageUploadErrors];
+
+export type GetPlatformImageUploadResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformImageUploadStatusSchema;
+};
+
+export type GetPlatformImageUploadResponse = GetPlatformImageUploadResponses[keyof GetPlatformImageUploadResponses];
+
+export type CancelPlatformImageUploadData = {
+    body: CancelPlatformImageUploadRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        uploadId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/images/uploads/{uploadId}/cancel';
+};
+
+export type CancelPlatformImageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CancelPlatformImageUploadError = CancelPlatformImageUploadErrors[keyof CancelPlatformImageUploadErrors];
+
+export type CancelPlatformImageUploadResponses = {
+    /**
+     * Successful response
+     */
+    202: PlatformImageUploadStatusSchema;
+};
+
+export type CancelPlatformImageUploadResponse = CancelPlatformImageUploadResponses[keyof CancelPlatformImageUploadResponses];
+
 export type CompletePlatformImageUploadData = {
     body: CompletePlatformImageUploadRequestSchema;
     headers: {
@@ -10356,7 +11124,7 @@ export type CompletePlatformImageUploadResponses = {
     /**
      * Successful response
      */
-    201: PlatformImageEntryViewSchema;
+    202: PlatformImageUploadStatusSchema;
 };
 
 export type CompletePlatformImageUploadResponse = CompletePlatformImageUploadResponses[keyof CompletePlatformImageUploadResponses];
@@ -10851,6 +11619,213 @@ export type WithdrawEvaluationReleaseResponses = {
 };
 
 export type WithdrawEvaluationReleaseResponse = WithdrawEvaluationReleaseResponses[keyof WithdrawEvaluationReleaseResponses];
+
+export type CreateCourseLlmPolicyData = {
+    body: ProjectLlmEgressPolicySchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match'?: string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/llm-egress-policies';
+};
+
+export type CreateCourseLlmPolicyErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateCourseLlmPolicyError = CreateCourseLlmPolicyErrors[keyof CreateCourseLlmPolicyErrors];
+
+export type CreateCourseLlmPolicyResponses = {
+    /**
+     * Successful response
+     */
+    201: ProjectLlmEgressPolicySchema;
+};
+
+export type CreateCourseLlmPolicyResponse = CreateCourseLlmPolicyResponses[keyof CreateCourseLlmPolicyResponses];
+
+export type GetActiveCourseLlmPolicyData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/llm-egress-policies/active';
+};
+
+export type GetActiveCourseLlmPolicyErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetActiveCourseLlmPolicyError = GetActiveCourseLlmPolicyErrors[keyof GetActiveCourseLlmPolicyErrors];
+
+export type GetActiveCourseLlmPolicyResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectLlmEgressPolicySchema;
+};
+
+export type GetActiveCourseLlmPolicyResponse = GetActiveCourseLlmPolicyResponses[keyof GetActiveCourseLlmPolicyResponses];
+
+export type ListOrganizationUsersData = {
+    body?: never;
+    path?: never;
+    query: {
+        query: string;
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/directory/users';
+};
+
+export type ListOrganizationUsersErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListOrganizationUsersError = ListOrganizationUsersErrors[keyof ListOrganizationUsersErrors];
+
+export type ListOrganizationUsersResponses = {
+    /**
+     * Successful response
+     */
+    200: OrganizationUserPageSchema;
+};
+
+export type ListOrganizationUsersResponse = ListOrganizationUsersResponses[keyof ListOrganizationUsersResponses];
 
 export type ListEnvironmentsData = {
     body?: never;
@@ -12498,6 +13473,76 @@ export type UpdateProjectResponses = {
 
 export type UpdateProjectResponse = UpdateProjectResponses[keyof UpdateProjectResponses];
 
+export type ListProjectAgentRunsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/agent-runs';
+};
+
+export type ListProjectAgentRunsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectAgentRunsError = ListProjectAgentRunsErrors[keyof ListProjectAgentRunsErrors];
+
+export type ListProjectAgentRunsResponses = {
+    /**
+     * Successful response
+     */
+    200: AgentRunHistoryPageSchema;
+};
+
+export type ListProjectAgentRunsResponse = ListProjectAgentRunsResponses[keyof ListProjectAgentRunsResponses];
+
 export type CreateProjectAgentRunData = {
     body: CreateAgentRunRequestSchema;
     headers: {
@@ -13129,6 +14174,148 @@ export type GetProjectAuthoringApprovalResponses = {
 };
 
 export type GetProjectAuthoringApprovalResponse = GetProjectAuthoringApprovalResponses[keyof GetProjectAuthoringApprovalResponses];
+
+export type GetProjectCandidateBuildData = {
+    body?: never;
+    path: {
+        projectId: string;
+        candidateId: string;
+        target: 'environment' | 'evaluation_runner';
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}';
+};
+
+export type GetProjectCandidateBuildErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectCandidateBuildError = GetProjectCandidateBuildErrors[keyof GetProjectCandidateBuildErrors];
+
+export type GetProjectCandidateBuildResponses = {
+    /**
+     * Successful response
+     */
+    200: CandidateBuildTaskSchema;
+};
+
+export type GetProjectCandidateBuildResponse = GetProjectCandidateBuildResponses[keyof GetProjectCandidateBuildResponses];
+
+export type CancelProjectCandidateBuildData = {
+    body: CancelCandidateBuildRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        projectId: string;
+        candidateId: string;
+        target: 'environment' | 'evaluation_runner';
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}/cancel';
+};
+
+export type CancelProjectCandidateBuildErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CancelProjectCandidateBuildError = CancelProjectCandidateBuildErrors[keyof CancelProjectCandidateBuildErrors];
+
+export type CancelProjectCandidateBuildResponses = {
+    /**
+     * Successful response
+     */
+    202: CandidateBuildTaskSchema;
+};
+
+export type CancelProjectCandidateBuildResponse = CancelProjectCandidateBuildResponses[keyof CancelProjectCandidateBuildResponses];
 
 export type ListProjectResourceChargesData = {
     body?: never;
@@ -13968,6 +15155,7 @@ export type CreateProjectLlmPolicyData = {
     body: ProjectLlmEgressPolicySchema;
     headers: {
         'Idempotency-Key': string;
+        'If-Match'?: string;
     };
     path: {
         projectId: string;
@@ -14100,6 +15288,73 @@ export type GetActiveProjectLlmPolicyResponses = {
 };
 
 export type GetActiveProjectLlmPolicyResponse = GetActiveProjectLlmPolicyResponses[keyof GetActiveProjectLlmPolicyResponses];
+
+export type GetProjectLlmPolicyOptionsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/llm-egress-policy-options';
+};
+
+export type GetProjectLlmPolicyOptionsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectLlmPolicyOptionsError = GetProjectLlmPolicyOptionsErrors[keyof GetProjectLlmPolicyOptionsErrors];
+
+export type GetProjectLlmPolicyOptionsResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectLlmPolicyOptionsSchema;
+};
+
+export type GetProjectLlmPolicyOptionsResponse = GetProjectLlmPolicyOptionsResponses[keyof GetProjectLlmPolicyOptionsResponses];
 
 export type ListOwnProjectEvaluationResultsData = {
     body?: never;
@@ -15009,6 +16264,76 @@ export type CreateProjectResourceRequestResponses = {
 };
 
 export type CreateProjectResourceRequestResponse = CreateProjectResourceRequestResponses[keyof CreateProjectResourceRequestResponses];
+
+export type ListProjectResourceUsageData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/usage';
+};
+
+export type ListProjectResourceUsageErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectResourceUsageError = ListProjectResourceUsageErrors[keyof ListProjectResourceUsageErrors];
+
+export type ListProjectResourceUsageResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceUsagePageSchema;
+};
+
+export type ListProjectResourceUsageResponse = ListProjectResourceUsageResponses[keyof ListProjectResourceUsageResponses];
 
 export type CreateProjectWorkConfigurationRunData = {
     body: CreateWorkConfigurationRunRequestSchema;
@@ -16195,14 +17520,21 @@ export type CreateResourceRateResponses = {
 
 export type CreateResourceRateResponse = CreateResourceRateResponses[keyof CreateResourceRateResponses];
 
-export type RecordResourceUsageData = {
-    body: RecordResourceUsageRequestSchema;
-    path?: never;
+export type EndResourceRateData = {
+    body: EndResourceRateRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        rateId: string;
+    };
     query?: never;
-    url: '/api/v1/resource/usage';
+    url: '/api/v1/resource/rates/{rateId}/end';
 };
 
-export type RecordResourceUsageErrors = {
+export type EndResourceRateErrors = {
     /**
      * RFC 9457 problem detail
      */
@@ -16249,16 +17581,16 @@ export type RecordResourceUsageErrors = {
     503: ProblemDetails;
 };
 
-export type RecordResourceUsageError = RecordResourceUsageErrors[keyof RecordResourceUsageErrors];
+export type EndResourceRateError = EndResourceRateErrors[keyof EndResourceRateErrors];
 
-export type RecordResourceUsageResponses = {
+export type EndResourceRateResponses = {
     /**
      * Successful response
      */
-    200: ResourceUsageRecordSchema;
+    200: ResourceRateSchema;
 };
 
-export type RecordResourceUsageResponse = RecordResourceUsageResponses[keyof RecordResourceUsageResponses];
+export type EndResourceRateResponse = EndResourceRateResponses[keyof EndResourceRateResponses];
 
 export type ConsumeOidcBackchannelLogoutData = {
     body: {
@@ -16355,3 +17687,12 @@ export type LogoutBrowserSessionErrors = {
 };
 
 export type LogoutBrowserSessionError = LogoutBrowserSessionErrors[keyof LogoutBrowserSessionErrors];
+
+export type LogoutBrowserSessionResponses = {
+    /**
+     * Session revoked and provider logout URL returned for top-level navigation
+     */
+    200: LogoutBrowserSessionResponseSchema;
+};
+
+export type LogoutBrowserSessionResponse2 = LogoutBrowserSessionResponses[keyof LogoutBrowserSessionResponses];

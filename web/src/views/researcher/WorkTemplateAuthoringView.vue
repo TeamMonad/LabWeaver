@@ -85,15 +85,15 @@
         :message="upload.state.diagnostic.message"
         :retryable="upload.state.diagnostic.retryable"
         severity="error"
-        @retry="upload.retry"
+        @retry="retryPackageLoad"
       />
 
       <div class="form-actions">
         <button type="button" class="filled-button" :disabled="!canUpload" @click="upload.createSession">
-          <template v-if="upload.state.kind === 'hashing'">计算哈希中…</template>
-          <template v-else-if="upload.state.kind === 'creating'">创建上传会话…</template>
+          <template v-if="upload.state.kind === 'creating'">创建上传会话…</template>
           <template v-else-if="upload.state.kind === 'uploading'">上传中…</template>
           <template v-else-if="upload.state.kind === 'completing'">确认归档…</template>
+          <template v-else-if="upload.state.kind === 'loading'">读取已归档材料包…</template>
           <template v-else>上传材料包</template>
         </button>
         <button v-if="packageDone" type="button" class="text-button" @click="upload.clear">清除材料</button>
@@ -105,53 +105,95 @@
       </p>
     </section>
 
-    <section v-if="packageDone" class="template-card md-card" aria-labelledby="run-heading">
+    <section v-if="packageDone || runIdRef" class="template-card md-card" aria-labelledby="run-heading">
       <div class="section-heading section-heading--compact">
         <div>
           <h4 id="run-heading">生成可重复使用的 Work 模板</h4>
           <p>材料包就绪后启动生成；完成后检查候选运行环境，再提交审核。</p>
         </div>
-        <button v-if="agent.run.kind === 'success'" type="button" class="icon-button" aria-label="刷新 AgentRun" @click="agent.load(agent.run.data.id)">
+        <button v-if="agent.run.kind === 'success'" type="button" class="icon-button" aria-label="刷新生成任务" @click="agent.load(agent.run.data.id)">
           <SvgIcon name="refresh" size="sm" aria-hidden="true" />
         </button>
       </div>
 
       <button type="button" class="filled-button" :disabled="!canStartRun" @click="startRun">
-        {{ agent.acting === 'start' ? '提交中…' : '启动 Work AgentRun' }}
+        {{ agent.acting === 'start' ? '提交中…' : '启动 Work 模板生成' }}
       </button>
 
-      <AsyncStateView v-if="agent.run.kind !== 'idle'" :state="agent.run" empty-text="启动后这里会显示 AgentRun 状态。" @retry="reloadRun">
+      <AsyncStateView v-if="agent.run.kind !== 'idle'" :state="agent.run" empty-text="启动后这里会显示生成任务状态。" @retry="reloadRun">
         <template #success="{ data }">
+          <div class="run-status-card" role="status">
+            <div class="run-header">
+              <div>
+                <strong>生成任务</strong>
+                <p class="run-state-summary">
+                  {{ runStateLabel(data.state) }}
+                </p>
+              </div>
+              <span class="state-chip" :class="`state-chip--${data.state}`">{{ runStateLabel(data.state) }}</span>
+            </div>
+            <p class="run-next-step">
+              {{ runNextStep(data) }}
+            </p>
+            <ul class="track-status-list">
+              <li
+                v-for="track in data.tracks"
+                :key="`${track.kind}-status`"
+                class="track-status-item"
+              >
+                <div class="track-status-header">
+                  <strong>{{ trackLabel(track.kind) }}</strong>
+                  <span class="track-status">{{ trackStatusLabel(track, data) }}</span>
+                </div>
+                <p
+                  v-if="trackDiagnosticMessage(track)"
+                  class="run-track-diagnostic"
+                  role="alert"
+                >
+                  失败原因：{{ trackDiagnosticMessage(track) }}
+                </p>
+                <p
+                  v-if="trackNextStep(track, data)"
+                  class="run-track-next-step"
+                >
+                  下一步：{{ trackNextStep(track, data) }}
+                </p>
+              </li>
+            </ul>
+          </div>
           <details class="technical-details">
             <summary>查看生成任务详情</summary>
-          <div class="run-overview">
-            <div><span>Run</span><code>{{ data.id }}</code></div>
-            <div><span>状态</span><span class="state-chip" :class="`state-chip--${data.state}`">{{ runStateLabel(data.state) }}</span></div>
-            <div><span>Revision</span><code>rev-{{ data.revision }}</code></div>
-          </div>
-          <ul class="track-list">
-            <li v-for="track in data.tracks" :key="track.kind" class="track-row">
-              <span>{{ track.kind === 'environment' ? 'Work Environment 候选' : track.kind === 'evaluation' ? 'Evaluation 候选' : 'Work 配置' }}</span>
-              <code v-if="track.candidateId">{{ track.candidateId }}</code>
-              <span v-else class="muted">尚未生成</span>
-            </li>
-          </ul>
+            <div class="run-overview">
+              <div><span>任务 ID</span><code>{{ data.id }}</code></div>
+              <div><span>Revision</span><code>rev-{{ data.revision }}</code></div>
+            </div>
+            <ul class="track-list">
+              <li v-for="track in data.tracks" :key="track.kind" class="track-row">
+                <span>{{ trackLabel(track.kind) }}</span>
+                <code v-if="track.candidateId">候选 ID：{{ track.candidateId }}</code>
+                <code v-if="trackDiagnosticCode(track)">诊断代码：{{ trackDiagnosticCode(track) }}</code>
+                <span v-if="!track.candidateId && !trackDiagnosticCode(track)" class="muted">尚未生成候选</span>
+              </li>
+            </ul>
           </details>
           <div class="run-actions">
-            <button v-if="data.state === 'requested' || data.state === 'running'" type="button" class="outlined-button danger-button" :disabled="agent.acting !== null" @click="agent.cancel">取消 AgentRun</button>
-            <button v-if="data.state === 'failed' || data.state === 'partially_succeeded'" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试 Environment 轨道</button>
+            <button v-if="data.state === 'requested' || data.state === 'running'" type="button" class="outlined-button danger-button" :disabled="agent.acting !== null" @click="agent.cancel">取消生成任务</button>
+            <button v-if="trackCanRetry(data, 'environment')" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试环境候选生成</button>
           </div>
         </template>
       </AsyncStateView>
 
       <DiagnosticBanner
         v-if="agent.outcome"
-        :code="agent.outcome.code"
-        :message="agent.outcome.message"
+        :message="runDiagnosticMessage(agent.outcome.code, agent.outcome.message)"
         :retryable="agent.outcome.retryable"
         :severity="agent.outcome.code.includes('FAILED') ? 'error' : 'info'"
         @retry="reloadRun"
       />
+      <details v-if="agent.outcome" class="technical-details technical-diagnostic-details">
+        <summary>查看诊断代码</summary>
+        <code>{{ agent.outcome.code }}</code>
+      </details>
     </section>
 
     <section v-if="environmentCandidate.kind !== 'idle'" class="template-card md-card" aria-labelledby="candidate-heading" data-testid="work-template-candidate">
@@ -160,19 +202,19 @@
           <h4 id="candidate-heading">检查生成结果</h4>
           <p>查看运行环境和构建产物，确认它符合当前 Work 项目后提交审核。</p>
         </div>
-        <button v-if="candidateId" type="button" class="icon-button" aria-label="刷新 Environment 候选" :disabled="environmentCandidate.kind === 'loading'" @click="loadCandidate(candidateId)">
+        <button v-if="candidateId" type="button" class="icon-button" aria-label="刷新环境候选" :disabled="environmentCandidate.kind === 'loading'" @click="loadCandidate(candidateId)">
           <SvgIcon name="refresh" size="sm" aria-hidden="true" />
         </button>
       </div>
 
-      <AsyncStateView :state="environmentCandidate" empty-text="该 AgentRun 尚未生成 Environment 候选。" :loading-text="'加载 Environment 候选…'" @retry="retryCandidate">
+      <AsyncStateView :state="environmentCandidate" empty-text="该生成任务尚未生成环境候选。" :loading-text="'加载环境候选…'" @retry="retryCandidate">
         <template #success="{ data }">
           <div class="candidate-summary">
             <div><span>名称</span><strong>{{ data.candidate.spec.name }}</strong></div>
             <div><span>类别</span><span class="state-chip">{{ data.candidate.spec.class }}</span></div>
             <div><span>运行时</span><code>{{ runtimeKindLabel(data.candidate.spec.runtime.kind) }}</code></div>
             <div><span>构建</span><span>{{ buildStateLabel(data.build?.state) }}</span></div>
-            <div><span>运行时 artifact</span><code v-if="data.imageArtifact">{{ artifactIdentity(data.imageArtifact) }}</code><span v-else>未就绪</span></div>
+            <div><span>运行时产物</span><code v-if="data.imageArtifact">{{ artifactIdentity(data.imageArtifact) }}</code><span v-else>未就绪</span></div>
           </div>
           <details class="technical-details">
             <summary>查看版本与审批记录</summary>
@@ -184,13 +226,16 @@
           </details>
 
           <details class="candidate-details" open>
-            <summary>查看完整 EnvironmentSpec</summary>
+            <summary>查看完整环境规格</summary>
             <pre>{{ formatCandidateSpec(data.candidate.spec) }}</pre>
           </details>
 
           <p v-if="data.build?.diagnosticCode" class="candidate-diagnostic" role="alert">{{ data.build.diagnosticCode }}</p>
-          <p v-if="data.candidate.spec.class !== 'work'" class="candidate-diagnostic" role="alert">该候选的 Environment class 不是 work，不能发布为 Work 模板。</p>
-          <p v-else-if="!data.imageArtifact" class="candidate-diagnostic" role="status">运行时 artifact 尚未就绪。候选生成完成后刷新此卡片。</p>
+          <p v-if="data.candidate.spec.class !== 'work'" class="candidate-diagnostic" role="alert">该候选的环境类型不是 Work，不能发布为 Work 模板。</p>
+          <p v-else-if="!data.imageArtifact" class="candidate-diagnostic" role="status">运行时产物尚未就绪。候选生成完成后刷新此卡片。</p>
+
+          <CandidateBuildTask v-if="data.build" :project-id="data.candidate.projectId"
+            :candidate-id="data.candidate.id" target="environment" />
 
           <div v-if="data.approvals.length > 0" class="approval-history">
             <h5>批准记录</h5>
@@ -214,16 +259,16 @@
 
           <label class="authorization-field candidate-confirmation">
             <input v-model="candidateReviewAcknowledged" data-testid="work-template-candidate-confirmation" type="checkbox" />
-            <span>我已查看完整 EnvironmentSpec、运行时 artifact、构建状态和安全约束，并确认这个候选用于当前 Work 项目。</span>
+            <span>我已查看完整环境规格、运行时产物、构建状态和安全约束，并确认这个候选用于当前 Work 项目。</span>
           </label>
 
           <form v-if="!approvedCandidate" class="approval-form" data-testid="work-template-candidate-approval-form" @submit.prevent="approveCandidate">
             <label>
               <span>候选批准原因</span>
-              <textarea v-model="approvalReason" class="text-input" rows="3" maxlength="500" required placeholder="说明为什么批准这个 Work Environment 候选" />
+              <textarea v-model="approvalReason" class="text-input" rows="3" maxlength="500" required placeholder="说明为什么批准这个 Work 环境候选" />
             </label>
             <button type="submit" class="filled-button" :disabled="!canApproveCandidate || approvingCandidate">
-              {{ approvingCandidate ? '提交批准中…' : '批准 Environment 候选' }}
+              {{ approvingCandidate ? '提交批准中…' : '批准环境候选' }}
             </button>
           </form>
           <div v-else class="approved-summary" role="status">
@@ -234,7 +279,7 @@
       </AsyncStateView>
     </section>
 
-    <section v-if="approvedCandidate" class="template-card md-card" aria-labelledby="release-heading" data-testid="work-template-release">
+    <section v-if="approvedCandidate || release.kind === 'success'" class="template-card md-card" aria-labelledby="release-heading" data-testid="work-template-release">
       <div class="section-heading section-heading--compact">
         <div>
           <h4 id="release-heading">发布 Work 模板</h4>
@@ -242,9 +287,9 @@
         </div>
       </div>
       <div v-if="environmentCandidate.kind === 'success'" class="release-summary">
-        <div><span>Candidate</span><code>{{ environmentCandidate.data.candidate.id }}</code></div>
-        <div><span>Runtime</span><code>{{ environmentCandidate.data.candidate.spec.runtime.kind }}</code></div>
-        <div><span>Approval</span><code>{{ approvedCandidate.id }}</code></div>
+        <div><span>候选</span><code>{{ environmentCandidate.data.candidate.id }}</code></div>
+        <div><span>运行时</span><code>{{ environmentCandidate.data.candidate.spec.runtime.kind }}</code></div>
+        <div v-if="approvedCandidate"><span>审批</span><code>{{ approvedCandidate.id }}</code></div>
       </div>
       <DiagnosticBanner
         v-if="releaseOutcome"
@@ -260,13 +305,39 @@
       <div v-else class="operation-summary" role="status">
         <SvgIcon name="check_circle" size="md" aria-hidden="true" />
         <div>
-          <strong>Work 模板发布操作已接受</strong>
+          <strong>{{ releaseWithdrawal ? 'Work 模板已撤回' : 'Work 模板发布操作已接受' }}</strong>
           <code>{{ release.data.operationId }}</code>
           <a :href="release.data.statusUrl">查看发布状态</a>
-          <RouterLink class="filled-button" data-testid="work-template-resource-link" :to="{ path: '/researcher/resources', query: { projectId: props.projectId ?? undefined } }">申请 Work 资源</RouterLink>
+          <span v-if="releaseWithdrawal" class="release-withdrawn" data-testid="work-template-release-withdrawn">
+            撤回原因：{{ releaseWithdrawal.reasonCode }}
+          </span>
+          <RouterLink v-else class="filled-button" data-testid="work-template-resource-link" :to="{ path: '/researcher/resources', query: { projectId: props.projectId ?? undefined } }">申请 Work 资源</RouterLink>
+          <button
+            v-if="canWithdrawRelease"
+            type="button"
+            class="outlined-button"
+            data-testid="work-template-withdraw-release-button"
+            @click="openReleaseWithdrawal"
+          >
+            撤回 Work 模板
+          </button>
         </div>
       </div>
+      <p v-if="release.kind === 'success'" class="release-withdrawal-note">
+        撤回会阻止新的环境使用此版本；已有环境不会自动释放，已有访问授权不会自动撤销，已建立连接不会因撤回自动断开；它们仍受原授权、会话和环境生命周期限制。已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。
+      </p>
     </section>
+
+    <ConfirmDialog
+      :open="withdrawalConfirmationOpen"
+      title="撤回 Work 模板版本？"
+      :description="releaseWithdrawalDescription"
+      confirm-text="撤回版本"
+      cancel-text="取消"
+      severity="warning"
+      @cancel="cancelReleaseWithdrawal"
+      @confirm="confirmReleaseWithdrawal"
+    />
   </section>
 </template>
 
@@ -275,6 +346,8 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { appendProjectEnvironmentCandidateDecision, createEnvironmentTemplateRelease, getEnvironmentTemplateRelease, getProjectEnvironmentCandidate } from '@/generated/contracts'
 import type {
@@ -284,11 +357,14 @@ import type {
   EnvironmentCandidateViewSchema,
   OperationAccepted,
   ProblemPackageSchema,
+  ReleaseWithdrawal,
 } from '@/generated/contracts'
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
+import { withdrawEnvironmentTemplateReleaseByUi } from '@/composables/useEnvironmentTemplateReleases'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
+import { agentAttemptStateLabel } from '@/utils/stateLabels'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 const props = defineProps<{
@@ -309,7 +385,7 @@ const releaseIdRef = computed(() => props.releaseId?.trim() || null)
 const policy = useActiveProjectLlmPolicy(projectIdRef)
 const policyRevision = computed(() => policy.state.kind === 'success' ? policy.state.data.revision : undefined)
 const upload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef)
-const agent = useProjectAgentRun(projectIdRef)
+const agent = useProjectAgentRun(projectIdRef, { kind: 'authoring', environmentClass: 'work' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragOver = ref(false)
@@ -322,6 +398,9 @@ const approvingCandidate = ref(false)
 const publishingRelease = ref(false)
 const approvedCandidate = ref<CandidateApprovalSchema | null>(null)
 const release = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
+const releaseWithdrawal = ref<ReleaseWithdrawal | null>(null)
+const withdrawalConfirmationOpen = ref(false)
+const withdrawalInFlight = ref(false)
 const releaseRouteState = ref<'none' | 'loading' | 'loaded' | 'error'>('none')
 let candidateGeneration = 0
 let candidateKey = ''
@@ -331,6 +410,8 @@ const CANDIDATE_NOT_FOUND_MAX_RETRIES = 100
 let candidateNotFoundRetryId: string | null = null
 let candidateNotFoundRetryCount = 0
 let loadedRouteRunId: string | null = null
+let loadedRouteProjectId: string | null = null
+let routeRestoreGeneration = 0
 let releaseGeneration = 0
 let approvalRequestKey: string | null = null
 let releaseRequestKey: string | null = null
@@ -345,7 +426,19 @@ const canUpload = computed(() => {
   const ready = upload.state.kind === 'ready' || upload.state.kind === 'error'
   return Boolean(props.projectId && ready && upload.files.length > 0 && policyRevision.value !== undefined)
 })
-const canStartRun = computed(() => Boolean(packageDone.value && uploadedPackage.value && policy.state.kind === 'success' && !agent.acting))
+const agentRunForCurrentPackage = computed(() => (
+  agent.run.kind === 'success'
+  && uploadedPackage.value !== null
+  && agent.run.data.packageId === uploadedPackage.value.id
+))
+const canStartRun = computed(() => Boolean(
+  packageDone.value
+  && uploadedPackage.value
+  && policy.state.kind === 'success'
+  && agent.run.kind !== 'loading'
+  && !agentRunForCurrentPackage.value
+  && !agent.acting,
+))
 const candidateArtifactReady = computed(() => {
   if (environmentCandidate.value.kind !== 'success') return false
   return candidateArtifactIsReady(environmentCandidate.value.data)
@@ -359,6 +452,28 @@ const canPublishRelease = computed(() => {
   if (releaseIdRef.value && releaseRouteState.value !== 'loaded') return false
   return candidateArtifactReady.value && candidateReviewAcknowledged.value
 })
+const currentReleaseId = computed(() => {
+  if (releaseIdRef.value) return releaseIdRef.value
+  if (release.value.kind !== 'success') return null
+  const segments = release.value.data.statusUrl.split('/').filter(Boolean)
+  const id = segments[segments.length - 1]
+  return id ? decodeURIComponent(id) : null
+})
+const currentReleaseVersion = computed(() => release.value.kind === 'success' ? release.value.data.revision : null)
+const canWithdrawRelease = computed(() => Boolean(
+  props.projectId
+  && currentReleaseId.value
+  && currentReleaseVersion.value
+  && releaseRouteState.value === 'loaded'
+  && !releaseWithdrawal.value
+  && !publishingRelease.value
+  && !withdrawalInFlight.value,
+))
+const releaseWithdrawalDescription = computed(() => {
+  const version = currentReleaseVersion.value
+  if (!version) return ''
+  return `撤回 Work 模板 v${version} 后，新的环境不能使用此版本；已有环境不会自动释放，已有访问授权不会自动撤销，已建立连接不会因撤回自动断开；它们仍受原授权、会话和环境生命周期限制。已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。确认撤回吗？`
+})
 
 watch(
   () => agent.run,
@@ -370,8 +485,8 @@ watch(
     candidateKey = nextKey
     if (!nextCandidateId) {
       environmentCandidate.value = state.data.state === 'failed' || state.data.state === 'cancelled'
-        ? { kind: 'blocked', diagnostic: makeDiagnostic('WORK_TEMPLATE_CANDIDATE_MISSING', 'AgentRun 未生成可用的 Work Environment 候选。', false) }
-        : { kind: 'loading', message: '等待 Agent 生成 Work Environment 候选…' }
+        ? { kind: 'blocked', diagnostic: makeDiagnostic('WORK_TEMPLATE_CANDIDATE_MISSING', '生成任务未生成可用的 Work 环境候选。', false) }
+        : { kind: 'loading', message: '等待生成 Work 环境候选…' }
       stopCandidatePolling()
       return
     }
@@ -382,23 +497,27 @@ watch(
 watch(
   [projectIdRef, runIdRef],
   ([projectId, runId]) => {
+    const generation = ++routeRestoreGeneration
+    const previousProjectId = loadedRouteProjectId
+    const previousRunId = loadedRouteRunId
     if (!projectId || !runId) {
       loadedRouteRunId = null
+      loadedRouteProjectId = null
+      if (previousProjectId || previousRunId) upload.clear()
       return
     }
-    if (runId === loadedRouteRunId) return
+    if (runId === loadedRouteRunId && projectId === loadedRouteProjectId) return
     candidateGeneration += 1
     candidateKey = ''
     environmentCandidate.value = { kind: 'idle' }
     candidateOutcome.value = null
-    releaseOutcome.value = null
     approvedCandidate.value = null
     candidateReviewAcknowledged.value = false
-    release.value = { kind: 'idle' }
-    releaseRouteState.value = releaseIdRef.value ? 'loading' : 'none'
     stopCandidatePolling()
+    if (previousProjectId || previousRunId) upload.clear()
     loadedRouteRunId = runId
-    void agent.load(runId)
+    loadedRouteProjectId = projectId
+    void restoreRouteRun(projectId, runId, generation)
   },
   { immediate: true },
 )
@@ -409,9 +528,17 @@ watch(
     releaseGeneration += 1
     if (!projectId || !releaseId) {
       releaseRouteState.value = 'none'
-      if (!releaseId) release.value = { kind: 'idle' }
+      releaseOutcome.value = null
+      release.value = { kind: 'idle' }
+      releaseWithdrawal.value = null
+      withdrawalConfirmationOpen.value = false
       return
     }
+    releaseRouteState.value = 'loading'
+    releaseOutcome.value = null
+    release.value = { kind: 'loading', message: '加载发布状态…' }
+    releaseWithdrawal.value = null
+    withdrawalConfirmationOpen.value = false
     void loadRelease(releaseId)
   },
   { immediate: true },
@@ -421,15 +548,11 @@ watch(
   () => props.projectId,
   () => {
     candidateGeneration += 1
-    releaseGeneration += 1
     candidateKey = ''
     environmentCandidate.value = { kind: 'idle' }
     candidateOutcome.value = null
-    releaseOutcome.value = null
     approvedCandidate.value = null
     candidateReviewAcknowledged.value = false
-    release.value = { kind: 'idle' }
-    releaseRouteState.value = releaseIdRef.value ? 'loading' : 'none'
     approvalReason.value = ''
     approvalRequestKey = null
     releaseRequestKey = null
@@ -449,7 +572,7 @@ async function loadCandidate(id: string, silent = false) {
     environmentCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('WORK_TEMPLATE_CANDIDATE_CONTEXT_MISSING', '缺少项目或候选 ID。', false) }
     return
   }
-  if (!silent) environmentCandidate.value = { kind: 'loading', message: '加载 Environment 候选…' }
+  if (!silent) environmentCandidate.value = { kind: 'loading', message: '加载环境候选…' }
   const result = await getProjectEnvironmentCandidate({ path: { projectId, candidateId: id } })
   if (generation !== candidateGeneration || props.projectId !== projectId) return
   if (result.error) {
@@ -457,15 +580,15 @@ async function loadCandidate(id: string, silent = false) {
     const candidateProjectionPending = result.response?.status === 404 && problem?.diagnosticCode === 'LW_CANDIDATE_NOT_FOUND'
     if (candidateProjectionPending && candidateNotFoundRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES) {
       candidateNotFoundRetryCount += 1
-      environmentCandidate.value = { kind: 'loading', message: '等待 Environment 候选同步…' }
+      environmentCandidate.value = { kind: 'loading', message: '等待环境候选同步…' }
       scheduleCandidateNotFoundRetry(projectId, id, generation)
       return
     }
     if (candidateProjectionPending) {
-      environmentCandidate.value = { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', 'Environment 候选在限定时间内仍未同步，请重试。', true) }
+      environmentCandidate.value = { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', '环境候选在限定时间内仍未同步，请重试。', true) }
       return
     }
-    environmentCandidate.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_LOAD_FAILED', problem?.detail ?? '加载 Work Environment 候选失败', problem?.retryable ?? true) }
+    environmentCandidate.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_LOAD_FAILED', problem?.detail ?? '加载 Work 环境候选失败', problem?.retryable ?? true) }
     return
   }
   candidateNotFoundRetryCount = 0
@@ -483,6 +606,17 @@ async function loadCandidate(id: string, silent = false) {
   approvalRequestKey = null
   releaseRequestKey = null
   scheduleCandidatePoll(result.data)
+}
+
+async function restoreRouteRun(projectId: string, runId: string, generation: number) {
+  const loaded = await agent.load(runId)
+  if (!loaded || generation !== routeRestoreGeneration || props.projectId !== projectId || runIdRef.value !== runId) return
+  const restoredRun = agent.run.kind === 'success' ? agent.run.data : null
+  if (!restoredRun || restoredRun.id !== runId || restoredRun.projectId !== projectId || restoredRun.purpose.kind !== 'authoring' || restoredRun.purpose.environmentClass !== 'work') return
+  const packageId = restoredRun.packageId?.trim()
+  if (!packageId) return
+  if (upload.state.kind === 'done' && upload.state.package.id === packageId) return
+  await upload.loadPackage(packageId)
 }
 
 function candidateArtifactIsReady(data: EnvironmentCandidateViewSchema): boolean {
@@ -542,7 +676,7 @@ async function loadRelease(id: string, silent = false) {
   releaseRouteState.value = 'loading'
   if (!silent) release.value = { kind: 'loading', message: '加载发布状态…' }
   const result = await getEnvironmentTemplateRelease({ path: { projectId, releaseId: id } })
-  if (generation !== releaseGeneration || props.projectId !== projectId) return
+  if (generation !== releaseGeneration || props.projectId !== projectId || releaseIdRef.value !== id) return
   if (result.error) {
     const problem = extractProblemDetails(result.error)
     const diagnostic = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_LOAD_FAILED', problem?.detail ?? '加载 Work 模板发布状态失败', problem?.retryable ?? true)
@@ -552,6 +686,7 @@ async function loadRelease(id: string, silent = false) {
     return
   }
   releaseRouteState.value = 'loaded'
+  releaseWithdrawal.value = result.data.withdrawal ?? null
   release.value = {
     kind: 'success',
     data: {
@@ -583,12 +718,29 @@ async function startRun() {
   })
   if (started && agent.run.kind === 'success') {
     loadedRouteRunId = agent.run.data.id
+    loadedRouteProjectId = projectId
     emit('run-created', agent.run.data.id)
   }
 }
 
 function reloadRun() {
-  if (agent.run.kind === 'success') void agent.load(agent.run.data.id)
+  const projectId = props.projectId
+  const runId = runIdRef.value ?? (agent.run.kind === 'success' ? agent.run.data.id : null)
+  if (projectId && runId) {
+    const generation = ++routeRestoreGeneration
+    void restoreRouteRun(projectId, runId, generation)
+  } else if (agent.run.kind === 'success') {
+    void agent.load(agent.run.data.id)
+  }
+}
+
+function retryPackageLoad() {
+  const restoredRun = agent.run.kind === 'success' ? agent.run.data : null
+  if (runIdRef.value && restoredRun?.id === runIdRef.value && restoredRun.projectId === props.projectId && restoredRun.packageId) {
+    void upload.loadPackage(restoredRun.packageId)
+    return
+  }
+  void upload.retry()
 }
 
 async function approveCandidate() {
@@ -612,11 +764,11 @@ async function approveCandidate() {
     })
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      candidateOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_APPROVAL_FAILED', problem?.detail ?? '批准 Environment 候选失败', problem?.retryable ?? true)
+      candidateOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_APPROVAL_FAILED', problem?.detail ?? '批准环境候选失败', problem?.retryable ?? true)
       return
     }
     approvedCandidate.value = result.data
-    candidateOutcome.value = makeDiagnostic('WORK_TEMPLATE_CANDIDATE_APPROVED', 'Environment 候选已批准，可以发布 Work 模板。', false)
+    candidateOutcome.value = makeDiagnostic('WORK_TEMPLATE_CANDIDATE_APPROVED', '环境候选已批准，可以发布 Work 模板。', false)
   } finally {
     approvingCandidate.value = false
   }
@@ -650,6 +802,7 @@ async function publishRelease() {
       return
     }
     release.value = { kind: 'success', data: result.data }
+    releaseWithdrawal.value = null
     releaseRouteState.value = 'loaded'
     const statusSegments = result.data.statusUrl.split('/').filter(Boolean)
     const releaseId = statusSegments[statusSegments.length - 1]
@@ -657,6 +810,54 @@ async function publishRelease() {
     releaseOutcome.value = makeDiagnostic('WORK_TEMPLATE_RELEASE_ACCEPTED', 'Work 模板发布操作已接受。', false)
   } finally {
     publishingRelease.value = false
+  }
+}
+
+function openReleaseWithdrawal() {
+  if (!canWithdrawRelease.value) return
+  withdrawalConfirmationOpen.value = true
+}
+
+function cancelReleaseWithdrawal() {
+  withdrawalConfirmationOpen.value = false
+}
+
+async function confirmReleaseWithdrawal() {
+  const projectId = props.projectId
+  const releaseId = currentReleaseId.value
+  const releaseVersion = currentReleaseVersion.value
+  if (!projectId || !releaseId || !releaseVersion || !canWithdrawRelease.value) return
+  withdrawalConfirmationOpen.value = false
+  withdrawalInFlight.value = true
+  try {
+    const result = await withdrawEnvironmentTemplateReleaseByUi(projectId, releaseId, releaseVersion)
+    if (result.error) {
+      if (props.projectId !== projectId || currentReleaseId.value !== releaseId) return
+      const problem = extractProblemDetails(result.error)
+      releaseOutcome.value = makeDiagnostic(
+        problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED',
+        problem?.detail ?? '撤回 Work 模板失败',
+        problem?.retryable ?? true,
+      )
+      return
+    }
+    if (props.projectId !== projectId || currentReleaseId.value !== releaseId) return
+    if (result.data.releaseId !== releaseId || result.data.releaseVersion !== releaseVersion) {
+      releaseOutcome.value = makeDiagnostic('WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED', '撤回响应与当前 Work 模板不匹配。', false)
+      return
+    }
+    releaseWithdrawal.value = result.data
+    releaseOutcome.value = makeDiagnostic('WORK_TEMPLATE_RELEASE_WITHDRAWN', 'Work 模板已撤回。', false)
+  } catch (error) {
+    if (props.projectId !== projectId || currentReleaseId.value !== releaseId) return
+    const problem = extractProblemDetails(error)
+    releaseOutcome.value = makeDiagnostic(
+      problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED',
+      problem?.detail ?? '撤回 Work 模板失败',
+      problem?.retryable ?? true,
+    )
+  } finally {
+    withdrawalInFlight.value = false
   }
 }
 
@@ -672,7 +873,94 @@ function onDrop(event: DragEvent) {
 }
 
 function runStateLabel(state: AgentRunSchema['state']) {
-  return ({ requested: '已提交', running: '运行中', partially_succeeded: '部分成功', succeeded: '已完成', awaiting_approval: '等待批准', failed: '失败', cancelling: '取消中', cancelled: '已取消' } as Record<AgentRunSchema['state'], string>)[state]
+  return ({ requested: '已提交', running: '生成中', partially_succeeded: '部分完成', succeeded: '生成完成', awaiting_approval: '等待批准', failed: '生成失败', cancelling: '取消中', cancelled: '已取消' } as Record<AgentRunSchema['state'], string>)[state]
+}
+
+function trackLabel(kind: AgentRunSchema['tracks'][number]['kind']): string {
+  return kind === 'environment' ? 'Work 环境候选' : kind === 'evaluation' ? '评测候选' : 'Work 配置'
+}
+
+function latestTrackAttempt(track: AgentRunSchema['tracks'][number]) {
+  return track.attempts[track.attempts.length - 1]
+}
+
+function trackStatusLabel(track: AgentRunSchema['tracks'][number], data: AgentRunSchema): string {
+  const attempt = latestTrackAttempt(track)
+  if (attempt) return agentAttemptStateLabel(attempt.state)
+  if (track.candidateId) return '候选已生成'
+  if (data.state === 'awaiting_approval') return '等待批准'
+  if (data.state === 'requested' || data.state === 'running') return '等待生成'
+  if (data.state === 'succeeded') return '未生成候选'
+  if (data.state === 'cancelling') return '取消中'
+  if (data.state === 'failed' || data.state === 'cancelled' || data.state === 'partially_succeeded') return '未完成'
+  return '未开始'
+}
+
+function trackDiagnosticCode(track: AgentRunSchema['tracks'][number]): string | null {
+  return latestTrackAttempt(track)?.diagnosticCode ?? null
+}
+
+function runDiagnosticMessage(code: string, fallback: string): string {
+  switch (code) {
+    case 'LW_TASK_RESOURCE_APPROVAL_TIMEOUT':
+      return '资源申请未及时获批，请查看申请状态或联系资源管理员；确认失败后可重试原任务。临时资源回收不等于整体生成成功。'
+    case 'LW_RESOURCE_EXHAUSTED':
+      return '资源申请超出项目可用额度，请查看资源申请或联系管理员。'
+    case 'LW_ACCESS_DENIED':
+      return '当前账号没有继续此项目任务的权限，请确认项目成员资格。'
+    case 'REVISION_CONFLICT':
+      return '材料或项目 AI 设置已经变化，请刷新页面后重新启动任务。'
+    case 'LW_CANDIDATE_NOT_FOUND':
+      return '候选可能仍在服务端同步，请点击重试继续查看。'
+    default:
+      return fallback
+  }
+}
+
+function trackDiagnosticMessage(track: AgentRunSchema['tracks'][number]): string | null {
+  const code = trackDiagnosticCode(track)
+  return code ? runDiagnosticMessage(code, '生成未完成，请查看高级诊断详情。') : null
+}
+
+function trackNextStep(track: AgentRunSchema['tracks'][number], data: AgentRunSchema): string | null {
+  const attempt = latestTrackAttempt(track)
+  if (trackDiagnosticCode(track) === 'LW_TASK_RESOURCE_APPROVAL_TIMEOUT') return '确认资源申请失败后可重试原任务；临时资源回收不等于整体生成成功。'
+  if (trackCanRetry(data, track.kind)) return `确认失败原因后，可重试${trackLabel(track.kind)}。`
+  if (attempt?.state === 'awaiting_approval') return '请查看资源申请状态，批准后任务会继续。'
+  if (attempt?.state === 'pending' || attempt?.state === 'running' || attempt?.state === 'repairing') return '页面会自动刷新，完成前无需重复提交。'
+  if (track.candidateId) return null
+  if (data.state === 'failed' || data.state === 'cancelled') return '任务已结束，请处理失败原因后重新启动。'
+  return null
+}
+
+function runNextStep(data: AgentRunSchema): string {
+  switch (data.state) {
+    case 'requested':
+      return '任务已提交，等待生成任务开始。'
+    case 'running':
+      return '任务正在生成，页面会自动刷新。'
+    case 'awaiting_approval':
+      return '正在等待资源申请批准；请查看资源申请状态。'
+    case 'partially_succeeded':
+      return '部分轨道已完成，请处理失败轨道后重试。'
+    case 'succeeded':
+      return data.tracks.some((track) => track.kind === 'environment' && track.candidateId)
+        ? '生成完成，请检查候选运行环境并提交审核。'
+        : '任务已完成，但候选仍在同步，请刷新后继续。'
+    case 'failed':
+      return '生成失败，请查看失败原因；确认后可重试失败轨道。'
+    case 'cancelling':
+      return '正在取消任务，请等待状态更新。'
+    case 'cancelled':
+      return '任务已取消，可重新启动一次新的生成任务。'
+  }
+}
+
+function trackCanRetry(data: AgentRunSchema, kind: AgentRunSchema['tracks'][number]['kind']): boolean {
+  if (data.state !== 'failed' && data.state !== 'partially_succeeded' && data.state !== 'cancelled') return false
+  const track = data.tracks.find((item) => item.kind === kind)
+  const latestAttempt = track?.attempts[track.attempts.length - 1]
+  return latestAttempt?.state === 'failed' || latestAttempt?.state === 'cancelled'
 }
 
 function runtimeKindLabel(kind: EnvironmentCandidateViewSchema['candidate']['spec']['runtime']['kind']) {
@@ -715,6 +1003,17 @@ onUnmounted(() => {
 .policy-summary, .run-overview, .candidate-summary, .release-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); font: var(--md-sys-body-small); }
 .policy-summary span, .run-overview span, .candidate-summary > div > span:first-child, .release-summary > div > span:first-child { color: var(--md-sys-color-on-surface-variant); }
 .policy-summary code, .run-overview code, .candidate-summary code, .release-summary code { color: var(--md-sys-color-on-surface); overflow-wrap: anywhere; }
+.run-status-card { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); background: var(--md-sys-color-surface-container-low); }
+.run-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.run-state-summary { margin: 4px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
+.run-next-step { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
+.track-status-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.track-status-item { display: grid; gap: 5px; padding: 10px 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container); }
+.track-status-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.track-status { color: var(--md-sys-color-primary); font: var(--md-sys-label-large); }
+.run-track-diagnostic, .run-track-next-step { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.run-track-diagnostic { color: var(--md-sys-color-error); }
+.technical-diagnostic-details code { overflow-wrap: anywhere; }
 .drop-zone { display: grid; justify-items: center; gap: 12px; padding: 30px 20px; border: 2px dashed var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-large); background: var(--md-sys-color-surface-container-low); text-align: center; }
 .drop-zone--active { border-color: var(--md-sys-color-primary); background: var(--md-sys-color-primary-container); }
 .drop-zone p { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
@@ -757,5 +1056,7 @@ onUnmounted(() => {
 .operation-summary div { display: grid; gap: 4px; }
 .operation-summary code { overflow-wrap: anywhere; }
 .operation-summary a { color: inherit; }
+.release-withdrawn { color: var(--md-sys-color-error); font: var(--md-sys-label-medium); }
+.release-withdrawal-note { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.5; }
 @media (max-width: 680px) { .file-row, .track-row { grid-template-columns: 1fr auto; } .file-size, .file-status { justify-self: start; } .section-heading { flex-direction: column; } .section-heading--compact { flex-direction: row; } }
 </style>

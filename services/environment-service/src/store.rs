@@ -7,13 +7,15 @@ use contracts::authoring::{EnvironmentClass, RuntimeKind};
 use contracts::environment::{
     DesiredEnvironmentState, EnvironmentCreateSpec, EnvironmentInstance,
     EnvironmentLeaseAuthorization, EnvironmentOperation, EnvironmentOperationKind,
-    EnvironmentOperationSnapshot, ObservedEnvironmentState, OperationState,
+    EnvironmentOperationSnapshot, EnvironmentResetTarget, ObservedEnvironmentState, OperationState,
     ResourceWorkCleanupStatus,
 };
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, EnvironmentEvent, EventContract, SPEC_VERSION, subjects,
 };
-use contracts::http::{EnvironmentOperationAccepted, IdempotencyKey, MAX_CURSOR_LENGTH};
+use contracts::http::{
+    CreateEnvironmentRequest, EnvironmentOperationAccepted, IdempotencyKey, MAX_CURSOR_LENGTH,
+};
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, OperationId, ProjectId, ReleaseId,
     Revision, Sequence, StreamSequence, UtcTimestamp,
@@ -143,7 +145,8 @@ impl PgEnvironmentStore {
         instance: &EnvironmentInstance,
     ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let accepted = create_in_transaction(&mut transaction, idempotency_key, instance).await?;
+        let accepted =
+            create_in_transaction(&mut transaction, idempotency_key, instance, None).await?;
         transaction.commit().await?;
         Ok(accepted)
     }
@@ -159,6 +162,7 @@ impl PgEnvironmentStore {
             &mut transaction,
             idempotency_key,
             command,
+            None,
             None,
             None,
             None,
@@ -188,10 +192,124 @@ impl PgEnvironmentStore {
             lease_authorization,
             Some(project_id),
             course_id,
+            None,
         )
         .await?;
         transaction.commit().await?;
         Ok(accepted)
+    }
+
+    /// Accepts a public create command with the request-level idempotency identity computed
+    /// before release or Resource side effects.  The hash is committed with the same aggregate
+    /// transaction, so retries use the exact identity that was visible at the HTTP boundary.
+    pub async fn accept_api_create_command(
+        &self,
+        idempotency_key: &str,
+        command: &LifecycleCommand,
+        create: &EnvironmentCreateSpec,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        request_hash: Sha256Digest,
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let accepted = accept_command_in_transaction(
+            &mut transaction,
+            idempotency_key,
+            command,
+            Some(create),
+            None,
+            Some(project_id),
+            course_id,
+            Some(request_hash),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(accepted)
+    }
+
+    /// Returns a completed public create result before the caller performs any external side
+    /// effect.  A matching in-progress request is reported as such; a different identity is a
+    /// conflict, preserving the normal idempotency ledger semantics without holding a database
+    /// transaction across Resource or Access calls.
+    pub async fn lookup_api_create_replay(
+        &self,
+        idempotency_key: &str,
+        request: &CreateEnvironmentRequest,
+        actor_id: ActorId,
+    ) -> Result<Option<EnvironmentOperationAccepted>, EnvironmentStoreError> {
+        let hash = create_api_request_hash(request, actor_id)?;
+        self.lookup_completed_api_command(idempotency_key, "create", hash)
+            .await
+    }
+
+    /// Computes the same stable request identity used by the public create replay lookup.
+    pub fn create_api_request_hash(
+        &self,
+        request: &CreateEnvironmentRequest,
+        actor_id: ActorId,
+    ) -> Result<Sha256Digest, EnvironmentStoreError> {
+        create_api_request_hash(request, actor_id)
+    }
+
+    /// Returns a completed public lifecycle result before If-Match-dependent or Access side
+    /// effects.  The identity contains only stable command intent; trace and server timestamps
+    /// are deliberately excluded so a retry with a fresh request context can replay.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the public replay identity is kept explicit at the API boundary"
+    )]
+    pub async fn lookup_api_lifecycle_replay(
+        &self,
+        idempotency_key: &str,
+        environment_id: EnvironmentId,
+        kind: EnvironmentOperationKind,
+        expected_revision: Revision,
+        actor_id: ActorId,
+        preserve_mutable_disk: bool,
+        reset_target: Option<&EnvironmentResetTarget>,
+    ) -> Result<Option<EnvironmentOperationAccepted>, EnvironmentStoreError> {
+        let hash = lifecycle_request_hash(
+            environment_id,
+            kind,
+            expected_revision,
+            actor_id,
+            preserve_mutable_disk,
+            3,
+            reset_target,
+        )?;
+        self.lookup_completed_api_command(idempotency_key, operation_name(kind), hash)
+            .await
+    }
+
+    async fn lookup_completed_api_command(
+        &self,
+        idempotency_key: &str,
+        operation: &str,
+        request_hash: Sha256Digest,
+    ) -> Result<Option<EnvironmentOperationAccepted>, EnvironmentStoreError> {
+        match IdempotencyStore::lookup(
+            &self.pool,
+            Domain::Environment,
+            operation,
+            idempotency_key,
+            request_hash,
+        )
+        .await?
+        {
+            None => Ok(None),
+            Some(IdempotencyDecision::Replay(value)) => serde_json::from_value(value)
+                .map(Some)
+                .map_err(EnvironmentStoreError::Serialization),
+            Some(IdempotencyDecision::Conflict) => Err(EnvironmentStoreError::IdempotencyConflict),
+            Some(IdempotencyDecision::InProgress) => {
+                Err(EnvironmentStoreError::IdempotencyInProgress)
+            }
+            Some(IdempotencyDecision::Reserved) => Err(EnvironmentStoreError::Persistence(
+                PersistenceError::IdentityMismatch(
+                    "idempotency lookup returned a reservation".to_owned(),
+                ),
+            )),
+        }
     }
 
     /// Applies the next durable event and its lifecycle mutation in one transaction.
@@ -228,6 +346,7 @@ impl PgEnvironmentStore {
                     inbound.lease_authorization.clone(),
                     Some(inbound.project_id),
                     inbound.course_id,
+                    None,
                 )
                 .await?,
             ),
@@ -252,6 +371,54 @@ impl PgEnvironmentStore {
         .await?
         .ok_or(EnvironmentStoreError::EnvironmentNotFound)?;
         decode_contract(row.try_get("contract")?)
+    }
+
+    /// Lists Deleted Experiment instances that still hold a durable Resource reservation.
+    ///
+    /// Deletion is terminal, so the reservation can be released and the allocation cleared. The
+    /// list is bounded; a release that fails simply leaves the row for the next reconcile pass.
+    pub(crate) async fn list_deleted_resource_environments(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<EnvironmentInstance>, EnvironmentStoreError> {
+        if limit <= 0 {
+            return Err(EnvironmentStoreError::InvalidLimit);
+        }
+        let rows = sqlx::query(
+            "SELECT contract FROM environment.environment_instances \
+             WHERE contract->>'class'='experiment' \
+               AND contract->>'observedState'='deleted' \
+               AND COALESCE((contract->>'resourceReservationReleased')::boolean, false)=false \
+             ORDER BY updated_at, environment_id LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| decode_contract(row.try_get("contract")?))
+            .collect()
+    }
+
+    /// Marks the terminal Experiment Resource reservation as released.
+    pub(crate) async fn clear_environment_resource_reservation(
+        &self,
+        environment_id: EnvironmentId,
+    ) -> Result<(), EnvironmentStoreError> {
+        let result = sqlx::query(
+            "UPDATE environment.environment_instances \
+             SET contract = jsonb_set(contract, '{resourceReservationReleased}', 'true'::jsonb, true), updated_at = clock_timestamp() \
+             WHERE environment_id=$1 \
+               AND contract->>'class'='experiment' \
+               AND contract->>'observedState'='deleted' \
+               AND COALESCE((contract->>'resourceReservationReleased')::boolean, false)=false",
+        )
+        .bind(environment_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(EnvironmentStoreError::RevisionConflict);
+        }
+        Ok(())
     }
 
     /// Loads one operation from the actor-visible history and projects it through the
@@ -494,7 +661,6 @@ impl PgEnvironmentStore {
             return Ok(current);
         }
         if authorization.lease_revision <= current_authorization.lease_revision
-            || authorization.expires_at <= current.eligibility_expires_at
             || authorization.expires_at <= current_authorization.expires_at
         {
             return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
@@ -506,7 +672,6 @@ impl PgEnvironmentStore {
         for endpoint in &mut updated.endpoints {
             endpoint.revision = updated.revision;
         }
-        updated.eligibility_expires_at = authorization.expires_at;
         updated.operation.lease_authorization = Some(authorization);
         update_instance(&mut transaction, &current, &updated).await?;
         enqueue_environment_event(
@@ -648,6 +813,14 @@ impl PgEnvironmentStore {
         {
             return Err(EnvironmentStoreError::LeaseLost);
         }
+        let deferred = updated.revision == stored.revision;
+        if deferred {
+            let mut scheduled = stored.clone();
+            scheduled.operation.next_attempt_at = updated.operation.next_attempt_at;
+            if &scheduled != updated {
+                return Err(EnvironmentStoreError::RevisionConflict);
+            }
+        }
         update_instance(&mut transaction, &stored, updated).await?;
         let terminal = matches!(
             updated.operation.state,
@@ -682,6 +855,10 @@ impl PgEnvironmentStore {
         if result.rows_affected() != 1 {
             return Err(EnvironmentStoreError::LeaseLost);
         }
+        if deferred {
+            transaction.commit().await?;
+            return Ok(());
+        }
         let occurred_at = database_now(&mut transaction).await?;
         crate::metering::record_transition(&mut transaction, &stored, updated, occurred_at).await?;
         enqueue_environment_event_at(
@@ -706,7 +883,8 @@ impl PgEnvironmentStore {
         }
         let rows = sqlx::query(
             "SELECT contract FROM environment.environment_instances \
-             WHERE desired_state <> 'deleted' AND eligibility_expires_at <= $1 \
+             WHERE desired_state <> 'deleted' AND eligibility_expires_at IS NOT NULL \
+               AND eligibility_expires_at <= $1 \
              ORDER BY eligibility_expires_at \
              LIMIT $2",
         )
@@ -890,6 +1068,7 @@ async fn create_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     idempotency_key: &str,
     instance: &EnvironmentInstance,
+    request_hash_override: Option<Sha256Digest>,
 ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
     IdempotencyKey::parse(idempotency_key)
         .map_err(|_| EnvironmentStoreError::InvalidIdempotencyKey)?;
@@ -920,7 +1099,7 @@ async fn create_in_transaction(
     {
         return Err(EnvironmentStoreError::InvalidCreateAggregate);
     }
-    let request_hash = create_request_hash(instance)?;
+    let request_hash = request_hash_override.unwrap_or(create_request_hash(instance)?);
     match IdempotencyStore::reserve(
         transaction,
         Domain::Environment,
@@ -961,7 +1140,7 @@ async fn create_in_transaction(
     .bind(as_i64(instance.revision.get(), "revision")?)
     .bind(&instance.last_diagnostic_code)
     .bind(instance.failed_phase.map(wire_name).transpose()?)
-    .bind(instance.eligibility_expires_at.get())
+    .bind(instance.eligibility_expires_at.map(UtcTimestamp::get))
     .bind(serde_json::to_value(instance)?)
     .execute(&mut **transaction)
     .await;
@@ -1005,7 +1184,11 @@ fn build_create_instance(
         || course_id != spec.course_id
         || spec.release_version == 0
         || spec.provider_binding.trim().is_empty()
-        || spec.eligibility_expires_at <= authority_now
+        || spec.retention.validate().is_err()
+        || spec.retention.retain_until != spec.eligibility_expires_at
+        || spec
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= authority_now)
         || !(1..=100).contains(&command.max_attempts)
         || command.deadline_at <= command.accepted_at
         || command.deadline_at <= authority_now
@@ -1042,7 +1225,7 @@ fn build_create_instance(
                 return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
             }
             authorization.validate()?;
-            std::cmp::min(spec.eligibility_expires_at, authorization.expires_at)
+            spec.eligibility_expires_at
         }
     };
     let instance = EnvironmentInstance {
@@ -1057,6 +1240,9 @@ fn build_create_instance(
         release_version: spec.release_version,
         lease_id: spec.lease_id,
         capacity_binding: spec.capacity_binding.clone(),
+        approved_resources: spec.approved_resources.clone(),
+        gpu_allocation: spec.gpu_allocation.clone(),
+        resource_reservation_released: false,
         provider_binding: spec.provider_binding.clone(),
         desired_state: DesiredEnvironmentState::Running,
         observed_state: ObservedEnvironmentState::Requested,
@@ -1095,6 +1281,7 @@ fn build_create_instance(
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "the transaction keeps idempotency, row locking, lifecycle planning, persistence, and Outbox ordering auditable"
 )]
@@ -1106,6 +1293,7 @@ async fn accept_command_in_transaction(
     lease_authorization: Option<EnvironmentLeaseAuthorization>,
     project_id: Option<ProjectId>,
     course_id: Option<CourseId>,
+    request_hash_override: Option<Sha256Digest>,
 ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
     if command.kind == EnvironmentOperationKind::Create {
         let authority_now = database_now(transaction).await?;
@@ -1117,7 +1305,13 @@ async fn accept_command_in_transaction(
             project_id.ok_or(EnvironmentStoreError::InboundMetadataInvalid)?,
             course_id,
         )?;
-        return create_in_transaction(transaction, idempotency_key, &instance).await;
+        return create_in_transaction(
+            transaction,
+            idempotency_key,
+            &instance,
+            request_hash_override,
+        )
+        .await;
     }
     if create.is_some() {
         return Err(EnvironmentStoreError::CreateSpecUnexpected);
@@ -1125,6 +1319,9 @@ async fn accept_command_in_transaction(
     IdempotencyKey::parse(idempotency_key)
         .map_err(|_| EnvironmentStoreError::InvalidIdempotencyKey)?;
     let operation_name = operation_name(command.kind);
+    if request_hash_override.is_some() {
+        return Err(EnvironmentStoreError::InboundMetadataInvalid);
+    }
     let request_hash = command_request_hash(command)?;
     match IdempotencyStore::reserve(
         transaction,
@@ -1351,7 +1548,7 @@ async fn update_instance(
     .bind(as_i64(updated.revision.get(), "revision")?)
     .bind(&updated.last_diagnostic_code)
     .bind(updated.failed_phase.map(wire_name).transpose()?)
-    .bind(updated.eligibility_expires_at.get())
+    .bind(updated.eligibility_expires_at.map(UtcTimestamp::get))
     .bind(serde_json::to_value(updated)?)
     .execute(&mut **transaction)
     .await?;
@@ -1674,7 +1871,15 @@ fn public_operation_snapshot(
         && record.operation.attempt < record.operation.max_attempts
         && instance.observed_state == ObservedEnvironmentState::Failed
         && instance.failed_phase.is_some()
-        && instance.eligibility_expires_at > snapshot_at
+        && instance
+            .eligibility_expires_at
+            .is_none_or(|deadline| deadline > snapshot_at)
+        && (instance.class == contracts::authoring::EnvironmentClass::Experiment
+            || instance
+                .operation
+                .lease_authorization
+                .as_ref()
+                .is_some_and(|authorization| authorization.expires_at > snapshot_at))
         && EnvironmentInstance::ensure_operation_allowed(
             instance.observed_state,
             EnvironmentOperationKind::Retry,
@@ -1905,32 +2110,60 @@ fn create_request_hash(
         "runtimeKind": instance.runtime_kind,
         "releaseId": instance.release_id,
         "releaseVersion": instance.release_version,
+        "displayLabel": instance.display_label,
         "leaseId": instance.lease_id,
         "capacityBinding": instance.capacity_binding,
-        "actorId": instance.operation.actor_id,
         "providerBinding": instance.provider_binding,
         "eligibilityExpiresAt": instance.eligibility_expires_at,
-        "traceId": instance.operation.trace_id,
-        "acceptedAt": instance.operation.accepted_at,
-        "deadlineAt": instance.operation.deadline_at,
+        "actorId": instance.operation.actor_id,
         "maxAttempts": instance.operation.max_attempts,
         "leaseAuthorization": instance.operation.lease_authorization,
     }))
 }
 
-fn command_request_hash(command: &LifecycleCommand) -> Result<Sha256Digest, EnvironmentStoreError> {
+fn create_api_request_hash(
+    request: &CreateEnvironmentRequest,
+    actor_id: ActorId,
+) -> Result<Sha256Digest, EnvironmentStoreError> {
     canonical_hash(&json!({
-        "environmentId": command.environment_id,
-        "kind": command.kind,
-        "expectedRevision": command.expected_revision,
-        "actorId": command.actor_id,
-        "traceId": command.trace_id,
-        "acceptedAt": command.accepted_at,
-        "deadlineAt": command.deadline_at,
-        "accessRevocationRevision": command.access_revocation_revision,
-        "preserveMutableDisk": command.preserve_mutable_disk,
-        "maxAttempts": command.max_attempts,
-        "resetTarget": command.reset_target,
+        "projectId": request.project_id,
+        "courseId": request.course_id,
+        "ownerId": actor_id,
+        "releaseId": request.release_id,
+        "releaseVersion": request.release_version,
+        "displayLabel": request.display_label,
+    }))
+}
+
+fn command_request_hash(command: &LifecycleCommand) -> Result<Sha256Digest, EnvironmentStoreError> {
+    lifecycle_request_hash(
+        command.environment_id,
+        command.kind,
+        command.expected_revision,
+        command.actor_id,
+        command.preserve_mutable_disk,
+        command.max_attempts,
+        command.reset_target.as_ref(),
+    )
+}
+
+fn lifecycle_request_hash(
+    environment_id: EnvironmentId,
+    kind: EnvironmentOperationKind,
+    expected_revision: Revision,
+    actor_id: ActorId,
+    preserve_mutable_disk: bool,
+    max_attempts: u32,
+    reset_target: Option<&EnvironmentResetTarget>,
+) -> Result<Sha256Digest, EnvironmentStoreError> {
+    canonical_hash(&json!({
+        "environmentId": environment_id,
+        "kind": kind,
+        "expectedRevision": expected_revision,
+        "actorId": actor_id,
+        "preserveMutableDisk": preserve_mutable_disk,
+        "maxAttempts": max_attempts,
+        "resetTarget": reset_target,
     }))
 }
 
@@ -2145,6 +2378,61 @@ mod tests {
             decode_inventory_cursor(&encoded[..encoded.len() - 1], filter),
             Err(EnvironmentStoreError::InvalidInventoryCursor)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn idempotency_hashes_bind_user_intent_and_ignore_request_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor_id = ActorId::new();
+        let request = CreateEnvironmentRequest {
+            project_id: ProjectId::new(),
+            course_id: Some(CourseId::new()),
+            release_id: ReleaseId::new(),
+            release_version: 4,
+            display_label: Some("demo".to_owned()),
+        };
+        let create_hash = create_api_request_hash(&request, actor_id)?;
+        let mut changed_label = request.clone();
+        changed_label.display_label = Some("other".to_owned());
+        assert_ne!(
+            create_hash,
+            create_api_request_hash(&changed_label, actor_id)?
+        );
+        assert_ne!(
+            create_hash,
+            create_api_request_hash(&request, ActorId::new())?
+        );
+
+        let accepted_at = UtcTimestamp::from_str("2026-07-14T00:00:00.000Z")?;
+        let deadline_at = UtcTimestamp::from_str("2026-07-14T00:10:00.000Z")?;
+        let command = LifecycleCommand {
+            environment_id: EnvironmentId::new(),
+            kind: EnvironmentOperationKind::Stop,
+            expected_revision: Revision::new(3)?,
+            actor_id,
+            trace_id: "first-request".to_owned(),
+            accepted_at,
+            deadline_at,
+            access_revocation_revision: Some(Revision::new(7)?),
+            preserve_mutable_disk: true,
+            max_attempts: 3,
+            reset_target: None,
+        };
+        let mut retry = command.clone();
+        retry.trace_id = "retry-request".to_owned();
+        retry.accepted_at = UtcTimestamp::from_str("2026-07-14T00:00:01.000Z")?;
+        retry.deadline_at = UtcTimestamp::from_str("2026-07-14T00:10:01.000Z")?;
+        retry.access_revocation_revision = Some(Revision::new(8)?);
+        assert_eq!(
+            command_request_hash(&command)?,
+            command_request_hash(&retry)?
+        );
+        retry.expected_revision = Revision::new(4)?;
+        assert_ne!(
+            command_request_hash(&command)?,
+            command_request_hash(&retry)?
+        );
         Ok(())
     }
 }

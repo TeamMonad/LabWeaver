@@ -29,6 +29,15 @@ existing infrastructure component.
 The checked-in `*.example` files document non-secret runtime configuration fields. They are not a
 deployable bundle and must not contain credentials.
 
+The Control upload lifetime is configured only by the reviewed
+`control-service-config/config.yaml` document in the bundle. Keep
+`object_store.uploadTtlSeconds` and `control.uploadTtlSeconds` equal; the checked-in Control
+profile uses `14400` seconds (four hours) for new signed archive uploads. This is the maximum session
+age and does not extend sessions that were already persisted. The Helm chart does not provide a
+second upload-TTL override: `deploymentIdentity.configurationBundleSha256` is the chart key that
+rolls workloads after the bundle changes, and the Ansible application role applies the supplied
+bundle verbatim.
+
 The Container provider entry must set both `workspaceStorageClassName` and
 `workspaceAccessMode`. The access mode is passed through to the workspace PVC and accepts only
 the Kubernetes values `ReadWriteOnce` and `ReadWriteMany`; the production NFS example uses
@@ -49,6 +58,11 @@ Copy and specialize the examples as follows:
 - `resource-service.yaml.example` → `resource-service-config/http.yaml`
 - `resource-capacity.json.example` → `resource-service-config/capacity.json`
 - `web-deployment.json.example` → `web-config/deployment.json`
+
+The KubeVirt provider's `gatewayNamespace` must match the
+`platform_application_namespace` used for the Helm release because the bundled
+`openssh-gateway` is deployed in that namespace. The default application
+namespace is `labweaver-system`; `gatewayPodLabel` remains `openssh-gateway`.
 
 The Resource API is exposed over its server TLS listener. Access calls use a short-lived Keycloak
 service JWT with the `resource.api.invoke` permission and the configured Access client ID, then

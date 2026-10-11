@@ -23,11 +23,14 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
+use url::Url;
 use uuid::Uuid;
 
+use crate::container_provider::valid_extended_resource_name;
 use crate::{
-    ContainerReleaseResolver, EnvironmentProvider, ProviderFailure, ProviderFailureCode,
-    ProviderObservation, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
+    ContainerReleaseResolver, EnvironmentProvider, KubeVirtExecutionInstance,
+    KubeVirtExecutionPermit, ProviderFailure, ProviderFailureCode, ProviderObservation,
+    ProviderOutcome, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
 };
 
 pub const KUBEVIRT_BACKEND_PROTOCOL_VERSION: u8 = 1;
@@ -35,6 +38,127 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const GATEWAY_LABEL_KEY: &str = "app.kubernetes.io/name";
 const KUBEVIRT_NODE_LABEL_KEY: &str = "labweaver.io/kubevirt";
 const KUBEVIRT_NODE_LABEL_VALUE: &str = "true";
+const NVIDIA_GRIDD_PATH: &str = "/usr/bin/nvidia-gridd";
+const NVIDIA_GRIDD_CONFIG_PATH: &str = "/etc/nvidia/gridd.conf";
+const FASTAPI_DLS_SIGNING_ROOT_PATH: &str = "/etc/nvidia/labweaver-fastapi-dls-signing-root-ca.pem";
+const VGPU_CLIENT_TOKEN_DIRECTORY: &str = "/etc/nvidia/ClientConfigToken/";
+const VGPU_CLIENT_TOKEN_PATH: &str = "/etc/nvidia/ClientConfigToken/client_configuration_token.tok";
+
+/// Deployment-owned Secret reference used by the VM vGPU licensing bootstrap.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KubeVirtSecretRef {
+    pub namespace: String,
+    pub name: String,
+    pub key: String,
+}
+
+impl KubeVirtSecretRef {
+    fn validate(&self) -> Result<(), ReleaseProjectionError> {
+        if !valid_dns_label(&self.namespace)
+            || !valid_dns_label(&self.name)
+            || self.key.is_empty()
+            || self.key.len() > 253
+            || !self
+                .key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        Ok(())
+    }
+}
+
+/// The two supported NVIDIA licensing service implementations.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KubeVirtVmVgpuLicenseMode {
+    NvidiaDls,
+    FastapiDls,
+}
+
+/// Non-secret, deployment-owned VM vGPU licensing configuration.
+///
+/// Secret values are deliberately represented only by Kubernetes Secret references. They are
+/// resolved by the restricted `KubeVirt` executor at apply time and never become part of the
+/// public resource plan or image.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KubeVirtVmVgpuLicensingConfiguration {
+    pub mode: KubeVirtVmVgpuLicenseMode,
+    /// HTTPS endpoint that must match the endpoint encoded in the deployment-issued client token.
+    /// The executor keeps the token opaque and uses this value for the exact egress boundary.
+    pub license_url: Url,
+    pub token_secret_ref: KubeVirtSecretRef,
+    pub tls_ca_secret_ref: KubeVirtSecretRef,
+    #[serde(default)]
+    pub fastapi_dls_signing_root_ca_secret_ref: Option<KubeVirtSecretRef>,
+}
+
+impl KubeVirtVmVgpuLicensingConfiguration {
+    /// Validates the supported deployment modes and all non-secret references.
+    pub fn validate(&self) -> Result<(), ReleaseProjectionError> {
+        if self.license_url.scheme() != "https"
+            || self.license_url.host_str().is_none()
+            || self.license_url.username() != ""
+            || self.license_url.password().is_some()
+            || self.license_url.path() != "/"
+            || self.license_url.query().is_some()
+            || self.license_url.fragment().is_some()
+            || (self.mode == KubeVirtVmVgpuLicenseMode::FastapiDls
+                && self.license_url.port_or_known_default() != Some(443))
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        self.token_secret_ref.validate()?;
+        self.tls_ca_secret_ref.validate()?;
+        match self.mode {
+            KubeVirtVmVgpuLicenseMode::NvidiaDls => {
+                if self.fastapi_dls_signing_root_ca_secret_ref.is_some() {
+                    return Err(ReleaseProjectionError::ConfigurationInvalid);
+                }
+            }
+            KubeVirtVmVgpuLicenseMode::FastapiDls => {
+                self.fastapi_dls_signing_root_ca_secret_ref
+                    .as_ref()
+                    .ok_or(ReleaseProjectionError::ConfigurationInvalid)?
+                    .validate()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fixed path used by the prebuilt guest image for the NVIDIA DLS token.
+    #[must_use]
+    pub const fn token_path() -> &'static str {
+        VGPU_CLIENT_TOKEN_PATH
+    }
+
+    /// Fixed directory configured in `gridd.conf` for the prebuilt guest image.
+    #[must_use]
+    pub const fn token_directory_path() -> &'static str {
+        VGPU_CLIENT_TOKEN_DIRECTORY
+    }
+
+    /// Fixed NVIDIA Grid daemon configuration path in the prebuilt guest image.
+    #[must_use]
+    pub const fn gridd_config_path() -> &'static str {
+        NVIDIA_GRIDD_CONFIG_PATH
+    }
+
+    /// Fixed path used by the prebuilt guest image for FastAPI-DLS signing trust.
+    #[must_use]
+    pub const fn fastapi_signing_root_path() -> &'static str {
+        FASTAPI_DLS_SIGNING_ROOT_PATH
+    }
+
+    /// Fixed guest daemon path passed to `gridd-unlock-patcher`.
+    #[must_use]
+    pub const fn nvidia_gridd_path() -> &'static str {
+        NVIDIA_GRIDD_PATH
+    }
+}
 
 /// Durable Environment operation identity carried across the KubeVirt/CDI boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -112,6 +236,9 @@ pub struct KubeVirtResourcePlan {
     /// runtime-registered base.
     pub base_disk_disk_sha256: String,
     pub storage_class_name: String,
+    /// Non-secret deployment-owned licensing references used only by a VM vGPU executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_vgpu_licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
     pub resources: Vec<KubeVirtResource>,
     pub plan_sha256: Sha256Digest,
 }
@@ -220,15 +347,21 @@ impl RuntimeVmBasePolicy {
     ///
     /// The reviewed raw-disk SHA-256 is unknown on this path, so the declared registry manifest
     /// digest is both the durable identity and the catalog-independent stand-in the binding type
-    /// requires. The CDI `DataSource` name is derived from that digest so one imported disk is
-    /// reused across environments regardless of the release-declared binding string.
+    /// requires. The CDI `DataSource` name is derived from the complete runtime import identity
+    /// so a source repository change cannot collide with an existing imported disk while the same
+    /// exact source can still be reused across environments.
     fn runtime_binding(
         &self,
         base_disk: &VirtualMachineBaseDisk,
         format: VirtualMachineDiskFormat,
     ) -> Option<KubeVirtBaseDiskBinding> {
         let manifest_digest = declared_manifest_digest(&base_disk.source_registry_digest)?;
-        let short = manifest_digest.get(..32).unwrap_or(manifest_digest);
+        let data_source_name = runtime_base_data_source_name(
+            &base_disk.source_registry_digest,
+            base_disk.capacity_bytes,
+            format,
+            &self.storage_class_name,
+        )?;
         KubeVirtBaseDiskBinding::new(
             base_disk.binding.clone(),
             base_disk.source_registry_digest.clone(),
@@ -238,12 +371,39 @@ impl RuntimeVmBasePolicy {
             self.storage_class_binding.clone(),
             self.storage_class_name.clone(),
             self.data_source_namespace.clone(),
-            format!("vm-base-{short}"),
+            data_source_name,
             self.guest_user.clone(),
             self.ssh_port,
         )
         .ok()
     }
+}
+
+const RUNTIME_BASE_DATA_SOURCE_PREFIX: &str = "vm-base-";
+const RUNTIME_BASE_DATA_SOURCE_HASH_LENGTH: usize = 48;
+
+/// Builds the DNS-safe CDI identity shared by the runtime import and every VM clone reference.
+///
+/// The source reference is intentionally hashed in full, including its repository and manifest
+/// digest. Capacity, format, storage class and identity are part of the canonical tuple because
+/// they constrain the imported CDI object or the resource plan that consumes it.
+fn runtime_base_data_source_name(
+    source_registry_digest: &str,
+    capacity_bytes: u64,
+    format: VirtualMachineDiskFormat,
+    storage_class_name: &str,
+) -> Option<String> {
+    let identity = json!({
+        "sourceRegistryDigest": source_registry_digest,
+        "capacityBytes": capacity_bytes,
+        "format": format,
+        "storageClassName": storage_class_name,
+        "identity": KubeVirtBaseDiskIdentity::RuntimeRegistryDigest.as_str(),
+    });
+    let digest = Sha256Digest::of_canonical(&identity).ok()?.to_string();
+    let suffix = digest.get(..RUNTIME_BASE_DATA_SOURCE_HASH_LENGTH)?;
+    let name = format!("{RUNTIME_BASE_DATA_SOURCE_PREFIX}{suffix}");
+    valid_dns_label(&name).then_some(name)
 }
 
 /// Extracts the lowercase `sha256:` hex payload from an immutable `docker://` registry digest.
@@ -264,12 +424,13 @@ fn declared_manifest_digest(source_registry_digest: &str) -> Option<&str> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtCleanupPlan {
     pub environment_id: EnvironmentId,
+    pub project_id: contracts::ProjectId,
     pub namespace: String,
     pub virtual_machine_name: String,
     pub plan_sha256: Sha256Digest,
 }
 
-/// Complete readiness identity returned only after VM, guest agent and SSH converge.
+/// Complete readiness identity returned after VM and SSH converge; guest-agent state is observed separately.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtRunningObservation {
@@ -305,37 +466,37 @@ pub trait KubeVirtProviderBackend: Send + Sync {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn observe(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn start(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtStoppedObservation, ProviderFailure>;
+        plan: &KubeVirtCleanupPlan,
+    ) -> Result<ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure>;
 
     async fn restart(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn delete_namespace(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<ArtifactRef, ProviderFailure>;
+    ) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure>;
 }
 
 /// NATS adapter for the deployment-owned `KubeVirt` executor.
@@ -381,16 +542,19 @@ impl NatsKubeVirtProviderBackend {
         let request = async_nats::Request::new()
             .timeout(Some(self.request_timeout))
             .payload(payload.into());
-        let message = self
+        let message = match self
             .client
             .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
+                if error.kind() == async_nats::client::RequestErrorKind::TimedOut {
+                    return None;
+                }
                 tracing::warn!(
                     event = "environment.kubevirt_provider.executor_request_failed",
                     component = "kubevirt-provider",
                     operation = "kubevirt.executor.request",
-                    outcome = "deferred",
+                    outcome = "failed",
                     duration_ms = 0_u64,
                     trace_id = fence.trace_id,
                     diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
@@ -402,8 +566,12 @@ impl NatsKubeVirtProviderBackend {
                     operation_id = %fence.operation_id,
                     attempt = fence.attempt,
                 );
-                unavailable()
-            })?;
+                Some(unavailable())
+            }) {
+            Ok(message) => message,
+            Err(None) => return Ok(KubeVirtExecutorResponse::Pending),
+            Err(Some(failure)) => return Err(failure),
+        };
         if message.payload.len() > MAX_RESPONSE_BYTES {
             return Err(invalid_observation());
         }
@@ -430,7 +598,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(fence, KubeVirtExecutorRequest::Apply { plan: plan.clone() })
@@ -443,7 +611,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(
@@ -459,7 +627,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(fence, KubeVirtExecutorRequest::Start { plan: plan.clone() })
@@ -471,8 +639,8 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtStoppedObservation, ProviderFailure> {
+        plan: &KubeVirtCleanupPlan,
+    ) -> Result<ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure> {
         match self
             .request(fence, KubeVirtExecutorRequest::Stop { plan: plan.clone() })
             .await?
@@ -480,7 +648,8 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
             KubeVirtExecutorResponse::Stopped {
                 plan_sha256,
                 observation,
-            } if plan_sha256 == plan.plan_sha256 => Ok(observation),
+            } if plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(observation)),
+            KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
             KubeVirtExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
@@ -490,7 +659,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(
@@ -506,7 +675,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
+    ) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure> {
         match self
             .request(
                 fence,
@@ -518,8 +687,9 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
                 plan_sha256,
                 cleanup_evidence,
             } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
-                Ok(cleanup_evidence)
+                Ok(ProviderOutcome::Completed(cleanup_evidence))
             }
+            KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
             KubeVirtExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
@@ -532,12 +702,13 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
 fn running_response(
     response: &KubeVirtExecutorResponse,
     plan: &KubeVirtResourcePlan,
-) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
     match response {
         KubeVirtExecutorResponse::Running {
             plan_sha256,
             observation,
-        } if *plan_sha256 == plan.plan_sha256 => Ok(*observation),
+        } if *plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(*observation)),
+        KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
         KubeVirtExecutorResponse::Failed { failure } => Err(*failure),
         _ => Err(invalid_observation()),
     }
@@ -562,7 +733,7 @@ pub enum KubeVirtExecutorRequest {
     Apply { plan: KubeVirtResourcePlan },
     Observe { plan: KubeVirtResourcePlan },
     Start { plan: KubeVirtResourcePlan },
-    Stop { plan: KubeVirtResourcePlan },
+    Stop { plan: KubeVirtCleanupPlan },
     Restart { plan: KubeVirtResourcePlan },
     DeleteNamespace { plan: KubeVirtCleanupPlan },
 }
@@ -614,9 +785,9 @@ const fn kubevirt_executor_environment_id(request: &KubeVirtExecutorRequest) -> 
         KubeVirtExecutorRequest::Apply { plan }
         | KubeVirtExecutorRequest::Observe { plan }
         | KubeVirtExecutorRequest::Start { plan }
-        | KubeVirtExecutorRequest::Stop { plan }
         | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
-        KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+        KubeVirtExecutorRequest::Stop { plan }
+        | KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
     }
 }
 
@@ -642,6 +813,7 @@ pub struct KubeVirtExecutorResponseEnvelope {
     deny_unknown_fields
 )]
 pub enum KubeVirtExecutorResponse {
+    Pending,
     Running {
         plan_sha256: Sha256Digest,
         observation: KubeVirtRunningObservation,
@@ -666,6 +838,7 @@ pub trait KubeVirtExecutorBackend: Send + Sync {
         &self,
         fence: &KubeVirtBackendFence,
         request: &KubeVirtExecutorRequest,
+        permit: &KubeVirtExecutionPermit,
     ) -> KubeVirtExecutorResponse;
 }
 
@@ -675,7 +848,111 @@ pub struct PgKubeVirtExecutorFenceStore {
     pool: PgPool,
 }
 
+#[derive(Clone)]
+struct UnfinishedKubeVirtExecution {
+    instance: KubeVirtExecutionInstance,
+    request_id: String,
+    generation: i64,
+    operation_id: Uuid,
+    provider_step: i32,
+    attempt: i32,
+    deadline_at: time::OffsetDateTime,
+}
+
 impl PgKubeVirtExecutorFenceStore {
+    async fn recover_previous_boot(
+        &self,
+        instance: &KubeVirtExecutionInstance,
+    ) -> Result<(), KubeVirtExecutorFenceError> {
+        let rows=sqlx::query("SELECT environment_id,execution_owner,last_request_id,highest_generation,operation_id,provider_step,attempt,deadline_at FROM environment.kubevirt_executor_fences WHERE last_response IS NULL AND execution_owner->>'podUid'=$1 AND execution_owner->>'containerName'=$2")
+            .bind(instance.pod_uid.to_string()).bind(&instance.container_name).fetch_all(&self.pool).await?;
+        for row in rows {
+            let owner: KubeVirtExecutionInstance =
+                serde_json::from_value(row.try_get("execution_owner")?)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            if owner.namespace != instance.namespace
+                || owner.pod_name != instance.pod_name
+                || owner.boot_token == instance.boot_token
+            {
+                return Err(KubeVirtExecutorFenceError::IdentityMismatch);
+            }
+            let previous = UnfinishedKubeVirtExecution {
+                instance: owner,
+                request_id: row.try_get("last_request_id")?,
+                generation: row.try_get("highest_generation")?,
+                operation_id: row.try_get("operation_id")?,
+                provider_step: row.try_get("provider_step")?,
+                attempt: row.try_get("attempt")?,
+                deadline_at: row.try_get("deadline_at")?,
+            };
+            let environment_id =
+                EnvironmentId::from_str(&row.try_get::<Uuid, _>("environment_id")?.to_string())
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            self.retire_previous_boot(environment_id, &previous).await?;
+        }
+        Ok(())
+    }
+
+    /// Only the new verified PID1 may retire an earlier boot in the same isolated Pod container.
+    async fn retire_previous_boot(
+        &self,
+        environment_id: EnvironmentId,
+        previous: &UnfinishedKubeVirtExecution,
+    ) -> Result<(), KubeVirtExecutorFenceError> {
+        let now: time::OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&self.pool)
+            .await?;
+        let code = if now >= previous.deadline_at {
+            ProviderFailureCode::Timeout
+        } else {
+            ProviderFailureCode::Cancelled
+        };
+        let response = KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code,
+                retryable: false,
+            },
+        };
+        let affected = sqlx::query(
+            "UPDATE environment.kubevirt_executor_fences SET last_response=$8, \
+             updated_at=clock_timestamp() WHERE environment_id=$1 AND highest_generation=$2 \
+             AND operation_id=$3 AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 \
+             AND execution_owner=$7 AND last_response IS NULL",
+        )
+        .bind(environment_id.as_uuid())
+        .bind(previous.generation)
+        .bind(previous.operation_id)
+        .bind(previous.provider_step)
+        .bind(previous.attempt)
+        .bind(&previous.request_id)
+        .bind(
+            serde_json::to_value(&previous.instance)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+        )
+        .bind(
+            serde_json::to_value(response)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(KubeVirtExecutorFenceError::StaleGeneration);
+        }
+        Ok(())
+    }
+
+    fn permit(
+        &self,
+        fence: KubeVirtBackendFence,
+        instance: KubeVirtExecutionInstance,
+    ) -> KubeVirtExecutionPermit {
+        KubeVirtExecutionPermit {
+            pool: self.pool.clone(),
+            fence,
+            instance,
+        }
+    }
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -688,19 +965,12 @@ impl PgKubeVirtExecutorFenceStore {
     async fn admit(
         &self,
         envelope: &KubeVirtExecutorRequestEnvelope,
+        instance: &KubeVirtExecutionInstance,
     ) -> Result<KubeVirtExecutorAdmission, KubeVirtExecutorFenceError> {
         validate_kubevirt_executor_request(envelope)?;
         let fence = &envelope.fence;
         let mut transaction = self.pool.begin().await?;
-        let authority_now: time::OffsetDateTime =
-            sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
-                .fetch_one(&mut *transaction)
-                .await?;
-        if authority_now >= fence.deadline_at.get() {
-            return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
-        }
-        let remaining = std::time::Duration::try_from(fence.deadline_at.get() - authority_now)
-            .map_err(|_| KubeVirtExecutorFenceError::DeadlineExceeded)?;
+        lock_execution_environment(&mut transaction, fence.environment_id).await?;
         let current = sqlx::query(
             "SELECT highest_generation,operation_id,provider_step,attempt,tombstoned, \
                     last_request_id,last_response,deadline_at \
@@ -709,6 +979,10 @@ impl PgKubeVirtExecutorFenceStore {
         .bind(fence.environment_id.as_uuid())
         .fetch_optional(&mut *transaction)
         .await?;
+        let authority_now: time::OffsetDateTime =
+            sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+                .fetch_one(&mut *transaction)
+                .await?;
         if let Some(row) = current {
             let highest_generation = u64::try_from(row.try_get::<i64, _>("highest_generation")?)
                 .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
@@ -722,7 +996,7 @@ impl PgKubeVirtExecutorFenceStore {
             let tombstoned: bool = row.try_get("tombstoned")?;
             let last_request_id: String = row.try_get("last_request_id")?;
             let last_response = row.try_get::<Option<Value>, _>("last_response")?;
-            let previous_deadline: time::OffsetDateTime = row.try_get("deadline_at")?;
+
             if last_request_id == fence.request_id.to_string() {
                 if let Some(value) = last_response {
                     transaction.rollback().await?;
@@ -730,7 +1004,10 @@ impl PgKubeVirtExecutorFenceStore {
                 }
                 return Err(KubeVirtExecutorFenceError::InProgress);
             }
-            if last_response.is_none() && authority_now < previous_deadline {
+            if authority_now >= fence.deadline_at.get() {
+                return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
+            }
+            if last_response.is_none() {
                 return Err(KubeVirtExecutorFenceError::InProgress);
             }
             let cleanup_succeeded = last_response
@@ -764,7 +1041,7 @@ impl PgKubeVirtExecutorFenceStore {
             sqlx::query(
                 "UPDATE environment.kubevirt_executor_fences SET highest_generation=$2, \
                  operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
-                 last_request_id=$8,last_response=NULL,deadline_at=$9,updated_at=clock_timestamp() \
+                 last_request_id=$8,last_response=NULL,deadline_at=$9,execution_owner=$10,updated_at=clock_timestamp() \
                  WHERE environment_id=$1",
             )
             .bind(fence.environment_id.as_uuid())
@@ -785,13 +1062,17 @@ impl PgKubeVirtExecutorFenceStore {
             .bind(kubevirt_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
+            .bind(serde_json::to_value(instance).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
             .execute(&mut *transaction)
             .await?;
         } else {
-            sqlx::query(
+            if authority_now >= fence.deadline_at.get() {
+                return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
+            }
+            let admitted = sqlx::query(
                 "INSERT INTO environment.kubevirt_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
-                  last_action,last_request_id,deadline_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                  last_action,last_request_id,deadline_at,execution_owner) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (environment_id) DO NOTHING",
             )
             .bind(fence.environment_id.as_uuid())
             .bind(
@@ -811,25 +1092,32 @@ impl PgKubeVirtExecutorFenceStore {
             .bind(kubevirt_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
+            .bind(serde_json::to_value(instance).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
             .execute(&mut *transaction)
             .await?;
+            if admitted.rows_affected() != 1 {
+                return Err(KubeVirtExecutorFenceError::InProgress);
+            }
         }
         transaction.commit().await?;
-        Ok(KubeVirtExecutorAdmission::Execute(remaining))
+        Ok(KubeVirtExecutorAdmission::Execute)
     }
 
     async fn complete(
         &self,
         fence: KubeVirtBackendFence,
         response: &KubeVirtExecutorResponse,
+        instance: &KubeVirtExecutionInstance,
     ) -> Result<(), KubeVirtExecutorFenceError> {
         let value = serde_json::to_value(response)
             .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_execution_environment(&mut transaction, fence.environment_id).await?;
         let updated = sqlx::query(
             "UPDATE environment.kubevirt_executor_fences SET last_response=$7, \
                  tombstoned=CASE WHEN $8 THEN TRUE ELSE tombstoned END,updated_at=clock_timestamp() \
              WHERE environment_id=$1 AND highest_generation=$2 AND operation_id=$3 \
-               AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND last_response IS NULL",
+               AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND execution_owner=$9 AND (last_response IS NULL OR last_response=$7)",
         )
         .bind(fence.environment_id.as_uuid())
         .bind(i64::try_from(fence.environment_generation).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
@@ -839,67 +1127,341 @@ impl PgKubeVirtExecutorFenceStore {
         .bind(fence.request_id.to_string())
         .bind(value)
         .bind(matches!(response, KubeVirtExecutorResponse::Deleted { .. }))
-        .execute(&self.pool)
+        .bind(serde_json::to_value(instance).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
+        .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(KubeVirtExecutorFenceError::StaleGeneration);
         }
+        transaction.commit().await?;
         Ok(())
     }
 }
 
+/// A DB-only barrier settles any earlier admission commit before a no-row completion decision.
+async fn lock_execution_environment(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    environment_id: EnvironmentId,
+) -> Result<(), KubeVirtExecutorFenceError> {
+    sqlx::query("SELECT environment_id FROM environment.environment_instances WHERE environment_id=$1 FOR UPDATE")
+        .bind(environment_id.as_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(KubeVirtExecutorFenceError::Cancelled)?;
+    Ok(())
+}
+
 enum KubeVirtExecutorAdmission {
-    Execute(std::time::Duration),
+    Execute,
     Replay(Value),
 }
 
-/// Deadline-bounded executor with replay and stale-generation rejection.
+/// Each process remembers its actual in-flight execution until its terminal response is durable.
+#[derive(Clone)]
+struct ActiveKubeVirtExecution {
+    fence: KubeVirtBackendFence,
+    terminal: Option<KubeVirtExecutorResponse>,
+}
+
+/// Kubernetes-incarnation-fenced executor. No database lock spans backend I/O.
 pub struct FencedKubeVirtExecutor<B> {
     store: PgKubeVirtExecutorFenceStore,
     backend: B,
+    instance: KubeVirtExecutionInstance,
+    active: Mutex<std::collections::BTreeMap<Uuid, ActiveKubeVirtExecution>>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
     #[must_use]
-    pub const fn new(store: PgKubeVirtExecutorFenceStore, backend: B) -> Self {
-        Self { store, backend }
+    pub fn new(
+        store: PgKubeVirtExecutorFenceStore,
+        backend: B,
+        instance: KubeVirtExecutionInstance,
+    ) -> Self {
+        Self {
+            store,
+            backend,
+            instance,
+            active: Mutex::new(std::collections::BTreeMap::new()),
+            shutdown: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    /// Called once before listening, after the production PID1/PodSpec startup check.
+    pub async fn prepare_startup(&self) -> Result<(), KubeVirtExecutorFenceError> {
+        self.store.recover_previous_boot(&self.instance).await
+    }
+
+    fn cancel_active(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    async fn finish_terminals(&self) -> Result<(), KubeVirtExecutorFenceError> {
+        let records = self
+            .active
+            .lock()
+            .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for record in records {
+            let terminal = record
+                .terminal
+                .ok_or(KubeVirtExecutorFenceError::InProgress)?;
+            self.store
+                .complete(record.fence.clone(), &terminal, &self.instance)
+                .await?;
+            self.forget(&record.fence)?;
+        }
+        Ok(())
     }
 
     pub async fn execute(
         &self,
         envelope: KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponseEnvelope, KubeVirtExecutorFenceError> {
-        let response = match self.store.admit(&envelope).await? {
-            KubeVirtExecutorAdmission::Execute(remaining) => {
-                let response = tokio::time::timeout(
-                    remaining,
-                    self.backend.execute(&envelope.fence, &envelope.request),
-                )
-                .await
-                .map_err(|_| KubeVirtExecutorFenceError::DeadlineExceeded)?;
-                self.store
-                    .complete(envelope.fence.clone(), &response)
-                    .await?;
-                response
+        validate_kubevirt_executor_request(&envelope)?;
+        if *self.shutdown.borrow() {
+            return Err(KubeVirtExecutorFenceError::Cancelled);
+        }
+        let fence = &envelope.fence;
+        let previous = {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            if let Some(previous) = active.get(&fence.environment_id.as_uuid()) {
+                Some(previous.clone())
+            } else {
+                active.insert(
+                    fence.environment_id.as_uuid(),
+                    ActiveKubeVirtExecution {
+                        fence: fence.clone(),
+                        terminal: None,
+                    },
+                );
+                None
             }
-            KubeVirtExecutorAdmission::Replay(value) => serde_json::from_value(value)
-                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
         };
-        Ok(KubeVirtExecutorResponseEnvelope {
-            protocol_version: envelope.fence.protocol_version,
-            environment_id: envelope.fence.environment_id,
-            operation_id: envelope.fence.operation_id,
-            provider_step: envelope.fence.provider_step,
-            environment_generation: envelope.fence.environment_generation,
-            attempt: envelope.fence.attempt,
-            action: envelope.fence.action,
-            request_id: envelope.fence.request_id,
-            response,
-        })
+        if let Some(previous) = previous {
+            if let Some(terminal) = previous.terminal {
+                match self
+                    .store
+                    .complete(previous.fence.clone(), &terminal, &self.instance)
+                    .await
+                {
+                    Ok(()) => {
+                        self.forget(&previous.fence)?;
+                        if previous.fence.request_id == fence.request_id {
+                            return Ok(kubevirt_response_envelope(fence, terminal));
+                        }
+                    }
+                    Err(KubeVirtExecutorFenceError::StaleGeneration) => {
+                        self.forget(&previous.fence)?;
+                    }
+                    Err(_) => {}
+                }
+            }
+            return Ok(kubevirt_response_envelope(
+                fence,
+                KubeVirtExecutorResponse::Pending,
+            ));
+        }
+        let result = self.execute_reserved(&envelope).await;
+        // A terminal whose persistence failed stays in memory; polling retries only completion.
+        if self
+            .active
+            .lock()
+            .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?
+            .get(&fence.environment_id.as_uuid())
+            .is_none_or(|record| record.terminal.is_none())
+        {
+            self.forget(fence)?;
+        }
+        result.map(|response| kubevirt_response_envelope(fence, response))
+    }
+
+    async fn execute_reserved(
+        &self,
+        envelope: &KubeVirtExecutorRequestEnvelope,
+    ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
+        match self.store.admit(envelope, &self.instance).await {
+            Ok(KubeVirtExecutorAdmission::Replay(value)) => serde_json::from_value(value)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch),
+            Err(KubeVirtExecutorFenceError::InProgress) => Ok(KubeVirtExecutorResponse::Pending),
+            Err(error @ KubeVirtExecutorFenceError::Database(_)) => {
+                self.finish_unstarted_admission(&envelope.fence, error)
+                    .await
+            }
+            Err(error) => Err(error),
+            Ok(KubeVirtExecutorAdmission::Execute) => {
+                let permit = self
+                    .store
+                    .permit(envelope.fence.clone(), self.instance.clone());
+                let response = self.run_to_terminal(envelope, &permit).await;
+                {
+                    let mut active = self
+                        .active
+                        .lock()
+                        .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+                    let record = active
+                        .get_mut(&envelope.fence.environment_id.as_uuid())
+                        .ok_or(KubeVirtExecutorFenceError::IdentityMismatch)?;
+                    record.terminal = Some(response.clone());
+                }
+                if self
+                    .store
+                    .complete(envelope.fence.clone(), &response, &self.instance)
+                    .await
+                    .is_err()
+                {
+                    return Ok(KubeVirtExecutorResponse::Pending);
+                }
+                self.forget(&envelope.fence)?;
+                Ok(response)
+            }
+        }
+    }
+
+    async fn finish_unstarted_admission(
+        &self,
+        fence: &KubeVirtBackendFence,
+        original_error: KubeVirtExecutorFenceError,
+    ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
+        // No backend was invoked. A committed admission can be finished without repeating effects.
+        let response = KubeVirtExecutorResponse::Failed {
+            failure: unavailable(),
+        };
+        {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            let record = active
+                .get_mut(&fence.environment_id.as_uuid())
+                .ok_or(KubeVirtExecutorFenceError::IdentityMismatch)?;
+            record.terminal = Some(response.clone());
+        }
+        match self
+            .store
+            .complete(fence.clone(), &response, &self.instance)
+            .await
+        {
+            Ok(()) => {
+                self.forget(fence)?;
+                Ok(response)
+            }
+            Err(
+                KubeVirtExecutorFenceError::StaleGeneration | KubeVirtExecutorFenceError::Cancelled,
+            ) => {
+                // complete's Environment barrier proves the earlier DB transaction has settled.
+                self.forget(fence)?;
+                Err(original_error)
+            }
+            Err(_) => Ok(KubeVirtExecutorResponse::Pending),
+        }
+    }
+
+    async fn run_to_terminal(
+        &self,
+        envelope: &KubeVirtExecutorRequestEnvelope,
+        permit: &KubeVirtExecutionPermit,
+    ) -> KubeVirtExecutorResponse {
+        let mut shutdown = self.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled);
+        }
+        let remaining = match permit.check().await {
+            Ok(remaining) => remaining,
+            Err(error) => return execution_terminal_failure(&error),
+        };
+        // Leaving this block drops the actual backend future before completion is persisted.
+        let response = {
+            let work = self
+                .backend
+                .execute(&envelope.fence, &envelope.request, permit);
+            tokio::pin!(work);
+            let watch_authority = async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if let Err(error) = permit.check().await {
+                        return error;
+                    }
+                }
+            };
+            tokio::select! {
+                response = &mut work => response,
+                _ = shutdown.changed() => execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled),
+                error = watch_authority => execution_terminal_failure(&error),
+                () = tokio::time::sleep(remaining) => execution_terminal_failure(&KubeVirtExecutorFenceError::DeadlineExceeded),
+            }
+        };
+        // The backend only completes when its work is terminal. Pending is a transport reply,
+        // never a durable result or permission to repeat a possibly accepted write.
+        if matches!(response, KubeVirtExecutorResponse::Pending) {
+            return KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::ObservationInvalid,
+                    retryable: false,
+                },
+            };
+        }
+        if !matches!(response, KubeVirtExecutorResponse::Failed { .. })
+            && let Err(error) = permit.check().await
+        {
+            return execution_terminal_failure(&error);
+        }
+        response
+    }
+
+    fn forget(&self, fence: &KubeVirtBackendFence) -> Result<(), KubeVirtExecutorFenceError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+        if active
+            .get(&fence.environment_id.as_uuid())
+            .is_some_and(|record| record.fence.request_id == fence.request_id)
+        {
+            active.remove(&fence.environment_id.as_uuid());
+        }
+        Ok(())
     }
 }
 
-/// Typed NATS request/reply server for the `KubeVirt` executor subject.
+fn execution_terminal_failure(error: &KubeVirtExecutorFenceError) -> KubeVirtExecutorResponse {
+    let failure = match error {
+        KubeVirtExecutorFenceError::DeadlineExceeded => ProviderFailure {
+            code: ProviderFailureCode::Timeout,
+            retryable: false,
+        },
+        KubeVirtExecutorFenceError::Cancelled => ProviderFailure {
+            code: ProviderFailureCode::Cancelled,
+            retryable: false,
+        },
+        _ => kubevirt_executor_failure(error),
+    };
+    KubeVirtExecutorResponse::Failed { failure }
+}
+
+fn kubevirt_response_envelope(
+    fence: &KubeVirtBackendFence,
+    response: KubeVirtExecutorResponse,
+) -> KubeVirtExecutorResponseEnvelope {
+    KubeVirtExecutorResponseEnvelope {
+        protocol_version: fence.protocol_version,
+        environment_id: fence.environment_id,
+        operation_id: fence.operation_id,
+        provider_step: fence.provider_step,
+        environment_generation: fence.environment_generation,
+        attempt: fence.attempt,
+        action: fence.action,
+        request_id: fence.request_id,
+        response,
+    }
+}
+
 pub struct NatsKubeVirtExecutorServer<B> {
     client: async_nats::Client,
     subject: String,
@@ -922,71 +1484,71 @@ impl<B: KubeVirtExecutorBackend + 'static> NatsKubeVirtExecutorServer<B> {
         })
     }
 
-    pub async fn serve(self) -> Result<(), KubeVirtExecutorFenceError> {
+    pub async fn serve(
+        self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), KubeVirtExecutorFenceError> {
         let mut subscriber = self
             .client
             .subscribe(self.subject)
             .await
             .map_err(|_| KubeVirtExecutorFenceError::Transport)?;
-        while let Some(message) = subscriber.next().await {
-            let Some(reply) = message.reply.clone() else {
-                tracing::warn!(
-                    event = "environment.kubevirt_executor.request_rejected",
-                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_REPLY_REQUIRED"
-                );
-                continue;
-            };
-            if message.payload.len() > MAX_RESPONSE_BYTES {
-                tracing::warn!(
-                    event = "environment.kubevirt_executor.request_rejected",
-                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_PAYLOAD_TOO_LARGE"
-                );
-                continue;
+        let mut tasks = tokio::task::JoinSet::new();
+        let result = loop {
+            if *shutdown.borrow() {
+                break Ok(());
             }
-            let Ok(envelope) =
-                serde_json::from_slice::<KubeVirtExecutorRequestEnvelope>(&message.payload)
-            else {
-                tracing::warn!(
-                    event = "environment.kubevirt_executor.request_rejected",
-                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CONTRACT_INVALID"
-                );
-                continue;
-            };
-            let client = self.client.clone();
-            let executor = Arc::clone(&self.executor);
-            tokio::spawn(async move {
-                let fence = envelope.fence.clone();
-                let response = executor.execute(envelope).await.unwrap_or_else(|error| {
-                    KubeVirtExecutorResponseEnvelope {
-                        protocol_version: fence.protocol_version,
-                        environment_id: fence.environment_id,
-                        operation_id: fence.operation_id,
-                        provider_step: fence.provider_step,
-                        environment_generation: fence.environment_generation,
-                        attempt: fence.attempt,
-                        action: fence.action,
-                        request_id: fence.request_id,
-                        response: KubeVirtExecutorResponse::Failed {
-                            failure: kubevirt_executor_failure(&error),
-                        },
-                    }
-                });
-                let Ok(payload) = serde_json::to_vec(&response) else {
-                    tracing::error!(
-                        event = "environment.kubevirt_executor.response_failed",
-                        diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_RESPONSE_INVALID"
-                    );
-                    return;
-                };
-                if client.publish(reply, payload.into()).await.is_err() {
-                    tracing::warn!(
-                        event = "environment.kubevirt_executor.response_failed",
-                        diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TRANSPORT_FAILED"
-                    );
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break Ok(()),
+                result = tasks.join_next(), if !tasks.is_empty() => {
+                    if result.is_some_and(|result|result.is_err()) {break Err(KubeVirtExecutorFenceError::Transport);}
                 }
-            });
+                message = subscriber.next() => {
+                    let Some(message)=message else {break Err(KubeVirtExecutorFenceError::Transport);};
+                    let Some(reply)=message.reply else {
+                        tracing::warn!(event="environment.kubevirt_executor.request_rejected",reason="replyRequired");
+                        continue;
+                    };
+                    if message.payload.len()>MAX_RESPONSE_BYTES {
+                        tracing::warn!(event="environment.kubevirt_executor.request_rejected",reason="payloadTooLarge");
+                        continue;
+                    }
+                    let Ok(envelope)=serde_json::from_slice::<KubeVirtExecutorRequestEnvelope>(&message.payload) else {
+                        tracing::warn!(event="environment.kubevirt_executor.request_rejected",reason="contractInvalid");
+                        continue;
+                    };
+                    let client=self.client.clone();let executor=Arc::clone(&self.executor);
+                    tasks.spawn(async move {
+                        let fence=envelope.fence.clone();
+                        let response=executor.execute(envelope).await.unwrap_or_else(|error|kubevirt_response_envelope(&fence,KubeVirtExecutorResponse::Failed {failure:kubevirt_executor_failure(&error)}));
+                        let Ok(payload)=serde_json::to_vec(&response) else {return;};
+                        if client.publish(reply,payload.into()).await.is_err() {
+                            tracing::warn!(event="environment.kubevirt_executor.response_failed",diagnostic="LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TRANSPORT_FAILED");
+                        }
+                    });
+                }
+            }
+        };
+        // Dropping the subscription rejects new work; accepted tasks still retain their exact owner.
+        drop(subscriber);
+        self.executor.cancel_active();
+        let mut task_failed = false;
+        while let Some(task) = tasks.join_next().await {
+            task_failed |= task.is_err();
         }
-        Err(KubeVirtExecutorFenceError::Transport)
+        let completion = self.executor.finish_terminals().await;
+        if completion.is_err() {
+            tracing::error!(
+                event = "environment.kubevirt_executor.drain_failed",
+                diagnostic = "LW_ENVIRONMENT_KUBEVIRT_TERMINAL_PERSIST_FAILED"
+            );
+        }
+        result?;
+        if task_failed {
+            return Err(KubeVirtExecutorFenceError::Transport);
+        }
+        completion
     }
 }
 
@@ -1012,6 +1574,14 @@ const fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> Provid
         KubeVirtExecutorFenceError::InProgress
         | KubeVirtExecutorFenceError::Database(_)
         | KubeVirtExecutorFenceError::Transport => unavailable(),
+        KubeVirtExecutorFenceError::DeadlineExceeded => ProviderFailure {
+            code: ProviderFailureCode::Timeout,
+            retryable: false,
+        },
+        KubeVirtExecutorFenceError::Cancelled => ProviderFailure {
+            code: ProviderFailureCode::Cancelled,
+            retryable: false,
+        },
         _ => configuration_invalid(),
     }
 }
@@ -1039,6 +1609,8 @@ pub enum KubeVirtExecutorFenceError {
     IdentityMismatch,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_DEADLINE_EXCEEDED")]
     DeadlineExceeded,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CANCELLED")]
+    Cancelled,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_STALE_GENERATION")]
     StaleGeneration,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TOMBSTONED")]
@@ -1185,6 +1757,8 @@ pub struct KubeVirtProviderConfiguration {
     pub base_disks: Vec<KubeVirtBaseDiskBinding>,
     /// Optional runtime policy admitting release-declared base disks that are not seeded.
     pub runtime_vm_base: Option<RuntimeVmBasePolicy>,
+    /// Optional deployment-owned VM vGPU licensing configuration. A VM vGPU plan requires it.
+    pub vm_vgpu_licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
     pub ssh: KubeVirtSshBootstrap,
     pub resource_budget: KubeVirtResourceBudget,
 }
@@ -1250,9 +1824,22 @@ impl KubeVirtProviderConfiguration {
             trust_revision,
             base_disks,
             runtime_vm_base,
+            vm_vgpu_licensing: None,
             ssh,
             resource_budget,
         })
+    }
+
+    /// Adds the optional deployment-owned VM vGPU licensing configuration.
+    pub fn with_vm_vgpu_licensing(
+        mut self,
+        licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if let Some(configuration) = licensing.as_ref() {
+            configuration.validate()?;
+        }
+        self.vm_vgpu_licensing = licensing;
+        Ok(self)
     }
 
     fn base_disk_binding(&self, binding: &str) -> Option<&KubeVirtBaseDiskBinding> {
@@ -1275,7 +1862,7 @@ pub trait KubeVirtObservationStore: Send + Sync {
     async fn record_stopped(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
+        plan: &KubeVirtCleanupPlan,
         observation: &KubeVirtStoppedObservation,
     ) -> Result<(), KubeVirtObservationStoreError>;
 
@@ -1452,7 +2039,7 @@ impl KubeVirtObservationStore for PgKubeVirtObservationStore {
     async fn record_stopped(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
+        plan: &KubeVirtCleanupPlan,
         observation: &KubeVirtStoppedObservation,
     ) -> Result<(), KubeVirtObservationStoreError> {
         if plan.environment_id != fence.environment_id
@@ -1843,6 +2430,23 @@ where
         }
         let (cpu_millicores, memory_bytes, storage_bytes, gpu_allocation) =
             approved_resources(instance, projection)?;
+        let vm_vgpu = gpu_allocation
+            .as_ref()
+            .is_some_and(|allocation| allocation.mode == GpuAllocationMode::VmVgpu);
+        let vm_vgpu_licensing = if vm_vgpu {
+            Some(
+                self.configuration
+                    .vm_vgpu_licensing
+                    .clone()
+                    .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?,
+            )
+        } else {
+            None
+        };
+        if let Some(licensing) = vm_vgpu_licensing.as_ref() {
+            licensing.validate()?;
+            labels["labweaver.io/gpu-mode"] = json!("vm_vgpu");
+        }
         let cpu = format!("{cpu_millicores}m");
         let memory = memory_bytes.to_string();
         let storage = storage_bytes.to_string();
@@ -1856,6 +2460,9 @@ where
         let quota_cpu_limit_millicores = cpu_millicores
             .checked_add(budget.cdi_importer_cpu_limit_millicores)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        // This is compute headroom, applied once to the guest container limit.
+        // KubeVirt adds its own launcher overhead; the executor includes that and
+        // native support containers in the applied quota without changing guest approval.
         let vmi_memory_limit_bytes = memory_bytes
             .checked_add(budget.vmi_memory_overhead_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
@@ -1865,6 +2472,7 @@ where
         let quota_memory_limit_bytes = vmi_memory_limit_bytes
             .checked_add(budget.cdi_importer_memory_limit_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        // This is logical intent. The executor derives the applied CDI filesystem quota.
         let quota_storage_bytes = storage_bytes
             .checked_add(budget.cdi_scratch_storage_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
@@ -1906,6 +2514,9 @@ where
         if let Some(course_id) = instance.course_id {
             pod_labels["labweaver.io/course-id"] = json!(course_id.to_string());
         }
+        if vm_vgpu {
+            pod_labels["labweaver.io/gpu-mode"] = json!("vm_vgpu");
+        }
         let mut quota_hard = serde_json::Map::from_iter([
             ("requests.cpu".to_owned(), json!(quota_cpu_request)),
             ("limits.cpu".to_owned(), json!(quota_cpu_limit)),
@@ -1917,7 +2528,7 @@ where
         ]);
         if let Some(allocation) = gpu_allocation {
             quota_hard.insert(
-                format!("limits.{}", allocation.allocation_binding),
+                format!("requests.{}", allocation.allocation_binding),
                 json!(allocation.count.to_string()),
             );
         }
@@ -2036,7 +2647,7 @@ where
                     "metadata":{"name":data_volume_name,"namespace":namespace,"labels":labels,"annotations":annotations},
                     "spec":{
                         "sourceRef":{"kind":"DataSource","namespace":base_binding.data_source_namespace,"name":base_binding.data_source_name},
-                        "storage":{"storageClassName":base_binding.storage_class_name,"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":storage}}}
+                        "storage":{"storageClassName":base_binding.storage_class_name,"volumeMode":"Filesystem","accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":storage}}}
                     }
                 }),
             ),
@@ -2053,6 +2664,7 @@ where
                             "metadata":{"labels":pod_labels},
                             "spec":{
                                 "terminationGracePeriodSeconds":30,
+                                "architecture":"amd64",
                                 "nodeSelector":{KUBEVIRT_NODE_LABEL_KEY:KUBEVIRT_NODE_LABEL_VALUE},
                                 "domain":{
                                     "resources":{"requests":vmi_requests,"limits":vmi_limits},
@@ -2105,6 +2717,21 @@ where
                 }),
             ));
         }
+        if vm_vgpu {
+            let licensing = vm_vgpu_licensing
+                .as_ref()
+                .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+            documents.push(resource(
+                "CiliumNetworkPolicy",
+                Some(&namespace),
+                "vm-vgpu-license-egress",
+                json!({
+                    "apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy",
+                    "metadata":{"name":"vm-vgpu-license-egress","namespace":namespace,"labels":labels},
+                    "spec":{"endpointSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"egress":vm_vgpu_license_egress(licensing)?}
+                }),
+            ));
+        }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
             "releaseId": projection.release.id,
@@ -2112,6 +2739,7 @@ where
             "baseDisk": base_disk,
             "format": format,
             "storageClassName": base_binding.storage_class_name,
+            "vmVgpuLicensing": &vm_vgpu_licensing,
             "resources": documents,
         }))?;
         Ok(KubeVirtResourcePlan {
@@ -2126,6 +2754,7 @@ where
             base_disk_data_source_name: base_binding.data_source_name.clone(),
             base_disk_disk_sha256: base_binding.disk_sha256.clone(),
             storage_class_name: base_binding.storage_class_name.clone(),
+            vm_vgpu_licensing,
             resources: documents,
             plan_sha256,
         })
@@ -2170,12 +2799,14 @@ where
         let virtual_machine_name = "runtime".to_owned();
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
+            "projectId": instance.project_id,
             "namespace": namespace,
             "virtualMachineName": virtual_machine_name,
             "action": "cleanup",
         }))?;
         Ok(KubeVirtCleanupPlan {
             environment_id: instance.id,
+            project_id: instance.project_id,
             namespace,
             virtual_machine_name,
             plan_sha256,
@@ -2194,17 +2825,23 @@ where
         &self.binding
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one concrete provider action dispatch keeps pending distinct from completed observations"
+    )]
     async fn execute(
         &self,
         action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
+    ) -> Result<crate::ProviderOutcome<ProviderObservation>, ProviderFailure> {
         let fence = KubeVirtBackendFence::for_action(instance, action)?;
-        let no_endpoints = |next_state, operation_complete| ProviderObservation {
-            next_state,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete,
+        let no_endpoints = |next_state, operation_complete| {
+            ProviderOutcome::Completed(ProviderObservation {
+                next_state,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete,
+            })
         };
         if action == ReconcileAction::Cleanup
             && instance.observed_state == ObservedEnvironmentState::Deleting
@@ -2212,7 +2849,11 @@ where
             let plan = self
                 .cleanup_plan(instance)
                 .map_err(|error| projection_failure(&error))?;
-            let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
+            let ProviderOutcome::Completed(cleanup_evidence) =
+                self.backend.delete_namespace(&fence, &plan).await?
+            else {
+                return Ok(ProviderOutcome::Pending);
+            };
             if !valid_artifact_ref(&cleanup_evidence) {
                 return Err(ProviderFailure {
                     code: ProviderFailureCode::CleanupFailed,
@@ -2223,18 +2864,35 @@ where
                 .record_deleted(&fence, &plan, &cleanup_evidence)
                 .await
                 .map_err(|error| observation_store_failure(&error))?;
-            return Ok(ProviderObservation {
+            return Ok(ProviderOutcome::Completed(ProviderObservation {
                 next_state: ObservedEnvironmentState::Deleted,
                 endpoints: Vec::new(),
                 cleanup_evidence: Some(cleanup_evidence),
                 operation_complete: true,
-            });
+            }));
         }
         if action == ReconcileAction::Cleanup
             && instance.observed_state == ObservedEnvironmentState::Stopped
             && instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted
         {
             return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+        }
+        if action == ReconcileAction::Stop
+            && matches!(
+                instance.observed_state,
+                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring
+            )
+        {
+            if instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted {
+                return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+            }
+            if matches!(
+                self.stop_runtime(&fence, instance).await?,
+                ProviderOutcome::Pending
+            ) {
+                return Ok(ProviderOutcome::Pending);
+            }
+            return Ok(no_endpoints(ObservedEnvironmentState::Stopped, true));
         }
         let resolved = self
             .releases
@@ -2258,40 +2916,44 @@ where
                 ReconcileAction::Provision | ReconcileAction::Reset,
                 ObservedEnvironmentState::Provisioning,
             ) => {
-                let observed = self.backend.apply(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.apply(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
+                    .map(ProviderOutcome::Completed)
             }
             (ReconcileAction::Observe, _) => {
-                let observed = self.backend.observe(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.observe(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
+                    .map(ProviderOutcome::Completed)
             }
             (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
-                let observed = self.backend.start(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.start(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
+                    .map(ProviderOutcome::Completed)
             }
             (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
-                let observed = self.backend.restart(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.restart(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
-            }
-            (
-                ReconcileAction::Stop,
-                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring,
-            ) => {
-                let observed = self.backend.stop(&fence, &plan).await?;
-                validate_stopped_observation(instance, observed)?;
-                self.observations
-                    .record_stopped(&fence, &plan, &observed)
-                    .await
-                    .map_err(|error| observation_store_failure(&error))?;
-                Ok(no_endpoints(
-                    ObservedEnvironmentState::Stopped,
-                    instance.desired_state
-                        == contracts::environment::DesiredEnvironmentState::Stopped,
-                ))
+                    .map(ProviderOutcome::Completed)
             }
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::Rejected,
@@ -2307,6 +2969,25 @@ where
     R: ContainerReleaseResolver,
     S: KubeVirtObservationStore,
 {
+    async fn stop_runtime(
+        &self,
+        fence: &KubeVirtBackendFence,
+        instance: &EnvironmentInstance,
+    ) -> Result<ProviderOutcome<()>, ProviderFailure> {
+        let plan = self
+            .cleanup_plan(instance)
+            .map_err(|error| projection_failure(&error))?;
+        let ProviderOutcome::Completed(observed) = self.backend.stop(fence, &plan).await? else {
+            return Ok(ProviderOutcome::Pending);
+        };
+        validate_stopped_observation(instance, observed)?;
+        self.observations
+            .record_stopped(fence, &plan, &observed)
+            .await
+            .map_err(|error| observation_store_failure(&error))?;
+        Ok(ProviderOutcome::Completed(()))
+    }
+
     async fn accept_running_observation(
         &self,
         fence: &KubeVirtBackendFence,
@@ -2478,7 +3159,7 @@ fn approved_resources(
                 resources.cpu_millicores,
                 resources.memory_bytes,
                 resources.storage_bytes,
-                None,
+                experiment_gpu_allocation(instance, projection)?,
             ))
         }
         contracts::authoring::EnvironmentClass::Work => {
@@ -2509,11 +3190,88 @@ fn approved_resources(
     }
 }
 
+/// Returns the Resource-resolved Experiment GPU allocation, failing closed on any mismatch.
+///
+/// A release that declares a GPU but has no durable allocation, or whose allocation does not
+/// match the declared class and count, is rejected before any VM object is rendered.
+fn experiment_gpu_allocation(
+    instance: &EnvironmentInstance,
+    projection: &ReleasePublished,
+) -> Result<Option<GpuAllocation>, ReleaseProjectionError> {
+    match (
+        &instance.gpu_allocation,
+        projection.environment_spec.resources.gpu.as_ref(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(allocation), Some(request))
+            if allocation.class == request.class && allocation.count == request.count =>
+        {
+            allocation
+                .validate()
+                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+            Ok(Some(allocation.clone()))
+        }
+        _ => Err(ReleaseProjectionError::SecurityPostureInvalid),
+    }
+}
+
+fn vm_vgpu_license_egress(
+    licensing: &KubeVirtVmVgpuLicensingConfiguration,
+) -> Result<Vec<Value>, ReleaseProjectionError> {
+    licensing.validate()?;
+    let mut egress = vec![json!({
+        "toEndpoints":[{"matchLabels":{
+            "k8s:io.kubernetes.pod.namespace":"kube-system",
+            "k8s:k8s-app":"kube-dns"
+        }}],
+        "toPorts":[{"ports":[{"protocol":"UDP","port":"53"},{"protocol":"TCP","port":"53"}],"rules":{"dns":[{"matchPattern":"*"}]}}]
+    })];
+    match licensing.mode {
+        KubeVirtVmVgpuLicenseMode::NvidiaDls => {
+            let host = licensing
+                .license_url
+                .host_str()
+                .ok_or(ReleaseProjectionError::ConfigurationInvalid)?;
+            let destination = if let Ok(address) = IpAddr::from_str(host) {
+                let prefix = if address.is_ipv4() { 32 } else { 128 };
+                json!({"toCIDR":[format!("{address}/{prefix}")]})
+            } else {
+                json!({"toFQDNs":[{"matchName":host}]})
+            };
+            let mut destination = destination;
+            destination["toPorts"] = json!([{"ports":[{"protocol":"TCP","port":licensing.license_url.port_or_known_default().unwrap_or(443).to_string()}]}]);
+            egress.push(destination);
+        }
+        KubeVirtVmVgpuLicenseMode::FastapiDls => {
+            let host = licensing
+                .license_url
+                .host_str()
+                .ok_or(ReleaseProjectionError::ConfigurationInvalid)?;
+            let parts = host.split('.').collect::<Vec<_>>();
+            if parts.len() != 5
+                || !valid_dns_label(parts[0])
+                || parts[2..] != ["svc", "cluster", "local"]
+                || !valid_dns_label(parts[1])
+            {
+                return Err(ReleaseProjectionError::ConfigurationInvalid);
+            }
+            egress.push(json!({
+                "toEndpoints":[{"matchLabels":{
+                    "k8s:io.kubernetes.pod.namespace":parts[1],
+                    "app.kubernetes.io/name":"fastapi-dls"
+                }}],
+                "toPorts":[{"ports":[{"protocol":"TCP","port":"8443"}]}]
+            }));
+        }
+    }
+    Ok(egress)
+}
+
 fn valid_subject(value: &str) -> bool {
     valid_binding(value) && !value.contains('*') && !value.contains('>')
 }
 
-fn valid_dns_label(value: &str) -> bool {
+pub(crate) fn valid_dns_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
         && !value.starts_with('-')
@@ -2521,16 +3279,6 @@ fn valid_dns_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-fn valid_extended_resource_name(value: &str) -> bool {
-    let Some((prefix, name)) = value.rsplit_once('/') else {
-        return valid_dns_label(value);
-    };
-    !prefix.is_empty()
-        && prefix.len() <= 253
-        && prefix.split('.').all(valid_dns_label)
-        && valid_dns_label(name)
 }
 
 fn valid_guest_user(value: &str) -> bool {
@@ -2570,5 +3318,346 @@ const fn configuration_invalid() -> ProviderFailure {
     ProviderFailure {
         code: ProviderFailureCode::Rejected,
         retryable: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnstartedBackend(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl KubeVirtExecutorBackend for UnstartedBackend {
+        async fn execute(
+            &self,
+            _fence: &KubeVirtBackendFence,
+            _request: &KubeVirtExecutorRequest,
+            _permit: &KubeVirtExecutionPermit,
+        ) -> KubeVirtExecutorResponse {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            KubeVirtExecutorResponse::Failed {
+                failure: configuration_invalid(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real database race controls the admission commit barrier and subsequent absent-row completion"
+    )]
+    async fn unstarted_completion_waits_for_admission_commit_before_deciding_absence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let authority = crate::test_support::requested_instance();
+        let mut fence = KubeVirtBackendFence::for_action(&authority, ReconcileAction::Provision)
+            .map_err(|error| format!("{error:?}"))?;
+        let (_container, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
+        let pool = permit.pool.clone();
+        sqlx::query("DELETE FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid())
+            .execute(&pool)
+            .await?;
+        let executor = Arc::new(FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(pool.clone()),
+            UnstartedBackend(std::sync::atomic::AtomicUsize::new(0)),
+            permit.instance.clone(),
+        ));
+        executor
+            .active
+            .lock()
+            .map_err(|_| "active fixture lock")?
+            .insert(
+                fence.environment_id.as_uuid(),
+                ActiveKubeVirtExecution {
+                    fence: fence.clone(),
+                    terminal: None,
+                },
+            );
+        let mut admission = pool.begin().await?;
+        lock_execution_environment(&mut admission, fence.environment_id).await?;
+        sqlx::query("INSERT INTO environment.kubevirt_executor_fences (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned,last_action,last_request_id,deadline_at,execution_owner) VALUES ($1,$2,$3,$4,$5,FALSE,'provision',$6,$7,$8)")
+            .bind(fence.environment_id.as_uuid()).bind(i64::try_from(fence.environment_generation)?)
+            .bind(fence.operation_id.as_uuid()).bind(i32::try_from(fence.provider_step)?).bind(i32::try_from(fence.attempt)?)
+            .bind(fence.request_id.to_string()).bind(fence.deadline_at.get()).bind(serde_json::to_value(&permit.instance)?)
+            .execute(&mut *admission).await?;
+        let (started, receiver) = tokio::sync::oneshot::channel();
+        let executing = Arc::clone(&executor);
+        let task_fence = fence.clone();
+        let mut completion = tokio::spawn(async move {
+            let _ = started.send(());
+            executing
+                .finish_unstarted_admission(
+                    &task_fence,
+                    KubeVirtExecutorFenceError::Database(sqlx::Error::Protocol(
+                        "admission acknowledgement lost".to_owned(),
+                    )),
+                )
+                .await
+        });
+        receiver.await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut completion)
+                .await
+                .is_err()
+        );
+        admission.commit().await?;
+        assert!(matches!(
+            completion.await??,
+            KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::Unavailable,
+                    ..
+                }
+            }
+        ));
+        let terminal: Value = sqlx::query_scalar("SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid()).fetch_one(&pool).await?;
+        assert_eq!(terminal["status"], "failed");
+        assert_eq!(
+            executor.backend.0.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(
+            executor
+                .active
+                .lock()
+                .map_err(|_| "active fixture lock")?
+                .is_empty()
+        );
+        sqlx::query("DELETE FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid())
+            .execute(&pool)
+            .await?;
+        executor
+            .active
+            .lock()
+            .map_err(|_| "active fixture lock")?
+            .insert(
+                fence.environment_id.as_uuid(),
+                ActiveKubeVirtExecution {
+                    fence: fence.clone(),
+                    terminal: None,
+                },
+            );
+        assert!(matches!(
+            executor
+                .finish_unstarted_admission(
+                    &fence,
+                    KubeVirtExecutorFenceError::Database(sqlx::Error::Protocol(
+                        "admission rolled back".to_owned()
+                    ))
+                )
+                .await,
+            Err(KubeVirtExecutorFenceError::Database(_))
+        ));
+        assert!(
+            executor
+                .active
+                .lock()
+                .map_err(|_| "active fixture lock")?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nats_timeout_is_pending_but_no_responders_is_real_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers::{
+            GenericImage,
+            core::{IntoContainerPort, WaitFor},
+            runners::AsyncRunner,
+        };
+        let nats = GenericImage::new("nats", "2.11.8-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .start()
+            .await?;
+        let client = async_nats::connect(format!(
+            "nats://127.0.0.1:{}",
+            nats.get_host_port_ipv4(4222).await?
+        ))
+        .await?;
+        let mut subscriber = client.subscribe("fixture.kubevirt.accepted").await?;
+        client.flush().await?;
+        let instance = crate::test_support::requested_instance();
+        let fence = KubeVirtBackendFence {
+            protocol_version: KUBEVIRT_BACKEND_PROTOCOL_VERSION,
+            environment_id: instance.id,
+            operation_id: instance.operation.id,
+            provider_step: 1,
+            environment_generation: 1,
+            attempt: 1,
+            action: ReconcileAction::Cleanup,
+            request_id: Sha256Digest::of_bytes(b"bound-in-request"),
+            trace_id: "transport-fixture".to_owned(),
+            deadline_at: instance.operation.deadline_at,
+        };
+        let request = KubeVirtExecutorRequest::DeleteNamespace {
+            plan: KubeVirtCleanupPlan {
+                environment_id: instance.id,
+                project_id: instance.project_id,
+                namespace: format!("lw-env-{}", instance.id),
+                virtual_machine_name: "runtime".to_owned(),
+                plan_sha256: Sha256Digest::of_bytes(b"cleanup"),
+            },
+        };
+        let backend = NatsKubeVirtProviderBackend::new(
+            client.clone(),
+            "fixture.kubevirt.accepted".to_owned(),
+            Duration::from_millis(30),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        assert!(matches!(
+            backend
+                .request(&fence, request.clone())
+                .await
+                .map_err(|error| format!("{error:?}"))?,
+            KubeVirtExecutorResponse::Pending
+        ));
+        let accepted = tokio::time::timeout(Duration::from_secs(1), subscriber.next())
+            .await?
+            .ok_or("request not accepted")?;
+        let accepted: KubeVirtExecutorRequestEnvelope = serde_json::from_slice(&accepted.payload)?;
+        assert_eq!(accepted.fence.operation_id, fence.operation_id);
+        assert_eq!(accepted.fence.attempt, 1);
+        assert_eq!(accepted.fence.deadline_at, fence.deadline_at);
+        let no_responder = NatsKubeVirtProviderBackend::new(
+            client,
+            "fixture.kubevirt.no_responder".to_owned(),
+            Duration::from_millis(30),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        assert!(matches!(
+            no_responder.request(&fence, request).await,
+            Err(ProviderFailure {
+                code: ProviderFailureCode::Unavailable,
+                retryable: true
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn external_nvidia_dls_egress_uses_exact_fqdn_and_port() -> Result<(), ReleaseProjectionError> {
+        let license_url = "https://licenses.example.test:8443/"
+            .parse()
+            .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
+        let licensing = KubeVirtVmVgpuLicensingConfiguration {
+            mode: KubeVirtVmVgpuLicenseMode::NvidiaDls,
+            license_url,
+            token_secret_ref: KubeVirtSecretRef {
+                namespace: "license-system".to_owned(),
+                name: "client-token".to_owned(),
+                key: "token".to_owned(),
+            },
+            tls_ca_secret_ref: KubeVirtSecretRef {
+                namespace: "license-system".to_owned(),
+                name: "license-tls".to_owned(),
+                key: "ca.crt".to_owned(),
+            },
+            fastapi_dls_signing_root_ca_secret_ref: None,
+        };
+        let egress = vm_vgpu_license_egress(&licensing)?;
+        assert_eq!(
+            egress[1]["toFQDNs"][0]["matchName"],
+            json!("licenses.example.test")
+        );
+        assert_eq!(egress[1]["toPorts"][0]["ports"][0]["port"], json!("8443"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_base_name_separates_full_registry_source_and_stays_dns_safe() {
+        let digest = "a".repeat(64);
+        let source_a = format!("docker://harbor.example/guest-a@sha256:{digest}");
+        let source_b = format!("docker://harbor.example/guest-b@sha256:{digest}");
+        let name_a = runtime_base_data_source_name(
+            &source_a,
+            16_u64 << 30,
+            VirtualMachineDiskFormat::Qcow2,
+            "local-path",
+        );
+        let name_b = runtime_base_data_source_name(
+            &source_b,
+            16_u64 << 30,
+            VirtualMachineDiskFormat::Qcow2,
+            "local-path",
+        );
+
+        assert!(name_a.is_some());
+        assert!(name_b.is_some());
+        let name_a = name_a.unwrap_or_default();
+        let name_b = name_b.unwrap_or_default();
+        assert_ne!(name_a, name_b);
+        assert_eq!(name_a.len(), 56);
+        assert!(valid_dns_label(&name_a));
+        assert!(valid_dns_label(&format!("{name_a}-seed")));
+    }
+
+    #[test]
+    fn runtime_base_name_covers_strict_import_identity_fields() {
+        let source = "docker://harbor.example/guest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let name = |capacity, format, storage_class| {
+            runtime_base_data_source_name(source, capacity, format, storage_class)
+                .unwrap_or_default()
+        };
+
+        assert_eq!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path")
+        );
+        assert_ne!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(32_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path")
+        );
+        assert_ne!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(16_u64 << 30, VirtualMachineDiskFormat::Raw, "local-path")
+        );
+        assert_ne!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "fast-local")
+        );
+    }
+
+    #[test]
+    fn runtime_binding_and_clone_reference_share_one_data_source_name() -> Result<(), String> {
+        let policy = RuntimeVmBasePolicy::new(
+            "local-path".to_owned(),
+            "local-path".to_owned(),
+            "labweaver-system".to_owned(),
+            "student".to_owned(),
+            22,
+            2,
+            32_u64 << 30,
+        )
+        .map_err(|error| format!("policy: {error:?}"))?;
+        let base_disk = VirtualMachineBaseDisk {
+            binding: "runtime-vm".to_owned(),
+            source_registry_digest:
+                "docker://harbor.example/guest@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            capacity_bytes: 16_u64 << 30,
+        };
+        let format = VirtualMachineDiskFormat::Qcow2;
+        let binding = policy
+            .runtime_binding(&base_disk, format)
+            .ok_or_else(|| "runtime binding rejected".to_owned())?;
+        let expected = runtime_base_data_source_name(
+            &base_disk.source_registry_digest,
+            base_disk.capacity_bytes,
+            format,
+            "local-path",
+        )
+        .ok_or_else(|| "runtime identity rejected".to_owned())?;
+        if binding.data_source_name != expected {
+            return Err(format!(
+                "binding name {} differs from expected {expected}",
+                binding.data_source_name
+            ));
+        }
+        Ok(())
     }
 }

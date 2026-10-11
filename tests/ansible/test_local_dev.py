@@ -251,7 +251,7 @@ class LocalDevBundleTests(unittest.TestCase):
         )
         self.assertEqual(
             [observer["providerBinding"] for observer in rendered["gpuObservers"]],
-            ["gpu-primary-v1", "kubernetes-work-local-hostpath"],
+            ["container-primary-v1", "kubernetes-work-local-hostpath"],
         )
         for observer in rendered["gpuObservers"]:
             self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
@@ -265,9 +265,9 @@ class LocalDevBundleTests(unittest.TestCase):
             )
         classes = {seed["class"]: seed for seed in rendered["gpuCatalogSeed"]}
         self.assertEqual(
-            classes["nvidia-cuda"]["allocationBinding"], "nvidia-cuda-primary-v1"
+            classes["nvidia-cuda"]["allocationBinding"], "nvidia.com/gpu"
         )
-        self.assertEqual(classes["nvidia-cuda"]["providerBinding"], "gpu-primary-v1")
+        self.assertEqual(classes["nvidia-cuda"]["providerBinding"], "container-primary-v1")
         self.assertEqual(classes["nvidia-cuda-local"]["allocationBinding"], "nvidia.com/gpu")
         # Resource resolves the allocation for the binding the Work environment runs under.
         self.assertEqual(
@@ -290,7 +290,7 @@ class LocalDevBundleTests(unittest.TestCase):
                         "class": "nvidia-cuda",
                         "mode": "exclusive",
                         "capacityUnits": 1,
-                        "allocationBinding": "nvidia-cuda-primary-v1",
+                        "allocationBinding": "nvidia.com/gpu",
                     }
                 ],
             },
@@ -302,7 +302,7 @@ class LocalDevBundleTests(unittest.TestCase):
                         "mode": "exclusive",
                         "providerBinding": "kubernetes-work-local-hostpath",
                         "capacityUnits": 1,
-                        "allocationBinding": "nvidia-cuda-primary-v1",
+                        "allocationBinding": "nvidia.com/gpu",
                     }
                 ],
             },
@@ -1918,6 +1918,15 @@ class LocalDevBundleTests(unittest.TestCase):
                 control_values["control"]["evaluationRuntime"]["runnerImage"],
                 images["evaluation_runner"],
             )
+            llm_policy_options = control_values["control"]["llmPolicyOptions"]
+            self.assertEqual(
+                llm_policy_options["models"],
+                [{"model": "test-model", "label": "Configured model"}],
+            )
+            self.assertEqual(llm_policy_options["defaultModel"], "test-model")
+            self.assertEqual(llm_policy_options["runtimeBinding"], "claude-code-production")
+            self.assertEqual(llm_policy_options["claudeCodeVersion"], "2.1.215")
+            self.assertEqual(llm_policy_options["maxInFlightPerWorker"], 1)
             evaluation_config = next(
                 document
                 for document in platform_documents
@@ -2180,6 +2189,10 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertEqual(
                 build_values["executor"]["projectStorageQuotaBytes"],
                 provider.project_storage_quota_bytes,
+            )
+            self.assertEqual(
+                build_values["executor"]["serviceImage"],
+                images["evaluation_service"],
             )
             build_secret = next(
                 document

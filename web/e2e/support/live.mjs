@@ -1,10 +1,12 @@
 import { randomBytes } from 'node:crypto'
+import path from 'node:path'
 import { expect } from '@playwright/test'
 
+const authDir = process.env.LABWEAVER_AUTH_DIR || '.auth'
 export const AUTH_STATE = Object.freeze({
-  teacher: '.auth/teacher.json',
-  student: '.auth/student.json',
-  admin: '.auth/platform-admin.json',
+  teacher: path.join(authDir, 'teacher.json'),
+  student: path.join(authDir, 'student.json'),
+  admin: path.join(authDir, 'platform-admin.json'),
 })
 
 export function uuidv7() {
@@ -38,13 +40,20 @@ export function policyFor(projectId, courseId = null, providerModel, budgetOverr
       maxInFlightPerWorker: 1,
     },
     budget: {
-      maxInputTokens: 100000,
-      maxOutputTokens: 20000,
-      maxRequests: 8,
-      maxCostMicrousd: 1000000,
-      timeoutMilliseconds: 120000,
+      // An authoring candidate runs for up to sixty provider turns and each turn
+      // re-sends the reviewed prompt, so the ceilings cover a whole multi-turn
+      // session rather than a single short request. They are deliberately far
+      // above what sixty turns can consume: the binding limits are the CLI's
+      // --max-turns and the wall clock, not the token accounting, which counts
+      // cached prompt prefixes on every turn. A project's real policy comes from
+      // the teacher-facing form; these are the acceptance harness defaults.
+      maxInputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_INPUT_TOKENS) || 20000000,
+      maxOutputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_OUTPUT_TOKENS) || 5000000,
+      maxRequests: Number(process.env.LABWEAVER_E2E_LLM_MAX_REQUESTS) || 200,
+      maxCostMicrousd: Number(process.env.LABWEAVER_E2E_LLM_MAX_COST_MICROUSD) || 500000000,
+      timeoutMilliseconds: Number(process.env.LABWEAVER_E2E_LLM_TIMEOUT_MS) || 900000,
       maxTransientRetries: 1,
-      maxSchemaRepairs: 2,
+      maxSchemaRepairs: Number(process.env.LABWEAVER_E2E_LLM_MAX_SCHEMA_REPAIRS) || 2,
       ...budgetOverrides,
     },
     deniedDataClasses: [
@@ -76,17 +85,78 @@ export async function expectJson(response, label) {
   }
 }
 
-export async function createProjectPolicy(request, baseURL, projectId, budgetOverrides = {}) {
-  const body = policyFor(projectId, null, process.env.LABWEAVER_E2E_PROVIDER_MODEL, budgetOverrides)
-  const response = await request.post(`/api/v1/projects/${projectId}/llm-egress-policies`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
-    data: body,
+function formatPolicyDecimal(value, scale) {
+  const integer = Number(value)
+  if (!Number.isSafeInteger(integer) || integer <= 0) throw new Error('POLICY_BUDGET_VALUE_INVALID')
+  const unit = 10 ** scale
+  const whole = Math.floor(integer / unit)
+  const fraction = integer % unit
+  if (fraction === 0) return String(whole)
+  return `${whole}.${String(fraction).padStart(scale, '0').replace(/0+$/, '')}`
+}
+
+export async function configureProjectPolicyByUi(page, projectId, budgetOverrides = {}) {
+  const model = process.env.LABWEAVER_E2E_PROVIDER_MODEL?.trim()
+  if (!model || /\s/.test(model)) throw new Error('LABWEAVER_E2E_PROVIDER_MODEL_REQUIRED')
+  const defaults = policyFor(projectId, null, model, budgetOverrides).budget
+  await page.goto(`/researcher/ai-policy?projectId=${encodeURIComponent(projectId)}`, {
+    waitUntil: 'domcontentloaded',
   })
-  return await expectJson(response, 'PROJECT_POLICY_CREATE_FAILED')
+  await expect(page.getByRole('heading', { name: '项目 AI 设置', exact: true })).toBeVisible()
+  const projectSelect = page.locator('select[data-testid="policy-project-select"]')
+  await expect(projectSelect).toBeVisible()
+  await projectSelect.selectOption(projectId)
+  await expect(page.locator('[data-testid="policy-options-state"]')).toBeVisible()
+  const modelSelect = page.locator('select[data-testid="policy-model-select"]')
+  await expect(modelSelect).toBeVisible({ timeout: 30_000 })
+  await modelSelect.selectOption(model)
+  const consent = page.locator('input[data-testid="policy-material-consent"]')
+  await consent.check()
+  const fields = {
+    maxInputTokens: defaults.maxInputTokens,
+    maxOutputTokens: defaults.maxOutputTokens,
+    maxRequests: defaults.maxRequests,
+    maxCostDollars: formatPolicyDecimal(defaults.maxCostMicrousd, 6),
+    timeoutSeconds: formatPolicyDecimal(defaults.timeoutMilliseconds, 3),
+    maxTransientRetries: defaults.maxTransientRetries,
+    maxSchemaRepairs: defaults.maxSchemaRepairs,
+  }
+  for (const [name, value] of Object.entries(fields)) {
+    await page.locator(`input[name="${name}"]`).fill(String(value))
+  }
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === `/api/v1/projects/${projectId}/llm-egress-policies`
+  })
+  await page.locator('[data-testid="policy-save-button"]').click()
+  return await expectJson(await responsePromise, 'PROJECT_POLICY_UI_SAVE_FAILED')
+}
+
+/** Enter a role workbench through the public home task cards. */
+export async function navigateFromHomeByUi(page, taskLabel) {
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByRole('heading', { name: '欢迎进入 LabWeaver', exact: true })).toBeVisible({ timeout: 60_000 })
+  const tasks = page.locator('.task-grid a.task-card')
+  const compact = (value) => String(value ?? '').replace(/\s+/g, '')
+  let matchingIndexes = []
+  await expect.poll(
+    async () => {
+      matchingIndexes = await tasks.evaluateAll((cards, expected) => cards.reduce((indexes, card, index) => {
+        const title = card.querySelector('.card-title')?.textContent ?? ''
+        if (title.replace(/\s+/g, '') === expected) indexes.push(index)
+        return indexes
+      }, []), compact(taskLabel))
+      return matchingIndexes.length
+    },
+    { timeout: 60_000, intervals: [250, 500, 1000] },
+  ).toBe(1)
+  if (matchingIndexes.length !== 1) throw new Error(`HOME_TASK_CARD_NOT_UNIQUE:${taskLabel}`)
+  await tasks.nth(matchingIndexes[0]).click()
 }
 
 export async function createProjectByUi(page, name) {
-  await page.goto('/researcher/workspaces', { waitUntil: 'domcontentloaded' })
+  await navigateFromHomeByUi(page, '项目与工作空间')
   await page.getByRole('heading', { name: '项目与工作空间', exact: true }).waitFor()
   await page.getByRole('button', { name: '新建项目', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '新建项目' })
@@ -95,39 +165,25 @@ export async function createProjectByUi(page, name) {
   const responsePromise = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/projects')
   await dialog.getByRole('button', { name: '创建项目', exact: true }).click()
   const project = await expectJson(await responsePromise, 'PROJECT_CREATE_FAILED')
-  await page.getByRole('option', { name: new RegExp(project.id) }).waitFor()
+  const trigger = page.getByRole('button', { name: '选择项目', exact: true })
+  await expect(trigger.locator('.trigger-primary')).toHaveText(project.name, { timeout: 30_000 })
   return project
 }
 
 export async function selectProjectByUi(page, projectId) {
+  const projects = await expectJson(await page.request.get('/api/v1/projects'), 'PROJECT_LIST_FOR_SELECTOR_FAILED')
+  if (!Array.isArray(projects)) throw new Error('PROJECT_LIST_FOR_SELECTOR_INVALID')
+  const project = projects.find((item) => item?.id === projectId)
+  if (!project || typeof project.name !== 'string' || project.name.trim() === '') {
+    throw new Error(`PROJECT_SELECTOR_PROJECT_NOT_FOUND:${projectId}`)
+  }
   const trigger = page.getByRole('button', { name: '选择项目', exact: true })
   await trigger.click()
   const dialog = page.getByRole('dialog', { name: '项目选择器' })
-  const option = dialog.getByRole('option', { name: new RegExp(projectId) })
-  await option.waitFor()
+  const option = dialog.locator('button.project-item').filter({ hasText: project.name })
+  await expect(option).toHaveCount(1, { timeout: 30_000 })
   await option.click()
-  await expect(trigger).toContainText(projectId)
-}
-
-export async function uploadPackage(request, baseURL, projectId, policyRevision = 1) {
-  const content = Buffer.from('# LabWeaver live Work fixture\n\nUse the managed environment.\n', 'utf8')
-  const files = [{ path: 'README.md', sizeBytes: content.byteLength, mediaType: 'text/markdown' }]
-  const sessionResponse = await request.post(`/api/v1/projects/${projectId}/problem-package-uploads`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
-    data: { projectId, courseId: null, files, retentionPolicyRevision: policyRevision },
-  })
-  const session = await expectJson(sessionResponse, 'PACKAGE_UPLOAD_SESSION_FAILED')
-  const sessionEtag = sessionResponse.headers().etag
-  if (!/^"rev-\d+"$/.test(sessionEtag ?? '')) throw new Error(`PACKAGE_UPLOAD_ETAG_INVALID:${sessionEtag ?? 'missing'}`)
-  const target = session.uploadTargets.find((item) => item.path === 'README.md')
-  if (!target) throw new Error('PACKAGE_UPLOAD_TARGET_MISSING:README.md')
-  const uploadResponse = await request.put(target.uploadUrl, { headers: target.requiredHeaders, data: content })
-  if (!uploadResponse.ok()) throw new Error(`PACKAGE_OBJECT_UPLOAD_FAILED:${uploadResponse.status()} ${(await uploadResponse.text()).slice(0, 2000)}`)
-  const completeResponse = await request.post(`/api/v1/projects/${projectId}/problem-package-uploads/${session.id}/complete`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7(), 'If-Match': sessionEtag }),
-    data: {},
-  })
-  return await expectJson(completeResponse, 'PACKAGE_UPLOAD_COMPLETE_FAILED')
+  await expect(trigger.locator('.trigger-primary')).toHaveText(project.name)
 }
 
 export async function pollJson(request, path, predicate, label, timeout = 180_000) {

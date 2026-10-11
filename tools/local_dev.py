@@ -109,6 +109,8 @@ NATS_BOX_IMAGE = "docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf67
 MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
 KEYCLOAK_IMAGE = "docker.io/keycloak/keycloak:26.7.0@sha256:1362a9d9f13ab325231ea133610cc905e12805804abc7acbef552dd613720aa6"
 CLAUDE_CODE_VERSION = "2.1.215"
+CLAUDE_CODE_RUNTIME_BINDING = "claude-code-production"
+CLAUDE_CODE_MAX_IN_FLIGHT_PER_WORKER = 1
 CLAUDE_CODE_LINUX_X64_SHA512 = "cf00de4e2b500f7bf4fc6c57de19753d3639e23ee2177fe103d40614cf79ca29ddf61064bcbcafe9a53d59d1fbd3cf6cdc02027c8ea167be00157b41469e9bcd"
 PROVIDER_ENVIRONMENT_KEYS = (
     "ANTHROPIC_BASE_URL",
@@ -630,6 +632,31 @@ def render_authoring_buildkit_sidecar(data: str, buildkit_image: str) -> str:
         )
         if replacements != 1:
             fail(f"agent configuration has no commented sandbox.{key} anchor")
+    return data
+
+
+def render_local_llm_policy_options(
+    data: str, provider_environment: dict[str, str]
+) -> str:
+    """Bind the local Control policy options to the explicitly selected provider model."""
+
+    model = provider_environment.get("ANTHROPIC_MODEL", "").strip()
+    if not model:
+        fail("local provider configuration has no ANTHROPIC_MODEL")
+    block = (
+        "  llmPolicyOptions:\n"
+        "    models:\n"
+        f"      - model: {json.dumps(model)}\n"
+        "        label: \"Configured model\"\n"
+        f"    defaultModel: {json.dumps(model)}\n"
+        f"    runtimeBinding: {json.dumps(CLAUDE_CODE_RUNTIME_BINDING)}\n"
+        f"    claudeCodeVersion: {json.dumps(CLAUDE_CODE_VERSION)}\n"
+        f"    maxInFlightPerWorker: {CLAUDE_CODE_MAX_IN_FLIGHT_PER_WORKER}\n"
+    )
+    options_pattern = re.compile(r"(?ms)^  llmPolicyOptions:\n.*?(?=^[^ \t]|\Z)")
+    data, replacements = options_pattern.subn(block, data, count=1)
+    if replacements != 1:
+        fail("control plane configuration has no llmPolicyOptions block")
     return data
 
 
@@ -3115,6 +3142,7 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("control plane configuration has no evaluationRuntime.runnerImage")
+            data = render_local_llm_policy_options(data, provider_environment)
         if source == "agent-control-plane.yaml.example":
             sandbox_image = images.get("authoring_sandbox")
             if not isinstance(sandbox_image, str) or not re.fullmatch(
@@ -3182,6 +3210,28 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("build executor configuration has no projectStorageQuotaBytes")
+            service_image = images.get("evaluation_service")
+            if not isinstance(service_image, str) or not re.fullmatch(
+                r"[^\s@]+(?:/[^\s@]+)*@sha256:[0-9a-f]{64}", service_image
+            ):
+                fail(
+                    "local build executor service image must be an immutable evaluation_service image"
+                )
+            service_image_pattern = re.compile(
+                r'(?m)^(\s*serviceImage:\s*)(?:"[^"]*"|[^\s#]+)\s*$'
+            )
+            data, replacements = service_image_pattern.subn(
+                rf'\g<1>"{service_image}"', data, count=1
+            )
+            if replacements != 1:
+                executor_pattern = re.compile(r"(?m)^(executor:\s*)$")
+                data, replacements = executor_pattern.subn(
+                    rf'\g<1>\n  serviceImage: "{service_image}"',
+                    data,
+                    count=1,
+                )
+                if replacements != 1:
+                    fail("build executor configuration has no executor mapping")
         if source.startswith("environment-providers"):
             data=(ROOT/"deploy/config/environment-providers.local-hostpath.example.json").read_text()
             providers = json.loads(data)
@@ -3236,6 +3286,11 @@ def make_app_input(
             elif key in ("mtls-ca.pem",): values[key]=platform_ca
             elif key in ("postgres-ca.pem","minio-ca.pem","nats-ca.pem","oidc-ca.pem","service-oidc-ca.pem","outbound-ca.pem"):
                 values[key]=ca
+            elif key in ("portal-ca.pem", "portal-public-root.crt"):
+                # The local portal certificate is issued by the same public
+                # authority used by the HTTPS edge. Keep the trust root in
+                # the service bundle aligned with that certificate chain.
+                values[key] = ca
             elif key=="nats-server": values[key]=f"tls://nats.{DATA_NAMESPACE}.svc:4222"
             elif key in ("nats.creds","nats-client.crt","nats-client.key"):
                 values[key]=(nats/nats_name/key.replace("nats-client.","nats-client.")).read_bytes()
@@ -3357,7 +3412,7 @@ def make_app_input(
         elif key in ("nats-client.crt", "nats-client.key", "nats.creds"):
             resource_values[key] = (nats / "resource-service" / key).read_bytes()
         elif key == "mtls-ca.pem": resource_values[key] = platform_ca
-        elif key == "oidc-ca.pem": resource_values[key] = ca
+        elif key in ("oidc-ca.pem", "postgres-ca.pem"): resource_values[key] = ca
         elif key == "service-client-secret": resource_values[key] = clients["resource-service"]
         elif key == "tls.crt": resource_values[key] = (identities / "resource-service" / "certificate.pem").read_bytes()
         elif key == "tls.key": resource_values[key] = (identities / "resource-service" / "key.pem").read_bytes()

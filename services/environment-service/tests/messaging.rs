@@ -137,7 +137,10 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
                 provider_binding: instance.provider_binding.clone(),
                 lease_id: None,
                 capacity_binding: None,
-                eligibility_expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+                approved_resources: instance.approved_resources.clone(),
+                gpu_allocation: None,
+                retention: support::finite_retention(),
+                eligibility_expires_at: Some(timestamp("2027-07-15T00:00:00.000Z")),
             }),
         },
     };
@@ -291,7 +294,15 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         provider_binding: "container-primary-v1".to_owned(),
         lease_id: Some(work_lease_id),
         capacity_binding: Some("cpu-standard-v1".to_owned()),
-        eligibility_expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+        approved_resources: WorkloadResources {
+            cpu_millicores: 1000,
+            memory_bytes: 1_073_741_824,
+            storage_bytes: 1_073_741_824,
+            gpu: None,
+        },
+        gpu_allocation: None,
+        retention: support::finite_retention(),
+        eligibility_expires_at: Some(timestamp("2027-07-15T00:00:00.000Z")),
     });
     context
         .publish(
@@ -407,7 +418,9 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
     )
     .await
     .map_err(|_| "provider RPC timed out")?
-    .map_err(|_| "provider RPC failed")?;
+    .map_err(|_| "provider RPC failed")?
+    .completed()
+    .ok_or("provider unexpectedly pending")?;
     assert_eq!(
         observation.next_state,
         contracts::environment::ObservedEnvironmentState::Validating

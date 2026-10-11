@@ -400,9 +400,47 @@ async fn cancellation_cleanup_failure_is_a_terminal_blocker() {
         .await
         .expect_err("cancelled build must fail");
 
-    assert_eq!(error.code, BuildFailureCode::CleanupFailed);
+    assert_eq!(error.code, BuildFailureCode::Cancelled);
     assert!(!error.cleanup_verified);
-    assert_eq!(error.diagnostic_code(), "LW_AGENT_BUILD_CLEANUP_FAILED");
+    assert_eq!(error.diagnostic_code(), "LW_AGENT_BUILD_CANCELLED");
+}
+
+#[tokio::test]
+async fn build_waits_beyond_control_timeout_within_approved_overall_deadline() {
+    let provider = FakeProvider {
+        build_delay: Duration::from_millis(40),
+        ..FakeProvider::default()
+    };
+    let pipeline = BuildPipeline::new(
+        provider,
+        BuildPipelinePolicy {
+            builder_binding: "buildkit-primary-v1".to_owned(),
+            registry_binding: "harbor-primary-v1".to_owned(),
+            registry_robot_name: "runtime-puller".to_owned(),
+            stage_timeout: Duration::from_millis(10),
+        },
+    )
+    .expect("valid pipeline");
+    pipeline
+        .execute(&command(500), now(), fence(500), &BuildCancellation::new())
+        .await
+        .expect("build is governed by the approved overall deadline");
+}
+
+#[tokio::test]
+async fn cleanup_failure_keeps_known_primary_failure_and_blocks_retry() {
+    let provider = FakeProvider {
+        published_digest: format!("sha256:{}", "b".repeat(64)),
+        cleanup_fails: true,
+        ..FakeProvider::default()
+    };
+    let error = pipeline(provider)
+        .execute(&command(500), now(), fence(500), &BuildCancellation::new())
+        .await
+        .expect_err("publication mismatch");
+    assert_eq!(error.code, BuildFailureCode::PublicationIdentityMismatch);
+    assert!(!error.cleanup_verified);
+    assert!(!error.retryable);
 }
 
 fn pipeline(provider: FakeProvider) -> BuildPipeline<FakeProvider> {

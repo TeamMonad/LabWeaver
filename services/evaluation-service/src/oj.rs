@@ -491,6 +491,19 @@ pub struct OjEvidenceReceipt {
     pub diagnostic_code: String,
     pub awarded_points: u32,
     pub max_points: u32,
+    /// Compiler exit code. One integer keeps the payload-free receipt small while making a failed
+    /// compile diagnosable: the lab's `build-xv6.sh` uses 64/65/66 for its own early exits, which
+    /// is otherwise indistinguishable from a `make` failure once the Job and its `/evidence`
+    /// volume are gone.
+    pub compile_exit_code: Option<i32>,
+    /// Signal that killed the compiler, when it was not a plain exit. An OOM kill leaves no exit
+    /// code at all, so this is the only field that distinguishes it from a script early exit.
+    pub compile_signal: Option<i32>,
+    /// Whether the compile stage hit the profile's wall-clock budget.
+    pub compile_timed_out: bool,
+    /// Whether the compile stage exceeded the profile's bounded output budget; the worker stops it
+    /// early in that case, which also leaves no exit code.
+    pub compile_output_exceeded: bool,
 }
 
 impl OjEvidenceReceipt {

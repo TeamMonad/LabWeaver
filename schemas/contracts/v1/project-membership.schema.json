@@ -82,6 +82,13 @@
       ],
       "description": "Optional teaching course association."
     },
+    "displayName": {
+      "description": "Human-readable issuer name, present on project membership views.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "expiresAt": {
       "anyOf": [
         {
@@ -108,6 +115,13 @@
     "state": {
       "$ref": "#/$defs/MembershipState",
       "description": "Current lifecycle state."
+    },
+    "username": {
+      "description": "Issuer username, present on project membership views when identity\nmetadata is available.  Authorization snapshots leave this unset.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

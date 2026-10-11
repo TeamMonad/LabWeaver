@@ -23,7 +23,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use url::Url;
 
-use crate::store::ActiveGpuReservation;
+use crate::store::{ActiveGpuReservation, ActiveReservationTarget};
 
 const MAX_KUBERNETES_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_KUBERNETES_LIST_ITEMS: u32 = 100_000;
@@ -531,32 +531,29 @@ fn pod_is_resource_owned(
         // observer does not count that workload as external capacity usage.
         reservation.allocation_binding == allocation_binding
     }) {
-        let namespace_matches = match &reservation.target {
-            ResourceTarget::Environment { .. } => {
-                reservation.namespace_name.as_deref() == namespace.as_deref()
-            }
-            ResourceTarget::Task { .. } => reservation
-                .namespace_name
-                .as_deref()
-                .is_some_and(|expected| namespace.as_deref() == Some(expected)),
+        let namespace_matches = match (&reservation.namespace_name, &reservation.target) {
+            (Some(expected), _) => namespace.as_deref() == Some(expected.as_str()),
+            // Experiment reservations are keyed by the exact Environment identity and exact
+            // requested units, so an absent namespace cannot be used to claim an unrelated pod.
+            (None, ActiveReservationTarget::Environment { .. }) => true,
+            (None, ActiveReservationTarget::Task { .. }) => false,
         };
         if !namespace_matches {
             continue;
         }
         let target_matches = match &reservation.target {
-            ResourceTarget::Environment {
+            ActiveReservationTarget::Environment {
                 environment_id: id, ..
             } => {
                 task_run_id.is_none() && environment_id.as_deref() == Some(id.to_string().as_str())
             }
-            ResourceTarget::Task { task_run_id: id } => {
+            ActiveReservationTarget::Task { task_run_id: id } => {
                 environment_id.is_none() && task_run_id.as_deref() == Some(id.to_string().as_str())
             }
         };
         if target_matches && pod_requested_units(pod, allocation_binding)? == reservation.units {
             tracing::debug!(
                 event = "resource.gpu_capacity.reservation_excluded",
-                claim_id = %reservation.claim_id,
                 entry_id = %reservation.entry_id,
                 allocation_binding,
                 units = reservation.units,
@@ -812,8 +809,13 @@ impl EnvironmentHandoffClient {
                     .json(&handoff),
             )
             .await?;
-        if response.status() == StatusCode::ACCEPTED {
+        let status = response.status();
+        if status == StatusCode::ACCEPTED {
             Ok(())
+        } else if (status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT)
+            && status != StatusCode::TOO_MANY_REQUESTS
+        {
+            Err(CapacityProviderError::HandoffInvalid)
         } else {
             Err(CapacityProviderError::HandoffRejected)
         }
@@ -1065,13 +1067,31 @@ impl CapacityReconcileWorker {
                 claim_id = %item.claim.id,
                 diagnostic_code = %error.diagnostic()
             );
-            self.store
-                .retry_or_block_capacity_handoff(
-                    item.claim.id,
-                    item.claim.revision,
-                    error.diagnostic(),
-                )
-                .await?;
+            if matches!(&error, CapacityProviderError::HandoffInvalid) {
+                self.store
+                    .fail_pre_handoff_capacity_handoff(
+                        crate::store::FailPreHandoffCapacityHandoff {
+                            claim_id: item.claim.id,
+                            expected_claim_revision: item.claim.revision,
+                            lease_id: item.lease.id,
+                            expected_lease_revision: item.lease.revision,
+                            diagnostic_code: error.diagnostic().to_owned(),
+                            actor: self.environment_handoff.system_actor_id,
+                            trace_id: format!("resource-handoff-rejected-{}", item.claim.id),
+                        },
+                    )
+                    .await?;
+            } else {
+                self.store
+                    .retry_or_block_capacity_handoff(
+                        item.claim.id,
+                        item.claim.revision,
+                        error.diagnostic(),
+                        self.environment_handoff.system_actor_id,
+                        &format!("resource-handoff-failed-{}", item.claim.id),
+                    )
+                    .await?;
+            }
         } else {
             self.store
                 .mark_capacity_handed_off(
@@ -1106,13 +1126,31 @@ impl CapacityReconcileWorker {
                     claim_id = %item.claim.id,
                     diagnostic_code = %error.diagnostic()
                 );
-                self.store
-                    .retry_or_block_capacity_handoff(
-                        item.claim.id,
-                        item.claim.revision,
-                        error.diagnostic(),
-                    )
-                    .await?;
+                if matches!(&error, CapacityProviderError::HandoffInvalid) {
+                    self.store
+                        .fail_pre_handoff_capacity_handoff(
+                            crate::store::FailPreHandoffCapacityHandoff {
+                                claim_id: item.claim.id,
+                                expected_claim_revision: item.claim.revision,
+                                lease_id: item.lease.id,
+                                expected_lease_revision: item.lease.revision,
+                                diagnostic_code: error.diagnostic().to_owned(),
+                                actor: self.environment_handoff.system_actor_id,
+                                trace_id: format!("resource-handoff-rejected-{}", item.claim.id),
+                            },
+                        )
+                        .await?;
+                } else {
+                    self.store
+                        .retry_or_block_capacity_handoff(
+                            item.claim.id,
+                            item.claim.revision,
+                            error.diagnostic(),
+                            self.environment_handoff.system_actor_id,
+                            &format!("resource-handoff-failed-{}", item.claim.id),
+                        )
+                        .await?;
+                }
             }
         }
         Ok(true)
@@ -1305,7 +1343,24 @@ impl CapacityReconcileWorker {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                 }
-                _ = interval.tick() => { let _ = self.reconcile_once().await?; }
+                _ = interval.tick() => {
+                    match self.reconcile_once().await {
+                        Ok(_) => {}
+                        Err(error) if crate::store::is_retryable_database_error(&error) => {
+                            let safe_detail = crate::store::resource_error_safe_detail(&error);
+                            tracing::warn!(
+                                event = "resource.capacity.reconcile_deadlock",
+                                operation = "capacity_reconcile_iteration",
+                                outcome = "retry_next_iteration",
+                                error_kind = crate::store::resource_error_kind(&error),
+                                failure_stage = "capacity.worker",
+                                safe_detail = safe_detail.as_str(),
+                                retryable = true,
+                            );
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
             }
         }
     }
@@ -1325,6 +1380,8 @@ pub enum CapacityProviderError {
     HandoffFence,
     #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")]
     HandoffRejected,
+    #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")]
+    HandoffInvalid,
     #[error("LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED")]
     LeaseSyncRejected,
     #[error("LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED")]
@@ -1355,7 +1412,9 @@ impl CapacityProviderError {
             Self::Readback => "LW_RESOURCE_CAPACITY_READBACK_INVALID",
             Self::Unavailable => "LW_RESOURCE_CAPACITY_UNAVAILABLE",
             Self::HandoffFence => "LW_RESOURCE_ENVIRONMENT_HANDOFF_FENCE_INVALID",
-            Self::HandoffRejected => "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
+            Self::HandoffRejected | Self::HandoffInvalid => {
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED"
+            }
             Self::LeaseSyncRejected => "LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED",
             Self::CleanupRejected => "LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED",
             Self::TaskOwnerRequired => "LW_RESOURCE_TASK_OWNER_REQUIRED",
@@ -1445,16 +1504,11 @@ mod tests {
     fn pod_labels_and_phases_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let environment_id = contracts::EnvironmentId::new();
         let reservation = ActiveGpuReservation {
-            claim_id: contracts::CapacityClaimId::new(),
             entry_id: contracts::GpuCatalogEntryId::new(),
             units: 1,
             allocation_binding: "nvidia.com/gpu".to_owned(),
             namespace_name: Some("lw-env".to_owned()),
-            target: ResourceTarget::Environment {
-                environment_id,
-                release_id: contracts::ReleaseId::new(),
-                release_version: 1,
-            },
+            target: ActiveReservationTarget::Environment { environment_id },
         };
         let mut pod = json!({
             "metadata": {
@@ -1496,12 +1550,11 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let task_run_id = contracts::TaskRunId::new();
         let reservation = ActiveGpuReservation {
-            claim_id: contracts::CapacityClaimId::new(),
             entry_id: contracts::GpuCatalogEntryId::new(),
             units: 2,
             allocation_binding: "nvidia.com/gpu".to_owned(),
             namespace_name: Some("labweaver-evaluation-runs".to_owned()),
-            target: ResourceTarget::Task { task_run_id },
+            target: ActiveReservationTarget::Task { task_run_id },
         };
         let pod = json!({
             "metadata": {

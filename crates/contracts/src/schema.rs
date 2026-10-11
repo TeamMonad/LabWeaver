@@ -30,12 +30,20 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProjectLlmEgressPolicy
     );
     document!(
+        "schemas/contracts/v1/project-llm-policy-options.schema.json",
+        crate::authoring::ProjectLlmPolicyOptions
+    );
+    document!(
         "schemas/contracts/v1/project.schema.json",
         crate::project::Project
     );
     document!(
         "schemas/contracts/v1/agent-run.schema.json",
         crate::authoring::AgentRun
+    );
+    document!(
+        "schemas/contracts/v1/agent-run-history-page.schema.json",
+        crate::authoring::AgentRunHistoryPage
     );
     document!(
         "schemas/contracts/v1/environment-candidate.schema.json",
@@ -252,6 +260,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::ResourceUsageRecord
     );
     document!(
+        "schemas/contracts/v1/resource-usage-page.schema.json",
+        crate::resource::ResourceUsagePage
+    );
+    document!(
         "schemas/contracts/v1/resource-charge.schema.json",
         crate::resource::ResourceCharge
     );
@@ -368,12 +380,24 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::auth::AuthenticatedActor
     );
     document!(
+        "schemas/contracts/v1/organization-user.schema.json",
+        crate::auth::OrganizationUser
+    );
+    document!(
+        "schemas/contracts/v1/organization-user-page.schema.json",
+        crate::auth::OrganizationUserPage
+    );
+    document!(
         "schemas/contracts/v1/auth-session.schema.json",
         crate::auth::AuthSession
     );
     document!(
         "schemas/contracts/v1/csrf-token-response.schema.json",
         crate::auth::CsrfTokenResponse
+    );
+    document!(
+        "schemas/contracts/v1/logout-browser-session-response.schema.json",
+        crate::auth::LogoutBrowserSessionResponse
     );
     document!(
         "schemas/contracts/v1/course-membership.schema.json",
@@ -572,6 +596,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::EnvironmentCandidateView
     );
     document!(
+        "schemas/contracts/v1/http/candidate-build-task.schema.json",
+        crate::http::CandidateBuildTask
+    );
+    document!(
+        "schemas/contracts/v1/http/cancel-candidate-build-request.schema.json",
+        crate::http::CancelCandidateBuildRequest
+    );
+    document!(
         "schemas/contracts/v1/http/evaluation-candidate-view.schema.json",
         crate::http::EvaluationCandidateView
     );
@@ -604,6 +636,38 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::RecordResourceUsageRequest
     );
     document!(
+        "schemas/contracts/v1/http/resolve-environment-resource-reservation-request.schema.json",
+        crate::environment::ResolveEnvironmentResourceReservationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/resolve-environment-resource-reservation-response.schema.json",
+        crate::environment::ResolveEnvironmentResourceReservationResponse
+    );
+    document!(
+        "schemas/contracts/v1/http/activate-environment-resource-reservation-request.schema.json",
+        crate::environment::ActivateEnvironmentResourceReservationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/activate-environment-resource-reservation-response.schema.json",
+        crate::environment::ActivateEnvironmentResourceReservationResponse
+    );
+    document!(
+        "schemas/contracts/v1/http/suspend-environment-resource-reservation-request.schema.json",
+        crate::environment::SuspendEnvironmentResourceReservationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/suspend-environment-resource-reservation-response.schema.json",
+        crate::environment::SuspendEnvironmentResourceReservationResponse
+    );
+    document!(
+        "schemas/contracts/v1/http/release-environment-resource-reservation-request.schema.json",
+        crate::environment::ReleaseEnvironmentResourceReservationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/release-environment-resource-reservation-response.schema.json",
+        crate::environment::ReleaseEnvironmentResourceReservationResponse
+    );
+    document!(
         "schemas/contracts/v1/http/task-resource-status.schema.json",
         crate::http::TaskResourceStatus
     );
@@ -618,6 +682,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/create-resource-rate-request.schema.json",
         crate::http::CreateResourceRateRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/end-resource-rate-request.schema.json",
+        crate::http::EndResourceRateRequest
     );
     document!(
         "schemas/contracts/v1/http/upsert-resource-budget-request.schema.json",
@@ -724,12 +792,32 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::PlatformImageUploadSession
     );
     document!(
+        "schemas/contracts/v1/http/platform-image-upload-status.schema.json",
+        crate::http::PlatformImageUploadStatus
+    );
+    document!(
         "schemas/contracts/v1/http/complete-platform-image-upload-request.schema.json",
         crate::http::CompletePlatformImageUploadRequest
     );
     document!(
+        "schemas/contracts/v1/http/cancel-platform-image-upload-request.schema.json",
+        crate::http::CancelPlatformImageUploadRequest
+    );
+    document!(
         "schemas/contracts/v1/http/internal-platform-image-import-request.schema.json",
         crate::http::InternalPlatformImageImportRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-enqueue-request.schema.json",
+        crate::http::InternalPlatformImageImportEnqueueRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-job-status.schema.json",
+        crate::http::InternalPlatformImageImportJobStatus
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-cancel-request.schema.json",
+        crate::http::InternalPlatformImageImportCancelRequest
     );
 
     document!(
@@ -950,6 +1038,17 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let mut parameters = path_parameters(operation.path);
         if matches!(
             operation.operation_id,
+            "getProjectCandidateBuild" | "cancelProjectCandidateBuild"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "target" {
+                    parameter["schema"] =
+                        json!({"type":"string","enum":["environment","evaluation_runner"]});
+                }
+            }
+        }
+        if matches!(
+            operation.operation_id,
             "listEnvironmentTemplateReleases"
                 | "listEvaluationReleases"
                 | "listOwnProjectEvaluationResults"
@@ -969,6 +1068,22 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "listProjectResourceRequests" | "listProjectResourceLeases"
         ) {
             parameters.push(json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if operation.operation_id == "listOrganizationUsers" {
+            parameters.extend([
+                json!({"name":"query","in":"query","required":true,"schema":{"type":"string","minLength":1,"maxLength":128}}),
+                json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
+                json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
+            ]);
+        }
+        if matches!(
+            operation.operation_id,
+            "listProjectAgentRuns" | "listProjectResourceUsage"
+        ) {
+            parameters.extend([
+                json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
+                json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
+            ]);
         }
         if operation.operation_id == "getInternalAuthoringPublicationAdmission" {
             parameters.extend([
@@ -1018,6 +1133,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.mutation == MutationContract::IdempotentRevisioned {
             parameters.push(header_parameter("If-Match", true));
         }
+        if matches!(
+            operation.operation_id,
+            "createProjectLlmPolicy" | "createCourseLlmPolicy"
+        ) {
+            parameters.push(header_parameter("If-Match", false));
+        }
         // The BFF interceptor obtains and attaches these headers for browser
         // mutations. Read operations authenticate through the session cookie
         // but do not participate in the CSRF protocol, so keeping the headers
@@ -1061,6 +1182,32 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_ENV_OWNER_UNAVAILABLE",
                 "LW_ENV_OWNER_RESOLVER_UNAVAILABLE",
                 "LW_ENV_OWNER_CLOCK_INVALID"
+            ]);
+        }
+        if operation.operation_id == "listOrganizationUsers" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_ACCESS_DIRECTORY_QUERY_INVALID",
+                "LW_ACCESS_DIRECTORY_PAGE_INVALID",
+                "LW_ACCESS_DIRECTORY_UNAVAILABLE",
+            ]);
+        }
+        if operation.operation_id == "listProjectAgentRuns" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AGENT_PERSISTENCE_FAILED",
+            ]);
+        }
+        if operation.operation_id == "addProjectMembership" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_ACCESS_DIRECTORY_USERNAME_INVALID",
+                "LW_ACCESS_DIRECTORY_UNAVAILABLE",
+                "LW_ACCESS_DIRECTORY_USER_NOT_FOUND",
+                "LW_ACCESS_DIRECTORY_USER_DISABLED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_REVISION_CONFLICT",
             ]);
         }
         if matches!(
@@ -1137,7 +1284,11 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 },
                 "OperationAccepted": {"type":"object","additionalProperties":false,"required":["operationId","revision","statusUrl"],"properties":{"operationId":{"type":"string","format":"uuid"},"revision":{"type":"integer","minimum":1},"statusUrl":{"type":"string","format":"uri-reference"}}}
                 ,"AuthSession": contract_ref("auth-session")
+                 ,"OrganizationUser": contract_ref("organization-user")
+                 ,"OrganizationUserPage": contract_ref("organization-user-page")
+                 ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
+                ,"LogoutBrowserSessionResponse": contract_ref("logout-browser-session-response")
                 ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
@@ -1178,6 +1329,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"PlatformImageCatalog": contract_ref("http/platform-image-catalog")
                 ,"PlatformImageCatalogView": contract_ref("http/platform-image-catalog-view")
                 ,"PlatformImageUploadSession": contract_ref("http/platform-image-upload-session")
+                ,"PlatformImageUploadStatus": contract_ref("http/platform-image-upload-status")
+                ,"InternalPlatformImageImportJobStatus": contract_ref("http/internal-platform-image-import-job-status")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
@@ -1203,7 +1356,7 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
             paths.insert(
                 "/auth/logout".to_owned(),
-                json!({"post":{"operationId":"logoutBrowserSession","summary":"Revoke the BFF session and begin provider logout","security":[{"bffSession":[]}],"parameters":[{"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}},{"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}}],"responses":{"302":{"description":"Session revoked and redirected to provider logout"},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"logoutBrowserSession","summary":"Revoke the BFF session and return the provider logout URL","security":[{"bffSession":[]}],"parameters":[{"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}},{"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}}],"responses":{"200":{"description":"Session revoked and provider logout URL returned for top-level navigation","content":{"application/json":{"schema":{"$ref":"#/components/schemas/LogoutBrowserSessionResponse"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/api/v1/auth/session".to_owned(),
@@ -1253,7 +1406,7 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
             paths.insert(
                 "/internal/v1/build-requests/{buildRequestId}".to_owned(),
-                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course","security": internal_security("agent_build:read"),"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course","security": internal_security("agent_build:read"),"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/tracks/{track}/retry".to_owned(),
@@ -1453,8 +1606,9 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "removeProjectMembership" => "http/remove-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
-        "createProjectLlmPolicy" => "project-llm-egress-policy",
+        "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
         "createProjectAgentRun" => "http/create-agent-run-request",
+        "cancelProjectCandidateBuild" => "http/cancel-candidate-build-request",
         "createInternalAgentLlmReview" => "http/internal-agent-llm-review-request",
         "createProjectWorkConfigurationRun" => "http/create-work-configuration-run-request",
         "approveProjectWorkConfigurationRun" => "http/approve-work-configuration-request",
@@ -1473,11 +1627,10 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
         "createResourceRate" => "http/create-resource-rate-request",
+        "endResourceRate" => "http/end-resource-rate-request",
         "upsertProjectResourceBudget" => "http/upsert-resource-budget-request",
         "createProjectResourceChargeAdjustment" => "http/create-resource-adjustment-request",
-        "recordResourceUsage" | "recordInternalResourceUsage" => {
-            "http/record-resource-usage-request"
-        }
+        "recordInternalResourceUsage" => "http/record-resource-usage-request",
         "acknowledgeTaskResource" => "http/acknowledge-task-resource-request",
         "releaseTaskResource" => "http/release-task-resource-request",
         "cancelTaskResource"
@@ -1510,7 +1663,9 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "disablePlatformImage" => "http/disable-platform-image-request",
         "createPlatformImageUpload" => "http/create-platform-image-upload-request",
         "completePlatformImageUpload" => "http/complete-platform-image-upload-request",
-        "importPlatformImage" => "http/internal-platform-image-import-request",
+        "cancelPlatformImageUpload" => "http/cancel-platform-image-upload-request",
+        "enqueuePlatformImageImport" => "http/internal-platform-image-import-enqueue-request",
+        "cancelPlatformImageImportJob" => "http/internal-platform-image-import-cancel-request",
         _ => return None,
     };
     Some(contract_ref(name))
@@ -1529,6 +1684,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "type":"array",
             "items":contract_ref("project-membership")
         }),
+        "listOrganizationUsers" => contract_ref("organization-user-page"),
+        "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
         "addProjectMembership" | "removeProjectMembership" => contract_ref("project-membership"),
         "createProjectProblemPackageUpload" => contract_ref("http/problem-package-upload-session"),
         "getProjectProblemPackage" | "completeProjectProblemPackageUpload" => {
@@ -1536,7 +1693,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }
         "createProjectLlmPolicy"
         | "getActiveProjectLlmPolicy"
+        | "createCourseLlmPolicy"
+        | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
+        "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"
@@ -1553,6 +1713,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "completeProjectAuthoringApproval" => contract_ref("authoring-approval"),
         "getProjectAuthoringApproval" => contract_ref("authoring-approval-publication-status"),
         "getProjectEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
+        "getProjectCandidateBuild" | "cancelProjectCandidateBuild" => {
+            contract_ref("http/candidate-build-task")
+        }
         "getProjectEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
         "createEvaluationRelease" | "getEvaluationRelease" | "withdrawEvaluationRelease" => {
             contract_ref("evaluation-release")
@@ -1580,9 +1743,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "resolveEnvironmentWorkConfigurationTarget" => {
             contract_ref("environment-work-configuration-target")
         }
-        "recordResourceUsage" | "recordInternalResourceUsage" => {
-            contract_ref("resource-usage-record")
-        }
+        "recordInternalResourceUsage" => contract_ref("resource-usage-record"),
         "claimTaskResource"
         | "acknowledgeTaskResource"
         | "getTaskResource"
@@ -1601,13 +1762,14 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listResourceRates" => {
             json!({"type":"array","items":contract_ref("resource-rate")})
         }
-        "createResourceRate" => contract_ref("resource-rate"),
+        "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
         "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
             contract_ref("resource-budget")
         }
         "listProjectResourceCharges" => {
             json!({"type":"array","items":contract_ref("resource-charge")})
         }
+        "listProjectResourceUsage" => contract_ref("resource-usage-page"),
         "createProjectResourceChargeAdjustment" => contract_ref("resource-charge"),
         "getResourceLease" | "renewResourceLease" | "revokeResourceLease" => {
             contract_ref("resource-lease")
@@ -1642,12 +1804,19 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("gateway-session")
         }
         "listPlatformImages" => contract_ref("http/platform-image-catalog-view"),
-        "registerPlatformImage"
-        | "repinPlatformImage"
-        | "disablePlatformImage"
-        | "completePlatformImageUpload" => contract_ref("http/platform-image-entry-view"),
+        "getPlatformImageUpload" => contract_ref("http/platform-image-upload-status"),
+        "registerPlatformImage" | "repinPlatformImage" | "disablePlatformImage" => {
+            contract_ref("http/platform-image-entry-view")
+        }
+        "completePlatformImageUpload" | "cancelPlatformImageUpload" => {
+            contract_ref("http/platform-image-upload-status")
+        }
         "createPlatformImageUpload" => contract_ref("http/platform-image-upload-session"),
-        "importPlatformImage" => contract_ref("http/platform-image-entry"),
+        "enqueuePlatformImageImport"
+        | "getPlatformImageImportJob"
+        | "cancelPlatformImageImportJob" => {
+            contract_ref("http/internal-platform-image-import-job-status")
+        }
         id if [
             "createEnvironmentTemplateRelease",
             "createEnvironment",
@@ -1717,7 +1886,11 @@ fn operation_responses(
     response_schema: Option<Value>,
 ) -> Value {
     let mut responses = serde_json::Map::new();
-    let mut success = json!({"description":"Successful response","headers":{"ETag":{"schema":{"type":"string","pattern":"^\\\"rev-[1-9][0-9]*\\\"$"}}}});
+    let mut success = json!({"description":"Successful response"});
+    if operation_id != "endResourceRate" {
+        success["headers"] =
+            json!({"ETag":{"schema":{"type":"string","pattern":"^\\\"rev-[1-9][0-9]*\\\"$"}}});
+    }
     if operation_id == "issueConsoleCapability" {
         success["headers"]["Set-Cookie"] = json!({
             "description": "Exactly one __Secure-labweaver_console_handoff cookie. It MUST be Secure, HttpOnly, SameSite=Strict, have Max-Age=30, and use the returned connectionLocator as its exact Path. Its value is the one-time secret and is never present in a response body, URL, SDK, or log.",

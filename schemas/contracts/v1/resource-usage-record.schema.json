@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
     "EventId": {
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
       "type": "string"
@@ -60,6 +64,55 @@
         "gpuUnitSeconds"
       ],
       "type": "object"
+    },
+    "ResourceUsageTarget": {
+      "description": "Durable owner of one usage interval.\n\nWork and task meters point at the Resource request and (for trusted internal\ndelivery) its Lease. Experiment meters point directly at the Environment\nreservation; Resource resolves the project, course, owner, approved\nresources, and GPU allocation from its saved authorization instead of\naccepting those fields from a meter payload.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resource_request",
+              "type": "string"
+            },
+            "leaseId": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LeaseId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requestId": {
+              "$ref": "#/$defs/ResourceRequestId"
+            }
+          },
+          "required": [
+            "kind",
+            "requestId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "const": "experiment_environment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "UsageMeasurement": {
       "description": "Known or explicitly unknown provider measurement.",
@@ -138,16 +191,6 @@
     "kind": {
       "$ref": "#/$defs/ResourceUsageKind"
     },
-    "leaseId": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/LeaseId"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "measuredFrom": {
       "$ref": "#/$defs/UtcTimestamp"
     },
@@ -163,21 +206,21 @@
     "projectId": {
       "$ref": "#/$defs/ProjectId"
     },
-    "requestId": {
-      "$ref": "#/$defs/ResourceRequestId"
-    },
     "settlement": {
       "$ref": "#/$defs/UsageSettlementState"
     },
     "sourceEventId": {
       "$ref": "#/$defs/EventId"
+    },
+    "target": {
+      "$ref": "#/$defs/ResourceUsageTarget"
     }
   },
   "required": [
     "id",
     "projectId",
     "kind",
-    "requestId",
+    "target",
     "sourceEventId",
     "measuredFrom",
     "measuredUntil",

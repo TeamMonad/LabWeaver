@@ -410,15 +410,13 @@ async fn resolve_availability(
         .await
         .map_err(|_| ApiError::unavailable("LW_CONSOLE_AUTHORITY_UNAVAILABLE"))?;
     let grant_expiry: OffsetDateTime = row.get("expires_at");
-    let mut deadline = [
-        grant_expiry,
-        session.expires_at,
-        session.idle_expires_at,
-        eligibility.eligibility_expires_at.get(),
-    ]
-    .into_iter()
-    .min()
-    .ok_or_else(|| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?;
+    let mut deadline = [grant_expiry, session.expires_at, session.idle_expires_at]
+        .into_iter()
+        .min()
+        .ok_or_else(|| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?;
+    if let Some(expiry) = eligibility.eligibility_expires_at {
+        deadline = deadline.min(expiry.get());
+    }
     if let Some(expiry) = membership.expires_at {
         deadline = deadline.min(expiry);
     }

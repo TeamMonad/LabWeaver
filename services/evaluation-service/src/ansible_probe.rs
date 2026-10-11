@@ -24,7 +24,7 @@ pub const ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION: &str =
 pub const ANSIBLE_PROBE_EVIDENCE_SCHEMA_VERSION: &str =
     "evaluation.labweaver.io/ansible-probe-evidence/v1";
 pub const ANSIBLE_PROBE_EVIDENCE_RECEIPT_SCHEMA_VERSION: &str =
-    "evaluation.labweaver.io/ansible-probe-evidence-receipt/v1";
+    "evaluation.labweaver.io/ansible-probe-evidence-receipt/v2";
 /// Frozen v1 module allowlist; identical to the contract-level set.
 pub const ALLOWED_PROBE_MODULES: [&str; 3] = [
     "ansible.builtin.package_facts",
@@ -687,6 +687,9 @@ pub struct AnsibleProbeEvidenceReceipt {
     pub terminal_status: AnsibleProbeTerminalStatus,
     pub diagnostic_code: String,
     pub passed_assertions: u32,
+    /// Assertions with an observed value of the expected type: passed or an
+    /// actual value mismatch. Unknown facts/type mismatches are not counted.
+    pub known_assertions: u32,
     pub total_assertions: u32,
 }
 
@@ -713,10 +716,30 @@ impl AnsibleProbeEvidenceReceipt {
             || self.evidence_size_bytes == 0
             || self.evidence_size_bytes > MAX_EVIDENCE_BYTES
             || self.diagnostic_code != self.terminal_status.diagnostic_code()
-            || self.passed_assertions > self.total_assertions
+            || self.passed_assertions > self.known_assertions
+            || self.known_assertions > self.total_assertions
             || self.total_assertions != total_assertions
         {
             return Err(AnsibleProbeError::EvidenceInvalid);
+        }
+        match self.terminal_status {
+            AnsibleProbeTerminalStatus::Succeeded
+                if self.passed_assertions != total_assertions
+                    || self.known_assertions != total_assertions =>
+            {
+                return Err(AnsibleProbeError::EvidenceInvalid);
+            }
+            AnsibleProbeTerminalStatus::AssertionsFailed
+                if self.passed_assertions == total_assertions =>
+            {
+                return Err(AnsibleProbeError::EvidenceInvalid);
+            }
+            AnsibleProbeTerminalStatus::Succeeded
+            | AnsibleProbeTerminalStatus::AssertionsFailed => {}
+            _ if self.passed_assertions != 0 || self.known_assertions != 0 => {
+                return Err(AnsibleProbeError::EvidenceInvalid);
+            }
+            _ => {}
         }
         Ok(())
     }

@@ -322,6 +322,7 @@ impl FrozenSubmission {
             || !is_sha256(&self.content_sha256)
             || self.environment.release_version == 0
             || self.retention.class != crate::RetentionClass::StudentSubmission
+            || self.retention.validate().is_err()
             || self.derived_archive.as_ref().is_some_and(|archive| {
                 archive.store_binding.trim().is_empty()
                     || archive.object_version.trim().is_empty()

@@ -288,9 +288,12 @@ async fn resolve_owner(
         course_id: request.course_id,
         owner_actor_id: request.owner_actor_id,
         environment_revision: request.expected_revision,
-        eligibility_expires_at: "2030-07-15T00:00:00.000Z"
-            .parse()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        eligibility_expires_at: Some(
+            "2030-07-15T00:00:00.000Z"
+                .parse()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ),
+        lease_fence: None,
     };
     let etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
     Ok(([(header::ETAG, etag)], Json(resolution)).into_response())
@@ -326,9 +329,12 @@ async fn resolve_endpoint_eligibility(
         course_id: request.course_id,
         owner_actor_id: request.actor_id,
         environment_revision,
-        eligibility_expires_at: "2030-07-15T00:00:00.000Z"
-            .parse()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        eligibility_expires_at: Some(
+            "2030-07-15T00:00:00.000Z"
+                .parse()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ),
+        lease_fence: None,
         endpoints: vec![EnvironmentEndpoint {
             id: request.endpoint_ids[0],
             protocol: EndpointProtocol::Ssh,

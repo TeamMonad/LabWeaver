@@ -85,6 +85,75 @@ async fn revisioned_mutation_rejects_cross_course_before_writing_state()
     Ok(())
 }
 
+#[tokio::test]
+async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn std::error::Error>>
+{
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let database_url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        postgres.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    apply_agent_migrations(&pool).await?;
+
+    let project = ProjectId::new();
+    let other_project = ProjectId::new();
+    let mut runs = Vec::new();
+    for (project_id, age_minutes) in [
+        (project, 1_i64),
+        (project, 2_i64),
+        (project, 3_i64),
+        (other_project, 1_i64),
+    ] {
+        let mut run = requested_run()?;
+        run.project_id = project_id;
+        let contract = serde_json::to_value(&run)?;
+        let purpose = serde_json::to_value(run.purpose)?;
+        sqlx::query(
+            "INSERT INTO agent.agent_runs \
+             (run_id,project_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256, \
+              policy_revision,purpose,contract,created_at,updated_at) \
+             VALUES ($1,$2,$3,$4,1,'requested',$5,$6,1,$7,$8,now()-($9 * interval '1 minute'),now()-($9 * interval '1 minute'))",
+        )
+        .bind(run.id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(run.course_id.map(CourseId::as_uuid))
+        .bind(run.package_id.as_uuid())
+        .bind("claude-code-v1")
+        .bind(Sha256Digest::of_bytes(run.id.to_string().as_bytes()).to_string())
+        .bind(purpose)
+        .bind(contract)
+        .bind(age_minutes)
+        .execute(&pool)
+        .await?;
+        if project_id == project {
+            runs.push(run.id);
+        }
+    }
+    let store = PostgresAgentRunStore::new(pool);
+    let first = store.list_project_runs(project, 1, 2, 0).await?;
+    assert_eq!(first.page, 1);
+    assert_eq!(first.page_size, 2);
+    assert!(first.has_more);
+    assert_eq!(first.items.len(), 2);
+    assert_eq!(first.items[0].id, runs[0]);
+    assert_eq!(first.items[1].id, runs[1]);
+    assert!(first.items.iter().all(|item| item.course_id.is_some()));
+
+    let second = store.list_project_runs(project, 2, 2, 2).await?;
+    assert!(!second.has_more);
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(second.items[0].id, runs[2]);
+
+    let empty = store.list_project_runs(ProjectId::new(), 1, 25, 0).await?;
+    assert!(empty.items.is_empty());
+    assert!(!empty.has_more);
+    Ok(())
+}
+
 fn requested_run() -> Result<AgentRun, Box<dyn std::error::Error>> {
     let run = AgentRun {
         id: AgentRunId::new(),

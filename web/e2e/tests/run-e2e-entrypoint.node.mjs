@@ -53,6 +53,29 @@ test('runtime replay selects every configured authenticated role project', () =>
   ])
 })
 
+test('runtime replay forwards caller arguments after the role project selection', () => {
+  assert.deepEqual(playwrightArguments(['--grep', 'student completes a published lab experiment']).slice(-2), [
+    '--grep',
+    'student completes a published lab experiment',
+  ])
+  assert.deepEqual(
+    playwrightArguments(['--list']).slice(0, -1),
+    playwrightArguments(),
+  )
+})
+
+test('run-e2e rejects an argument that would replace its own Playwright config', async () => {
+  let executed = false
+  const result = await runE2e({
+    environment: { ...process.env, LABWEAVER_BASE_URL: 'https://demo.lab.invalid' },
+    extraArguments: ['--config=other.config.mjs'],
+    execute: async () => { executed = true; return { exitCode: 0 } },
+  })
+  assert.equal(result.exitCode, 2)
+  assert.equal(executed, false)
+  assert.deepEqual(result.diagnostics, ['PW_ARGUMENT_REJECTED:--config'])
+})
+
 test('run-e2e validates all configured role credentials before browser execution', () => {
   const result = invokeEntrypoint({ baseUrl: 'https://example.invalid' })
   assert.equal(result.exitCode, 2)

@@ -6,7 +6,7 @@ metadata:
   labels: {labweaver.io/run-id: {{ identity_run_id }}, app.kubernetes.io/part-of: labweaver-identity}
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 300
+  activeDeadlineSeconds: {{ identity_provision_job_active_deadline_seconds }}
   ttlSecondsAfterFinished: 600
   template:
     metadata: {labels: {labweaver.io/run-id: {{ identity_run_id }}, app.kubernetes.io/part-of: labweaver-identity}}
@@ -23,13 +23,14 @@ spec:
               set -o pipefail
               kcadm=(/opt/keycloak/bin/kcadm.sh)
               "${kcadm[@]}" config credentials --server "http://{{ identity_name }}-http:8080" --realm master --user "$ADMIN_USERNAME" --password "$ADMIN_PASSWORD"
+{% if not (identity_foundation_realm_roles_only | bool) %}
               if ! "${kcadm[@]}" get "realms/{{ identity_realm }}" >/dev/null 2>&1; then
                 "${kcadm[@]}" create realms \
                   -s realm="{{ identity_realm }}" -s enabled=true -s sslRequired=external \
                   -s registrationAllowed=false -s resetPasswordAllowed=false \
                   -s loginWithEmailAllowed=false -s bruteForceProtected=true
               fi
-              {% for client in identity_service_clients %}
+{% for client in identity_service_clients %}
               client_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId="{{ client.client_id }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
               if [ -n "$client_id" ]; then
                 test "$(printf '%s\n' "$client_id" | wc -l)" -eq 1
@@ -67,7 +68,7 @@ spec:
                 -s name=labweaver-audience-{{ client.client_id }} -s protocol=openid-connect \
                 -s protocolMapper=oidc-audience-resolve-mapper \
                 -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false'
-              {% for self_target in identity_service_role_assignments if self_target.caller == client.client_id and self_target.target == client.client_id %}
+{% for self_target in identity_service_role_assignments if self_target.caller == client.client_id and self_target.target == client.client_id %}
               self_mapper_id=""
               while IFS=, read -r candidate_id candidate_name; do
                 if [ "$candidate_name" = "labweaver-self-audience-{{ client.client_id }}" ]; then
@@ -94,16 +95,16 @@ spec:
                 -s protocolMapper=oidc-audience-mapper \
                 -s 'config."included.custom.audience"={{ client.audience }}' \
                 -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false'
-              {% endfor %}
-              {% endfor %}
-              {% for assignment in identity_service_role_assignments %}
+{% endfor %}
+{% endfor %}
+{% for assignment in identity_service_role_assignments %}
               target_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId="{{ assignment.target }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
               test "$(printf '%s\n' "$target_id" | wc -l)" -eq 1
               test -n "$target_id"
-              {% for role in assignment.roles %}
               caller_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId="{{ assignment.caller }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
               test "$(printf '%s\n' "$caller_id" | wc -l)" -eq 1
               test -n "$caller_id"
+{% for role in assignment.roles %}
               if ! "${kcadm[@]}" get "clients/$target_id/roles/{{ role }}" -r "{{ identity_realm }}" >/dev/null 2>&1; then
                 "${kcadm[@]}" create "clients/$target_id/roles" -r "{{ identity_realm }}" -s name={{ role }} -s clientRole=true -s composite=false
               fi
@@ -121,16 +122,43 @@ spec:
                 echo "IDENTITY_SERVICE_SCOPE_MAPPING_MISSING: {{ assignment.caller }} -> {{ assignment.target }} -> {{ role }}" >&2
                 exit 1
               fi
-              {% endfor %}
-              {% endfor %}
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% for assignment in identity_service_realm_role_assignments %}
+              realm_management_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId=realm-management --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
+              test "$(printf '%s\n' "$realm_management_id" | wc -l)" -eq 1
+              test -n "$realm_management_id"
+              caller_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId="{{ assignment.caller }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
+              test "$(printf '%s\n' "$caller_id" | wc -l)" -eq 1
+              test -n "$caller_id"
+{% for role in assignment.roles %}
+              role_id="$("${kcadm[@]}" get "clients/$realm_management_id/roles/{{ role }}" -r "{{ identity_realm }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
+              test "$(printf '%s\n' "$role_id" | wc -l)" -eq 1
+              test -n "$role_id"
+              "${kcadm[@]}" add-roles -r "{{ identity_realm }}" --uusername "service-account-{{ assignment.caller }}" --cclientid realm-management --rolename "{{ role }}"
+              scope_roles="$("${kcadm[@]}" get "clients/$caller_id/scope-mappings/clients/$realm_management_id" -r "{{ identity_realm }}" --fields name --format csv --noquotes)"
+              if ! printf '%s\n' "$scope_roles" | grep -Fx -- "{{ role }}" >/dev/null; then
+                printf '[{"id":"%s","name":"%s","clientRole":true}]\n' "$role_id" "{{ role }}" |
+                  "${kcadm[@]}" create "clients/$caller_id/scope-mappings/clients/$realm_management_id" -r "{{ identity_realm }}" -f -
+              fi
+              scope_roles_after="$("${kcadm[@]}" get "clients/$caller_id/scope-mappings/clients/$realm_management_id" -r "{{ identity_realm }}" --fields name --format csv --noquotes)"
+              if ! printf '%s\n' "$scope_roles_after" | grep -Fx -- "{{ role }}" >/dev/null; then
+                echo "IDENTITY_SERVICE_REALM_SCOPE_MAPPING_MISSING: {{ assignment.caller }} -> realm-management -> {{ role }}" >&2
+                exit 1
+              fi
+{% endfor %}
+{% endfor %}
           env:
             - name: ADMIN_USERNAME
               valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: username}}
             - name: ADMIN_PASSWORD
               valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: password}}
-            {% for client in identity_service_clients %}
+{% if not (identity_foundation_realm_roles_only | bool) %}
+{% for client in identity_service_clients %}
             - name: CLIENT_SECRET_{{ client.client_id | upper | replace('-', '_') }}
               valueFrom: {secretKeyRef: {name: {{ client.secret_name }}, key: client-secret}}
-            {% endfor %}
-          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+{% endfor %}
+{% endif %}
+          resources: {requests: {cpu: 250m, memory: 128Mi}, limits: {cpu: "2", memory: 512Mi}}
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}

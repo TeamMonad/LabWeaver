@@ -873,7 +873,9 @@ pub(crate) fn validate_work_environment(
         || instance.desired_state != contracts::environment::DesiredEnvironmentState::Running
         || instance.observed_state != contracts::environment::ObservedEnvironmentState::Ready
         || instance.observed_generation != instance.generation
-        || instance.eligibility_expires_at <= now
+        || instance
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= now)
         || instance.endpoints.is_empty()
         || !instance.endpoints.iter().all(|endpoint| {
             endpoint.health == contracts::environment::EndpointHealth::Healthy

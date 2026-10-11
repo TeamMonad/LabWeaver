@@ -1,0 +1,21 @@
+{
+  "$defs": {
+    "UploadSessionId": {
+      "description": "Strongly typed UUIDv7 identifier for `UploadSessionId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Internal cancellation request for the Agent-owned import job.",
+  "properties": {
+    "uploadId": {
+      "$ref": "#/$defs/UploadSessionId"
+    }
+  },
+  "required": [
+    "uploadId"
+  ],
+  "title": "InternalPlatformImageImportCancelRequest",
+  "type": "object"
+}

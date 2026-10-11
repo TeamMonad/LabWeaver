@@ -156,7 +156,8 @@
       "enum": [
         "delete",
         "purge_after_export",
-        "retain_sanitized_receipt"
+        "retain_sanitized_receipt",
+        "retain_until_revoked"
       ],
       "type": "string"
     },
@@ -181,8 +182,11 @@
           "description": "Exact policy revision used at creation."
         },
         "retainUntil": {
-          "$ref": "#/$defs/UtcTimestamp",
-          "description": "Absolute retention boundary."
+          "description": "Absolute retention boundary. `None` is valid only for an explicitly permanent course\nmaterial decision whose disposition is `RetainUntilRevoked`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

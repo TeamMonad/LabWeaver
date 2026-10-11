@@ -1,0 +1,125 @@
+---
+- name: Write the FastAPI-DLS server certificate request configuration
+  ansible.builtin.copy:
+    dest: "{{ fastapi_dls_tls_temp.path }}/server.cnf"
+    mode: "0600"
+    content: |
+      [ req ]
+      distinguished_name = distinguished_name
+      prompt = no
+
+      [ distinguished_name ]
+      CN = {{ fastapi_dls_service_name }}
+  no_log: true
+
+- name: Write the FastAPI-DLS server certificate extensions
+  ansible.builtin.copy:
+    dest: "{{ fastapi_dls_tls_temp.path }}/server.ext"
+    mode: "0600"
+    content: |
+      [ v3_server ]
+      basicConstraints = critical,CA:FALSE
+      keyUsage = critical,digitalSignature,keyEncipherment
+      extendedKeyUsage = serverAuth
+      subjectAltName = {{ fastapi_dls_tls_san }}
+      subjectKeyIdentifier = hash
+      authorityKeyIdentifier = keyid,issuer
+  no_log: true
+
+- name: Generate the FastAPI-DLS server key
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - genpkey
+      - -algorithm
+      - RSA
+      - -pkeyopt
+      - rsa_keygen_bits:2048
+      - -out
+      - "{{ fastapi_dls_tls_temp.path }}/webserver.key"
+  args:
+    creates: "{{ fastapi_dls_tls_temp.path }}/webserver.key"
+  no_log: true
+
+- name: Generate the FastAPI-DLS server certificate request
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -new
+      - -sha256
+      - -key
+      - "{{ fastapi_dls_tls_temp.path }}/webserver.key"
+      - -out
+      - "{{ fastapi_dls_tls_temp.path }}/webserver.csr"
+      - -config
+      - "{{ fastapi_dls_tls_temp.path }}/server.cnf"
+  args:
+    creates: "{{ fastapi_dls_tls_temp.path }}/webserver.csr"
+  no_log: true
+
+- name: Sign the FastAPI-DLS server certificate with the retained CA
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -req
+      - -sha256
+      - -in
+      - "{{ fastapi_dls_tls_temp.path }}/webserver.csr"
+      - -CA
+      - "{{ fastapi_dls_tls_temp.path }}/ca.crt"
+      - -CAkey
+      - "{{ fastapi_dls_tls_temp.path }}/ca.key"
+      - -CAcreateserial
+      - -out
+      - "{{ fastapi_dls_tls_temp.path }}/webserver.crt"
+      - -days
+      - "825"
+      - -extfile
+      - "{{ fastapi_dls_tls_temp.path }}/server.ext"
+      - -extensions
+      - v3_server
+  args:
+    creates: "{{ fastapi_dls_tls_temp.path }}/webserver.crt"
+  no_log: true
+
+- name: Read the issued FastAPI-DLS TLS material
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ fastapi_dls_tls_temp.path }}/ca.key"
+    - "{{ fastapi_dls_tls_temp.path }}/ca.crt"
+    - "{{ fastapi_dls_tls_temp.path }}/webserver.key"
+    - "{{ fastapi_dls_tls_temp.path }}/webserver.crt"
+  register: fastapi_dls_tls_material
+  no_log: true
+
+- name: Select the issued FastAPI-DLS TLS material
+  ansible.builtin.set_fact:
+    fastapi_dls_tls_ca_key_b64: "{{ fastapi_dls_tls_material.results[0].content }}"
+    fastapi_dls_tls_ca_certificate_b64: "{{ fastapi_dls_tls_material.results[1].content }}"
+    fastapi_dls_tls_server_certificate_b64: "{{ fastapi_dls_tls_material.results[3].content }}"
+  no_log: true
+
+- name: Reconcile the issued FastAPI-DLS TLS Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ fastapi_dls_tls_secret_name }}"
+        namespace: "{{ fastapi_dls_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+          app.kubernetes.io/managed-by: ansible
+      type: Opaque
+      data:
+        ca.key: "{{ fastapi_dls_tls_ca_key_b64 }}"
+        ca.crt: "{{ fastapi_dls_tls_ca_certificate_b64 }}"
+        webserver.key: "{{ fastapi_dls_tls_material.results[2].content }}"
+        webserver.crt: "{{ fastapi_dls_tls_server_certificate_b64 }}"
+  no_log: true

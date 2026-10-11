@@ -33,7 +33,7 @@ spec:
         phase: compile
         input: student/student.c
         limits:
-          wallTimeSeconds: 60
+          wallTimeSeconds: 30
           memoryBytes: 1073741824
           outputBytes: 4194304
       checker:
@@ -56,9 +56,9 @@ spec:
             source: evaluator://tests/xv6-riscv64/filesystem
             maxPoints: 70
         limits:
-          wallTimeSeconds: 5
-          memoryBytes: 268435456
-          outputBytes: 1048576
+          wallTimeSeconds: 30
+          memoryBytes: 1073741824
+          outputBytes: 4194304
       checker:
         kind: token
       score:

@@ -61,7 +61,7 @@ const routes: RouteRecordRaw[] = [
   roleRoute('teacher', '/teacher', '教师工作台', () => import('@/views/TeacherView.vue'), [
     { path: 'overview', component: () => import('@/views/teacher/TeacherOverviewView.vue'), meta: { title: '实验总览' } },
     { path: 'labs', component: () => import('@/views/teacher/LabListView.vue'), meta: { title: '实验' } },
-    { path: 'environments', component: () => import('@/views/teacher/WorkbenchModuleView.vue'), meta: { title: '环境' }, props: { title: '环境', description: '在此查看实验运行环境、配额和健康诊断。' } },
+    { path: 'environments', component: () => import('@/views/teacher/WorkbenchModuleView.vue'), meta: { title: '环境' } },
     { path: 'materials', component: () => import('@/views/teacher/MaterialUploadView.vue'), meta: { title: '材料' } },
     { path: 'approvals', component: () => import('@/views/teacher/CandidateApprovalView.vue'), meta: { title: '审批' } },
   ]),
@@ -79,6 +79,7 @@ const routes: RouteRecordRaw[] = [
     { path: 'workspaces', component: () => import('@/views/researcher/WorkspaceListView.vue'), meta: { title: '工作空间' } },
     { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: 'Work 环境' } },
     { path: 'software', component: () => import('@/views/researcher/SoftwareConfigView.vue'), meta: { title: '软件配置' } },
+    { path: 'ai-policy', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '项目 AI 设置' } },
     { path: 'resources', component: () => import('@/views/researcher/ResourceRequestView.vue'), meta: { title: '资源申请' } },
   ], [...PLATFORM_ROLES]),
   roleRoute('admin', '/admin', '管理工作台', () => import('@/views/AdminView.vue'), [
@@ -87,7 +88,6 @@ const routes: RouteRecordRaw[] = [
     { path: 'resource-finance', component: () => import('@/views/admin/ResourceFinanceView.vue'), meta: { title: '预算与费用' } },
     { path: 'platform-images', component: () => import('@/views/admin/PlatformImageView.vue'), meta: { title: '平台镜像' } },
     { path: 'gpu-catalog', component: () => import('@/views/admin/GpuCatalogView.vue'), meta: { title: 'GPU 目录' } },
-    { path: 'audit', component: () => import('@/views/admin/AuditLogView.vue'), meta: { title: '审计' } },
   ]),
   {
     path: '/:pathMatch(.*)*',

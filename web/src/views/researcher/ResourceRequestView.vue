@@ -73,11 +73,13 @@
             <span>已发布版本</span>
             <select v-model="selectedReleaseKey" class="text-input" required :disabled="options.releases.kind !== 'success'">
               <option value="">选择用于绑定的版本</option>
+              <option v-if="selectedReleaseKey && !selectedRelease" :value="selectedReleaseKey">先前选择的版本（当前不可用）</option>
               <option v-for="release in releaseOptions" :key="releaseKey(release.id, release.version)" :value="releaseKey(release.id, release.version)">
                 {{ release.label }} · {{ release.runtimeKind }}
               </option>
             </select>
-            <small v-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布版本。请联系课程教师发布模板，或先生成 Work 模板。</small>
+            <small v-if="releaseSelectionMessage" class="field-note">{{ releaseSelectionMessage }}</small>
+            <small v-else-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布版本。请联系课程教师发布模板，或先生成 Work 模板。</small>
             <div v-if="options.releases.kind === 'empty'" class="release-empty-next-step">
               <RouterLink v-if="canPublishEnvironmentTemplates" class="text-button" :to="{ path: '/teacher/materials', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">教师发布模板</RouterLink>
               <RouterLink class="text-button" :to="{ path: '/researcher/software', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">生成 Work 模板</RouterLink>
@@ -94,12 +96,16 @@
           <div class="two-columns">
             <label>
               <span>GPU 目录项（可选）</span>
-              <select v-model="selectedGpuCatalogId" class="text-input" :disabled="options.catalog.kind !== 'success'">
+              <select v-model="selectedGpuCatalogId" class="text-input" :disabled="!selectedRelease">
                 <option value="">不申请 GPU</option>
+                <option v-if="selectedGpuCatalogId && !selectedGpu" :value="selectedGpuCatalogId">先前选择的 GPU（当前不可用）</option>
                 <option v-for="entry in gpuCatalogOptions" :key="entry.id" :value="entry.id">
                   {{ entry.class }} · {{ gpuModeLabel(entry.mode) }} · {{ entry.capacityUnits }} units
                 </option>
               </select>
+              <small v-if="gpuSelectionMessage" class="field-note">{{ gpuSelectionMessage }}</small>
+              <small v-else-if="!selectedRelease" class="field-note">先选择已发布版本，再显示与运行时兼容的 GPU 目录项。</small>
+              <small v-else-if="options.catalog.kind === 'success' && gpuCatalogOptions.length === 0" class="field-note">当前版本的运行时没有兼容的 GPU 目录项。</small>
             </label>
             <label>
               <span>GPU 数量</span>
@@ -109,14 +115,18 @@
           <div v-if="selectedGpu" class="gpu-detail" role="note">
             <strong>{{ selectedGpu.class }} · {{ gpuModeLabel(selectedGpu.mode) }}</strong>
             <span>目录容量：{{ selectedGpu.capacityUnits }} units · 单次申请上限：{{ selectedGpu.mode === 'container_time_slice' ? '1 个共享时间片' : `${selectedGpu.capacityUnits} 个单位` }}</span>
+            <span v-if="selectedGpu.mode === 'container_time_slice'" data-testid="gpu-sharing-limit">共享时间片不提供独占显存或固定比例算力，其他任务可能影响性能。</span>
             <span v-if="selectedGpuRate">费率：{{ selectedGpuRate.unitPrice.amount }} {{ selectedGpuRate.unitPrice.currency }} / {{ selectedGpuRate.unitQuantity }} GPU 秒</span>
-            <span v-else-if="selectedGpuRateAmbiguous">费率：当前有效费率的同一版本存在冲突，无法提交</span>
-            <span v-else>费用：尚未配置，当前不能提交这项 GPU 申请。</span>
+            <span v-else-if="selectedGpuRateAmbiguous">费用：当前有效费率存在冲突；申请仍可提交，费用不会按冲突配置自动结算。</span>
+            <span v-else-if="options.rates.kind === 'error'">费用：费率暂时无法读取；申请仍可提交，费用不会按免费处理。</span>
+            <span v-else-if="options.rates.kind === 'loading'">费用：正在读取费率；申请仍可提交，尚未形成费用估算。</span>
+            <span v-else>费用：当前未配置计价；申请仍可提交，费用不会按免费处理。</span>
           </div>
           <div class="estimate-box" role="note">
             <span>提交规格</span>
             <strong>{{ requestSummary }}</strong>
-            <small>费用估算以当前配置为准；没有匹配费率时会显示未配置计价。</small>
+            <small v-if="gpuSelectionMessage" class="field-note">{{ gpuSelectionMessage }}</small>
+            <small>费率缺失、冲突或读取失败时不显示为免费，费用状态以实际计量和平台后续核算为准。</small>
           </div>
           <button type="submit" class="filled-button" :disabled="!canSubmit || resources.acting !== null">提交资源申请</button>
         </form>
@@ -140,6 +150,12 @@
               <ul class="resource-list">
                 <li v-for="request in data" :key="request.id" class="resource-row">
                   <div class="resource-row__main"><strong>资源申请</strong><small>{{ request.requestKey }} · {{ resourceTargetLabel(request) }} · {{ resourceSummary(request.requestedResources) }}</small><small>更新于 {{ formatTimestamp(request.updatedAt) }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>申请 ID：{{ request.id }}</small></details></div>
+                  <p
+                    v-if="resourceAllocationFailureMessage(request.diagnosticCode)"
+                    role="alert"
+                  >
+                    {{ resourceAllocationFailureMessage(request.diagnosticCode) }}
+                  </p>
                   <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${request.state}`">{{ requestStateLabel(request.state) }}</span><button v-if="request.state === 'reviewing' || request.state === 'allocating'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="openCancelConfirmation(request)">取消</button></div>
                 </li>
               </ul>
@@ -153,7 +169,7 @@
             <template #success="{ data }">
               <ul class="resource-list">
                 <li v-for="lease in data" :key="lease.id" class="resource-row">
-                  <div class="resource-row__main"><strong>资源使用授权</strong><small>{{ lease.expiresAt ? `到期 ${formatTimestamp(lease.expiresAt)}` : '等待分配' }}</small><small v-if="lease.revokeReasonCode">原因：{{ lease.revokeReasonCode }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>Lease ID：{{ lease.id }} · 申请 ID：{{ lease.requestId }}</small></details></div>
+                  <div class="resource-row__main"><strong>资源使用授权</strong><small>{{ lease.expiresAt ? `到期 ${formatTimestamp(lease.expiresAt)}` : '等待分配' }}</small><small v-if="lease.revokeReasonCode === 'task_owner_release'" role="status">临时任务资源已回收，请查看任务结果；这不代表用户 Work 环境已释放。</small><small v-else-if="lease.revokeReasonCode">原因：{{ lease.revokeReasonCode }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>Lease ID：{{ lease.id }} · 申请 ID：{{ lease.requestId }}</small></details></div>
                   <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${lease.state}`">{{ leaseStateLabel(lease.state) }}</span><button v-if="lease.state === 'active' || lease.state === 'expiring'" type="button" class="outlined-button small" :disabled="resources.acting !== null" @click="renewLease(lease)">续期</button><button v-if="lease.state === 'active' || lease.state === 'expiring'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="openReclaimConfirmation(lease)">回收</button><RouterLink v-if="lease.state === 'active' && requestEnvironmentId(lease.requestId)" class="text-button" :to="{ path: '/researcher/environments', query: { environmentId: requestEnvironmentId(lease.requestId)!, projectId: selectedProjectId ?? undefined } }">连接</RouterLink></div>
                 </li>
               </ul>
@@ -189,6 +205,7 @@ import { useAuth } from '@/composables/useAuth'
 import type { ResourceLeaseSchema, ResourceRequestSchema } from '@/generated/contracts'
 import { formatTimestamp, idempotencyKey, newUuidV7 } from '@/utils/format'
 import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
+import { resourceAllocationFailureMessage } from '@/utils/stateLabels'
 
 const route = useRoute()
 const router = useRouter()
@@ -235,9 +252,26 @@ type ResourceConfirmation =
 const resourceConfirmation = ref<ResourceConfirmation | null>(null)
 
 const releaseOptions = computed(() => options.releases.kind === 'success' ? options.releases.data : [])
-const gpuCatalogOptions = computed(() => options.catalog.kind === 'success' ? options.catalog.data : [])
 const selectedRelease = computed(() => releaseOptions.value.find((item) => releaseKey(item.id, item.version) === selectedReleaseKey.value) ?? null)
+const releaseSelectionMessage = computed(() => {
+  if (!selectedReleaseKey.value || selectedRelease.value) return null
+  if (options.releases.kind === 'loading') return '正在读取先前选择的版本；读取完成前不能提交。'
+  if (options.releases.kind === 'error') return '版本暂时无法读取，已保留先前选择；请重试后再提交。'
+  return '先前选择的版本当前不可用，请重新选择版本后再提交。'
+})
+const gpuCatalogOptions = computed(() => {
+  if (options.catalog.kind !== 'success' || !selectedRelease.value) return []
+  const runtimeMode = selectedRelease.value.runtimeKind === 'virtual_machine' ? 'vm_vgpu' : 'container'
+  return options.catalog.data.filter((entry) => runtimeMode === 'vm_vgpu' ? entry.mode === 'vm_vgpu' : entry.mode !== 'vm_vgpu')
+})
 const selectedGpu = computed(() => gpuCatalogOptions.value.find((item) => item.id === selectedGpuCatalogId.value) ?? null)
+const gpuSelectionMessage = computed(() => {
+  if (!selectedGpuCatalogId.value || selectedGpu.value) return null
+  if (options.catalog.kind === 'loading') return '正在读取先前选择的 GPU 目录项；读取完成前不能提交。'
+  if (options.catalog.kind === 'error') return 'GPU 目录暂时无法读取，已保留先前选择；请重试，或显式选择“不申请 GPU”。'
+  if (!selectedRelease.value) return '已保留先前的 GPU 选择，请先选择有效版本，或显式选择“不申请 GPU”。'
+  return '先前选择的 GPU 目录项当前不可用，请重新选择，或显式选择“不申请 GPU”。'
+})
 const selectedGpuRateSelection = computed(() => selectedGpu.value
   ? options.gpuRateSelection(selectedGpu.value)
   : { rate: null, ambiguous: false })
@@ -300,7 +334,7 @@ watch(selectedProjectId, (id) => {
 watch(
   () => releaseOptions.value,
   (items) => {
-    if (!items.some((item) => releaseKey(item.id, item.version) === selectedReleaseKey.value)) {
+    if (options.releases.kind === 'success' && !selectedReleaseKey.value && items.length > 0) {
       selectedReleaseKey.value = releaseKey(items[0]?.id ?? '', items[0]?.version ?? 0)
     }
   },
@@ -310,9 +344,8 @@ watch(
 watch(
   () => selectedGpu.value,
   (entry) => {
-    if (!entry) {
-      gpuCount.value = 1
-    } else if (entry.mode === 'container_time_slice') {
+    if (!entry) return
+    if (entry.mode === 'container_time_slice') {
       gpuCount.value = 1
     } else if (gpuCount.value < 1 || gpuCount.value > entry.capacityUnits) {
       gpuCount.value = Math.min(Math.max(gpuCount.value, 1), entry.capacityUnits)
@@ -327,7 +360,7 @@ const canSubmit = computed(() => Boolean(
   Number.isInteger(memoryGiB.value) && memoryGiB.value > 0 &&
   Number.isInteger(storageGiB.value) && storageGiB.value > 0 &&
   Number.isInteger(durationHours.value) && durationHours.value > 0 &&
-  (!selectedGpu.value || (
+  (!selectedGpuCatalogId.value || (selectedGpu.value &&
     Number.isInteger(gpuCount.value) &&
     gpuCount.value > 0 &&
     gpuCount.value <= selectedGpu.value.capacityUnits
@@ -396,6 +429,7 @@ async function reclaimLease(lease: ResourceLeaseSchema) { await resources.reclai
 function requestEnvironmentId(requestId: string) {
   if (resources.requests.kind !== 'success') return null
   const request = resources.requests.data.find((item) => item.id === requestId)
+  if (resourceAllocationFailureMessage(request?.diagnosticCode)) return null
   return request?.target.kind === 'environment' ? request.target.environmentId : null
 }
 function releaseKey(id: string, version: number) { return id && version > 0 ? `${id}:${version}` : '' }

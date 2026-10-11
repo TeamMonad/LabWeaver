@@ -65,6 +65,7 @@ pub struct ContainerResource {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContainerResourcePlan {
     pub environment_id: contracts::EnvironmentId,
+    pub project_id: contracts::ProjectId,
     pub namespace: String,
     pub image: String,
     pub resources: Vec<ContainerResource>,
@@ -1444,10 +1445,6 @@ where
                 format!("requests.{}", allocation.allocation_binding),
                 quantity.clone(),
             );
-            quota_hard.insert(
-                format!("limits.{}", allocation.allocation_binding),
-                quantity,
-            );
         }
         let mut pod_labels = json!({
             "app": app_name,
@@ -1627,6 +1624,7 @@ where
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
+            project_id: instance.project_id,
             namespace,
             image,
             resources: documents,
@@ -1664,11 +1662,13 @@ where
         let namespace = format!("lw-env-{}", instance.id);
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
+            "projectId": instance.project_id,
             "namespace": namespace,
             "action": "cleanup",
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
+            project_id: instance.project_id,
             namespace,
             image: String::new(),
             resources: Vec::new(),
@@ -1687,108 +1687,123 @@ where
         &self.binding
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one concrete provider action dispatch keeps observation completion consistent"
+    )]
     async fn execute(
         &self,
         action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        let fence = ContainerBackendFence::for_action(instance, action)?;
-        let no_endpoints = |next_state, operation_complete| ProviderObservation {
-            next_state,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete,
-        };
-        if action == ReconcileAction::Cleanup
-            && instance.observed_state == ObservedEnvironmentState::Deleting
-        {
-            let plan = self
-                .cleanup_plan(instance)
-                .map_err(|error| projection_failure(&error))?;
-            let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
-            if !valid_artifact_ref(&cleanup_evidence) {
-                return Err(ProviderFailure {
-                    code: ProviderFailureCode::CleanupFailed,
-                    retryable: true,
+    ) -> Result<crate::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            let fence = ContainerBackendFence::for_action(instance, action)?;
+            let no_endpoints = |next_state, operation_complete| ProviderObservation {
+                next_state,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete,
+            };
+            if action == ReconcileAction::Cleanup
+                && instance.observed_state == ObservedEnvironmentState::Deleting
+            {
+                let plan = self
+                    .cleanup_plan(instance)
+                    .map_err(|error| projection_failure(&error))?;
+                let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
+                if !valid_artifact_ref(&cleanup_evidence) {
+                    return Err(ProviderFailure {
+                        code: ProviderFailureCode::CleanupFailed,
+                        retryable: true,
+                    });
+                }
+                return Ok(ProviderObservation {
+                    next_state: ObservedEnvironmentState::Deleted,
+                    endpoints: Vec::new(),
+                    cleanup_evidence: Some(cleanup_evidence),
+                    operation_complete: true,
                 });
             }
-            return Ok(ProviderObservation {
-                next_state: ObservedEnvironmentState::Deleted,
-                endpoints: Vec::new(),
-                cleanup_evidence: Some(cleanup_evidence),
-                operation_complete: true,
-            });
-        }
-        if action == ReconcileAction::Cleanup
-            && instance.observed_state == ObservedEnvironmentState::Stopped
-            && instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted
-        {
-            return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
-        }
-        let resolved = self
-            .releases
-            .resolve(instance.release_id, instance.release_version)
-            .await
-            .map_err(|error| {
-                log_projection_failure(&error, instance, action, "resolve");
+            if action == ReconcileAction::Cleanup
+                && instance.observed_state == ObservedEnvironmentState::Stopped
+                && instance.desired_state
+                    == contracts::environment::DesiredEnvironmentState::Deleted
+            {
+                return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+            }
+            if action == ReconcileAction::Stop
+                && matches!(
+                    instance.observed_state,
+                    ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring
+                )
+            {
+                if instance.desired_state
+                    == contracts::environment::DesiredEnvironmentState::Deleted
+                {
+                    return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+                }
+                let plan = self
+                    .cleanup_plan(instance)
+                    .map_err(|error| projection_failure(&error))?;
+                self.backend.scale(&fence, &plan, 0).await?;
+                return Ok(no_endpoints(ObservedEnvironmentState::Stopped, true));
+            }
+            let resolved = self
+                .releases
+                .resolve(instance.release_id, instance.release_version)
+                .await
+                .map_err(|error| {
+                    log_projection_failure(&error, instance, action, "resolve");
+                    projection_failure(&error)
+                })?;
+            let plan = self.plan(instance, &resolved, action).map_err(|error| {
+                log_projection_failure(&error, instance, action, "plan");
                 projection_failure(&error)
             })?;
-        let plan = self.plan(instance, &resolved, action).map_err(|error| {
-            log_projection_failure(&error, instance, action, "plan");
-            projection_failure(&error)
-        })?;
-        match (action, instance.observed_state) {
-            (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
-                Ok(no_endpoints(ObservedEnvironmentState::Validating, false))
+            match (action, instance.observed_state) {
+                (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
+                    Ok(no_endpoints(ObservedEnvironmentState::Validating, false))
+                }
+                (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
+                    Ok(no_endpoints(ObservedEnvironmentState::Building, false))
+                }
+                (ReconcileAction::Build, ObservedEnvironmentState::Building) => {
+                    Ok(no_endpoints(ObservedEnvironmentState::Provisioning, false))
+                }
+                (
+                    ReconcileAction::Provision | ReconcileAction::Reset,
+                    ObservedEnvironmentState::Provisioning,
+                ) => {
+                    let observed = self.backend.apply(&fence, &plan).await?;
+                    ready_observation(instance, observed)
+                }
+                (ReconcileAction::Observe, _) => {
+                    let observed = self.backend.observe(&fence, &plan).await?;
+                    ready_observation(instance, observed)
+                }
+                (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
+                    let observed = self.backend.scale(&fence, &plan, 1).await?;
+                    ready_observation(instance, observed)
+                }
+                (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
+                    let observed = self
+                        .backend
+                        // The aggregate revision changes after every observation and
+                        // retry. The accepted operation revision is immutable for
+                        // one user restart, so it is the only stable template
+                        // identity that makes repeated reconciliation idempotent.
+                        .restart(&fence, &plan, instance.operation.accepted_revision)
+                        .await?;
+                    ready_observation(instance, observed)
+                }
+                _ => Err(ProviderFailure {
+                    code: ProviderFailureCode::Rejected,
+                    retryable: false,
+                }),
             }
-            (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
-                Ok(no_endpoints(ObservedEnvironmentState::Building, false))
-            }
-            (ReconcileAction::Build, ObservedEnvironmentState::Building) => {
-                Ok(no_endpoints(ObservedEnvironmentState::Provisioning, false))
-            }
-            (
-                ReconcileAction::Provision | ReconcileAction::Reset,
-                ObservedEnvironmentState::Provisioning,
-            ) => {
-                let observed = self.backend.apply(&fence, &plan).await?;
-                ready_observation(instance, observed)
-            }
-            (ReconcileAction::Observe, _) => {
-                let observed = self.backend.observe(&fence, &plan).await?;
-                ready_observation(instance, observed)
-            }
-            (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
-                let observed = self.backend.scale(&fence, &plan, 1).await?;
-                ready_observation(instance, observed)
-            }
-            (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
-                let observed = self
-                    .backend
-                    // The aggregate revision changes after every observation and
-                    // retry. The accepted operation revision is immutable for
-                    // one user restart, so it is the only stable template
-                    // identity that makes repeated reconciliation idempotent.
-                    .restart(&fence, &plan, instance.operation.accepted_revision)
-                    .await?;
-                ready_observation(instance, observed)
-            }
-            (
-                ReconcileAction::Stop,
-                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring,
-            ) => {
-                self.backend.scale(&fence, &plan, 0).await?;
-                Ok(no_endpoints(
-                    ObservedEnvironmentState::Stopped,
-                    instance.desired_state
-                        == contracts::environment::DesiredEnvironmentState::Stopped,
-                ))
-            }
-            _ => Err(ProviderFailure {
-                code: ProviderFailureCode::Rejected,
-                retryable: false,
-            }),
         }
+        .await
+        .map(crate::ProviderOutcome::Completed)
     }
 }
 
@@ -1870,7 +1885,7 @@ fn approved_resources(
                 resources.cpu_millicores,
                 resources.memory_bytes,
                 resources.storage_bytes,
-                None,
+                experiment_gpu_allocation(instance, projection)?,
             ))
         }
         contracts::authoring::EnvironmentClass::Work => {
@@ -1898,6 +1913,31 @@ fn approved_resources(
                 authorization.gpu_allocation.clone(),
             ))
         }
+    }
+}
+
+/// Returns the Resource-resolved Experiment GPU allocation, failing closed on any mismatch.
+///
+/// A release that declares a GPU but has no durable allocation, or whose allocation does not
+/// match the declared class and count, is rejected before any workload object is rendered.
+fn experiment_gpu_allocation(
+    instance: &EnvironmentInstance,
+    projection: &ReleasePublished,
+) -> Result<Option<GpuAllocation>, ReleaseProjectionError> {
+    match (
+        &instance.gpu_allocation,
+        projection.environment_spec.resources.gpu.as_ref(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(allocation), Some(request))
+            if allocation.class == request.class && allocation.count == request.count =>
+        {
+            allocation
+                .validate()
+                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+            Ok(Some(allocation.clone()))
+        }
+        _ => Err(ReleaseProjectionError::SecurityPostureInvalid),
     }
 }
 
@@ -2079,14 +2119,35 @@ fn valid_dns_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn valid_extended_resource_name(value: &str) -> bool {
-    let Some((prefix, name)) = value.rsplit_once('/') else {
-        return valid_dns_label(value);
+/// Kubernetes extended resources must also be valid after adding the quota prefix.
+pub(crate) fn valid_extended_resource_name(value: &str) -> bool {
+    let Some((prefix, name)) = value.split_once('/') else {
+        return false;
     };
-    !prefix.is_empty()
-        && prefix.len() <= 253
-        && prefix.split('.').all(valid_dns_label)
-        && valid_dns_label(name)
+    if value.contains("kubernetes.io/") || value.starts_with("requests.") {
+        return false;
+    }
+    let valid_prefix = |prefix: &str| {
+        !prefix.is_empty()
+            && prefix.len() <= 253
+            && prefix.split('.').all(|label| {
+                !label.is_empty()
+                    && label.as_bytes()[0].is_ascii_alphanumeric()
+                    && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                    && label.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
+    };
+    valid_prefix(prefix)
+        && valid_prefix(&format!("requests.{prefix}"))
+        && !name.is_empty()
+        && name.len() <= 63
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name.as_bytes()[name.len() - 1].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -2140,7 +2201,9 @@ pub enum ReleaseProjectionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{release_provider_binding, valid_image_repository_prefix};
+    use super::{
+        release_provider_binding, valid_extended_resource_name, valid_image_repository_prefix,
+    };
     use contracts::authoring::EnvironmentRuntimeSpec;
     use serde_json::json;
 
@@ -2179,6 +2242,44 @@ mod tests {
             _ => unreachable!("test runtime kind"),
         };
         serde_json::from_value(runtime).expect("valid runtime")
+    }
+
+    #[test]
+    fn extended_resources_follow_qualified_name_and_quota_constraints() {
+        for name in [
+            "nvidia.com/GRID_V100DX-2Q",
+            "nvidia.com/gpu.shared",
+            "example.org/A_b.c-9",
+        ] {
+            assert!(valid_extended_resource_name(name), "{name}");
+        }
+        for name in [
+            "gpu",
+            "kubernetes.io/gpu",
+            "vendor.kubernetes.io/gpu",
+            "requests.vendor/gpu",
+            "Vendor.io/gpu",
+            "vendor..io/gpu",
+            "vendor.io/-gpu",
+            "vendor.io/gpu_",
+            "vendor.io/gpu/other",
+            "vendor.io/gpü",
+        ] {
+            assert!(!valid_extended_resource_name(name), "{name}");
+        }
+        assert!(valid_extended_resource_name(&format!(
+            "{}/{}",
+            "a".repeat(244),
+            "A".repeat(63)
+        )));
+        assert!(!valid_extended_resource_name(&format!(
+            "{}/gpu",
+            "a".repeat(245)
+        )));
+        assert!(!valid_extended_resource_name(&format!(
+            "vendor.io/{}",
+            "A".repeat(64)
+        )));
     }
 
     #[test]

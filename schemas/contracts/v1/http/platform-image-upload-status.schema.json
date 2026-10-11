@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "PlatformImageId": {
+      "description": "Strongly typed UUIDv7 identifier for `PlatformImageId`.",
+      "type": "string"
+    },
+    "PlatformImageUploadPartTarget": {
+      "description": "One short-lived presigned multipart part authority for one OCI archive.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "partNumber": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requiredHeaders": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "uploadUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "partNumber",
+        "uploadUrl",
+        "requiredHeaders",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "PlatformImageUploadState": {
+      "description": "Control-owned lifecycle state for a platform image upload.",
+      "enum": [
+        "pending",
+        "queued",
+        "freezing",
+        "importing",
+        "cancelling",
+        "imported",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "PlatformImageUploadTarget": {
+      "description": "Short-lived multipart upload authority for one OCI archive.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "partSizeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parts": {
+          "items": {
+            "$ref": "#/$defs/PlatformImageUploadPartTarget"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "partSizeBytes",
+        "parts",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "PlatformImageUploadedPart": {
+      "additionalProperties": false,
+      "description": "Actual part observed by the object store during upload status refresh.",
+      "properties": {
+        "etag": {
+          "type": "string"
+        },
+        "partNumber": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "partNumber",
+        "etag",
+        "sizeBytes"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UploadSessionId": {
+      "description": "Strongly typed UUIDv7 identifier for `UploadSessionId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public status of a platform image upload and its asynchronous import.",
+  "properties": {
+    "catalogId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformImageId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diagnostic": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "state": {
+      "$ref": "#/$defs/PlatformImageUploadState"
+    },
+    "uploadId": {
+      "$ref": "#/$defs/UploadSessionId"
+    },
+    "uploadTarget": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformImageUploadTarget"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "uploadedParts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PlatformImageUploadedPart"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "uploadId",
+    "state",
+    "revision"
+  ],
+  "title": "PlatformImageUploadStatus",
+  "type": "object"
+}

@@ -40,6 +40,14 @@
         <SvgIcon :name="themeIcon" size="md" :aria-label="`主题：${themeStore.preference}`" />
       </button>
 
+      <span
+        v-if="auth.error.value"
+        class="login-error"
+        role="alert"
+      >
+        认证操作失败：{{ auth.error.value.message }}
+      </span>
+
       <template v-if="auth.isLoading.value">
         <span class="login-status" role="status">加载中…</span>
       </template>
@@ -247,6 +255,11 @@ function cycleTheme() {
 .user-name {
   font: var(--md-sys-label-large);
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.login-error {
+  font: var(--md-sys-label-large);
+  color: var(--md-sys-color-error);
 }
 
 .user-chip {

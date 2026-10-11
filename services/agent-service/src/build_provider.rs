@@ -12,7 +12,10 @@ use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract h
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::build_pipeline::{
     BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
@@ -68,14 +71,45 @@ impl NatsBuildSupplyChainProvider {
         let context = bind_build_executor_request(*context, &request)?;
         let payload = serde_json::to_vec(&BuildExecutorRequestEnvelope { context, request })
             .map_err(|_| output_invalid())?;
+        let timeout = if matches!(
+            context.stage,
+            BuildProviderStage::Build | BuildProviderStage::Import
+        ) {
+            std::time::Duration::try_from(
+                context.deadline_at.get() - time::OffsetDateTime::now_utc(),
+            )
+            .map_err(|_| unavailable())?
+        } else {
+            self.request_timeout
+        };
         let request = async_nats::Request::new()
-            .timeout(Some(self.request_timeout))
+            .timeout(Some(timeout))
             .payload(payload.into());
         let message = self
             .client
             .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                let failure = unavailable();
+                if context.stage == BuildProviderStage::Cleanup {
+                    let error_kind = match error.kind() {
+                        async_nats::RequestErrorKind::TimedOut => "timeout",
+                        async_nats::RequestErrorKind::NoResponders => "no_responders",
+                        async_nats::RequestErrorKind::Other => "transport_other",
+                    };
+                    tracing::warn!(
+                        event = "agent.build.cleanup_request_failed",
+                        build_request_id = %context.build_request_id,
+                        generation = context.fence_generation,
+                        build_stage = build_stage_name(context.stage),
+                        failure_stage = "cleanup.rpc.request",
+                        error_kind,
+                        diagnostic_code = failure.diagnostic_code(),
+                        retryable = failure.retryable,
+                    );
+                }
+                failure
+            })?;
         if message.payload.len() > MAX_RESPONSE_BYTES {
             return Err(output_invalid());
         }
@@ -221,6 +255,8 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
                 BuildExecutorRequest::Cleanup {
                     build_request_id,
                     identity,
+                    timeout_milliseconds: u64::try_from(self.request_timeout.as_millis())
+                        .map_err(|_| configuration_failure())?,
                 },
             )
             .await?
@@ -269,6 +305,7 @@ pub enum BuildExecutorRequest {
     Cleanup {
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
+        timeout_milliseconds: u64,
     },
 }
 
@@ -328,6 +365,7 @@ pub trait BuildExecutorBackend: Send + Sync {
         &self,
         context: &BuildProviderRequestContext,
         request: &BuildExecutorRequest,
+        cancellation: &CancellationToken,
     ) -> BuildExecutorResponse;
 }
 
@@ -358,11 +396,16 @@ impl PgBuildExecutorFenceStore {
             sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
                 .fetch_one(&mut *transaction)
                 .await?;
-        if authority_now >= context.deadline_at.get() {
+        let cleanup = context.stage == BuildProviderStage::Cleanup;
+        if !cleanup && authority_now >= context.deadline_at.get() {
             return Err(BuildExecutorFenceError::DeadlineExceeded);
         }
-        let remaining = std::time::Duration::try_from(context.deadline_at.get() - authority_now)
-            .map_err(|_| BuildExecutorFenceError::DeadlineExceeded)?;
+        let remaining = if cleanup {
+            cleanup_timeout(&envelope.request)?
+        } else {
+            std::time::Duration::try_from(context.deadline_at.get() - authority_now)
+                .map_err(|_| BuildExecutorFenceError::DeadlineExceeded)?
+        };
         let current = sqlx::query(
             "SELECT highest_generation,lease_token,tombstone_generation,last_stage_rank, \
                     last_request_id,last_response,deadline_at \
@@ -391,8 +434,24 @@ impl PgBuildExecutorFenceStore {
             {
                 return Err(BuildExecutorFenceError::StaleGeneration);
             }
+            if cleanup
+                && (context.fence_generation != highest_generation
+                    || context.lease_token != lease_token
+                    || context.deadline_at.get() != previous_deadline)
+            {
+                return Err(BuildExecutorFenceError::IdentityMismatch);
+            }
+            let retry_cleanup = cleanup
+                && context.fence_generation == highest_generation
+                && last_stage_rank == stage_rank
+                && tombstone_generation == Some(highest_generation)
+                && last_request_id == context.stage_request_id.to_string()
+                && last_response
+                    .as_ref()
+                    .is_some_and(retryable_cleanup_response);
             if context.fence_generation == highest_generation
                 && last_request_id == context.stage_request_id.to_string()
+                && !retry_cleanup
             {
                 if let Some(value) = last_response {
                     transaction.rollback().await?;
@@ -400,11 +459,11 @@ impl PgBuildExecutorFenceStore {
                 }
                 return Err(BuildExecutorFenceError::InProgress);
             }
-            if last_response.is_none() && authority_now < previous_deadline {
+            if last_response.is_none() {
                 return Err(BuildExecutorFenceError::InProgress);
             }
             if context.fence_generation == highest_generation
-                && (tombstone_generation == Some(highest_generation)
+                && ((tombstone_generation == Some(highest_generation) && !retry_cleanup)
                     || (stage_rank < last_stage_rank
                         && context.stage != BuildProviderStage::Cleanup))
             {
@@ -435,6 +494,9 @@ impl PgBuildExecutorFenceStore {
             .execute(&mut *transaction)
             .await?;
         } else {
+            if cleanup {
+                return Err(BuildExecutorFenceError::IdentityMismatch);
+            }
             sqlx::query(
                 "INSERT INTO agent.build_executor_fences \
                  (build_request_id,highest_generation,lease_token,tombstone_generation,last_stage, \
@@ -497,31 +559,124 @@ enum BuildExecutorAdmission {
     Replay(Value),
 }
 
+pub(crate) fn retryable_cleanup_response(value: &Value) -> bool {
+    match serde_json::from_value::<BuildExecutorResponse>(value.clone()) {
+        Ok(BuildExecutorResponse::Failed { failure }) => retryable_cleanup_failure(failure),
+        _ => false,
+    }
+}
+
+pub(crate) const fn retryable_cleanup_failure(failure: BuildProviderFailure) -> bool {
+    failure.retryable
+        && matches!(
+            failure.code,
+            BuildProviderFailureCode::Unavailable | BuildProviderFailureCode::TimedOut
+        )
+}
+
+fn cleanup_timeout(request: &BuildExecutorRequest) -> Result<Duration, BuildExecutorFenceError> {
+    if let BuildExecutorRequest::Cleanup {
+        timeout_milliseconds,
+        ..
+    } = request
+        && *timeout_milliseconds > 0
+        && *timeout_milliseconds <= 3_600_000
+    {
+        return Ok(Duration::from_millis(*timeout_milliseconds));
+    }
+    Err(BuildExecutorFenceError::IdentityMismatch)
+}
+
 /// Server-side executor wrapper that never calls a side-effect adapter before durable admission.
 pub struct FencedBuildExecutor<B> {
     store: PgBuildExecutorFenceStore,
     backend: B,
+    active: Mutex<HashMap<BuildRequestId, ActiveBuild>>,
+}
+
+#[derive(Clone)]
+struct ActiveBuild {
+    context: BuildProviderRequestContext,
+    cancellation: CancellationToken,
+    joined: CancellationToken,
 }
 
 impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
     #[must_use]
-    pub const fn new(store: PgBuildExecutorFenceStore, backend: B) -> Self {
-        Self { store, backend }
+    pub fn new(store: PgBuildExecutorFenceStore, backend: B) -> Self {
+        Self {
+            store,
+            backend,
+            active: Mutex::new(HashMap::new()),
+        }
     }
 
     pub async fn execute(
         &self,
         envelope: BuildExecutorRequestEnvelope,
     ) -> Result<BuildExecutorResponseEnvelope, BuildExecutorFenceError> {
-        let response = match self.store.admit(&envelope).await? {
-            BuildExecutorAdmission::Execute(remaining) => {
-                let response = tokio::time::timeout(
-                    remaining,
-                    self.backend.execute(&envelope.context, &envelope.request),
+        if envelope.context.stage == BuildProviderStage::Cleanup {
+            validate_executor_request(&envelope)?;
+            let active = self
+                .active
+                .lock()
+                .await
+                .get(&envelope.context.build_request_id)
+                .cloned();
+            if let Some(active) = active {
+                if active.context.fence_generation != envelope.context.fence_generation
+                    || active.context.lease_token != envelope.context.lease_token
+                    || active.context.deadline_at != envelope.context.deadline_at
+                {
+                    return Err(BuildExecutorFenceError::IdentityMismatch);
+                }
+                if active.context.stage != BuildProviderStage::Cleanup {
+                    active.cancellation.cancel();
+                }
+                tokio::time::timeout(
+                    cleanup_timeout(&envelope.request)?,
+                    active.joined.cancelled(),
                 )
                 .await
-                .map_err(|_| BuildExecutorFenceError::DeadlineExceeded)?;
-                self.store.complete(envelope.context, &response).await?;
+                .map_err(|_| BuildExecutorFenceError::InProgress)?;
+            }
+        }
+        let response = match self.store.admit(&envelope).await? {
+            BuildExecutorAdmission::Execute(remaining) => {
+                let active = ActiveBuild {
+                    context: envelope.context,
+                    cancellation: CancellationToken::new(),
+                    joined: CancellationToken::new(),
+                };
+                self.active
+                    .lock()
+                    .await
+                    .insert(envelope.context.build_request_id, active.clone());
+                let execution = self.backend.execute(
+                    &envelope.context,
+                    &envelope.request,
+                    &active.cancellation,
+                );
+                tokio::pin!(execution);
+                let response = tokio::select! {
+                    response = &mut execution => response,
+                    () = tokio::time::sleep(remaining) => {
+                        active.cancellation.cancel();
+                        execution.await
+                    }
+                };
+                let unconfirmed = matches!(&response, BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::ExecutionUnknown);
+                let complete = if unconfirmed {
+                    Ok(())
+                } else {
+                    self.store.complete(envelope.context, &response).await
+                };
+                self.active
+                    .lock()
+                    .await
+                    .remove(&envelope.context.build_request_id);
+                active.joined.cancel();
+                complete?;
                 response
             }
             BuildExecutorAdmission::Replay(value) => serde_json::from_value(value)
@@ -686,7 +841,18 @@ fn executor_request_identity_valid(request: &BuildExecutorRequest) -> bool {
                     .strip_prefix("sha256:")
                     .is_some_and(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
         }
-        BuildExecutorRequest::Cleanup { .. } => true,
+        BuildExecutorRequest::Cleanup {
+            build_request_id,
+            identity,
+            timeout_milliseconds,
+        } => {
+            *identity
+                == BuildIdentity(Sha256Digest::of_bytes(
+                    build_request_id.as_uuid().as_bytes(),
+                ))
+                && *timeout_milliseconds > 0
+                && *timeout_milliseconds <= 3_600_000
+        }
     }
 }
 
@@ -736,7 +902,7 @@ const fn build_stage_rank(stage: BuildProviderStage) -> i16 {
     }
 }
 
-const fn build_stage_name(stage: BuildProviderStage) -> &'static str {
+pub(crate) const fn build_stage_name(stage: BuildProviderStage) -> &'static str {
     match stage {
         BuildProviderStage::EnsurePrivateProject => "ensure_private_project",
         BuildProviderStage::Build => "build",

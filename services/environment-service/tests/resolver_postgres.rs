@@ -43,7 +43,7 @@ async fn resolver_uses_real_postgres_and_owner_resolution_logic()
     support::apply_environment_migrations(&pool).await?;
 
     let mut authoritative = support::ready_instance();
-    authoritative.eligibility_expires_at = support::timestamp("2030-07-15T00:00:00.000Z");
+    authoritative.eligibility_expires_at = Some(support::timestamp("2030-07-15T00:00:00.000Z"));
     insert_instance(&pool, &authoritative).await?;
 
     let store = PgEnvironmentStore::new(pool.clone());
@@ -111,7 +111,7 @@ async fn resolver_uses_real_postgres_and_owner_resolution_logic()
 
     let database_now = store.current_time().await?;
     let mut expired = reassigned.clone();
-    expired.eligibility_expires_at = shift_minutes(database_now, -1)?;
+    expired.eligibility_expires_at = Some(shift_minutes(database_now, -1)?);
     let lagged_process_clock = shift_minutes(database_now, -2)?;
     assert!(
         authorize_owner_resolution(&expired, &request_for(&expired), lagged_process_clock).is_ok()
@@ -191,7 +191,7 @@ async fn insert_instance(
     .bind(instance.lease_id.map(contracts::LeaseId::as_uuid))
     .bind(i64::try_from(instance.revision.get())?)
     .bind(&instance.last_diagnostic_code)
-    .bind(instance.eligibility_expires_at.get())
+    .bind(instance.eligibility_expires_at.map(contracts::UtcTimestamp::get))
     .bind(serde_json::to_value(instance)?)
     .execute(pool)
     .await?;
@@ -215,7 +215,11 @@ async fn update_instance(
     .bind(wire(&instance.desired_state)?)
     .bind(wire(&instance.observed_state)?)
     .bind(i64::try_from(instance.revision.get())?)
-    .bind(instance.eligibility_expires_at.get())
+    .bind(
+        instance
+            .eligibility_expires_at
+            .map(contracts::UtcTimestamp::get),
+    )
     .bind(serde_json::to_value(instance)?)
     .execute(pool)
     .await?;

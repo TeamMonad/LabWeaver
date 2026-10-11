@@ -7,13 +7,13 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
-use contracts::UtcTimestamp;
 use contracts::access::{
     CloseGatewaySessionRequest, CreateGatewaySessionRequest, GatewaySession, GatewaySessionState,
     HeartbeatGatewaySessionRequest, SshAuthorization, SshAuthorizationRequest,
 };
+use contracts::{Revision, UtcTimestamp};
 use reqwest::{Certificate, Client, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh_key::{HashAlg, PublicKey};
 use time::OffsetDateTime;
@@ -22,6 +22,7 @@ use tracing::{error, info, warn};
 
 const AUTHORIZE_PATH: &str = "/internal/v1/ssh/authorize";
 const SESSION_PATH: &str = "/internal/v1/sessions";
+const MAX_GUEST_COMMAND_BYTES: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 enum GatewayError {
@@ -33,6 +34,10 @@ enum GatewayError {
     InputStage(&'static str),
     #[error("access authority rejected or failed the request")]
     Authority,
+    #[error("access authority transport failed")]
+    Transport,
+    #[error("gateway session close retries exhausted")]
+    CloseRetriesExhausted,
     #[error("target session failed")]
     Target,
 }
@@ -43,6 +48,8 @@ impl GatewayError {
             Self::Configuration => "LW_GATEWAY_CONFIGURATION_INVALID",
             Self::InvalidInput | Self::InputStage(_) => "LW_GATEWAY_INPUT_INVALID",
             Self::Authority => "LW_GATEWAY_AUTHORITY_FAILED",
+            Self::Transport => "LW_GATEWAY_AUTHORITY_TRANSPORT_FAILED",
+            Self::CloseRetriesExhausted => "LW_GATEWAY_SESSION_CLOSE_RETRIES_EXHAUSTED",
             Self::Target => "LW_GATEWAY_TARGET_SESSION_FAILED",
         }
     }
@@ -52,6 +59,8 @@ impl GatewayError {
             Self::Configuration => "configuration_invalid",
             Self::InvalidInput | Self::InputStage(_) => "input_rejected",
             Self::Authority => "access_authority_failed",
+            Self::Transport => "access_authority_transport_failed",
+            Self::CloseRetriesExhausted => "session_close_retries_exhausted",
             Self::Target => "target_session_failed",
         }
     }
@@ -61,29 +70,133 @@ impl GatewayError {
             Self::InputStage(stage) => stage,
             Self::Configuration => "gateway.configuration",
             Self::InvalidInput => "gateway.input",
-            Self::Authority => "gateway.access_authority",
+            Self::Authority | Self::Transport => "gateway.access_authority",
+            Self::CloseRetriesExhausted => "gateway.session.close",
             Self::Target => "gateway.target_session",
         }
     }
 
     const fn retryable(&self) -> bool {
-        matches!(self, Self::Authority | Self::Target)
+        matches!(self, Self::Authority | Self::Transport | Self::Target)
     }
 }
 
 #[derive(Clone)]
 struct GatewayConfig {
     access_url: String,
-    gateway_identity: String,
+    service_client_id: String,
     client: Client,
     service_token_client: ServiceTokenClient,
     context: telemetry::RequestContext,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionRevisionConflict {
+    diagnostic_code: String,
+    current_revision: Revision,
+    state: GatewaySessionState,
+}
+
+const CLOSE_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
+const CLOSE_RETRY_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseResponseAction {
+    Success,
+    RevisionConflict,
+    Retry,
+    Reject,
+}
+
+fn close_response_action(status: StatusCode) -> CloseResponseAction {
+    match status {
+        status if status.is_success() => CloseResponseAction::Success,
+        StatusCode::PRECONDITION_FAILED => CloseResponseAction::RevisionConflict,
+        StatusCode::TOO_MANY_REQUESTS => CloseResponseAction::Retry,
+        status if status.is_server_error() => CloseResponseAction::Retry,
+        _ => CloseResponseAction::Reject,
+    }
+}
+
+fn close_retry_delay(attempt: usize) -> Option<Duration> {
+    CLOSE_RETRY_DELAYS.get(attempt).copied()
+}
+
+const fn close_error_is_retryable(error: &GatewayError) -> bool {
+    matches!(error, GatewayError::Transport)
+}
+
+enum HeartbeatUpdate {
+    Active(Box<GatewaySession>),
+    Stop(Revision),
+}
+
+#[cfg(target_os = "linux")]
+fn arm_parent_death_signal() -> Result<(), GatewayError> {
+    use nix::sys::prctl::set_pdeathsig;
+    use nix::sys::signal::Signal;
+    use nix::unistd::getppid;
+
+    let parent = getppid();
+    if parent.as_raw() <= 1 {
+        return Err(GatewayError::Configuration);
+    }
+    set_pdeathsig(Some(Signal::SIGHUP)).map_err(|_| GatewayError::Configuration)?;
+    let current_parent = getppid();
+    if current_parent != parent || current_parent.as_raw() <= 1 {
+        return Err(GatewayError::Configuration);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct GatewaySignals {
+    hangup: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(not(unix))]
+struct GatewaySignals;
+
+#[cfg(unix)]
+impl GatewaySignals {
+    fn new() -> Result<Self, GatewayError> {
+        let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .map_err(|_| GatewayError::Configuration)?;
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|_| GatewayError::Configuration)?;
+        Ok(Self { hangup, terminate })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.hangup.recv() => {}
+            _ = self.terminate.recv() => {}
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl GatewaySignals {
+    fn new() -> Self {
+        Self
+    }
+
+    async fn recv(&mut self) {
+        std::future::pending::<()>().await;
+    }
+}
+
 impl GatewayConfig {
     async fn load(context: telemetry::RequestContext) -> Result<Self, GatewayError> {
         let access_url = required_env("LABWEAVER_ACCESS_URL")?;
-        let gateway_identity = required_env("LABWEAVER_GATEWAY_IDENTITY")?;
+        let service_client_id = required_env("LABWEAVER_SERVICE_CLIENT_ID")?;
         let ca_path = required_env("LABWEAVER_ACCESS_CA_FILE")?;
         let oidc_ca_path = PathBuf::from(required_env("LABWEAVER_SERVICE_OIDC_CA")?);
         let oidc_ca = std::fs::read(oidc_ca_path).map_err(|_| GatewayError::Configuration)?;
@@ -99,7 +212,7 @@ impl GatewayConfig {
             .map_err(|_| GatewayError::Configuration)?;
         let service_token_config = ServiceTokenClientConfig::new(
             &required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?,
-            required_env("LABWEAVER_SERVICE_CLIENT_ID")?,
+            service_client_id.clone(),
             read_secret_file("LABWEAVER_SERVICE_CLIENT_SECRET_FILE")?,
             required_env("LABWEAVER_SERVICE_AUDIENCE")?,
             required_scopes("LABWEAVER_SERVICE_SCOPES")?,
@@ -113,7 +226,7 @@ impl GatewayConfig {
                 .map_err(|_| GatewayError::Configuration)?;
         Ok(Self {
             access_url: access_url.trim_end_matches('/').to_owned(),
-            gateway_identity,
+            service_client_id,
             client,
             service_token_client,
             context,
@@ -156,7 +269,7 @@ impl GatewayConfig {
         } else {
             "gateway.session.create"
         };
-        let response = request.send().await.map_err(|_| GatewayError::Authority)?;
+        let response = request.send().await.map_err(|_| GatewayError::Transport)?;
         let outcome = if response.status().is_success() {
             "succeeded"
         } else {
@@ -273,11 +386,18 @@ async fn run(context: &telemetry::RequestContext) -> Result<(), GatewayError> {
             if args.next().is_some() {
                 return Err(GatewayError::InvalidInput);
             }
+            #[cfg(unix)]
+            let mut signals = GatewaySignals::new()?;
+            #[cfg(not(unix))]
+            let mut signals = GatewaySignals::new();
+            #[cfg(target_os = "linux")]
+            arm_parent_death_signal()?;
             force_command(
                 &GatewayConfig::load(context.clone()).await?,
                 &authorization_id,
                 &token,
                 &connection_id,
+                &mut signals,
             )
             .await
         }
@@ -311,7 +431,7 @@ async fn authorized_keys(
         .map_err(|_| GatewayError::InputStage("authorized_keys.key_parse"))?;
     let request = SshAuthorizationRequest {
         presented_key_fingerprint_sha256: key.fingerprint(HashAlg::Sha256).to_string(),
-        gateway_identity: config.gateway_identity.clone(),
+        gateway_identity: config.service_client_id.clone(),
         connection_id: connection_id.to_owned(),
         source_address_hash: source_address_hash(source_address)
             .map_err(|_| GatewayError::InputStage("authorized_keys.source_address"))?,
@@ -345,15 +465,29 @@ async fn authorized_keys(
         connection_id,
     );
     println!(
-        "restrict,command=\"/usr/local/bin/labweaver-gateway-command force-command {} {} {}\" {}",
-        shell_token(&authorization.authorization_id)
-            .map_err(|_| GatewayError::InputStage("authorized_keys.authorization_id"))?,
-        shell_token(&authorization.force_command_token)
-            .map_err(|_| GatewayError::InputStage("authorized_keys.force_command_token"))?,
-        connection_id,
-        authorization.normalized_authorized_key
+        "{}",
+        authorized_key_line(
+            &authorization.authorization_id,
+            &authorization.force_command_token,
+            connection_id,
+            &authorization.normalized_authorized_key,
+        )?
     );
     Ok(())
+}
+
+fn authorized_key_line(
+    authorization_id: &str,
+    force_command_token: &str,
+    connection_id: &str,
+    normalized_authorized_key: &str,
+) -> Result<String, GatewayError> {
+    validate_connection_id(connection_id)?;
+    let authorization_id = shell_token(authorization_id)?;
+    let force_command_token = shell_token(force_command_token)?;
+    Ok(format!(
+        "restrict,pty,command=\"/usr/local/bin/labweaver-gateway-command force-command {authorization_id} {force_command_token} {connection_id}\" {normalized_authorized_key}"
+    ))
 }
 
 async fn force_command(
@@ -361,15 +495,16 @@ async fn force_command(
     authorization_id: &str,
     token: &str,
     connection_id: &str,
+    signals: &mut GatewaySignals,
 ) -> Result<(), GatewayError> {
     validate_connection_id(connection_id)?;
     let original_command = required_env("SSH_ORIGINAL_COMMAND")?;
-    let alias = parse_connect_command(&original_command)?;
+    let connect_command = parse_connect_command(&original_command)?;
     let request = CreateGatewaySessionRequest {
         authorization_id: authorization_id.to_owned(),
         force_command_token: token.to_owned(),
-        alias: alias.to_owned(),
-        gateway_identity: config.gateway_identity.clone(),
+        alias: connect_command.alias.to_owned(),
+        gateway_identity: config.service_client_id.clone(),
         connection_id: connection_id.to_owned(),
         opened_at: now()?,
     };
@@ -384,6 +519,7 @@ async fn force_command(
         .json::<GatewaySession>()
         .await
         .map_err(|_| GatewayError::Authority)?;
+    session.validate().map_err(|_| GatewayError::Authority)?;
     info!(
         schema = telemetry::LOG_SCHEMA,
         event = "gateway.session.started",
@@ -398,53 +534,149 @@ async fn force_command(
         connection_id,
         revision = session.revision.get(),
     );
-    let mut child = Command::new("/usr/bin/ssh")
-        .args([
-            "-F",
-            "/etc/labweaver/target-ssh.conf",
-            "-o",
-            &format!("HostName={}", session.target_host),
-            "-o",
-            &format!("HostKeyAlias={alias}"),
-            &format!("lab@{alias}"),
-        ])
+    let host_name = format!("HostName={}", session.target_host);
+    let host_key_alias = format!("HostKeyAlias={}", session.target_alias);
+    let target = format!("lab@{}", session.target_alias);
+    let mut ssh = Command::new("/usr/bin/ssh");
+    ssh.args(target_ssh_arguments(
+        &host_name,
+        &host_key_alias,
+        &target,
+        connect_command.remote_command,
+    ));
+    let Ok(mut child) = ssh
         .env("LABWEAVER_TARGET_ALIAS", &session.target_alias)
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| GatewayError::Target)?;
+    else {
+        close_session(config, &mut session, connection_id, false).await?;
+        return Err(GatewayError::Target);
+    };
+    let (result, target_stopped) =
+        run_target(config, &mut session, connection_id, &mut child, signals).await;
+    if !target_stopped {
+        return Err(match result {
+            Ok(()) => GatewayError::Target,
+            Err(error) => error,
+        });
+    }
+    close_session(config, &mut session, connection_id, result.is_ok()).await?;
+    result
+}
+
+async fn run_target(
+    config: &GatewayConfig,
+    session: &mut GatewaySession,
+    connection_id: &str,
+    child: &mut tokio::process::Child,
+    signals: &mut GatewaySignals,
+) -> (Result<(), GatewayError>, bool) {
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    let target_stopped;
     let result = loop {
         tokio::select! {
-            status = child.wait() => break status.map_err(|_| GatewayError::Target).and_then(|status| status.success().then_some(()).ok_or(GatewayError::Target)),
-            _ = heartbeat.tick() => {
-                let body = HeartbeatGatewaySessionRequest {
-                    gateway_identity: config.gateway_identity.clone(),
-                    connection_id: connection_id.to_owned(),
-                    expected_revision: session.revision,
-                    observed_at: now()?,
+            status = child.wait() => {
+                if let Ok(status) = status {
+                    target_stopped = true;
+                    break status.success().then_some(()).ok_or(GatewayError::Target);
+                }
+                let stop_result = stop_target(child).await;
+                target_stopped = stop_result.is_ok();
+                break match stop_result {
+                    Ok(()) => Err(GatewayError::Target),
+                    Err(error) => Err(error),
                 };
-                let response = config
-                    .post(
-                        &format!("{SESSION_PATH}/{}/heartbeat", session.id),
-                        &body,
-                        None,
-                        Some(session.revision),
-                    )
-                    .await?;
-                if response.status() != StatusCode::OK {
-                    child.kill().await.map_err(|_| GatewayError::Target)?;
-                    break Err(GatewayError::Authority);
+            }
+            _ = heartbeat.tick() => {
+                let heartbeat_result = heartbeat_session(config, session, connection_id).await;
+                match heartbeat_result {
+                    Ok(HeartbeatUpdate::Active(updated)) => *session = *updated,
+                    Ok(HeartbeatUpdate::Stop(revision)) => {
+                        session.revision = revision;
+                        let stop_result = stop_target(child).await;
+                        target_stopped = stop_result.is_ok();
+                        break match stop_result {
+                            Ok(()) => Err(GatewayError::Authority),
+                            Err(error) => Err(error),
+                        };
+                    }
+                    Err(error) => {
+                        let stop_result = stop_target(child).await;
+                        target_stopped = stop_result.is_ok();
+                        break match stop_result {
+                            Ok(()) => Err(error),
+                            Err(stop_error) => Err(stop_error),
+                        };
+                    }
                 }
-                session = response.json::<GatewaySession>().await.map_err(|_| GatewayError::Authority)?;
-                if session.state != GatewaySessionState::Active {
-                    child.kill().await.map_err(|_| GatewayError::Target)?;
-                    break Err(GatewayError::Authority);
-                }
+            }
+            () = signals.recv() => {
+                let stop_result = stop_target(child).await;
+                target_stopped = stop_result.is_ok();
+                break match stop_result {
+                    Ok(()) => Err(GatewayError::Target),
+                    Err(error) => Err(error),
+                };
             }
         }
     };
-    close_session(config, &session, connection_id, result.is_ok()).await?;
-    result
+    (result, target_stopped)
+}
+
+async fn heartbeat_session(
+    config: &GatewayConfig,
+    session: &GatewaySession,
+    connection_id: &str,
+) -> Result<HeartbeatUpdate, GatewayError> {
+    let body = HeartbeatGatewaySessionRequest {
+        gateway_identity: config.service_client_id.clone(),
+        connection_id: connection_id.to_owned(),
+        expected_revision: session.revision,
+        observed_at: now()?,
+    };
+    let response = config
+        .post(
+            &format!("{SESSION_PATH}/{}/heartbeat", session.id),
+            &body,
+            None,
+            Some(session.revision),
+        )
+        .await?;
+    if response.status() == StatusCode::OK {
+        let updated = response
+            .json::<GatewaySession>()
+            .await
+            .map_err(|_| GatewayError::Authority)?;
+        updated.validate().map_err(|_| GatewayError::Authority)?;
+        return Ok(if updated.state == GatewaySessionState::Active {
+            HeartbeatUpdate::Active(Box::new(updated))
+        } else {
+            HeartbeatUpdate::Stop(updated.revision)
+        });
+    }
+    if response.status() != StatusCode::PRECONDITION_FAILED {
+        return Err(GatewayError::Authority);
+    }
+    let conflict = response
+        .json::<SessionRevisionConflict>()
+        .await
+        .map_err(|_| GatewayError::Authority)?;
+    if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
+        || conflict.current_revision <= session.revision
+    {
+        return Err(GatewayError::Authority);
+    }
+    Ok(HeartbeatUpdate::Stop(conflict.current_revision))
+}
+
+async fn stop_target(child: &mut tokio::process::Child) -> Result<(), GatewayError> {
+    match child.kill().await {
+        Ok(()) => Ok(()),
+        Err(_) => match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) | Err(_) => Err(GatewayError::Target),
+        },
+    }
 }
 
 fn known_host(
@@ -534,49 +766,102 @@ const fn private_ip(address: std::net::IpAddr) -> bool {
 
 async fn close_session(
     config: &GatewayConfig,
-    session: &GatewaySession,
+    session: &mut GatewaySession,
     connection_id: &str,
     clean: bool,
 ) -> Result<(), GatewayError> {
-    let body = CloseGatewaySessionRequest {
-        gateway_identity: config.gateway_identity.clone(),
-        connection_id: connection_id.to_owned(),
-        expected_revision: session.revision,
-        closed_at: now()?,
-        reason_code: if clean {
-            "client_closed"
-        } else {
-            "target_failed"
-        }
-        .to_owned(),
-    };
-    let response = config
-        .post(
-            &format!("{SESSION_PATH}/{}/close", session.id),
-            &body,
-            None,
-            Some(session.revision),
-        )
-        .await?;
-    if response.status().is_success() {
-        info!(
-            schema = telemetry::LOG_SCHEMA,
-            event = "gateway.session.closed",
-            service = "access-gateway",
-            component = "ssh-session",
-            operation = "gateway.session.close",
-            outcome = "succeeded",
-            duration_ms = 0_u64,
-            request_id = config.context.request_id(),
-            trace_id = config.context.trace_id(),
-            session_id = %session.id,
-            connection_id,
-            revision = session.revision.get(),
-        );
-        Ok(())
-    } else {
-        Err(GatewayError::Authority)
+    match tokio::time::timeout(
+        CLOSE_RETRY_DEADLINE,
+        close_session_with_retries(config, session, connection_id, clean),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(GatewayError::CloseRetriesExhausted),
     }
+}
+
+async fn close_session_with_retries(
+    config: &GatewayConfig,
+    session: &mut GatewaySession,
+    connection_id: &str,
+    clean: bool,
+) -> Result<(), GatewayError> {
+    for attempt in 0..=CLOSE_RETRY_DELAYS.len() {
+        let body = CloseGatewaySessionRequest {
+            gateway_identity: config.service_client_id.clone(),
+            connection_id: connection_id.to_owned(),
+            expected_revision: session.revision,
+            closed_at: now()?,
+            reason_code: if clean {
+                "client_closed"
+            } else {
+                "target_failed"
+            }
+            .to_owned(),
+        };
+        let response = config
+            .post(
+                &format!("{SESSION_PATH}/{}/close", session.id),
+                &body,
+                None,
+                Some(session.revision),
+            )
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) if close_error_is_retryable(&error) => {
+                let Some(delay) = close_retry_delay(attempt) else {
+                    return Err(GatewayError::CloseRetriesExhausted);
+                };
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match close_response_action(response.status()) {
+            CloseResponseAction::Success => {
+                info!(
+                    schema = telemetry::LOG_SCHEMA,
+                    event = "gateway.session.closed",
+                    service = "access-gateway",
+                    component = "ssh-session",
+                    operation = "gateway.session.close",
+                    outcome = "succeeded",
+                    duration_ms = 0_u64,
+                    request_id = config.context.request_id(),
+                    trace_id = config.context.trace_id(),
+                    session_id = %session.id,
+                    connection_id,
+                    revision = session.revision.get(),
+                );
+                return Ok(());
+            }
+            CloseResponseAction::Retry => {
+                let Some(delay) = close_retry_delay(attempt) else {
+                    return Err(GatewayError::CloseRetriesExhausted);
+                };
+                tokio::time::sleep(delay).await;
+            }
+            CloseResponseAction::RevisionConflict => {
+                let conflict = response
+                    .json::<SessionRevisionConflict>()
+                    .await
+                    .map_err(|_| GatewayError::Authority)?;
+                if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
+                    || conflict.current_revision <= session.revision
+                {
+                    return Err(GatewayError::Authority);
+                }
+                session.revision = conflict.current_revision;
+                if conflict.state == GatewaySessionState::Closed {
+                    return Ok(());
+                }
+            }
+            CloseResponseAction::Reject => return Err(GatewayError::Authority),
+        }
+    }
+    Err(GatewayError::CloseRetriesExhausted)
 }
 
 fn required_env(name: &str) -> Result<String, GatewayError> {
@@ -644,17 +929,82 @@ fn validate_alias(value: &str) -> Result<(), GatewayError> {
     valid.then_some(()).ok_or(GatewayError::InvalidInput)
 }
 
-fn parse_connect_command(value: &str) -> Result<&str, GatewayError> {
-    let mut tokens = value.split_ascii_whitespace();
-    if tokens.next() != Some("connect") {
+#[derive(Debug, Eq, PartialEq)]
+struct ConnectCommand<'a> {
+    alias: &'a str,
+    remote_command: Option<&'a str>,
+}
+
+fn parse_connect_command(value: &str) -> Result<ConnectCommand<'_>, GatewayError> {
+    let value = value.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let keyword_end = value
+        .find(|character: char| character.is_ascii_whitespace())
+        .ok_or(GatewayError::InvalidInput)?;
+    if &value[..keyword_end] != "connect" {
         return Err(GatewayError::InvalidInput);
     }
-    let alias = tokens.next().ok_or(GatewayError::InvalidInput)?;
-    if tokens.next().is_some() {
-        return Err(GatewayError::InvalidInput);
-    }
+
+    let remainder =
+        value[keyword_end..].trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let alias_end = remainder
+        .find(|character: char| character.is_ascii_whitespace())
+        .unwrap_or(remainder.len());
+    let alias = &remainder[..alias_end];
     validate_alias(alias)?;
-    Ok(alias)
+
+    let remainder = remainder[alias_end..]
+        .trim_start_matches(|character: char| character.is_ascii_whitespace());
+    if remainder.is_empty() {
+        return Ok(ConnectCommand {
+            alias,
+            remote_command: None,
+        });
+    }
+    if !remainder.starts_with("--")
+        || remainder
+            .as_bytes()
+            .get(2)
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        return Err(GatewayError::InvalidInput);
+    }
+
+    let remote_command =
+        remainder[2..].trim_start_matches(|character: char| character.is_ascii_whitespace());
+    if remote_command.is_empty()
+        || remote_command.len() > MAX_GUEST_COMMAND_BYTES
+        || remote_command.contains('\0')
+    {
+        return Err(GatewayError::InvalidInput);
+    }
+    Ok(ConnectCommand {
+        alias,
+        remote_command: Some(remote_command),
+    })
+}
+
+fn target_ssh_arguments(
+    host_name: &str,
+    host_key_alias: &str,
+    target: &str,
+    remote_command: Option<&str>,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "-F".to_owned(),
+        "/etc/labweaver/target-ssh.conf".to_owned(),
+        "-o".to_owned(),
+        host_name.to_owned(),
+        "-o".to_owned(),
+        host_key_alias.to_owned(),
+    ];
+    if remote_command.is_some() {
+        arguments.push("-T".to_owned());
+    }
+    arguments.push(target.to_owned());
+    if let Some(remote_command) = remote_command {
+        arguments.push(remote_command.to_owned());
+    }
+    arguments
 }
 
 fn validate_connection_id(value: &str) -> Result<(), GatewayError> {
@@ -689,23 +1039,389 @@ fn elapsed_millis(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Arc;
+
+    use serde_json::Value;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
+    use tokio::task::JoinHandle;
+
+    #[derive(Clone, Debug)]
+    struct MockResponse {
+        status: u16,
+        body: String,
+        drop_connection: bool,
+    }
+
+    impl MockResponse {
+        fn json(status: u16, body: &Value) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                drop_connection: false,
+            }
+        }
+
+        fn drop_connection() -> Self {
+            Self {
+                status: 0,
+                body: String::new(),
+                drop_connection: true,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct MockCloseRequest {
+        if_match: Option<String>,
+        body: String,
+    }
+
+    struct MockAuthorityState {
+        token_status: u16,
+        close_responses: Mutex<VecDeque<MockResponse>>,
+        close_requests: Mutex<Vec<MockCloseRequest>>,
+    }
+
+    struct MockAuthority {
+        base_url: String,
+        state: Arc<MockAuthorityState>,
+        task: JoinHandle<()>,
+    }
+
+    impl MockAuthority {
+        async fn start(
+            token_status: u16,
+            close_responses: Vec<MockResponse>,
+        ) -> Result<Self, std::io::Error> {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let address = listener.local_addr()?;
+            let base_url = format!("http://{address}");
+            let state = Arc::new(MockAuthorityState {
+                token_status,
+                close_responses: Mutex::new(close_responses.into()),
+                close_requests: Mutex::new(Vec::new()),
+            });
+            let task_state = state.clone();
+            let task_base_url = base_url.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let state = task_state.clone();
+                    let base_url = task_base_url.clone();
+                    tokio::spawn(async move {
+                        serve_mock_request(stream, state, &base_url).await;
+                    });
+                }
+            });
+            Ok(Self {
+                base_url,
+                state,
+                task,
+            })
+        }
+
+        async fn close_requests(&self) -> Vec<MockCloseRequest> {
+            self.state.close_requests.lock().await.clone()
+        }
+    }
+
+    impl Drop for MockAuthority {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    struct MockHttpRequest {
+        path: String,
+        headers: BTreeMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    async fn read_mock_request(mut stream: TcpStream) -> Option<(TcpStream, MockHttpRequest)> {
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+            if bytes.len() > 64 * 1024 {
+                return None;
+            }
+        };
+        let header = std::str::from_utf8(&bytes[..header_end - 4]).ok()?;
+        let mut lines = header.lines();
+        let path = lines.next()?.split_ascii_whitespace().nth(1)?.to_owned();
+        let headers = lines
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.to_ascii_lowercase(), value.trim().to_owned()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while bytes.len() - header_end < content_length {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if bytes.len() > header_end + content_length + 64 * 1024 {
+                return None;
+            }
+        }
+        Some((
+            stream,
+            MockHttpRequest {
+                path,
+                headers,
+                body: bytes[header_end..header_end + content_length].to_vec(),
+            },
+        ))
+    }
+
+    async fn serve_mock_request(stream: TcpStream, state: Arc<MockAuthorityState>, base_url: &str) {
+        let Some((mut stream, request)) = read_mock_request(stream).await else {
+            return;
+        };
+        let (status, body) = if request.path.ends_with("/.well-known/openid-configuration") {
+            (
+                200,
+                serde_json::json!({
+                    "issuer": format!("{base_url}/issuer"),
+                    "authorization_endpoint": format!("{base_url}/authorize"),
+                    "token_endpoint": format!("{base_url}/token"),
+                    "jwks_uri": format!("{base_url}/jwks"),
+                    "response_types_supported": ["code"],
+                    "subject_types_supported": ["public"],
+                    "id_token_signing_alg_values_supported": ["RS256"],
+                    "grant_types_supported": ["authorization_code", "client_credentials"],
+                })
+                .to_string(),
+            )
+        } else if request.path == "/jwks" {
+            (200, serde_json::json!({"keys": []}).to_string())
+        } else if request.path == "/token" {
+            let status = state.token_status;
+            let body = if status == 200 {
+                serde_json::json!({
+                    "access_token": "eyJhbGciOiJub25lIn0.eyJhdWQiOiJhdWRpZW5jZSJ9.signature",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                })
+                .to_string()
+            } else {
+                serde_json::json!({"error": "temporarily_unavailable"}).to_string()
+            };
+            (status, body)
+        } else if request.path.ends_with("/close") {
+            state.close_requests.lock().await.push(MockCloseRequest {
+                if_match: request.headers.get("if-match").cloned(),
+                body: String::from_utf8_lossy(&request.body).into_owned(),
+            });
+            let response = state
+                .close_responses
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_else(|| MockResponse::json(500, &serde_json::json!({})));
+            if response.drop_connection {
+                return;
+            }
+            (response.status, response.body)
+        } else {
+            (404, serde_json::json!({"error": "not_found"}).to_string())
+        };
+        let reason = match status {
+            200 => "OK",
+            400 => "Bad Request",
+            403 => "Forbidden",
+            412 => "Precondition Failed",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "Test Response",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    }
+
+    async fn test_gateway_config(authority: &MockAuthority) -> Result<GatewayConfig, GatewayError> {
+        let token_config = ServiceTokenClientConfig::new(
+            &format!("{}/issuer", authority.base_url),
+            "gateway-test".to_owned(),
+            "secret".to_owned(),
+            "audience".to_owned(),
+            BTreeSet::from(["access.session.manage".to_owned()]),
+            30,
+            TransportSecurityMode::InsecureTestOnly,
+        )
+        .map_err(|_| GatewayError::Configuration)?;
+        let service_token_client = ServiceTokenClient::discover_with_trust(token_config, None)
+            .await
+            .map_err(|_| GatewayError::Configuration)?;
+        Ok(GatewayConfig {
+            access_url: authority.base_url.clone(),
+            service_client_id: "gateway-test".to_owned(),
+            client: reqwest::Client::new(),
+            service_token_client,
+            context: telemetry::RequestContext::generate(),
+        })
+    }
+
+    fn test_gateway_session() -> Result<GatewaySession, GatewayError> {
+        let timestamp = now()?;
+        Ok(GatewaySession {
+            id: contracts::GatewaySessionId::new(),
+            access_grant_id: contracts::AccessGrantId::new(),
+            access_grant_revision: Revision::new(1).map_err(|_| GatewayError::Configuration)?,
+            endpoint_grant_id: contracts::EndpointGrantId::new(),
+            ssh_public_key_id: contracts::SshPublicKeyId::new(),
+            target_alias: "lw-abcdefghijklmnopqrst".to_owned(),
+            target_host: format!("ssh.lw-env-{}.svc", contracts::EnvironmentId::new()),
+            gateway_identity: "gateway-test".to_owned(),
+            connection_id: "connection-a".to_owned(),
+            revision: Revision::new(1).map_err(|_| GatewayError::Configuration)?,
+            state: GatewaySessionState::Active,
+            opened_at: timestamp,
+            last_heartbeat_at: timestamp,
+            termination_requested_at: None,
+            terminate_by: None,
+            closed_at: None,
+            close_reason_code: None,
+        })
+    }
 
     #[test]
-    fn fixed_command_accepts_only_one_server_alias() {
-        assert!(matches!(
-            parse_connect_command("connect lw-abcdefghijklmnopqrst"),
-            Ok("lw-abcdefghijklmnopqrst")
-        ));
+    fn fixed_command_accepts_interactive_connection() -> Result<(), GatewayError> {
+        assert_eq!(
+            parse_connect_command("connect lw-abcdefghijklmnopqrst")?,
+            ConnectCommand {
+                alias: "lw-abcdefghijklmnopqrst",
+                remote_command: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_command_preserves_guest_command_spaces_and_quotes() -> Result<(), GatewayError> {
+        assert_eq!(
+            parse_connect_command(
+                "connect lw-abcdefghijklmnopqrst -- python3 -c 'print(\"hello world\")'"
+            )?,
+            ConnectCommand {
+                alias: "lw-abcdefghijklmnopqrst",
+                remote_command: Some("python3 -c 'print(\"hello world\")'"),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn target_ssh_arguments_keep_interactive_and_exec_modes_separate() {
+        let interactive = target_ssh_arguments(
+            "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+            "HostKeyAlias=lw-abcdefghijklmnopqrst",
+            "lab@lw-abcdefghijklmnopqrst",
+            None,
+        );
+        assert_eq!(
+            interactive,
+            vec![
+                "-F",
+                "/etc/labweaver/target-ssh.conf",
+                "-o",
+                "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+                "-o",
+                "HostKeyAlias=lw-abcdefghijklmnopqrst",
+                "lab@lw-abcdefghijklmnopqrst",
+            ]
+        );
+
+        let remote_command = "python3 -c 'print(\"hello world\")'";
+        let exec = target_ssh_arguments(
+            "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+            "HostKeyAlias=lw-abcdefghijklmnopqrst",
+            "lab@lw-abcdefghijklmnopqrst",
+            Some(remote_command),
+        );
+        assert_eq!(
+            exec,
+            vec![
+                "-F",
+                "/etc/labweaver/target-ssh.conf",
+                "-o",
+                "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+                "-o",
+                "HostKeyAlias=lw-abcdefghijklmnopqrst",
+                "-T",
+                "lab@lw-abcdefghijklmnopqrst",
+                remote_command,
+            ]
+        );
+    }
+
+    #[test]
+    fn authorized_key_line_allows_pty_only_for_the_forced_gateway_command()
+    -> Result<(), GatewayError> {
+        let connection_id = format!("ssh-{}", "a5".repeat(32));
+        let line = authorized_key_line(
+            "authorization-1",
+            "force-token-1",
+            &connection_id,
+            "ssh-ed25519 AAAA",
+        )?;
+        assert_eq!(
+            line,
+            format!(
+                "restrict,pty,command=\"/usr/local/bin/labweaver-gateway-command force-command authorization-1 force-token-1 {connection_id}\" ssh-ed25519 AAAA"
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_command_rejects_invalid_alias_and_undelimited_extra_arguments() {
         for invalid in [
             "",
             "connect",
-            "connect lw-abcdefghijklmnopqrst extra",
+            "connect lw-invalid -- echo",
+            "connect lw-abcdefghijklmnopqrst echo",
+            "connect lw-abcdefghijklmnopqrst extra words",
             "ssh lw-abcdefghijklmnopqrst",
             "connect lw-abcdefghijklmnopqrs;id",
             "scp file lw-abcdefghijklmnopqrst:/tmp",
         ] {
             assert!(parse_connect_command(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn fixed_command_rejects_empty_nul_and_overlong_guest_commands() {
+        assert!(parse_connect_command("connect lw-abcdefghijklmnopqrst --   ").is_err());
+        assert!(parse_connect_command("connect lw-abcdefghijklmnopqrst -- echo\0x").is_err());
+        let overlong = format!(
+            "connect lw-abcdefghijklmnopqrst -- {}",
+            "x".repeat(MAX_GUEST_COMMAND_BYTES + 1)
+        );
+        assert!(parse_connect_command(&overlong).is_err());
     }
 
     #[test]
@@ -791,6 +1507,146 @@ mod tests {
             Some(format!("10.101.251.15 ssh-ed25519 {encoded_key}").as_str())
         );
         assert!(verified_host_key_line("10.101.251.15", "SHA256:wrong", encoded_key).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn revision_conflict_requires_a_newer_authoritative_revision() -> Result<(), GatewayError> {
+        let conflict: SessionRevisionConflict = serde_json::from_value(serde_json::json!({
+            "diagnosticCode": "LW_REVISION_CONFLICT",
+            "currentRevision": 2,
+            "state": "terminating",
+        }))
+        .map_err(|_| GatewayError::Authority)?;
+        assert_eq!(conflict.diagnostic_code, "LW_REVISION_CONFLICT");
+        assert_eq!(
+            conflict.current_revision,
+            Revision::new(2).map_err(|_| GatewayError::Authority)?
+        );
+        assert_eq!(conflict.state, GatewaySessionState::Terminating);
+        assert!(conflict.current_revision > Revision::new(1).map_err(|_| GatewayError::Authority)?);
+        assert!(
+            serde_json::from_value::<SessionRevisionConflict>(serde_json::json!({
+                "diagnosticCode": "LW_REVISION_CONFLICT",
+            }))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_retries_transient_responses_then_succeeds() -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            vec![
+                MockResponse::drop_connection(),
+                MockResponse::json(503, &serde_json::json!({})),
+                MockResponse::json(429, &serde_json::json!({})),
+                MockResponse::json(200, &serde_json::json!({})),
+            ],
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", true).await;
+        assert!(result.is_ok());
+
+        let requests = authority.close_requests().await;
+        assert_eq!(requests.len(), 4);
+        for request in &requests {
+            assert_eq!(request.if_match.as_deref(), Some("\"rev-1\""));
+            let body: Value =
+                serde_json::from_str(&request.body).map_err(|_| GatewayError::Authority)?;
+            assert_eq!(body["expectedRevision"], 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_rejects_permanent_response_without_retry() -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            vec![MockResponse::json(
+                403,
+                &serde_json::json!({"error": "forbidden"}),
+            )],
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(matches!(result, Err(GatewayError::Authority)));
+        assert_eq!(authority.close_requests().await.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_reports_bounded_retry_exhaustion() -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            (0..=CLOSE_RETRY_DELAYS.len())
+                .map(|_| MockResponse::json(503, &serde_json::json!({})))
+                .collect(),
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(matches!(result, Err(GatewayError::CloseRetriesExhausted)));
+        assert_eq!(
+            authority.close_requests().await.len(),
+            CLOSE_RETRY_DELAYS.len() + 1
+        );
+        assert!(CLOSE_RETRY_DEADLINE < Duration::from_mins(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_applies_authoritative_revision_before_retrying()
+    -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            vec![
+                MockResponse::json(
+                    412,
+                    &serde_json::json!({
+                        "diagnosticCode": "LW_REVISION_CONFLICT",
+                        "currentRevision": 2,
+                        "state": "termination_overdue",
+                    }),
+                ),
+                MockResponse::json(200, &serde_json::json!({})),
+            ],
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(result.is_ok());
+
+        let requests = authority.close_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].if_match.as_deref(), Some("\"rev-1\""));
+        assert_eq!(requests[1].if_match.as_deref(), Some("\"rev-2\""));
+        assert_eq!(session.revision.get(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_does_not_retry_bearer_auth_failure() -> Result<(), GatewayError> {
+        let authority =
+            MockAuthority::start(401, vec![MockResponse::json(200, &serde_json::json!({}))])
+                .await
+                .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(matches!(result, Err(GatewayError::Authority)));
+        assert!(authority.close_requests().await.is_empty());
         Ok(())
     }
 }

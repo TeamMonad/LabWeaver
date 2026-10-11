@@ -6,7 +6,7 @@
 //!
 //! The test runs only when `LW_LIVE_HARBOR=1` is set together with every required variable below;
 //! otherwise it prints one skip line and returns. It writes one in-test OCI layout archive to the
-//! real immutable object store, drives the very same library call the HTTP handler drives, and
+//! real immutable object store, enqueues the durable job and drives the production import worker, and
 //! proves the real registry push, tag-to-digest closure, catalog pin, audit trail and fail-closed
 //! behaviour.
 //!
@@ -39,19 +39,22 @@
 use std::{env, error::Error, fs, path::Path, path::PathBuf, time::Duration};
 
 use agent_service::oci_registry::RegistryCredentials;
-use agent_service::platform_image_import::{PlatformImageImportError, import_platform_image};
+use agent_service::platform_image_jobs::{PlatformImageImportJobStore, PlatformImageImportWorker};
 use agent_service::platform_images::{
-    DisablePlatformImage, PgPlatformImageCatalog, PlatformImageRegistry,
-    PlatformImageRegistryError, PlatformImageStatus, PlatformImageStoreError,
+    DisablePlatformImage, PgPlatformImageCatalog, PlatformImageRegistry, PlatformImageStatus,
 };
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use contracts::http::{
+    InternalPlatformImageImportEnqueueRequest, PlatformImageEntry, PlatformImageImportJobState,
+};
+use contracts::http::{
     InternalPlatformImageImportRequest, PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE, PlatformImageKind,
 };
-use contracts::{ActorId, ArtifactRef, UtcTimestamp};
+use contracts::{ActorId, ArtifactRef, UploadSessionId, UtcTimestamp};
 use persistence_sqlx::Sha256Digest;
 use reqwest::{Certificate, Client, Url};
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -317,19 +320,21 @@ async fn live_import_publishes_tags_pins_and_audits() -> Result<(), Box<dyn Erro
     };
     println!("live schema readback: {schema} is present");
     let catalog = PgPlatformImageCatalog::new(pool.clone());
-    let store = S3ImmutableObjectStore::new(
-        object_store_config(&environment),
-        S3Credential {
-            access_key_id: read_secret(&environment.object_store_access_key_file)?,
-            secret_access_key: read_secret(&environment.object_store_secret_key_file)?,
-            session_token: environment
-                .object_store_session_token_file
-                .as_deref()
-                .map(read_secret)
-                .transpose()?,
-        },
-    )
-    .await?;
+    let store = Arc::new(
+        S3ImmutableObjectStore::new(
+            object_store_config(&environment),
+            S3Credential {
+                access_key_id: read_secret(&environment.object_store_access_key_file)?,
+                secret_access_key: read_secret(&environment.object_store_secret_key_file)?,
+                session_token: environment
+                    .object_store_session_token_file
+                    .as_deref()
+                    .map(read_secret)
+                    .transpose()?,
+            },
+        )
+        .await?,
+    );
     let registry = platform_registry(&environment)?;
     let archive = oci_layout_archive(
         b"{\"architecture\":\"amd64\",\"os\":\"linux\",\"variant\":\"live\"}",
@@ -373,7 +378,7 @@ async fn live_import_publishes_tags_pins_and_audits() -> Result<(), Box<dyn Erro
         &archive_object_key,
         &frozen.reference,
     );
-    let entry = import_platform_image(&registry, &catalog, &store, &request, now()?).await?;
+    let entry = run_import_job(&pool, &registry, &catalog, Arc::clone(&store), &request).await?;
     assert_eq!(
         entry.resolved_digest, archive.manifest_digest,
         "the imported pin must be the archive manifest digest"
@@ -472,30 +477,84 @@ async fn live_import_publishes_tags_pins_and_audits() -> Result<(), Box<dyn Erro
         &archive_object_key,
         &frozen.reference,
     );
-    let cross_error = import_platform_image(&registry, &catalog, &store, &cross_request, now()?)
-        .await
-        .err()
-        .ok_or("a reference outside the configured registry must be rejected")?;
+    let cross_error = run_import_job(
+        &pool,
+        &registry,
+        &catalog,
+        Arc::clone(&store),
+        &cross_request,
+    )
+    .await
+    .err()
+    .ok_or("a reference outside the configured registry must be rejected")?;
     assert!(
-        matches!(
-            cross_error,
-            PlatformImageImportError::Registry(PlatformImageRegistryError::InvalidReference)
-        ),
+        cross_error.to_string() == "LW_PLATFORM_IMAGE_REFERENCE_INVALID",
         "a foreign registry must fail closed as an invalid reference, got: {cross_error}"
     );
     println!("live cross-host rejection readback: {cross_error}");
 
-    let conflict = import_platform_image(&registry, &catalog, &store, &request, now()?)
+    let conflict = run_import_job(&pool, &registry, &catalog, Arc::clone(&store), &request)
         .await
         .err()
         .ok_or("a second import of the same binding must conflict")?;
     assert!(
-        matches!(
-            conflict,
-            PlatformImageImportError::Catalog(PlatformImageStoreError::Conflict)
-        ),
+        conflict.to_string() == "LW_PLATFORM_IMAGE_STATE_CONFLICT",
         "a duplicate binding must fail closed as a catalog conflict, got: {conflict}"
     );
     println!("live duplicate import readback: {conflict}");
     Ok(())
+}
+
+async fn run_import_job(
+    pool: &sqlx::PgPool,
+    registry: &PlatformImageRegistry,
+    catalog: &PgPlatformImageCatalog,
+    objects: Arc<S3ImmutableObjectStore>,
+    request: &InternalPlatformImageImportRequest,
+) -> Result<PlatformImageEntry, Box<dyn Error>> {
+    let jobs = PlatformImageImportJobStore::new(pool.clone());
+    let upload_id = UploadSessionId::new();
+    jobs.enqueue(
+        &InternalPlatformImageImportEnqueueRequest {
+            upload_id,
+            request: request.clone(),
+        },
+        now()?,
+    )
+    .await?;
+    let worker = PlatformImageImportWorker {
+        jobs: jobs.clone(),
+        catalog: catalog.clone(),
+        registry: Some(registry.clone()),
+        objects,
+        worker_id: "live-import".to_owned(),
+        lease_duration: Duration::from_mins(1),
+        poll_interval: Duration::from_millis(100),
+    };
+    let _worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(worker.run()));
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(2);
+    loop {
+        let status = jobs.status(upload_id).await?;
+        match status.state {
+            PlatformImageImportJobState::Succeeded => {
+                return catalog
+                    .list(None)
+                    .await?
+                    .into_iter()
+                    .find(|entry| Some(entry.catalog_id) == status.catalog_id)
+                    .ok_or_else(|| "completed import has no catalog entry".into());
+            }
+            PlatformImageImportJobState::Failed | PlatformImageImportJobState::Cancelled => {
+                return Err(status
+                    .diagnostic
+                    .unwrap_or_else(|| "import failed without a diagnostic".to_owned())
+                    .into());
+            }
+            PlatformImageImportJobState::Queued | PlatformImageImportJobState::Running => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("live import worker timed out".into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

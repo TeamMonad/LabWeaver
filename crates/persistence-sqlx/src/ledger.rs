@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::Sha256Digest;
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{Domain, PersistenceError};
@@ -23,6 +23,45 @@ pub enum IdempotencyDecision {
 pub struct IdempotencyStore;
 
 impl IdempotencyStore {
+    /// Reads an existing idempotency row without reserving or locking it.  API callers use this
+    /// only to replay a completed result before an external side effect; the authoritative
+    /// transaction still calls [`Self::reserve`] and verifies the same hash.
+    pub async fn lookup(
+        pool: &PgPool,
+        domain: Domain,
+        operation: &str,
+        key: &str,
+        request_hash: Sha256Digest,
+    ) -> Result<Option<IdempotencyDecision>, PersistenceError> {
+        validate_token("operation", operation)?;
+        validate_token("idempotency key", key)?;
+        let query = format!(
+            "SELECT request_sha256, state, result FROM {}.idempotency_ledger \
+             WHERE operation = $1 AND idempotency_key = $2",
+            domain.schema()
+        );
+        let Some(row) = sqlx::query(&query)
+            .bind(operation)
+            .bind(key)
+            .fetch_optional(pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let observed: String = row.try_get("request_sha256")?;
+        if observed != request_hash.to_string() {
+            return Ok(Some(IdempotencyDecision::Conflict));
+        }
+        let state: String = row.try_get("state")?;
+        match state.as_str() {
+            "completed" => Ok(Some(IdempotencyDecision::Replay(row.try_get("result")?))),
+            "in_progress" => Ok(Some(IdempotencyDecision::InProgress)),
+            _ => Err(PersistenceError::IdentityMismatch(
+                "idempotency state is invalid".to_owned(),
+            )),
+        }
+    }
+
     /// Reserves a key without committing independently from the business transaction.
     pub async fn reserve(
         transaction: &mut Transaction<'_, Postgres>,

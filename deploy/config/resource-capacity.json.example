@@ -11,9 +11,9 @@
     {
       "class": "nvidia-cuda",
       "mode": "exclusive",
-      "providerBinding": "gpu-primary-v1",
+      "providerBinding": "container-primary-v1",
       "capacityUnits": 1,
-      "allocationBinding": "nvidia-cuda-primary-v1"
+      "allocationBinding": "nvidia.com/gpu"
     }
   ]
 }

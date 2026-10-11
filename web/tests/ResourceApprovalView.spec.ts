@@ -8,10 +8,22 @@ const mocks = vi.hoisted(() => ({
   useResourceApproval: vi.fn(),
 }))
 
+const projectMocks = vi.hoisted(() => ({
+  projects: {
+    kind: 'success' as const,
+    data: [{ id: 'project-1', name: 'CUDA 实验项目' }],
+  },
+  selectedProjectId: null as string | null,
+}))
+
 vi.mock('@/composables/useResourceApproval', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/composables/useResourceApproval')>()
   return { ...actual, useResourceApproval: mocks.useResourceApproval }
 })
+
+vi.mock('@/composables/useProjects', () => ({
+  useProjects: () => projectMocks,
+}))
 
 const cpuRequest = {
   id: 'request-cpu',
@@ -108,6 +120,7 @@ function mountView(
         DiagnosticBanner: { template: '<div />' },
         GcpStatusPill: { props: ['state'], template: '<span>{{ state }}</span>' },
         SvgIcon: { template: '<span />' },
+        RouterLink: { props: ['to'], template: '<a class="router-link-stub" :data-path="to.path"><slot /></a>' },
         ConfirmDialog: {
           props: ['open', 'confirmText', 'description'],
           template: '<div v-if="open" role="alertdialog"><p>{{ description }}</p><button type="button" @click="$emit(\'confirm\')">{{ confirmText }}</button></div>',
@@ -127,6 +140,66 @@ async function openApproval(wrapper: VueWrapper, binding: string) {
 describe('ResourceApprovalView provider binding rules', () => {
   beforeEach(() => {
     mocks.useResourceApproval.mockReset()
+  })
+
+  it('points administrators to the project resource request flow when none exist', () => {
+    const { wrapper } = mountView(cpuRequest, { kind: 'empty' }, [])
+
+    expect(wrapper.text()).toContain('暂无资源申请')
+    expect(wrapper.text()).toContain('用户需要先在资源申请页选择项目并提交请求')
+    expect(wrapper.get('.router-link-stub').attributes('data-path')).toBe('/researcher/resources')
+    wrapper.unmount()
+  })
+
+  it('shows readable project and target context while keeping internal IDs advanced', () => {
+    const { wrapper } = mountView(taskRequestOne, { kind: 'empty' })
+
+    expect(wrapper.findAll('.request-detail .meta-row').some((row) => row.text().includes('评测任务资源'))).toBe(true)
+    expect(wrapper.text()).toContain('CUDA 实验项目')
+    expect(wrapper.text()).toContain('账号资料待同步')
+    expect(wrapper.text()).toContain('查看内部标识与诊断')
+    expect(wrapper.get('details.advanced-details').element.open).toBe(false)
+    expect(wrapper.get('details.advanced-details').text()).toContain('task-run-1')
+    wrapper.unmount()
+  })
+
+  it('explains task-owner cleanup without treating lease release as a successful task result', async () => {
+    const { approval, wrapper } = mountView(cpuRequest, { kind: 'empty' })
+    approval.selectedLease = {
+      id: 'lease-task-owner-release',
+      requestId: cpuRequest.id,
+      claimId: 'claim-1',
+      revision: 2,
+      state: 'revoked',
+      revokeReasonCode: 'task_owner_release',
+      createdAt: '2026-09-09T00:00:00.000Z',
+      updatedAt: '2026-09-09T00:00:00.000Z',
+    } as never
+    await nextTick()
+
+    expect(wrapper.text()).toContain('临时任务资源已回收，请查看任务结果')
+    expect(wrapper.text()).toContain('这不代表用户 Work 环境已释放')
+    expect(wrapper.text()).not.toContain('任务已完成，临时资源已回收')
+    wrapper.unmount()
+  })
+
+  it('explains a blocked active allocation without offering a misleading retry', () => {
+    const { wrapper } = mountView({ ...cpuRequest, state: 'active', diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }, { kind: 'empty' })
+    expect(wrapper.get('[role="alert"]').text()).toContain('分配失败，请回收后重新申请。')
+    expect(wrapper.text()).toContain('撤销这次授权')
+    expect(wrapper.findAll('button').some((button) => button.text() === '重新送审')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('offers rejected requests a confirmed resubmission instead of allocation retry', async () => {
+    const rejected = { ...cpuRequest, state: 'rejected' as const }
+    const { approval, wrapper } = mountView(rejected, { kind: 'empty' })
+    await wrapper.get('textarea[aria-label="资源申请操作理由"]').setValue('已核对资源与执行后端配置。')
+    await wrapper.findAll('button').find((button) => button.text() === '重新送审')!.trigger('click')
+    expect(approval.runRequestAction).not.toHaveBeenCalled()
+    await wrapper.get('[role="alertdialog"] button').trigger('click')
+    expect(approval.runRequestAction).toHaveBeenCalledWith('retry', rejected.id, expect.objectContaining({ reason: '已核对资源与执行后端配置。' }), expect.objectContaining({ expectedRevision: rejected.revision }))
+    wrapper.unmount()
   })
 
   it('allows a CPU-only approval with an empty GPU catalog after entering a binding', async () => {

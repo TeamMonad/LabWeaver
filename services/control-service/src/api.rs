@@ -18,24 +18,29 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
-use contracts::authoring::{AgentRun, AgentRunPurpose, AgentTrackKind, ProjectLlmEgressPolicy};
+use contracts::authoring::{
+    AgentRun, AgentRunPurpose, AgentTrackKind, CandidateDecision, EnvironmentCandidate,
+    ProjectLlmEgressPolicy, RuntimeKind,
+};
 use contracts::http::{
-    AddProjectMembershipRequest, AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
-    AuthoringPublicationAdmissionQuery, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
-    CompletePlatformImageUploadRequest, CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
+    AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
+    AuthoringPublicationAdmissionQuery, CancelCandidateBuildRequest,
+    CancelPlatformImageUploadRequest, CandidateBuildTarget, CandidateDecisionRequest,
+    CompleteAuthoringApprovalRequest, CompletePlatformImageUploadRequest,
+    CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
     CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest,
     CreateWorkConfigurationRunRequest, CursorPage, DisablePlatformImageRequest,
     EnvironmentPublicationAdmissionQuery, EvaluationReleaseListQuery, GeneratedArtifactKind,
     GeneratedArtifactQuery, IdempotencyKey, InternalAgentRunMutationRequest,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
-    InternalPlatformImageDisableRequest, InternalPlatformImageImportRequest,
-    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
-    InternalWithdrawEvaluationReleaseRequest, OperationAccepted, PlatformImageCatalogView,
-    PlatformImageEntry, PlatformImageEntryView, RegisterPlatformImageRequest,
-    RemoveProjectMembershipRequest, RepinPlatformImageRequest, StrongEtag,
-    WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
-    WorkConfigurationAdmissionQuery, WorkConfigurationPlanView, resolve_sse_resume,
+    InternalPlatformImageDisableRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageRepinRequest, InternalWithdrawEvaluationReleaseRequest, OperationAccepted,
+    PageQuery, PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
+    RegisterPlatformImageRequest, RemoveProjectMembershipRequest, RepinPlatformImageRequest,
+    ResolvedProjectMembershipRequest, StrongEtag, WithdrawEnvironmentTemplateReleaseRequest,
+    WithdrawEvaluationReleaseRequest, WorkConfigurationAdmissionQuery, WorkConfigurationPlanView,
+    resolve_sse_resume,
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
@@ -122,8 +127,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(get_project_policy),
         )
         .route(
+            "/api/v1/projects/{project_id}/llm-egress-policy-options",
+            get(get_project_policy_options),
+        )
+        .route(
             "/api/v1/projects/{project_id}/agent-runs",
-            post(create_project_agent_run),
+            get(list_project_agent_runs).post(create_project_agent_run),
         )
         .route(
             "/api/v1/projects/{project_id}/work-configuration-runs",
@@ -148,6 +157,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/tracks/{track}/retry",
             post(retry_project_agent_run),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}",
+            get(get_project_candidate_build),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}/cancel",
+            post(cancel_project_candidate_build),
         )
         .route(
             "/api/v1/projects/{project_id}/environment-candidates/{candidate_id}",
@@ -246,6 +263,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/admin/images/uploads/{upload_id}/complete",
             post(complete_admin_image_upload),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}",
+            get(get_admin_image_upload),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}/cancel",
+            post(cancel_admin_image_upload),
         )
         .route(
             "/api/v1/admin/images/{catalog_id}/repin",
@@ -499,7 +524,7 @@ async fn add_project_membership(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(project_id): Path<ProjectId>,
     headers: HeaderMap,
-    Json(request): Json<AddProjectMembershipRequest>,
+    Json(request): Json<ResolvedProjectMembershipRequest>,
 ) -> Result<Response, ApiError> {
     let decision = authorize_project(
         &state,
@@ -645,7 +670,12 @@ async fn create_project_policy(
     .await?;
     let policy = state
         .control
-        .activate_project_policy(project_id, policy, &idempotency(&headers)?)
+        .activate_project_policy(
+            project_id,
+            policy,
+            &idempotency(&headers)?,
+            optional_etag(&headers)?,
+        )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &policy, policy.revision))
 }
@@ -666,6 +696,23 @@ async fn get_project_policy(
     .await?;
     let policy = state.control.active_project_policy(project_id).await?;
     Ok(with_etag(StatusCode::OK, &policy, policy.revision))
+}
+
+async fn get_project_policy_options(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectLlmPolicyOptions",
+        project_id,
+    )
+    .await?;
+    Ok(Json(state.control.project_llm_policy_options()).into_response())
 }
 
 async fn create_project_agent_run(
@@ -885,6 +932,49 @@ async fn get_project_agent_run(
     Ok(with_etag(StatusCode::OK, &run, run.revision))
 }
 
+async fn list_project_agent_runs(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "listProjectAgentRuns",
+        project_id,
+    )
+    .await?;
+    // Keep the project lookup at the same gateway boundary as the detail route.  This binds the
+    // optional course association before the Agent-owned history is returned.
+    let project = state.control.project(project_id).await?;
+    let (page, page_size, _) = query
+        .normalized()
+        .map_err(|_| ApiError::bad_request("LW_AGENT_RUN_HISTORY_PAGE_INVALID"))?;
+    let history = state
+        .agent
+        .list_project_runs(
+            project_id,
+            &PageQuery {
+                page: Some(page),
+                page_size: Some(page_size),
+            },
+        )
+        .await?;
+    if history.page != page
+        || history.page_size != page_size
+        || history
+            .items
+            .iter()
+            .any(|item| item.project_id != project_id || item.course_id != project.course_id)
+    {
+        return Err(DownstreamError::IdentityMismatch.into());
+    }
+    Ok(Json(history).into_response())
+}
+
 async fn get_project_work_configuration_plan(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -1099,6 +1189,19 @@ async fn retry_project_agent_run(
     Ok(accepted(&run))
 }
 
+/// Called only after user authorization and before opening a mutation transaction.
+/// Container candidates retain their existing build authority and do not need the VM catalog.
+async fn candidate_platform_images(
+    state: &ApiState,
+    headers: &HeaderMap,
+    candidate: &EnvironmentCandidate,
+) -> Result<Vec<PlatformImageEntry>, ApiError> {
+    if candidate.spec.runtime.kind() != RuntimeKind::VirtualMachine {
+        return Ok(Vec::new());
+    }
+    Ok(state.agent.list_platform_images(headers).await?.entries)
+}
+
 async fn get_project_environment_candidate(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -1113,9 +1216,14 @@ async fn get_project_environment_candidate(
         project_id,
     )
     .await?;
+    let candidate = state
+        .control
+        .project_environment_candidate(project_id, candidate_id)
+        .await?;
+    let catalog = candidate_platform_images(&state, &headers, &candidate).await?;
     let value = state
         .control
-        .project_environment_candidate_view(project_id, candidate_id)
+        .project_environment_candidate_view(project_id, candidate_id, &catalog)
         .await?;
     Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
 }
@@ -1141,6 +1249,60 @@ async fn get_project_evaluation_candidate(
     Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
 }
 
+async fn get_project_candidate_build(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, candidate_id, target)): Path<(ProjectId, CandidateId, CandidateBuildTarget)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectCandidateBuild",
+        project_id,
+    )
+    .await?;
+    let task = state
+        .control
+        .candidate_build(&state.agent, project_id, candidate_id, target)
+        .await?;
+    Ok(with_etag(StatusCode::OK, &task, task.status.revision))
+}
+
+async fn cancel_project_candidate_build(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, candidate_id, target)): Path<(ProjectId, CandidateId, CandidateBuildTarget)>,
+    headers: HeaderMap,
+    Json(request): Json<CancelCandidateBuildRequest>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "cancelProjectCandidateBuild",
+        project_id,
+    )
+    .await?;
+    if etag(&headers)? != request.expected_revision {
+        return Err(ControlError::RevisionConflict.into());
+    }
+    let task = state
+        .control
+        .cancel_candidate_build(
+            &state.agent,
+            project_id,
+            candidate_id,
+            target,
+            &request,
+            decision.actor.actor_id,
+            &idempotency(&headers)?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::ACCEPTED, &task, task.status.revision))
+}
+
 async fn decide_project_environment_candidate(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -1156,6 +1318,15 @@ async fn decide_project_environment_candidate(
         project_id,
     )
     .await?;
+    let catalog = if request.decision == CandidateDecision::Approved {
+        let candidate = state
+            .control
+            .project_environment_candidate(project_id, candidate_id)
+            .await?;
+        candidate_platform_images(&state, &headers, &candidate).await?
+    } else {
+        Vec::new()
+    };
     let approval = state
         .control
         .decide_project_candidate(
@@ -1167,6 +1338,7 @@ async fn decide_project_environment_candidate(
             etag(&headers)?,
             &idempotency(&headers)?,
             now()?,
+            &catalog,
         )
         .await?;
     Ok(with_etag(
@@ -1202,6 +1374,7 @@ async fn decide_project_evaluation_candidate(
             etag(&headers)?,
             &idempotency(&headers)?,
             now()?,
+            &[],
         )
         .await?;
     Ok(with_etag(
@@ -1226,7 +1399,11 @@ async fn complete_project_authoring_approval(
         project_id,
     )
     .await?;
-    let catalog = state.agent.list_platform_images(&headers).await?;
+    let candidate = state
+        .control
+        .project_environment_candidate(project_id, request.environment_candidate_id)
+        .await?;
+    let catalog = candidate_platform_images(&state, &headers, &candidate).await?;
     let approval = state
         .control
         .complete_authoring_approval(
@@ -1236,7 +1413,7 @@ async fn complete_project_authoring_approval(
             &idempotency(&headers)?,
             now()?,
             &trace_id(&headers),
-            &catalog.entries,
+            &catalog,
         )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &approval, approval.revision))
@@ -1476,7 +1653,12 @@ async fn create_policy(
     .await?;
     let policy = state
         .control
-        .activate_policy(course_id, policy, &idempotency(&headers)?)
+        .activate_policy(
+            course_id,
+            policy,
+            &idempotency(&headers)?,
+            optional_etag(&headers)?,
+        )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &policy, policy.revision))
 }
@@ -1807,6 +1989,11 @@ async fn create_project_work_release(
         project_id,
     )
     .await?;
+    let candidate = state
+        .control
+        .project_environment_candidate(project_id, request.candidate_id)
+        .await?;
+    let catalog = candidate_platform_images(&state, &headers, &candidate).await?;
     let key = idempotency(&headers)?;
     let published_at = now()?;
     let trace_id = trace_id(&headers);
@@ -1820,6 +2007,7 @@ async fn create_project_work_release(
             &key,
             published_at,
             &trace_id,
+            &catalog,
         )
         .await?;
     Ok(Json(OperationAccepted {
@@ -2329,6 +2517,18 @@ fn etag(headers: &HeaderMap) -> Result<Revision, ApiError> {
         .map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))
 }
 
+fn optional_etag(headers: &HeaderMap) -> Result<Option<Revision>, ApiError> {
+    let Some(value) = headers.get("If-Match") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?;
+    StrongEtag::parse(value)
+        .map(|etag| Some(etag.revision()))
+        .map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))
+}
+
 fn parse_header<T: FromStr>(headers: &HeaderMap, name: &str) -> Result<T, ApiError> {
     headers
         .get(name)
@@ -2510,52 +2710,55 @@ async fn complete_admin_image_upload(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(upload_id): Path<UploadSessionId>,
     headers: HeaderMap,
-    Json(_request): Json<CompletePlatformImageUploadRequest>,
+    Json(request): Json<CompletePlatformImageUploadRequest>,
 ) -> Result<Response, ApiError> {
     let decision =
         authorize_global(&state, &principal, &headers, "completePlatformImageUpload").await?;
     require_platform_admin(&decision)?;
     let key = idempotency(&headers)?;
-    let staging = state
+    let status = state
         .control
-        .begin_platform_image_completion(decision.actor.actor_id, upload_id, &key, now()?)
+        .queue_platform_image_completion(decision.actor.actor_id, upload_id, &request, &key, now()?)
         .await?;
-    let import = InternalPlatformImageImportRequest {
-        kind: staging.kind,
-        binding: staging.binding,
-        target_reference: staging.target_reference,
-        archive: staging.archive,
-        archive_object_key: staging.archive_object_key,
-        disk_format: staging.disk_format,
-        disk_path: staging.disk_path,
-        capacity_bytes: staging.capacity_bytes,
-        trust_revision: staging.trust_revision,
-        actor_id: staging.actor_id,
-        reason: staging.reason,
-    };
-    let entry = match state
-        .agent
-        .import_platform_image(&import, &key, &headers)
-        .await
-    {
-        Ok(entry) => entry,
-        Err(error) => {
-            // The upstream diagnostic and status must survive to the browser, so the staging
-            // session is closed as failed before the original failure is propagated.
-            let api_error = ApiError::from(error);
-            state
-                .control
-                .fail_platform_image_import(upload_id, &api_error.diagnostic, now()?)
-                .await?;
-            return Err(api_error);
-        }
-    };
-    state
+    Ok(with_etag(StatusCode::ACCEPTED, &status, status.revision))
+}
+
+async fn get_admin_image_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(upload_id): Path<UploadSessionId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision = authorize_global(&state, &principal, &headers, "getPlatformImageUpload").await?;
+    require_platform_admin(&decision)?;
+    let status = state
         .control
-        .finish_platform_image_import(upload_id, entry.catalog_id, now()?)
+        .platform_image_upload_status(upload_id)
         .await?;
-    let references = state.control.platform_image_release_references().await?;
-    Ok((StatusCode::CREATED, Json(entry_view(entry, &references))).into_response())
+    Ok(with_etag(StatusCode::OK, &status, status.revision))
+}
+
+async fn cancel_admin_image_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(upload_id): Path<UploadSessionId>,
+    headers: HeaderMap,
+    Json(request): Json<CancelPlatformImageUploadRequest>,
+) -> Result<Response, ApiError> {
+    let decision =
+        authorize_global(&state, &principal, &headers, "cancelPlatformImageUpload").await?;
+    require_platform_admin(&decision)?;
+    let status = state
+        .control
+        .cancel_platform_image_upload(
+            decision.actor.actor_id,
+            upload_id,
+            &request,
+            &idempotency(&headers)?,
+            now()?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::ACCEPTED, &status, status.revision))
 }
 
 fn accepted(run: &AgentRun) -> Response {
@@ -2623,7 +2826,9 @@ impl From<ControlError> for ApiError {
             | ControlError::ProjectionConflict
             | ControlError::ReleaseCandidateMismatch
             | ControlError::ArtifactMismatch => StatusCode::CONFLICT,
-            ControlError::SseCursorExpired => StatusCode::GONE,
+            ControlError::SseCursorExpired | ControlError::PlatformImageUploadExpired => {
+                StatusCode::GONE
+            }
             ControlError::CourseMismatch | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,
             ControlError::ConfigurationInvalid
             | ControlError::PersistenceFailed

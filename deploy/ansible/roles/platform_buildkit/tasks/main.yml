@@ -16,6 +16,27 @@
       - platform_buildkit_lock.platform_foundation.buildkit_rootless is match('^[^\s]+@sha256:[0-9a-f]{64}$')
     fail_msg: PLATFORM_BUILDKIT_INPUT_INVALID
 
+- name: Validate the BuildKit egress posture
+  ansible.builtin.assert:
+    that:
+      - platform_buildkit_egress_mode in ['open', 'restricted']
+    fail_msg: PLATFORM_BUILDKIT_EGRESS_MODE_INVALID
+
+- name: Validate restricted BuildKit egress inputs
+  ansible.builtin.assert:
+    that:
+      - platform_buildkit_egress_fqdns | length > 0
+      - >-
+        platform_buildkit_egress_fqdns
+        | select('match', '^[a-z0-9][a-z0-9.-]*[a-z0-9]$')
+        | list | length == platform_buildkit_egress_fqdns | length
+      - >-
+        platform_buildkit_egress_registry_cidrs
+        | select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$')
+        | list | length == platform_buildkit_egress_registry_cidrs | length
+    fail_msg: PLATFORM_BUILDKIT_EGRESS_INPUT_INVALID
+  when: platform_buildkit_egress_mode == 'restricted'
+
 - name: Inspect controlled BuildKit inputs
   ansible.builtin.stat:
     path: "{{ item }}"

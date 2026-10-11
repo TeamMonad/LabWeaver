@@ -261,6 +261,33 @@ class WorkConfigurationRunnerTests(unittest.TestCase):
             (0, "9", False, b"primary-ok\nverification-failed\n"),
         )
 
+    def test_bash_shebang_with_pipefail_runs_under_bash(self) -> None:
+        # Regression: the runner used to hardcode /bin/sh, which is dash on
+        # Debian images; an agent-generated ``set -o pipefail`` script then died
+        # with "Illegal option -o pipefail" (exit 2). The runner must dispatch
+        # on the script's shebang and honor a bash interpreter. Debian images
+        # ship bash, so this exercises the real dispatch path.
+        name = self._new_case(
+            "#!/bin/bash\nset -o pipefail\nprintf '%s\\n' 'bash-ok' | cat\n",
+            None,
+        )
+        run = self._run(name, False, int(time.time()) + 30)
+        self.assertEqual(run.returncode, 0, run.stderr.decode("utf-8", "replace"))
+        self.assertEqual(self._observe(name, False), (0, "-", False, b"bash-ok\n"))
+
+    def test_no_shebang_pipefail_script_uses_bash_fallback(self) -> None:
+        # Regression: scripts without a shebang historically ran under /bin/sh
+        # (dash on Debian), which rejects ``set -o pipefail``; the runner now
+        # falls back to bash when present. Debian images ship bash, so this
+        # exercises the real fallback path.
+        name = self._new_case(
+            "set -o pipefail\nprintf '%s\\n' 'fallback-ok' | cat\n",
+            None,
+        )
+        run = self._run(name, False, int(time.time()) + 30)
+        self.assertEqual(run.returncode, 0, run.stderr.decode("utf-8", "replace"))
+        self.assertEqual(self._observe(name, False), (0, "-", False, b"fallback-ok\n"))
+
     def test_utf8_and_binary_output_are_capped(self) -> None:
         name = self._new_case(
             "#!/bin/sh\nprintf '\\342\\230\\203'\n"

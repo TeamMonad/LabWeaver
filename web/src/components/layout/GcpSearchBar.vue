@@ -7,8 +7,8 @@
         v-model="query"
         type="text"
         class="search-input"
-        placeholder="搜索任务或输入环境 ID（按 / 聚焦）…"
-        aria-label="搜索任务或按环境 ID 直达"
+        placeholder="搜索平台功能或页面（按 / 聚焦）…"
+        aria-label="搜索平台功能或页面"
         @focus="onFocus"
         @keydown.down.prevent="navigateDown"
         @keydown.up.prevent="navigateUp"
@@ -67,7 +67,7 @@
         class="search-empty"
         role="status"
       >
-        没有匹配的任务。
+        没有匹配的平台功能或页面。
       </p>
     </div>
   </div>

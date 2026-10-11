@@ -1,0 +1,150 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment-owned request to resolve and durably hold one Experiment resource reservation.\n\nThe caller submits only a policy-catalogued class and count. Resource selects the exact\nallocation binding, mode, and provider binding from its active catalog and current capacity\nobservation; an unknown class, exhausted pool, or stale observation fails closed.",
+  "properties": {
+    "approvedResources": {
+      "$ref": "#/$defs/WorkloadResources"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environmentGeneration": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "gpu": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuRequest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "operationId": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "providerBinding": {
+      "type": "string"
+    },
+    "traceId": {
+      "type": "string"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "environmentId",
+    "projectId",
+    "ownerActorId",
+    "providerBinding",
+    "approvedResources",
+    "operationId",
+    "environmentGeneration",
+    "traceId"
+  ],
+  "title": "ResolveEnvironmentResourceReservationRequest",
+  "type": "object"
+}

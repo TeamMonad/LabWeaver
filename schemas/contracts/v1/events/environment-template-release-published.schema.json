@@ -396,6 +396,25 @@
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
       "type": "string"
     },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
     "ImageArtifact": {
       "description": "Complete immutable runtime artifact identity.",
       "oneOf": [
@@ -557,6 +576,17 @@
           "minimum": 0,
           "type": "integer"
         },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Policy-catalogued GPU class and count. It never carries a Kubernetes resource name."
+        },
         "memoryBytes": {
           "format": "uint64",
           "minimum": 0,
@@ -591,7 +621,8 @@
       "enum": [
         "delete",
         "purge_after_export",
-        "retain_sanitized_receipt"
+        "retain_sanitized_receipt",
+        "retain_until_revoked"
       ],
       "type": "string"
     },
@@ -616,8 +647,11 @@
           "description": "Exact policy revision used at creation."
         },
         "retainUntil": {
-          "$ref": "#/$defs/UtcTimestamp",
-          "description": "Absolute retention boundary."
+          "description": "Absolute retention boundary. `None` is valid only for an explicitly permanent course\nmaterial decision whose disposition is `RetainUntilRevoked`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

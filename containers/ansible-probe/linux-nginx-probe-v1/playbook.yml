@@ -12,7 +12,7 @@
 #   teaching lab (docs/labs/linux-nginx-material-contract.md). Assertions
 #   referencing anything outside this surface fail closed as unknown facts.
 - name: LabWeaver read-only Linux Nginx probe (linux-nginx-probe-v1)
-  hosts: probe_target
+  hosts: probe
   gather_facts: false
   tasks:
     - name: Collect installed package facts

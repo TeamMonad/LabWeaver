@@ -1,0 +1,31 @@
+# Disposable Linux/amd64 builder for the vGPU guest-image preparation tool.
+# The image is a toolchain only; it is never used as a guest runtime or
+# published to the platform registry.
+ARG UBUNTU_BASE="docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254"
+
+FROM ${UBUNTU_BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+RUN apt-get -o APT::Update::Error-Mode=any update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        dhcpcd-base \
+        iproute2 \
+        isc-dhcp-client \
+        libguestfs-tools \
+        linux-headers-generic \
+        linux-image-generic \
+        python3 \
+        qemu-utils \
+        tar \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/bin/virt-customize \
+    && test -x /usr/bin/virt-sysprep \
+    && test -x /usr/bin/qemu-img
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]

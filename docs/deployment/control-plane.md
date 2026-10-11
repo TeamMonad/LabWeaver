@@ -1,4 +1,4 @@
-# Issue #48 Control-plane deployment and rollback
+# Issue #48 Control-plane deployment
 
 ## Configuration boundary
 
@@ -45,12 +45,11 @@ hash after freezing every exact MinIO object version. This keeps the client-veri
 contract distinct from the server-owned object-version identity.
 
 After the non-destructive retained-infrastructure inventory confirms that each
-domain has no business relations and an empty migration ledger, apply the
-2 baseline catalog through the controlled entry point before starting the new
-processes:
+domain has no business relations and an empty migration ledger, the application
+profile applies the baseline catalog before starting the new processes. Verify
+the generated contracts remain current:
 
 ```sh
-cargo xtask migrate --yes
 cargo xtask contracts check
 ```
 
@@ -66,10 +65,36 @@ probe scripts and model-generated code all execute inside that runtime, so the i
 identical for all three roles and is not chosen per service.
 
 Before any of these services dispatches work, every node eligible for those workloads must expose a
-`RuntimeClass` with handler `labweaver-sandbox` mapped to gVisor (`io.containerd.runsc.v1`) with the
-`runsc` sentry sidecar tree installed next to the runtime binary. The handler must not set a
-`base_runtime_spec`: `runsc` refuses to start a container from a base spec that carries no `mounts`
-array, so the process bound is not expressed in the OCI spec.
+`RuntimeClass` with handler `labweaver-sandbox` mapped to gVisor, with the `runsc` sentry sidecar
+tree installed next to the runtime binary.
+
+The isolation boundary has to cover a Pod's sandbox container as well as its other containers, so
+the node needs a container runtime that applies the Pod's runtime class to both. containerd does:
+`sandboxer = "podsandbox"` on a runtime table makes the runtime own the Pod sandbox, and the CRI
+writes the standard `io.kubernetes.cri.*` annotations that gVisor reads to tell a sandbox container
+from an ordinary one. CRI-O does not — it creates a Pod's sandbox with the node's *default* runtime
+regardless of the Pod's `runtimeClassName`, so `runsc` never owns a sandbox for such a Pod and every
+Job container fails with `cannot load sandbox: …_sandbox:….state: no such file or directory`.
+Sandbox-capable workers therefore run containerd, while the control-plane node keeps the CRI the
+cluster was installed with:
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.labweaver-sandbox]
+  runtime_type = 'io.containerd.runsc.v1'
+  sandboxer = 'podsandbox'
+```
+
+`deploy/ansible/roles/sandbox_runtime` installs the reviewed gVisor release from
+`deploy/versions.lock.yml` into `/usr/local/bin` (the whole tree, because `runsc` resolves its
+`gvisor-bin/` sentry relative to its own directory and containerd finds the shim by name on `PATH`),
+writes that runtime table into `/etc/containerd/config.toml`, points the kubelet's
+`containerRuntimeEndpoint` at containerd, retires the previous container runtime on the node and
+publishes the `RuntimeClass`. The runtime table sets no options and no `base_runtime_spec`: gVisor's
+shim rejects unknown option keys, and `runsc` refuses to start a container from a base spec that
+carries no `mounts` array, so the process bound is not expressed in the OCI spec. Every runtime
+table keeps `sandboxer = 'podsandbox'` so the sandbox container of a Pod is created by the runtime
+that Pod selected; a GPU node additionally keeps the `nvidia` device runtime for the workloads that
+need it.
 
 The process bound is enforced on the pod cgroup instead. Eligible nodes set the kubelet
 `podPidsLimit` to a reviewed finite value, so a fork bomb inside a sandbox is terminated instead of
@@ -78,9 +103,12 @@ node-level bound covers the whole one-shot Pod — every container of the Job �
 container, and a gVisor release that ignores `linux.resources.pids` leaves a per-container OCI cap
 unenforceable. The bound therefore has to leave room for every co-located workload on that node: a
 deployment that shares nodes with JVM services must review a larger value, while a dedicated
-one-shot node pool can review a small one. Recording which value the node class carries is a
-deployment prerequisite, not a reason to drop the sandbox. If the handler is unavailable,
-scheduling must fail closed instead of falling back to the node default runtime.
+one-shot node pool can review a small one. The v1 deployment shares both workers with Keycloak,
+PostgreSQL, NATS, MinIO, Harbor and user environments, and carries `podPidsLimit: 16384`
+(`deploy/ansible/roles/sandbox_runtime/defaults/main.yml`); the single-node local stack carries
+4096 (`tools/local_dev.py`). Recording which value the node class carries is a deployment
+prerequisite, not a reason to drop the sandbox. If the handler is unavailable, scheduling must fail
+closed instead of falling back to the node default runtime.
 
 Keep the existing seccomp, no-new-privileges, dropped-capability, read-only-root-filesystem and
 non-root controls unchanged; do not weaken them to make the runtime available. When the authoring
@@ -100,19 +128,6 @@ non-root user with a read-only root filesystem, no service-account token and onl
 proxy/registry/model egress CIDRs, and it carries `runtimeClassName: labweaver-sandbox` (see the
 shared runtime prerequisites above). Agent holds a namespaced Role limited to Jobs, Secrets, Pods and
 NetworkPolicies in that single namespace; it never receives cluster-wide permissions.
-
-## Rollback
-
-1. Stop admission of new Control mutations at the trusted Gateway.
-2. Stop new Agent dispatch claims, then allow bounded work to finish or request cancellation.
-3. Confirm immutable packages and the current baseline identity remain present.
-4. Roll back only to an image set verified against the same baseline.
-5. After publication, schema corrections use reviewed forward Migrations;
-   rollback never drops or rewrites retained infrastructure state.
-
-Rollback does not withdraw an EnvironmentTemplateRelease. A withdrawal is a separate append-only
-fact. A functional rollback to older material creates a higher release version referencing a
-still-valid verified candidate and authoritative artifact evidence.
 
 ## Current production blocker
 

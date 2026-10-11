@@ -35,14 +35,17 @@ describe('navigation rules', () => {
   it('makes all groups available when the user has all platform roles', () => {
     const groups = navigationGroupsForRoles(['teacher', 'student', 'admin'])
     expect(groups.map((group) => group.id)).toEqual(['teaching', 'student', 'work', 'admin'])
-    expect(groups.find((group) => group.id === 'work')?.items).toHaveLength(4)
+    expect(groups.find((group) => group.id === 'work')?.items).toHaveLength(5)
   })
 
   it('keeps project context and global admin actions separate', () => {
     const workspaces = NAVIGATION_GROUPS.find((group) => group.id === 'work')?.items.find((item) => item.id === 'workspaces')
+    const teacherEnvironments = NAVIGATION_GROUPS.find((group) => group.id === 'teaching')?.items.find((item) => item.id === 'teacher-environments')
     const approval = NAVIGATION_GROUPS.find((group) => group.id === 'admin')?.items.find((item) => item.id === 'admin-resource-approval')
     const finance = NAVIGATION_GROUPS.find((group) => group.id === 'admin')?.items.find((item) => item.id === 'admin-finance')
     expect(workspaces && navigationTarget(workspaces, 'project with spaces')).toBe('/researcher/workspaces?projectId=project+with+spaces')
+    expect(teacherEnvironments && navigationTarget(teacherEnvironments, 'project-1')).toBe('/teacher/environments?projectId=project-1')
+    expect(teacherEnvironments && navigationTarget(teacherEnvironments, null)).toBe('/teacher/environments')
     expect(approval && navigationTarget(approval, 'project-1')).toBe('/admin/resource-approval')
     expect(finance && navigationTarget(finance, 'project-1')).toBe('/admin/resource-finance?projectId=project-1')
   })
@@ -65,7 +68,7 @@ describe('navigation rules', () => {
     await router.isReady()
     const wrapper = mount(GcpSearchBar, { global: { plugins: [router] } })
 
-    const input = wrapper.find('input[aria-label="搜索任务或按环境 ID 直达"]')
+    const input = wrapper.find('input[aria-label="搜索平台功能或页面"]')
     await input.setValue('资源审批')
     await input.trigger('focus')
 
@@ -87,10 +90,10 @@ describe('navigation rules', () => {
     await router.isReady()
     const wrapper = mount(GcpSearchBar, { global: { plugins: [router] } })
 
-    const input = wrapper.find('input[aria-label="搜索任务或按环境 ID 直达"]')
-    await input.setValue('不存在的任务')
+    const input = wrapper.find('input[aria-label="搜索平台功能或页面"]')
+    await input.setValue('不存在的平台功能')
     await input.trigger('focus')
 
-    expect(wrapper.find('.search-empty').text()).toBe('没有匹配的任务。')
+    expect(wrapper.find('.search-empty').text()).toBe('没有匹配的平台功能或页面。')
   })
 })

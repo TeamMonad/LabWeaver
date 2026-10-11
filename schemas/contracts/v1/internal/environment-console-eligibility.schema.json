@@ -149,7 +149,10 @@
       ]
     },
     "eligibilityExpiresAt": {
-      "$ref": "#/$defs/UtcTimestamp"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "environmentClass": {
       "$ref": "#/$defs/EnvironmentClass"

@@ -837,6 +837,85 @@ pub async fn authorize_ssh(
     }))
 }
 
+async fn load_gateway_session_candidate(
+    tx: &mut Transaction<'_, Postgres>,
+    alias: &str,
+    key_id: Uuid,
+    actor_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<(sqlx::postgres::PgRow, Option<OffsetDateTime>), ApiError> {
+    let candidate = sqlx::query(
+        "SELECT g.grant_id,g.revision AS grant_revision,g.actor_id,g.project_id,g.course_id,g.environment_id, \
+                g.environment_revision,g.contract,g.expires_at,eg.endpoint_grant_id,eg.endpoint_id, \
+                eg.endpoint_revision,eg.expires_at AS endpoint_expires_at,pm.expires_at AS project_membership_expires_at \
+         FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
+         JOIN access.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
+         LEFT JOIN access.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
+         JOIN access.ssh_public_keys k ON k.key_id=$2 AND k.actor_id=g.actor_id \
+         WHERE eg.alias=$1 AND eg.protocol='ssh' AND eg.health='healthy' AND g.actor_id=$3 \
+           AND g.state='active' AND g.not_before<=$4 AND g.expires_at>$4 AND eg.expires_at>$4 \
+            AND k.revoked_at IS NULL AND pm.state='active' AND (pm.expires_at IS NULL OR pm.expires_at>$4) \
+            AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
+            AND (g.course_id IS NULL OR (cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$4))) \
+          FOR SHARE OF g,eg,k,pm",
+    )
+    .bind(alias)
+    .bind(key_id)
+    .bind(actor_id)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
+    .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    let subject_kind: EnvironmentAccessSubjectKind = serde_json::from_value(
+        candidate
+            .get::<Value, _>("contract")
+            .get("subjectKind")
+            .cloned()
+            .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?,
+    )
+    .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    let course_membership_expires_at = match candidate.get::<Option<Uuid>, _>("course_id") {
+        Some(course_id) => {
+            lock_course_membership(tx, course_id, actor_id, subject_kind, now).await?
+        }
+        None => None,
+    };
+    Ok((candidate, course_membership_expires_at))
+}
+
+async fn lock_course_membership(
+    tx: &mut Transaction<'_, Postgres>,
+    course_id: Uuid,
+    actor_id: Uuid,
+    subject_kind: EnvironmentAccessSubjectKind,
+    now: OffsetDateTime,
+) -> Result<Option<OffsetDateTime>, ApiError> {
+    let required_role = match subject_kind {
+        EnvironmentAccessSubjectKind::Owner => "student",
+        EnvironmentAccessSubjectKind::CourseTeacher => "teacher",
+    };
+    let row = sqlx::query(
+        "SELECT state,expires_at FROM access.course_memberships \
+         WHERE course_id=$1 AND actor_id=$2 AND role=$3 \
+         FOR SHARE",
+    )
+    .bind(course_id)
+    .bind(actor_id)
+    .bind(required_role)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
+    .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    let state: String = row.get("state");
+    let expires_at: Option<OffsetDateTime> = row.get("expires_at");
+    if state != "active" || expires_at.is_some_and(|expiry| expiry <= now) {
+        return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
+    }
+    Ok(expires_at)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one transaction binds the one-time key authorization to the exact endpoint eligibility decision"
@@ -883,30 +962,14 @@ pub async fn create_gateway_session(
       .bind(&identity.client_id).bind(&request.connection_id).bind(now)
       .fetch_optional(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
       .ok_or_else(|| ApiError::forbidden("LW_ACCESS_FORCE_TOKEN_REJECTED"))?;
-    let candidate = sqlx::query(
-        "SELECT g.grant_id,g.revision AS grant_revision,g.actor_id,g.project_id,g.course_id,g.environment_id, \
-                g.environment_revision,g.contract,g.expires_at,eg.endpoint_grant_id,eg.endpoint_id, \
-                eg.endpoint_revision,eg.expires_at AS endpoint_expires_at,pm.expires_at AS project_membership_expires_at,cm.expires_at AS course_membership_expires_at \
-         FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
-         JOIN access.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
-         LEFT JOIN access.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
-           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
-         JOIN access.ssh_public_keys k ON k.key_id=$2 AND k.actor_id=g.actor_id \
-         WHERE eg.alias=$1 AND eg.protocol='ssh' AND eg.health='healthy' AND g.actor_id=$3 \
-           AND g.state='active' AND g.not_before<=$4 AND g.expires_at>$4 AND eg.expires_at>$4 \
-            AND k.revoked_at IS NULL AND pm.state='active' AND (pm.expires_at IS NULL OR pm.expires_at>$4) \
-            AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
-            AND (g.course_id IS NULL OR (cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$4))) \
-          FOR SHARE OF g,eg,k,pm,cm",
+    let (candidate, course_membership_expires_at) = load_gateway_session_candidate(
+        &mut tx,
+        &request.alias,
+        auth.get::<Uuid, _>("key_id"),
+        auth.get::<Uuid, _>("actor_id"),
+        now,
     )
-    .bind(&request.alias)
-    .bind(auth.get::<Uuid, _>("key_id"))
-    .bind(auth.get::<Uuid, _>("actor_id"))
-    .bind(now)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
-    .ok_or_else(|| ApiError::forbidden("LW_ACCESS_SSH_DENIED"))?;
+    .await?;
     let actor_id = typed_id::<ActorId>(candidate.get("actor_id"))?;
     let endpoint_id = typed_id::<EndpointId>(candidate.get("endpoint_id"))?;
     let endpoint_revision = revision(candidate.get("endpoint_revision"))?;
@@ -950,22 +1013,34 @@ pub async fn create_gateway_session(
     if resolved.protocol != EndpointProtocol::Ssh
         || resolved.health != EndpointHealth::Healthy
         || resolved.revision != endpoint_revision
-        || eligibility.eligibility_expires_at.get() <= now
+        || eligibility
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline.get() <= now)
     {
         return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
     }
-    let expires_at = [
-        Some(auth.get::<OffsetDateTime, _>("expires_at")),
-        Some(candidate.get::<OffsetDateTime, _>("expires_at")),
-        Some(candidate.get::<OffsetDateTime, _>("endpoint_expires_at")),
-        candidate.get::<Option<OffsetDateTime>, _>("project_membership_expires_at"),
-        candidate.get::<Option<OffsetDateTime>, _>("course_membership_expires_at"),
-        Some(eligibility.eligibility_expires_at.get()),
+    let mut expires_at = [
+        auth.get::<OffsetDateTime, _>("expires_at"),
+        candidate.get::<OffsetDateTime, _>("expires_at"),
+        candidate.get::<OffsetDateTime, _>("endpoint_expires_at"),
     ]
     .into_iter()
-    .flatten()
     .min()
     .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    if let Some(deadline) = eligibility.eligibility_expires_at {
+        expires_at = expires_at.min(deadline.get());
+    }
+    if let Some(fence) = eligibility.lease_fence {
+        expires_at = expires_at.min(fence.expires_at.get());
+    }
+    if let Some(expiry) =
+        candidate.get::<Option<OffsetDateTime>, _>("project_membership_expires_at")
+    {
+        expires_at = expires_at.min(expiry);
+    }
+    if let Some(expiry) = course_membership_expires_at {
+        expires_at = expires_at.min(expiry);
+    }
     sqlx::query(
         "INSERT INTO access.gateway_sessions \
          (session_id,grant_id,grant_revision,actor_id,endpoint_id,endpoint_grant_id,key_id,state,started_at,expires_at,contract,gateway_identity,connection_id,revision,last_heartbeat_at) \
@@ -1010,7 +1085,14 @@ pub async fn heartbeat_gateway_session(
     ensure_gateway_request(&identity, &request.gateway_identity)?;
     let expected = if_match(&headers)?;
     if expected != request.expected_revision {
-        return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
+        let error = gateway_session_revision_conflict(
+            &state.pool,
+            session_id,
+            &identity.client_id,
+            &request.connection_id,
+        )
+        .await?;
+        return Err(error);
     }
     let now = OffsetDateTime::now_utc();
     let rows = sqlx::query(
@@ -1020,7 +1102,14 @@ pub async fn heartbeat_gateway_session(
       .bind(i64::try_from(expected.get()).map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?)
       .execute(&state.pool).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?.rows_affected();
     if rows != 1 {
-        return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
+        let error = gateway_session_revision_conflict(
+            &state.pool,
+            session_id,
+            &identity.client_id,
+            &request.connection_id,
+        )
+        .await?;
+        return Err(error);
     }
     Ok(Json(load_session(&state.pool, session_id).await?))
 }
@@ -1036,35 +1125,27 @@ pub async fn close_gateway_session(
     ensure_gateway_request(&identity, &request.gateway_identity)?;
     let expected = if_match(&headers)?;
     if expected != request.expected_revision || request.reason_code.trim().is_empty() {
+        if expected != request.expected_revision {
+            let error = gateway_session_revision_conflict(
+                &state.pool,
+                session_id,
+                &identity.client_id,
+                &request.connection_id,
+            )
+            .await?;
+            return Err(error);
+        }
         return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
     }
-    let now = OffsetDateTime::now_utc();
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    let rows = sqlx::query(
-        "UPDATE access.gateway_sessions SET state='closed',terminated_at=$4,close_reason_code=$5,revision=revision+1 \
-         WHERE session_id=$1 AND gateway_identity=$2 AND connection_id=$3 AND revision=$6 AND state IN ('active','terminating','termination_overdue')",
-    ).bind(session_id.as_uuid()).bind(&identity.client_id).bind(&request.connection_id).bind(now).bind(&request.reason_code)
-      .bind(i64::try_from(expected.get()).map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?)
-      .execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?.rows_affected();
-    if rows != 1 {
-        return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
-    }
-    let session = load_session_tx(&mut tx, session_id).await?;
-    enqueue_session_event(
-        &mut tx,
-        &session,
-        subjects::ACCESS_SESSION_CLOSED,
-        now,
-        &request.reason_code,
+    let session = close_gateway_session_owned(
+        &state.pool,
+        session_id,
+        &identity.client_id,
+        &request,
+        expected,
+        OffsetDateTime::now_utc(),
     )
     .await?;
-    tx.commit()
-        .await
-        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     Ok(Json(session))
 }
 
@@ -1205,10 +1286,13 @@ async fn activate_grant(
         tx.commit().await?;
         return Ok(());
     };
-    let expires_at = std::cmp::min(
-        grant.get::<OffsetDateTime, _>("expires_at"),
-        eligibility.eligibility_expires_at.get(),
-    );
+    let mut expires_at = grant.get::<OffsetDateTime, _>("expires_at");
+    if let Some(deadline) = eligibility.eligibility_expires_at {
+        expires_at = expires_at.min(deadline.get());
+    }
+    if let Some(fence) = eligibility.lease_fence {
+        expires_at = expires_at.min(fence.expires_at.get());
+    }
     if expires_at <= now {
         deny_grant_tx(
             &mut tx,
@@ -1969,6 +2053,75 @@ async fn load_session(pool: &PgPool, id: GatewaySessionId) -> Result<GatewaySess
     Ok(session)
 }
 
+/// Returns the authoritative revision only to the Gateway connection that owns
+/// the session.  A stale revision must remain a precondition failure; the
+/// bounded state hint lets that same owner retry close after a concurrent
+/// termination request without weakening revision or ownership checks.
+async fn gateway_session_revision_conflict(
+    pool: &PgPool,
+    session_id: GatewaySessionId,
+    gateway_identity: &str,
+    connection_id: &str,
+) -> Result<ApiError, ApiError> {
+    let session = load_session(pool, session_id).await?;
+    if session.gateway_identity == gateway_identity && session.connection_id == connection_id {
+        return Ok(ApiError::precondition_with_body(
+            "LW_REVISION_CONFLICT",
+            json!({
+                "diagnosticCode": "LW_REVISION_CONFLICT",
+                "currentRevision": session.revision,
+                "state": session.state,
+            }),
+        ));
+    }
+    Ok(ApiError::precondition("LW_REVISION_CONFLICT"))
+}
+
+async fn close_gateway_session_owned(
+    pool: &PgPool,
+    session_id: GatewaySessionId,
+    gateway_identity: &str,
+    request: &CloseGatewaySessionRequest,
+    expected: Revision,
+    now: OffsetDateTime,
+) -> Result<GatewaySession, ApiError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    let rows = sqlx::query(
+        "UPDATE access.gateway_sessions SET state='closed',terminated_at=$4,close_reason_code=$5,revision=revision+1 \
+         WHERE session_id=$1 AND gateway_identity=$2 AND connection_id=$3 AND revision=$6 AND state IN ('active','terminating','termination_overdue')",
+    ).bind(session_id.as_uuid()).bind(gateway_identity).bind(&request.connection_id).bind(now).bind(&request.reason_code)
+      .bind(i64::try_from(expected.get()).map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?)
+      .execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?.rows_affected();
+    if rows != 1 {
+        tx.rollback()
+            .await
+            .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+        return Err(gateway_session_revision_conflict(
+            pool,
+            session_id,
+            gateway_identity,
+            &request.connection_id,
+        )
+        .await?);
+    }
+    let session = load_session_tx(&mut tx, session_id).await?;
+    enqueue_session_event(
+        &mut tx,
+        &session,
+        subjects::ACCESS_SESSION_CLOSED,
+        now,
+        &request.reason_code,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    Ok(session)
+}
+
 async fn load_session_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: GatewaySessionId,
@@ -2573,6 +2726,223 @@ mod project_scope_tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
+        reason = "the test covers the gateway candidate query for project, course, and revoked grant state"
+    )]
+    async fn gateway_session_candidate_rechecks_course_membership_and_grant_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        );
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await?;
+        let migrations = format!(
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}\n{}\n{}",
+            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
+            include_str!("../../../migrations/access/0003_independent_project_memberships.sql"),
+            include_str!("../../../migrations/access/0004_actor_identity_metadata.sql"),
+            include_str!("../../../migrations/access/0005_gateway_service_client_identity.sql")
+        );
+        sqlx::raw_sql(&migrations).execute(&pool).await?;
+
+        let actor = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO access.actors (actor_id,issuer,subject_sha256) \
+             VALUES ($1,'https://issuer.example.test',$2)",
+        )
+        .bind(actor)
+        .bind("a".repeat(64))
+        .execute(&pool)
+        .await?;
+        let key_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO access.ssh_public_keys \
+             (key_id,actor_id,fingerprint_sha256,algorithm,normalized_openssh) \
+             VALUES ($1,$2,'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','ed25519',\
+                     'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')",
+        )
+        .bind(key_id)
+        .bind(actor)
+        .execute(&pool)
+        .await?;
+
+        let now = OffsetDateTime::now_utc();
+        let project_without_course = Uuid::now_v7();
+        let environment_without_course = Uuid::now_v7();
+        let endpoint_without_course = Uuid::now_v7();
+        let grant_without_course = Uuid::now_v7();
+        let endpoint_grant_without_course = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO access.project_memberships \
+             (course_id,project_id,actor_id,role,state,revision) \
+             VALUES (NULL,$1,$2,'student','active',1)",
+        )
+        .bind(project_without_course)
+        .bind(actor)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.access_grants \
+             (grant_id,actor_id,project_id,course_id,environment_id,revision,state,not_before,expires_at,contract) \
+             VALUES ($1,$2,$3,NULL,$4,1,'active',$5,$6,'{\"subjectKind\":\"owner\"}')",
+        )
+        .bind(grant_without_course)
+        .bind(actor)
+        .bind(project_without_course)
+        .bind(environment_without_course)
+        .bind(now - time::Duration::minutes(1))
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.endpoint_grants \
+             (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) \
+             VALUES ($1,$2,$3,1,'ssh','healthy','lw-abcdefghijklmnopqrst',$4,'{}')",
+        )
+        .bind(endpoint_grant_without_course)
+        .bind(grant_without_course)
+        .bind(endpoint_without_course)
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+
+        let mut tx = pool.begin().await?;
+        let (candidate, course_expiry) =
+            load_gateway_session_candidate(&mut tx, "lw-abcdefghijklmnopqrst", key_id, actor, now)
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("no-course candidate: {error:?}"))
+                })?;
+        assert_eq!(candidate.get::<Option<Uuid>, _>("course_id"), None);
+        assert_eq!(course_expiry, None);
+        tx.commit().await?;
+
+        let course_id = Uuid::now_v7();
+        let project_with_course = Uuid::now_v7();
+        let environment_with_course = Uuid::now_v7();
+        let endpoint_with_course = Uuid::now_v7();
+        let grant_with_course = Uuid::now_v7();
+        let endpoint_grant_with_course = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO access.project_memberships \
+             (course_id,project_id,actor_id,role,state,revision) \
+             VALUES ($1,$2,$3,'student','active',1)",
+        )
+        .bind(course_id)
+        .bind(project_with_course)
+        .bind(actor)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.course_memberships \
+             (course_id,actor_id,role,state,revision,expires_at) \
+             VALUES ($1,$2,'student','active',1,$3)",
+        )
+        .bind(course_id)
+        .bind(actor)
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.access_grants \
+             (grant_id,actor_id,project_id,course_id,environment_id,revision,state,not_before,expires_at,contract) \
+             VALUES ($1,$2,$3,$4,$5,1,'active',$6,$7,'{\"subjectKind\":\"owner\"}')",
+        )
+        .bind(grant_with_course)
+        .bind(actor)
+        .bind(project_with_course)
+        .bind(course_id)
+        .bind(environment_with_course)
+        .bind(now - time::Duration::minutes(1))
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.endpoint_grants \
+             (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) \
+             VALUES ($1,$2,$3,1,'ssh','healthy','lw-bcdefghijklmnopqrstu',$4,'{}')",
+        )
+        .bind(endpoint_grant_with_course)
+        .bind(grant_with_course)
+        .bind(endpoint_with_course)
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+
+        let mut tx = pool.begin().await?;
+        let (candidate, course_expiry) =
+            load_gateway_session_candidate(&mut tx, "lw-bcdefghijklmnopqrstu", key_id, actor, now)
+                .await
+                .map_err(|error| std::io::Error::other(format!("course candidate: {error:?}")))?;
+        assert_eq!(
+            candidate.get::<Option<Uuid>, _>("course_id"),
+            Some(course_id)
+        );
+        assert!(course_expiry.is_some());
+        tx.commit().await?;
+
+        sqlx::query(
+            "UPDATE access.access_grants SET state='revoked',revoked_at=$2,reason_code='user_revoked' WHERE grant_id=$1",
+        )
+        .bind(grant_with_course)
+        .bind(now)
+        .execute(&pool)
+        .await?;
+        let mut tx = pool.begin().await?;
+        assert!(
+            load_gateway_session_candidate(&mut tx, "lw-bcdefghijklmnopqrstu", key_id, actor, now,)
+                .await
+                .is_err()
+        );
+        tx.rollback().await?;
+
+        sqlx::query(
+            "UPDATE access.access_grants SET state='active',revoked_at=NULL,reason_code=NULL WHERE grant_id=$1",
+        )
+        .bind(grant_with_course)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "UPDATE access.course_memberships SET state='revoked',revision=2 WHERE course_id=$1 AND actor_id=$2 AND role='student'",
+        )
+        .bind(course_id)
+        .bind(actor)
+        .execute(&pool)
+        .await?;
+        let mut tx = pool.begin().await?;
+        assert!(
+            load_gateway_session_candidate(&mut tx, "lw-bcdefghijklmnopqrstu", key_id, actor, now,)
+                .await
+                .is_err()
+        );
+        tx.rollback().await?;
+
+        sqlx::query(
+            "UPDATE access.course_memberships SET state='active',revision=3,expires_at=$3 \
+             WHERE course_id=$1 AND actor_id=$2 AND role='student'",
+        )
+        .bind(course_id)
+        .bind(actor)
+        .bind(now - time::Duration::minutes(1))
+        .execute(&pool)
+        .await?;
+        let mut tx = pool.begin().await?;
+        assert!(
+            load_gateway_session_candidate(&mut tx, "lw-bcdefghijklmnopqrstu", key_id, actor, now,)
+                .await
+                .is_err()
+        );
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
         reason = "the test proves a stale Environment denial is terminal, lease-fenced, and evented"
     )]
     async fn stale_environment_activation_is_denied_and_publishes_terminal_event()
@@ -2686,6 +3056,221 @@ mod project_scope_tests {
         assert_eq!(event.1, 2);
         assert_eq!(event.2["data"]["state"], "denied");
         assert_eq!(event.2["data"]["revision"], 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test covers owner-scoped revision recovery through termination, overdue, and close"
+    )]
+    async fn gateway_session_revision_conflict_is_owner_scoped_through_overdue_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        );
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await?;
+        let migrations = format!(
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}\n{}\n{}",
+            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
+            include_str!("../../../migrations/access/0003_independent_project_memberships.sql"),
+            include_str!("../../../migrations/access/0004_actor_identity_metadata.sql"),
+            include_str!("../../../migrations/access/0005_gateway_service_client_identity.sql")
+        );
+        sqlx::raw_sql(&migrations).execute(&pool).await?;
+
+        let actor = Uuid::now_v7();
+        let grant_id = Uuid::now_v7();
+        let endpoint_grant_id = Uuid::now_v7();
+        let endpoint_id = Uuid::now_v7();
+        let key_id = Uuid::now_v7();
+        let session_id = GatewaySessionId::new();
+        let environment_id = Uuid::now_v7();
+        let now = OffsetDateTime::now_utc();
+        sqlx::query(
+            "INSERT INTO access.actors (actor_id,issuer,subject_sha256) \
+             VALUES ($1,'https://issuer.example.test',$2)",
+        )
+        .bind(actor)
+        .bind("a".repeat(64))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.access_grants \
+             (grant_id,actor_id,project_id,course_id,environment_id,revision,state,not_before,expires_at,contract) \
+             VALUES ($1,$2,$3,NULL,$4,1,'active',$5,$6,'{}')",
+        )
+        .bind(grant_id)
+        .bind(actor)
+        .bind(Uuid::now_v7())
+        .bind(environment_id)
+        .bind(now - time::Duration::minutes(1))
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.endpoint_grants \
+             (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) \
+             VALUES ($1,$2,$3,1,'ssh','healthy','lw-abcdefghijklmnopqrst',$4,'{}')",
+        )
+        .bind(endpoint_grant_id)
+        .bind(grant_id)
+        .bind(endpoint_id)
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.ssh_public_keys \
+             (key_id,actor_id,fingerprint_sha256,algorithm,normalized_openssh) \
+             VALUES ($1,$2,'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','ed25519',\
+                     'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')",
+        )
+        .bind(key_id)
+        .bind(actor)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.gateway_sessions \
+             (session_id,grant_id,grant_revision,actor_id,endpoint_id,endpoint_grant_id,key_id,state,\
+              started_at,expires_at,contract,gateway_identity,connection_id,revision,last_heartbeat_at) \
+             VALUES ($1,$2,1,$3,$4,$5,$6,'active',$7,$8,$9,$10,$11,1,$7)",
+        )
+        .bind(session_id.as_uuid())
+        .bind(grant_id)
+        .bind(actor)
+        .bind(endpoint_id)
+        .bind(endpoint_grant_id)
+        .bind(key_id)
+        .bind(now)
+        .bind(now + time::Duration::minutes(30))
+        .bind(json!({
+            "alias": "lw-abcdefghijklmnopqrst",
+            "targetHost": format!("ssh.lw-env-{environment_id}.svc"),
+        }))
+        .bind("gateway-a")
+        .bind("connection-a")
+        .execute(&pool)
+        .await?;
+
+        let owner_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("owner lookup: {error:?}")))?;
+        assert_eq!(owner_conflict.diagnostic, "LW_REVISION_CONFLICT");
+        let body = owner_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive current revision"))?;
+        assert_eq!(body["currentRevision"], 1);
+        assert_eq!(body["state"], "active");
+
+        let wrong_gateway =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-b", "connection-a")
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("gateway ownership lookup: {error:?}"))
+                })?;
+        assert!(wrong_gateway.body.is_none());
+        let wrong_connection =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-b")
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("connection ownership lookup: {error:?}"))
+                })?;
+        assert!(wrong_connection.body.is_none());
+
+        let requested_at = OffsetDateTime::now_utc();
+        let mut termination_tx = pool.begin().await?;
+        terminate_sessions_for_grant(
+            &mut termination_tx,
+            AccessGrantId::from_str(&grant_id.to_string())?,
+            requested_at,
+            requested_at + time::Duration::seconds(60),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("terminate: {error:?}")))?;
+        termination_tx.commit().await?;
+
+        let terminating_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("terminating lookup: {error:?}")))?;
+        let terminating_body = terminating_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive terminating revision"))?;
+        assert_eq!(terminating_body["currentRevision"], 2);
+        assert_eq!(terminating_body["state"], "terminating");
+
+        sqlx::query(
+            "UPDATE access.gateway_sessions SET terminate_by=now()-interval '1 second' \
+             WHERE session_id=$1",
+        )
+        .bind(session_id.as_uuid())
+        .execute(&pool)
+        .await?;
+        mark_overdue(&pool).await?;
+
+        let overdue_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("overdue lookup: {error:?}")))?;
+        let overdue_body = overdue_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive overdue revision"))?;
+        assert_eq!(overdue_body["currentRevision"], 3);
+        assert_eq!(overdue_body["state"], "termination_overdue");
+
+        let closed_at = utc_timestamp(OffsetDateTime::now_utc())
+            .map_err(|error| std::io::Error::other(format!("closed timestamp: {error:?}")))?;
+        let close_request = CloseGatewaySessionRequest {
+            gateway_identity: "gateway-a".to_owned(),
+            connection_id: "connection-a".to_owned(),
+            expected_revision: Revision::new(3)?,
+            closed_at,
+            reason_code: "target_failed".to_owned(),
+        };
+        let wrong_close = close_gateway_session_owned(
+            &pool,
+            session_id,
+            "gateway-b",
+            &close_request,
+            close_request.expected_revision,
+            closed_at.get(),
+        )
+        .await
+        .err()
+        .ok_or_else(|| std::io::Error::other("wrong gateway must not close the session"))?;
+        assert!(wrong_close.body.is_none());
+        let closed = close_gateway_session_owned(
+            &pool,
+            session_id,
+            "gateway-a",
+            &close_request,
+            close_request.expected_revision,
+            closed_at.get(),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("close: {error:?}")))?;
+        assert_eq!(closed.state, GatewaySessionState::Closed);
+        assert!(closed.closed_at.is_some());
+        let closed_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("closed lookup: {error:?}")))?;
+        let closed_body = closed_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive closed revision"))?;
+        assert_eq!(closed_body["currentRevision"], 4);
+        assert_eq!(closed_body["state"], "closed");
         Ok(())
     }
 }

@@ -134,7 +134,15 @@ impl FreezeBindingService {
             || instance.desired_state != DesiredEnvironmentState::Running
             || instance.observed_state != ObservedEnvironmentState::Ready
             || instance.observed_generation != instance.generation
-            || instance.eligibility_expires_at <= now
+            || instance
+                .eligibility_expires_at
+                .is_some_and(|deadline| deadline <= now)
+            || (instance.class == contracts::authoring::EnvironmentClass::Work
+                && instance
+                    .operation
+                    .lease_authorization
+                    .as_ref()
+                    .is_none_or(|authorization| authorization.expires_at <= now))
             || !instance
                 .endpoints
                 .iter()
@@ -319,7 +327,13 @@ impl FreezeBindingService {
             || instance.desired_state != DesiredEnvironmentState::Running
             || instance.observed_state != ObservedEnvironmentState::Ready
             || instance.observed_generation != instance.generation
-            || (!recovery && instance.eligibility_expires_at <= now)
+            || (!recovery
+                && instance
+                    .eligibility_expires_at
+                    .is_some_and(|deadline| deadline <= now))
+            || (!recovery
+                && expected_class == contracts::authoring::EnvironmentClass::Work
+                && work_admission_expires_at.is_none())
             || !instance
                 .endpoints
                 .iter()
@@ -539,15 +553,20 @@ fn frozen_identity(
 
 fn execution_certificate_expiry(
     now: UtcTimestamp,
-    environment_expires_at: UtcTimestamp,
+    environment_expires_at: Option<UtcTimestamp>,
     work_admission_expires_at: Option<UtcTimestamp>,
 ) -> Result<UtcTimestamp, FreezeBindingError> {
     let short_lived_expires_at =
         UtcTimestamp::from_utc(now.get() + time::Duration::seconds(CERTIFICATE_TTL_SECONDS))
             .map_err(|_| FreezeBindingError::CertificateFailed)?;
-    let expires_at = work_admission_expires_at.map_or(environment_expires_at, |grant_expires_at| {
-        std::cmp::min(environment_expires_at, grant_expires_at)
-    });
+    let expires_at = match (environment_expires_at, work_admission_expires_at) {
+        (Some(environment_expires_at), Some(grant_expires_at)) => {
+            std::cmp::min(environment_expires_at, grant_expires_at)
+        }
+        (Some(environment_expires_at), None) => environment_expires_at,
+        (None, Some(grant_expires_at)) => grant_expires_at,
+        (None, None) => short_lived_expires_at,
+    };
     let expires_at = std::cmp::min(short_lived_expires_at, expires_at);
     if expires_at <= now {
         return Err(FreezeBindingError::ExecutionBindingInvalid);
@@ -757,11 +776,15 @@ mod tests {
         let environment_expires_at: UtcTimestamp = "2026-07-19T08:10:00.000Z".parse()?;
         let grant_expires_at: UtcTimestamp = "2026-07-19T08:02:00.000Z".parse()?;
         assert_eq!(
-            execution_certificate_expiry(now, environment_expires_at, Some(grant_expires_at),)?,
+            execution_certificate_expiry(
+                now,
+                Some(environment_expires_at),
+                Some(grant_expires_at),
+            )?,
             grant_expires_at
         );
         assert_eq!(
-            execution_certificate_expiry(now, environment_expires_at, None)?,
+            execution_certificate_expiry(now, Some(environment_expires_at), None)?,
             "2026-07-19T08:04:59.000Z".parse()?
         );
         Ok(())
@@ -773,7 +796,11 @@ mod tests {
         let now: UtcTimestamp = "2026-07-19T08:00:00.000Z".parse()?;
         let expired: UtcTimestamp = "2026-07-19T07:59:59.000Z".parse()?;
         assert!(matches!(
-            execution_certificate_expiry(now, "2026-07-19T08:10:00.000Z".parse()?, Some(expired)),
+            execution_certificate_expiry(
+                now,
+                Some("2026-07-19T08:10:00.000Z".parse()?),
+                Some(expired),
+            ),
             Err(super::FreezeBindingError::ExecutionBindingInvalid)
         ));
         Ok(())

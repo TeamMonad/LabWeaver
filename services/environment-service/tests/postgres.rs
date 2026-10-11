@@ -16,12 +16,16 @@ use std::{
 
 use async_trait::async_trait;
 use contracts::environment::{
-    EndpointHealth, EndpointProtocol, EnvironmentCreateSpec, EnvironmentEndpoint,
-    EnvironmentLeaseAuthorization, EnvironmentOperationKind, ObservedEnvironmentState,
-    OperationState,
+    DesiredEnvironmentState, EndpointHealth, EndpointProtocol, EnvironmentCreateSpec,
+    EnvironmentEndpoint, EnvironmentLeaseAuthorization, EnvironmentOperationKind,
+    ObservedEnvironmentState, OperationState,
 };
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERSION, subjects};
-use contracts::resource::WorkloadResources;
+use contracts::http::RecordResourceUsageRequest;
+use contracts::resource::{
+    GpuAllocation, GpuAllocationMode, GpuRequest, ResourceUsageKind, UsageMeasurement,
+    WorkloadResources,
+};
 use contracts::supply_chain::{VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
     ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, LeaseId,
@@ -34,17 +38,19 @@ use environment_service::{
     EnvironmentEventPublisher, EnvironmentInventoryFilter, EnvironmentProvider,
     EnvironmentStoreError, FencedContainerExecutor, FencedKubeVirtExecutor, InboundCommandDecision,
     InboundLifecycleCommand, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
-    KubeVirtBaseDiskIdentity, KubeVirtCleanupPlan, KubeVirtExecutorBackend,
-    KubeVirtExecutorFenceError, KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope,
-    KubeVirtExecutorResponse, KubeVirtObservationStore, KubeVirtObservationStoreError,
-    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand,
-    LifecycleError, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+    KubeVirtBaseDiskIdentity, KubeVirtCleanupPlan, KubeVirtExecutionInstance,
+    KubeVirtExecutionPermit, KubeVirtExecutorBackend, KubeVirtExecutorFenceError,
+    KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse,
+    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtResourcePlan,
+    KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand, LifecycleError,
+    NatsKubeVirtExecutorServer, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     PgContainerExecutorFenceStore, PgEnvironmentStore, PgKubeVirtExecutorFenceStore,
     PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderFailure, ProviderFailureCode,
     ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction, ReconcileWorker,
     ReconcileWorkerOutcome, Reconciler, ReleaseProjectionDecision, apply_provider_observation,
 };
 use persistence_sqlx::Sha256Digest;
+use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -94,6 +100,16 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     );
     let replay = store.create("create-key-0001", &instance).await?;
     assert_eq!(accepted, replay);
+    let mut retry_context = instance.clone();
+    retry_context.operation.trace_id = "trace-create-retry".to_owned();
+    retry_context.operation.accepted_at = timestamp("2026-07-14T00:00:01.000Z");
+    retry_context.operation.next_attempt_at = retry_context.operation.accepted_at;
+    retry_context.operation.deadline_at = timestamp("2027-01-14T00:00:01.000Z");
+    assert!(retry_context.validate().is_ok());
+    assert_eq!(
+        store.create("create-key-0001", &retry_context).await?,
+        accepted
+    );
 
     sqlx::query(
         "UPDATE environment.environment_instances \
@@ -132,6 +148,19 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     conflicting.release_version += 1;
     assert!(matches!(
         store.create("create-key-0001", &conflicting).await,
+        Err(EnvironmentStoreError::IdempotencyConflict)
+    ));
+    let mut conflicting_label = instance.clone();
+    conflicting_label.display_label = "different-label".to_owned();
+    assert!(matches!(
+        store.create("create-key-0001", &conflicting_label).await,
+        Err(EnvironmentStoreError::IdempotencyConflict)
+    ));
+    let mut conflicting_actor = instance.clone();
+    conflicting_actor.owner_id = ActorId::new();
+    conflicting_actor.operation.actor_id = conflicting_actor.owner_id;
+    assert!(matches!(
+        store.create("create-key-0001", &conflicting_actor).await,
         Err(EnvironmentStoreError::IdempotencyConflict)
     ));
     let outbox_count: i64 =
@@ -402,12 +431,14 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             .checked_add(time::Duration::minutes(1))
             .ok_or("deadline overflow")?,
     )?;
-    assert!(matches!(
+    assert_eq!(
         store
             .accept_command("delete-key-command-identity", &changed_deadline)
-            .await,
-        Err(EnvironmentStoreError::IdempotencyConflict)
-    ));
+            .await?,
+        store
+            .accept_command("delete-key-command-identity", &identity_command)
+            .await?
+    );
     let mut changed_retry_limit = identity_command;
     changed_retry_limit.max_attempts = 4;
     assert!(matches!(
@@ -425,7 +456,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     registry.register(Arc::new(CleanupFailureProvider))?;
     let worker = ReconcileWorker::new(
         store.clone(),
-        Reconciler::new(registry, Duration::from_secs(1))?,
+        Reconciler::new(registry, Duration::from_secs(1))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
     )?;
@@ -434,8 +466,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             .run_once("environment-worker-cleanup-failure", accepted_at)
             .await?,
         ReconcileWorkerOutcome::Failed {
-            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
-        }
+            ref diagnostic_code,
+        } if diagnostic_code == "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
     ));
     let cleanup_failed = store.load(inbox_target.id).await?;
     assert_eq!(
@@ -463,8 +495,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             .run_once("environment-worker-command-identity-cleanup", accepted_at)
             .await?,
         ReconcileWorkerOutcome::Failed {
-            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
-        }
+            ref diagnostic_code,
+        } if diagnostic_code == "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
     ));
     assert_eq!(
         store.load(idempotency_target.id).await?.observed_state,
@@ -472,7 +504,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     );
 
     let mut crash_target = requested_instance();
-    crash_target.eligibility_expires_at = timestamp("2027-07-15T00:00:00.000Z");
+    crash_target.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
     store
         .create("create-key-crash-recovery", &crash_target)
         .await?;
@@ -490,7 +522,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     crash_registry.register(crash_provider.clone())?;
     let restarted_worker = ReconcileWorker::new(
         store.clone(),
-        Reconciler::new(crash_registry, Duration::from_millis(100))?,
+        Reconciler::new(crash_registry, Duration::from_millis(100))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
     )?;
@@ -657,7 +690,8 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
     }))?;
     let worker = ReconcileWorker::new(
         store.clone(),
-        Reconciler::new(registry, Duration::from_secs(1))?,
+        Reconciler::new(registry, Duration::from_secs(1))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
     )?;
@@ -724,7 +758,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
     handoff.class = contracts::authoring::EnvironmentClass::Work;
     handoff.lease_id = Some(LeaseId::new());
     handoff.capacity_binding = Some("work-capacity-regression".to_owned());
-    handoff.eligibility_expires_at = timestamp("2027-07-15T00:00:00.000Z");
+    handoff.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
     let lease_id = handoff.lease_id.ok_or("lease id missing")?;
     let capacity_binding = handoff
         .capacity_binding
@@ -775,6 +809,9 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         provider_binding: handoff.provider_binding.clone(),
         lease_id: handoff.lease_id,
         capacity_binding: handoff.capacity_binding.clone(),
+        approved_resources: handoff.approved_resources.clone(),
+        gpu_allocation: None,
+        retention: support::finite_retention(),
         eligibility_expires_at: handoff.eligibility_expires_at,
     };
 
@@ -816,6 +853,574 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
 }
 
 #[tokio::test]
+async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_boundaries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    let old_schema = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql"),
+        include_str!("../../../migrations/environment/0004_work_configuration_executions.sql"),
+        include_str!("../../../migrations/environment/0005_kubevirt_execution_owner.sql")
+    );
+    sqlx::raw_sql(&old_schema).execute(&pool).await?;
+
+    let resources = WorkloadResources {
+        cpu_millicores: 250,
+        memory_bytes: 512 * 1024 * 1024,
+        storage_bytes: 2 * 1024 * 1024 * 1024,
+        gpu: None,
+    };
+    let legacy_gpu_resources = WorkloadResources {
+        gpu: Some(GpuRequest {
+            class: "a10".to_owned(),
+            count: 1,
+        }),
+        ..resources.clone()
+    };
+    let legacy_gpu_allocation = GpuAllocation {
+        entry_id: contracts::GpuCatalogEntryId::new(),
+        class: "a10".to_owned(),
+        count: 1,
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: "provider".to_owned(),
+        allocation_binding: "allocation".to_owned(),
+        catalog_revision: revision(1),
+    };
+    let fixtures = [
+        (
+            ObservedEnvironmentState::Ready,
+            DesiredEnvironmentState::Running,
+            EnvironmentOperationKind::Create,
+            timestamp("2026-07-14T00:00:00.000Z"),
+        ),
+        (
+            ObservedEnvironmentState::Stopped,
+            DesiredEnvironmentState::Stopped,
+            EnvironmentOperationKind::Stop,
+            timestamp("2026-07-14T00:01:00.000Z"),
+        ),
+        (
+            ObservedEnvironmentState::Deleted,
+            DesiredEnvironmentState::Deleted,
+            EnvironmentOperationKind::Delete,
+            timestamp("2026-07-14T00:02:00.000Z"),
+        ),
+    ];
+    let mut instances = Vec::with_capacity(fixtures.len());
+    for (observed_state, desired_state, operation_kind, accepted_at) in fixtures {
+        let mut instance = support::ready_instance();
+        let instance_resources = if observed_state == ObservedEnvironmentState::Ready {
+            resources.clone()
+        } else {
+            legacy_gpu_resources.clone()
+        };
+        instance.approved_resources = instance_resources.clone();
+        if observed_state != ObservedEnvironmentState::Ready {
+            instance.gpu_allocation = Some(legacy_gpu_allocation.clone());
+        }
+        instance.observed_state = observed_state;
+        instance.desired_state = desired_state;
+        instance.operation.kind = operation_kind;
+        instance.operation.state = OperationState::Succeeded;
+        instance.operation.accepted_revision = instance.revision;
+        instance.operation.accepted_at = accepted_at;
+        instance.operation.next_attempt_at = accepted_at;
+        instance.operation.deadline_at = timestamp("2026-07-14T00:10:00.000Z");
+        instance.operation.access_revocation_revision = match operation_kind {
+            EnvironmentOperationKind::Stop | EnvironmentOperationKind::Delete => Some(revision(3)),
+            _ => None,
+        };
+        if observed_state != ObservedEnvironmentState::Ready {
+            instance.endpoints.clear();
+        }
+        if observed_state == ObservedEnvironmentState::Deleted {
+            instance.cleanup_evidence = Some(ArtifactRef {
+                artifact_id: ArtifactId::new(),
+                store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                object_version: instance.operation.id.to_string(),
+                size_bytes: 1,
+                media_type: "application/json".to_owned(),
+            });
+            instance.operation.cleanup_started_at = Some(accepted_at);
+        }
+        let mut legacy_contract = serde_json::to_value(&instance)?;
+        legacy_contract
+            .as_object_mut()
+            .ok_or("legacy Environment contract must be an object")?
+            .remove("approvedResources");
+        let projection_contract = serde_json::json!({
+            "environmentSpec": {
+                "resources": {
+                    "cpuMillicores": instance_resources.cpu_millicores,
+                    "memoryBytes": instance_resources.memory_bytes,
+                    "storageBytes": instance_resources.storage_bytes,
+                    "gpu": &instance_resources.gpu
+                }
+            }
+        });
+        sqlx::query(
+            "INSERT INTO environment.release_projections \
+             (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
+             VALUES ($1,$2,$3,1,$4,$5,$6,$7)",
+        )
+        .bind(instance.release_id.as_uuid())
+        .bind(instance.project_id.as_uuid())
+        .bind(instance.course_id.map(CourseId::as_uuid))
+        .bind(&instance.provider_binding)
+        .bind("a".repeat(64))
+        .bind(projection_contract)
+        .bind(EventId::new().as_uuid())
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment.environment_instances \
+             (environment_id,project_id,course_id,owner_actor_id,release_id,generation,observed_generation,\
+              desired_state,observed_state,provider_binding,lease_id,capacity_binding,revision,terminal_diagnostic,\
+              failed_phase,eligibility_expires_at,contract) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+        )
+        .bind(instance.id.as_uuid())
+        .bind(instance.project_id.as_uuid())
+        .bind(instance.course_id.map(CourseId::as_uuid))
+        .bind(instance.owner_id.as_uuid())
+        .bind(instance.release_id.as_uuid())
+        .bind(i64::try_from(instance.generation)?)
+        .bind(i64::try_from(instance.observed_generation)?)
+        .bind(match desired_state {
+            DesiredEnvironmentState::Running => "running",
+            DesiredEnvironmentState::Stopped => "stopped",
+            DesiredEnvironmentState::Deleted => "deleted",
+        })
+        .bind(match observed_state {
+            ObservedEnvironmentState::Ready => "ready",
+            ObservedEnvironmentState::Stopped => "stopped",
+            ObservedEnvironmentState::Deleted => "deleted",
+            _ => unreachable!("fixture state is constrained above"),
+        })
+        .bind(&instance.provider_binding)
+        .bind(instance.lease_id.map(LeaseId::as_uuid))
+        .bind(instance.capacity_binding.as_deref())
+        .bind(i64::try_from(instance.revision.get())?)
+        .bind(instance.last_diagnostic_code.as_deref())
+        .bind(Option::<&str>::None)
+        .bind(instance.eligibility_expires_at.map(contracts::UtcTimestamp::get))
+        .bind(legacy_contract)
+        .execute(&pool)
+        .await?;
+        if matches!(
+            observed_state,
+            ObservedEnvironmentState::Stopped | ObservedEnvironmentState::Deleted
+        ) {
+            let legacy_compute_started_at = if observed_state == ObservedEnvironmentState::Deleted {
+                Value::Null
+            } else {
+                serde_json::json!("2026-07-14T00:00:30.000Z")
+            };
+            let legacy_meter = serde_json::json!({
+                "version": 1,
+                "environmentId": instance.id,
+                "projectId": instance.project_id,
+                "courseId": instance.course_id,
+                "ownerActorId": instance.owner_id,
+                "gpuAllocation": &legacy_gpu_allocation,
+                "computeStartedAt": legacy_compute_started_at,
+                "pendingGpuUnitSeconds": 0,
+                "settlementPending": true
+            });
+            sqlx::query(
+                "INSERT INTO environment.resource_metering_state (environment_id, contract) \
+                 VALUES ($1, $2)",
+            )
+            .bind(instance.id.as_uuid())
+            .bind(legacy_meter)
+            .execute(&pool)
+            .await?;
+        }
+        instances.push(instance);
+    }
+
+    let source_event_id = EventId::new();
+    let legacy_delivery = serde_json::json!({
+        "kind": "compute",
+        "projectId": instances[0].project_id,
+        "courseId": instances[0].course_id,
+        "requestId": ResourceRequestId::new(),
+        "leaseId": null,
+        "sourceEventId": source_event_id,
+        "measuredFrom": "2026-07-14T00:10:00.000Z",
+        "measuredUntil": "2026-07-14T00:11:00.000Z",
+        "measurement": {
+            "state": "known",
+            "quantities": {
+                "cpuMillicoreSeconds": 15000,
+                "memoryByteSeconds": 31_457_280_000_u64,
+                "storageByteSeconds": 0,
+                "gpuUnitSeconds": 0
+            }
+        }
+    });
+    sqlx::query(
+        "INSERT INTO environment.resource_meter_deliveries \
+         (delivery_id,environment_id,source_event_id,kind,measured_from,measured_until,request,state,attempts,next_attempt_at) \
+         VALUES ($1,$2,$3,'compute',$4,$5,$6,'pending',0,$7)",
+    )
+    .bind(EventId::new().as_uuid())
+    .bind(instances[0].id.as_uuid())
+    .bind(source_event_id.as_uuid())
+    .bind(timestamp("2026-07-14T00:10:00.000Z").get())
+    .bind(timestamp("2026-07-14T00:11:00.000Z").get())
+    .bind(legacy_delivery)
+    .bind(timestamp("2026-07-14T00:12:00.000Z").get())
+    .execute(&pool)
+    .await?;
+
+    let migration =
+        include_str!("../../../migrations/environment/0006_unified_environment_metering.sql");
+    sqlx::raw_sql(migration).execute(&pool).await?;
+    sqlx::raw_sql(migration).execute(&pool).await?;
+
+    let store = PgEnvironmentStore::new(pool.clone());
+    for instance in &instances {
+        let expected_resources = if instance.gpu_allocation.is_some() {
+            &legacy_gpu_resources
+        } else {
+            &resources
+        };
+        assert_eq!(
+            store.load(instance.id).await?.approved_resources,
+            expected_resources.clone()
+        );
+    }
+    for instance in &instances {
+        let expected_resources = if instance.gpu_allocation.is_some() {
+            &legacy_gpu_resources
+        } else {
+            &resources
+        };
+        let contract: Value = sqlx::query_scalar(
+            "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+        )
+        .bind(instance.id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            contract["approvedResources"],
+            serde_json::to_value(expected_resources)?
+        );
+        assert!(matches!(
+            serde_json::from_value::<contracts::resource::ResourceUsageTarget>(
+                contract["target"].clone()
+            )?,
+            contracts::resource::ResourceUsageTarget::ExperimentEnvironment { environment_id }
+                if environment_id == instance.id
+        ));
+        match instance.observed_state {
+            ObservedEnvironmentState::Ready => {
+                assert!(contract["computeUnknownStartedAt"].is_string());
+                assert!(contract["storageStartedAt"].is_string());
+                assert_eq!(contract["storageKnown"], false);
+            }
+            ObservedEnvironmentState::Stopped => {
+                assert!(contract["computeStartedAt"].is_null());
+                assert!(contract["computeUnknownStartedAt"].is_null());
+                assert!(contract["storageStartedAt"].is_string());
+                assert_eq!(contract["storageKnown"], false);
+                assert!(contract.get("pendingGpuUnitSeconds").is_none());
+                assert!(contract.get("settlementPending").is_none());
+                assert_eq!(
+                    contract["gpuAllocation"],
+                    serde_json::to_value(&legacy_gpu_allocation)?
+                );
+            }
+            ObservedEnvironmentState::Deleted => {
+                assert!(contract["computeStartedAt"].is_null());
+                assert!(contract["computeUnknownStartedAt"].is_null());
+                assert!(contract["storageStartedAt"].is_null());
+                assert_eq!(contract["storageKnown"], false);
+                assert!(contract.get("pendingGpuUnitSeconds").is_none());
+                assert!(contract.get("settlementPending").is_none());
+            }
+            _ => unreachable!(),
+        }
+    }
+    let migrated_request: Value = sqlx::query_scalar(
+        "SELECT request FROM environment.resource_meter_deliveries WHERE source_event_id=$1",
+    )
+    .bind(source_event_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let decoded: RecordResourceUsageRequest = serde_json::from_value(migrated_request.clone())?;
+    assert!(matches!(
+        decoded.target,
+        contracts::resource::ResourceUsageTarget::ExperimentEnvironment { environment_id }
+            if environment_id == instances[0].id
+    ));
+    assert!(migrated_request.get("projectId").is_none());
+    assert!(migrated_request.get("requestId").is_none());
+    let delivery_state: String = sqlx::query_scalar(
+        "SELECT state FROM environment.resource_meter_deliveries WHERE source_event_id=$1",
+    )
+    .bind(source_event_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(delivery_state, "pending");
+
+    // Exercise the migrated Ready row through the real store and worker.  The initial
+    // migration marker is unknown compute/storage; Stop closes only compute, Restart
+    // recovers storage and starts a new known compute interval, and Delete closes both.
+    let migrated_ready = store.load(instances[0].id).await?;
+    let worker = success_worker(store.clone())?;
+    store
+        .accept_command(
+            "legacy-meter-stop",
+            &LifecycleCommand {
+                environment_id: migrated_ready.id,
+                kind: EnvironmentOperationKind::Stop,
+                expected_revision: migrated_ready.revision,
+                actor_id: migrated_ready.owner_id,
+                trace_id: "trace-legacy-meter-stop".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:01:30.000Z"),
+                deadline_at: timestamp("2027-01-14T00:06:00.000Z"),
+                access_revocation_revision: Some(revision(4)),
+                preserve_mutable_disk: true,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once(
+                "legacy-meter-stop-worker",
+                timestamp("2026-07-14T00:01:30.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Stopped,
+            terminal: true
+        }
+    ));
+    let stopped_meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(stopped_meter["computeStartedAt"].is_null());
+    assert!(stopped_meter["computeUnknownStartedAt"].is_null());
+    assert!(stopped_meter["storageStartedAt"].is_string());
+    assert_eq!(stopped_meter["storageKnown"], false);
+    let stop_event_time: UtcTimestamp = serde_json::from_value(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT payload->'time' FROM environment.outbox_events \
+             WHERE aggregate_id=$1 AND subject=$2 \
+               AND payload->'data'->>'state'=$3 \
+             ORDER BY public_sequence DESC LIMIT 1",
+        )
+        .bind(migrated_ready.id.as_uuid())
+        .bind(subjects::ENVIRONMENT_STATE_CHANGED)
+        .bind("stopped")
+        .fetch_one(&pool)
+        .await?,
+    )?;
+
+    let stopped = store.load(migrated_ready.id).await?;
+    // The store records the transition with PostgreSQL's database clock.  Use a
+    // database observation for the following Ready transition so this test
+    // does not confuse its historical fixture timestamps with live boundaries.
+    let restart_observed_at = store.current_time().await?;
+    let worker =
+        success_worker_with_restart_ready_observation(store.clone(), Some(restart_observed_at))?;
+    store
+        .accept_command(
+            "legacy-meter-restart",
+            &LifecycleCommand {
+                environment_id: stopped.id,
+                kind: EnvironmentOperationKind::Restart,
+                expected_revision: stopped.revision,
+                actor_id: stopped.owner_id,
+                trace_id: "trace-legacy-meter-restart".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:02:00.000Z"),
+                deadline_at: timestamp("2027-01-15T00:07:00.000Z"),
+                access_revocation_revision: None,
+                preserve_mutable_disk: true,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once(
+                "legacy-meter-restart-worker",
+                timestamp("2026-07-14T00:03:00.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Ready,
+            terminal: true
+        }
+    ));
+    let restarted_meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        restarted_meter["computeStartedAt"],
+        serde_json::to_value(restart_observed_at)?
+    );
+    assert_eq!(
+        restarted_meter["storageStartedAt"],
+        serde_json::to_value(restart_observed_at)?
+    );
+    assert_eq!(restarted_meter["storageKnown"], true);
+
+    let restarted = store.load(migrated_ready.id).await?;
+    store
+        .accept_command(
+            "legacy-meter-delete",
+            &LifecycleCommand {
+                environment_id: restarted.id,
+                kind: EnvironmentOperationKind::Delete,
+                expected_revision: restarted.revision,
+                actor_id: restarted.owner_id,
+                trace_id: "trace-legacy-meter-delete".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:04:00.000Z"),
+                deadline_at: timestamp("2027-01-16T00:08:00.000Z"),
+                access_revocation_revision: Some(revision(5)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once(
+                "legacy-meter-delete-worker",
+                timestamp("2026-07-14T00:04:30.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Deleted,
+            terminal: true
+        }
+    ));
+    let deleted_meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(deleted_meter["computeStartedAt"].is_null());
+    assert!(deleted_meter["computeUnknownStartedAt"].is_null());
+    assert!(deleted_meter["storageStartedAt"].is_null());
+    assert_eq!(deleted_meter["storageKnown"], false);
+    let delete_event_time: UtcTimestamp = serde_json::from_value(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT payload->'time' FROM environment.outbox_events \
+             WHERE aggregate_id=$1 AND subject=$2 \
+               AND payload->'data'->>'state'=$3 \
+             ORDER BY public_sequence DESC LIMIT 1",
+        )
+        .bind(migrated_ready.id.as_uuid())
+        .bind(subjects::ENVIRONMENT_STATE_CHANGED)
+        .bind("deleted")
+        .fetch_one(&pool)
+        .await?,
+    )?;
+
+    let deliveries: Vec<Value> = sqlx::query_scalar(
+        "SELECT request FROM environment.resource_meter_deliveries \
+         WHERE environment_id=$1 ORDER BY measured_from, delivery_id",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let deliveries: Vec<RecordResourceUsageRequest> = deliveries
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(deliveries.len(), 5);
+    for request in &deliveries {
+        assert!(matches!(
+            request.target,
+            contracts::resource::ResourceUsageTarget::ExperimentEnvironment { environment_id }
+                if environment_id == migrated_ready.id
+        ));
+    }
+    let migration_start = timestamp("2026-07-14T00:00:00.000Z");
+    let unknown_compute = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Compute && request.measured_from == migration_start
+        })
+        .ok_or("migrated unknown compute delivery missing")?;
+    assert!(matches!(
+        &unknown_compute.measurement,
+        UsageMeasurement::Unknown { .. }
+    ));
+    let stop_boundary = unknown_compute.measured_until;
+    assert!(
+        stop_boundary <= restart_observed_at,
+        "unknown compute boundary crossed the Ready observation"
+    );
+    assert_eq!(stop_boundary, stop_event_time);
+
+    let unknown_storage = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Storage && request.measured_from == migration_start
+        })
+        .ok_or("migrated unknown storage delivery missing")?;
+    assert!(matches!(
+        &unknown_storage.measurement,
+        UsageMeasurement::Unknown { .. }
+    ));
+    assert_eq!(unknown_storage.measured_until, restart_observed_at);
+
+    let known_compute = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Compute
+                && request.measured_from == restart_observed_at
+        })
+        .ok_or("migrated known compute delivery missing")?;
+    assert!(matches!(
+        &known_compute.measurement,
+        UsageMeasurement::Known { .. }
+    ));
+    let delete_boundary = known_compute.measured_until;
+    assert!(delete_boundary >= restart_observed_at);
+    assert_eq!(delete_boundary, delete_event_time);
+
+    let known_storage = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Storage
+                && request.measured_from == restart_observed_at
+                && request.measured_until == delete_boundary
+        })
+        .ok_or("migrated known storage delivery missing")?;
+    assert!(matches!(
+        &known_storage.measurement,
+        UsageMeasurement::Known { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(clippy::expect_used)]
 async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -828,21 +1433,15 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
         .max_connections(3)
         .connect(&url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
-        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
-        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    support::apply_environment_migrations(&pool).await?;
 
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
     let mut work = requested_instance();
     work.class = contracts::authoring::EnvironmentClass::Work;
     work.lease_id = Some(LeaseId::new());
     work.capacity_binding = Some("workspace-v1".to_owned());
     let initial_expiry = timestamp("2027-07-15T00:00:00.000Z");
-    work.eligibility_expires_at = initial_expiry;
+    work.eligibility_expires_at = Some(initial_expiry);
     work.operation.lease_authorization = Some(EnvironmentLeaseAuthorization {
         resource_request_id: ResourceRequestId::new(),
         lease_id: work.lease_id.expect("lease set above"),
@@ -865,6 +1464,13 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
         active_from: timestamp("2026-07-14T00:00:00.000Z"),
         expires_at: initial_expiry,
     });
+    work.approved_resources = work
+        .operation
+        .lease_authorization
+        .as_ref()
+        .ok_or("expected initial Work lease authorization")?
+        .approved_resources
+        .clone();
     store.create("create-key-lease-refresh", &work).await?;
 
     let worker = success_worker(store.clone())?;
@@ -978,15 +1584,54 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
 
     store
         .accept_command(
+            "restart-key-after-lease-refresh",
+            &LifecycleCommand {
+                environment_id: work.id,
+                kind: EnvironmentOperationKind::Restart,
+                expected_revision: stopped_refreshed.revision,
+                actor_id: ActorId::new(),
+                trace_id: "trace-restart-after-lease-refresh".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:03:00.000Z"),
+                deadline_at: timestamp("2026-07-14T00:08:00.000Z"),
+                access_revocation_revision: None,
+                preserve_mutable_disk: true,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    let restarting = store.load(work.id).await?;
+    assert_eq!(restarting.operation.kind, EnvironmentOperationKind::Restart);
+    assert_eq!(
+        restarting.observed_state,
+        ObservedEnvironmentState::Provisioning
+    );
+    assert!(matches!(
+        worker
+            .run_once(
+                "environment-worker-restart-after-lease-refresh",
+                timestamp("2026-07-14T00:03:00.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Ready,
+            terminal: true
+        }
+    ));
+    let restarted = store.load(work.id).await?;
+    assert_eq!(restarted.observed_state, ObservedEnvironmentState::Ready);
+
+    store
+        .accept_command(
             "delete-key-after-lease-refresh",
             &LifecycleCommand {
                 environment_id: work.id,
                 kind: EnvironmentOperationKind::Delete,
-                expected_revision: stopped_refreshed.revision,
+                expected_revision: restarted.revision,
                 actor_id: ActorId::new(),
                 trace_id: "trace-delete-after-lease-refresh".to_owned(),
-                accepted_at: timestamp("2026-07-14T00:02:00.000Z"),
-                deadline_at: timestamp("2026-07-14T00:07:00.000Z"),
+                accepted_at: timestamp("2026-07-14T00:04:00.000Z"),
+                deadline_at: timestamp("2026-07-14T00:09:00.000Z"),
                 access_revocation_revision: Some(support::revision(7)),
                 preserve_mutable_disk: false,
                 max_attempts: 3,
@@ -994,7 +1639,7 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
             },
         )
         .await?;
-    let mut refresh_during_delete = renewed_authorization;
+    let mut refresh_during_delete = renewed_authorization.clone();
     refresh_during_delete.lease_revision = support::revision(3);
     refresh_during_delete.expires_at = timestamp("2027-07-17T00:00:00.000Z");
     assert!(matches!(
@@ -1003,6 +1648,50 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
             .await,
         Err(EnvironmentStoreError::LeaseAuthorizationInvalid)
     ));
+    assert!(matches!(
+        worker
+            .run_once(
+                "environment-worker-delete-after-lease-refresh",
+                timestamp("2026-07-14T00:04:00.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Deleted,
+            terminal: true
+        }
+    ));
+    let deleted = store.load(work.id).await?;
+    assert_eq!(deleted.observed_state, ObservedEnvironmentState::Deleted);
+    let meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(work.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(meter["computeStartedAt"].is_null());
+    assert!(meter["computeUnknownStartedAt"].is_null());
+    assert!(meter["storageStartedAt"].is_null());
+    assert_eq!(meter["storageKnown"], false);
+    let deliveries: Vec<Value> = sqlx::query_scalar(
+        "SELECT request FROM environment.resource_meter_deliveries \
+         WHERE environment_id=$1 ORDER BY measured_from, delivery_id",
+    )
+    .bind(work.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(deliveries.len(), 3);
+    let resource_request_id = renewed_authorization.resource_request_id;
+    let lease_id = work.lease_id.ok_or("expected Work lease id")?;
+    for delivery in deliveries {
+        let request: RecordResourceUsageRequest = serde_json::from_value(delivery)?;
+        assert!(matches!(
+            request.target,
+            contracts::resource::ResourceUsageTarget::ResourceRequest {
+                request_id,
+                lease_id: Some(target_lease_id),
+            } if request_id == resource_request_id && target_lease_id == lease_id
+        ));
+    }
     Ok(())
 }
 
@@ -1307,6 +1996,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
     let environment_id = EnvironmentId::new();
     let plan = ContainerResourcePlan {
         environment_id,
+        project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{environment_id}"),
         image: format!("harbor.internal/course/image@sha256:{}", "a".repeat(64)),
         resources: Vec::new(),
@@ -1414,6 +2104,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
     let expired_environment_id = EnvironmentId::new();
     let expired_plan = ContainerResourcePlan {
         environment_id: expired_environment_id,
+        project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{expired_environment_id}"),
         image: String::new(),
         resources: Vec::new(),
@@ -1522,9 +2213,20 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
         &self,
         fence: &KubeVirtBackendFence,
         request: &KubeVirtExecutorRequest,
+        _: &KubeVirtExecutionPermit,
     ) -> KubeVirtExecutorResponse {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match request {
+            KubeVirtExecutorRequest::Stop { plan } => KubeVirtExecutorResponse::Stopped {
+                plan_sha256: plan.plan_sha256,
+                observation: KubeVirtStoppedObservation {
+                    observed_environment_generation: fence.environment_generation,
+                    vm_uid: uuid::Uuid::new_v4(),
+                    root_disk_uid: uuid::Uuid::new_v4(),
+                    vmi_absent: true,
+                    observed_at: self.observed_at,
+                },
+            },
             KubeVirtExecutorRequest::DeleteNamespace { plan } => {
                 KubeVirtExecutorResponse::Deleted {
                     plan_sha256: plan.plan_sha256,
@@ -1540,7 +2242,6 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
             KubeVirtExecutorRequest::Apply { plan }
             | KubeVirtExecutorRequest::Observe { plan }
             | KubeVirtExecutorRequest::Start { plan }
-            | KubeVirtExecutorRequest::Stop { plan }
             | KubeVirtExecutorRequest::Restart { plan } => KubeVirtExecutorResponse::Running {
                 plan_sha256: plan.plan_sha256,
                 observation: KubeVirtRunningObservation {
@@ -1574,14 +2275,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         .max_connections(3)
         .connect(&url)
         .await?;
-    sqlx::raw_sql(&format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
-        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
-        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
-    ))
-    .execute(&pool)
-    .await?;
+    support::apply_environment_migrations(&pool).await?;
     let observed_at = container_database_now(&pool).await?;
     let deadline = container_add_time(observed_at, time::Duration::minutes(1))?;
     let environment_id = EnvironmentId::new();
@@ -1596,6 +2290,17 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         ReconcileAction::Provision,
         deadline,
     )?;
+    let mut authority = requested_instance();
+    authority.id = environment_id;
+    authority.operation.id = operation_id;
+    authority.operation.accepted_at = observed_at;
+    authority.operation.next_attempt_at = observed_at;
+    authority.operation.deadline_at = deadline;
+    authority.eligibility_expires_at = Some(deadline);
+    PgEnvironmentStore::new(pool.clone())
+        .create("kubevirt-replay-authority", &authority)
+        .await?;
+    let instance = executor_instance();
     for _ in 0..2 {
         FencedKubeVirtExecutor::new(
             PgKubeVirtExecutorFenceStore::new(pool.clone()),
@@ -1603,6 +2308,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
                 calls: Arc::clone(&calls),
                 observed_at,
             },
+            instance.clone(),
         )
         .execute(first.clone())
         .await?;
@@ -1614,6 +2320,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
             calls: Arc::clone(&calls),
             observed_at,
         },
+        instance,
     );
     executor
         .execute(kubevirt_executor_envelope(
@@ -1642,6 +2349,16 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
     Ok(())
 }
 
+fn executor_instance() -> KubeVirtExecutionInstance {
+    KubeVirtExecutionInstance {
+        namespace: "labweaver-system".to_owned(),
+        pod_name: "executor-fixture".to_owned(),
+        pod_uid: uuid::Uuid::new_v4(),
+        container_name: "kubevirt-executor".to_owned(),
+        boot_token: uuid::Uuid::new_v4(),
+    }
+}
+
 fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan {
     KubeVirtResourcePlan {
         environment_id,
@@ -1664,6 +2381,7 @@ fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan
         base_disk_disk_sha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
             .to_owned(),
         storage_class_name: "local-path".to_owned(),
+        vm_vgpu_licensing: None,
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
     }
@@ -1682,6 +2400,7 @@ fn kubevirt_executor_envelope(
         ReconcileAction::Cleanup => KubeVirtExecutorRequest::DeleteNamespace {
             plan: KubeVirtCleanupPlan {
                 environment_id: plan.environment_id,
+                project_id: contracts::ProjectId::new(),
                 namespace: plan.namespace,
                 virtual_machine_name: plan.virtual_machine_name,
                 plan_sha256: plan.plan_sha256,
@@ -1722,9 +2441,9 @@ const fn environment_id_for_kubevirt_request(request: &KubeVirtExecutorRequest) 
         KubeVirtExecutorRequest::Apply { plan }
         | KubeVirtExecutorRequest::Observe { plan }
         | KubeVirtExecutorRequest::Start { plan }
-        | KubeVirtExecutorRequest::Stop { plan }
         | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
-        KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+        KubeVirtExecutorRequest::Stop { plan }
+        | KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
     }
 }
 
@@ -1770,6 +2489,7 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         base_disk_disk_sha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
             .to_owned(),
         storage_class_name: "local-path".to_owned(),
+        vm_vgpu_licensing: None,
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
     };
@@ -1808,7 +2528,14 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         vmi_absent: true,
         observed_at: timestamp("2026-07-16T08:05:00.000Z"),
     };
-    store.record_stopped(&stop, &plan, &stopped).await?;
+    let stop_plan = KubeVirtCleanupPlan {
+        environment_id,
+        project_id: contracts::ProjectId::new(),
+        namespace: plan.namespace.clone(),
+        virtual_machine_name: plan.virtual_machine_name.clone(),
+        plan_sha256: Sha256Digest::of_bytes(b"stop-plan"),
+    };
+    store.record_stopped(&stop, &stop_plan, &stopped).await?;
     let persisted_host_key: String = sqlx::query_scalar(
         "SELECT ssh_host_key_sha256 FROM environment.kubevirt_runtime_observations \
          WHERE environment_id=$1",
@@ -1839,6 +2566,7 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
     let cleanup = kubevirt_fence(environment_id, 4, ReconcileAction::Cleanup);
     let cleanup_plan = KubeVirtCleanupPlan {
         environment_id,
+        project_id: contracts::ProjectId::new(),
         namespace: plan.namespace.clone(),
         virtual_machine_name: plan.virtual_machine_name.clone(),
         plan_sha256: Sha256Digest::of_bytes(b"cleanup-plan"),
@@ -1917,11 +2645,21 @@ fn kubevirt_fence(
 fn success_worker(
     store: PgEnvironmentStore,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
+    success_worker_with_restart_ready_observation(store, None)
+}
+
+fn success_worker_with_restart_ready_observation(
+    store: PgEnvironmentStore,
+    restart_ready_observed_at: Option<UtcTimestamp>,
+) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
     let mut registry = ProviderRegistry::default();
-    registry.register(Arc::new(LifecycleSuccessProvider))?;
+    registry.register(Arc::new(LifecycleSuccessProvider {
+        restart_ready_observed_at,
+    }))?;
     Ok(ReconcileWorker::new(
         store,
-        Reconciler::new(registry, Duration::from_millis(100))?,
+        Reconciler::new(registry, Duration::from_millis(100))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
     )?)
@@ -1982,21 +2720,27 @@ impl EnvironmentProvider for BlockingProvider {
         &self,
         _action: ReconcileAction,
         _instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        self.entered.notify_one();
-        self.release.notified().await;
-        Ok(ProviderObservation {
-            next_state: ObservedEnvironmentState::Validating,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete: false,
-        })
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(ProviderObservation {
+                next_state: ObservedEnvironmentState::Validating,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete: false,
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
 struct CleanupFailureProvider;
 
-struct LifecycleSuccessProvider;
+struct LifecycleSuccessProvider {
+    restart_ready_observed_at: Option<UtcTimestamp>,
+}
 
 #[derive(Default)]
 struct IdempotentCrashProvider {
@@ -2015,7 +2759,7 @@ impl EnvironmentProvider for IdempotentCrashProvider {
         &self,
         action: ReconcileAction,
         instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self
             .completed
@@ -2032,7 +2776,11 @@ impl EnvironmentProvider for IdempotentCrashProvider {
         {
             self.side_effects.fetch_add(1, Ordering::SeqCst);
         }
-        LifecycleSuccessProvider.execute(action, instance).await
+        LifecycleSuccessProvider {
+            restart_ready_observed_at: None,
+        }
+        .execute(action, instance)
+        .await
     }
 }
 
@@ -2046,71 +2794,91 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
         &self,
         action: ReconcileAction,
         instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        let next_revision = support::revision(instance.revision.get() + 1);
-        let observation = match (action, instance.observed_state) {
-            (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
-                ProviderObservation {
-                    next_state: ObservedEnvironmentState::Validating,
-                    endpoints: Vec::new(),
-                    cleanup_evidence: None,
-                    operation_complete: false,
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            let next_revision = support::revision(instance.revision.get() + 1);
+            let observation = match (action, instance.observed_state) {
+                (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Validating,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: false,
+                    }
                 }
-            }
-            (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
-                ProviderObservation {
-                    next_state: ObservedEnvironmentState::Building,
-                    endpoints: Vec::new(),
-                    cleanup_evidence: None,
-                    operation_complete: false,
+                (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Building,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: false,
+                    }
                 }
-            }
-            (ReconcileAction::Build, ObservedEnvironmentState::Building) => ProviderObservation {
-                next_state: ObservedEnvironmentState::Provisioning,
-                endpoints: Vec::new(),
-                cleanup_evidence: None,
-                operation_complete: false,
-            },
-            (ReconcileAction::Provision, ObservedEnvironmentState::Provisioning) => {
-                ProviderObservation {
-                    next_state: ObservedEnvironmentState::Ready,
-                    endpoints: vec![EnvironmentEndpoint {
-                        id: EndpointId::new(),
-                        protocol: EndpointProtocol::Https,
-                        revision: next_revision,
-                        health: EndpointHealth::Healthy,
-                        observed_at: timestamp("2026-07-14T00:01:00.000Z"),
-                    }],
-                    cleanup_evidence: None,
-                    operation_complete: true,
+                (ReconcileAction::Build, ObservedEnvironmentState::Building) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Provisioning,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: false,
+                    }
                 }
-            }
-            (ReconcileAction::Stop, ObservedEnvironmentState::Stopping) => ProviderObservation {
-                next_state: ObservedEnvironmentState::Stopped,
-                endpoints: Vec::new(),
-                cleanup_evidence: None,
-                operation_complete: true,
-            },
-            (ReconcileAction::Cleanup, ObservedEnvironmentState::Deleting) => ProviderObservation {
-                next_state: ObservedEnvironmentState::Deleted,
-                endpoints: Vec::new(),
-                cleanup_evidence: Some(ArtifactRef {
-                    artifact_id: ArtifactId::new(),
-                    store_binding: "environment-cleanup-evidence-v1".to_owned(),
-                    object_version: instance.operation.id.to_string(),
-                    size_bytes: 1,
-                    media_type: "application/json".to_owned(),
-                }),
-                operation_complete: true,
-            },
-            _ => {
-                return Err(ProviderFailure {
-                    code: ProviderFailureCode::Rejected,
-                    retryable: false,
-                });
-            }
-        };
-        Ok(observation)
+                (
+                    ReconcileAction::Provision | ReconcileAction::Restart,
+                    ObservedEnvironmentState::Provisioning,
+                ) => {
+                    let ready_observed_at = match action {
+                        ReconcileAction::Provision => timestamp("2026-07-14T00:01:00.000Z"),
+                        ReconcileAction::Restart => self
+                            .restart_ready_observed_at
+                            .unwrap_or(timestamp("2026-07-14T00:03:00.000Z")),
+                        _ => unreachable!("ready observation action is constrained above"),
+                    };
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Ready,
+                        endpoints: vec![EnvironmentEndpoint {
+                            id: EndpointId::new(),
+                            protocol: EndpointProtocol::Https,
+                            revision: next_revision,
+                            health: EndpointHealth::Healthy,
+                            observed_at: ready_observed_at,
+                        }],
+                        cleanup_evidence: None,
+                        operation_complete: true,
+                    }
+                }
+                (ReconcileAction::Stop, ObservedEnvironmentState::Stopping) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Stopped,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: true,
+                    }
+                }
+                (ReconcileAction::Cleanup, ObservedEnvironmentState::Deleting) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Deleted,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: Some(ArtifactRef {
+                            artifact_id: ArtifactId::new(),
+                            store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                            object_version: instance.operation.id.to_string(),
+                            size_bytes: 1,
+                            media_type: "application/json".to_owned(),
+                        }),
+                        operation_complete: true,
+                    }
+                }
+                _ => {
+                    return Err(ProviderFailure {
+                        code: ProviderFailureCode::Rejected,
+                        retryable: false,
+                    });
+                }
+            };
+            Ok(observation)
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
@@ -2124,16 +2892,566 @@ impl EnvironmentProvider for CleanupFailureProvider {
         &self,
         action: ReconcileAction,
         _instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        if action != ReconcileAction::Cleanup {
-            return Err(ProviderFailure {
-                code: ProviderFailureCode::Rejected,
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            if action != ReconcileAction::Cleanup {
+                return Err(ProviderFailure {
+                    code: ProviderFailureCode::Rejected,
+                    retryable: false,
+                });
+            }
+            Err(ProviderFailure {
+                code: ProviderFailureCode::CleanupFailed,
                 retryable: false,
-            });
+            })
         }
-        Err(ProviderFailure {
-            code: ProviderFailureCode::CleanupFailed,
-            retryable: false,
-        })
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
+}
+
+struct BlockingKubeVirtExecutor {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+    observed_at: UtcTimestamp,
+}
+struct ExecutionDrop(Arc<AtomicBool>);
+impl Drop for ExecutionDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl KubeVirtExecutorBackend for BlockingKubeVirtExecutor {
+    async fn execute(
+        &self,
+        fence: &KubeVirtBackendFence,
+        request: &KubeVirtExecutorRequest,
+        permit: &KubeVirtExecutionPermit,
+    ) -> KubeVirtExecutorResponse {
+        if matches!(request, KubeVirtExecutorRequest::Apply { .. }) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let _drop = ExecutionDrop(Arc::clone(&self.dropped));
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+        CountingKubeVirtExecutor {
+            calls: Arc::clone(&self.calls),
+            observed_at: self.observed_at,
+        }
+        .execute(fence, request, permit)
+        .await
+    }
+}
+
+#[tokio::test]
+async fn kubevirt_pending_cancellation_and_timeout_preserve_exact_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut authority = requested_instance();
+    authority.operation.accepted_at = now;
+    authority.operation.next_attempt_at = now;
+    authority.operation.deadline_at = container_add_time(now, time::Duration::seconds(5))?;
+    authority.eligibility_expires_at = Some(container_add_time(now, time::Duration::minutes(2))?);
+    store.create("pending-authority", &authority).await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let instance = executor_instance();
+    let executor = Arc::new(FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        BlockingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            entered: Arc::clone(&entered),
+            dropped: Arc::clone(&dropped),
+            observed_at: now,
+        },
+        instance.clone(),
+    ));
+    let plan = kubevirt_executor_plan(authority.id);
+    let first = kubevirt_executor_envelope(
+        plan.clone(),
+        authority.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        authority.operation.deadline_at,
+    )?;
+    let task = {
+        let executor = Arc::clone(&executor);
+        let first = first.clone();
+        tokio::spawn(async move { executor.execute(first).await })
+    };
+    entered.notified().await;
+    assert!(matches!(
+        executor.execute(first.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let unchanged = store.load(authority.id).await?;
+    assert_eq!(unchanged, authority);
+    let accepted_at = store.current_time().await?;
+    let accepted = store
+        .accept_command(
+            "pending-delete",
+            &LifecycleCommand {
+                environment_id: authority.id,
+                kind: EnvironmentOperationKind::Delete,
+                expected_revision: authority.revision,
+                actor_id: authority.owner_id,
+                trace_id: "pending-delete".to_owned(),
+                accepted_at,
+                deadline_at: container_add_time(accepted_at, time::Duration::seconds(5))?,
+                access_revocation_revision: Some(revision(2)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    let current = store.load(authority.id).await?;
+    assert_eq!(current.operation.id, accepted.operation_id);
+    let cleanup = kubevirt_executor_envelope(
+        plan,
+        accepted.operation_id,
+        current.generation,
+        1,
+        ReconcileAction::Cleanup,
+        current.operation.deadline_at,
+    )?;
+    assert!(matches!(
+        executor.execute(cleanup.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    let response = tokio::time::timeout(Duration::from_secs(2), task).await???;
+    assert!(matches!(
+        response.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                ..
+            }
+        }
+    ));
+    assert!(dropped.load(Ordering::SeqCst));
+    let old_terminal: serde_json::Value = sqlx::query_scalar(
+        "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1",
+    )
+    .bind(authority.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(old_terminal["failure"]["code"], "cancelled");
+    assert!(matches!(
+        executor.execute(cleanup).await?.response,
+        KubeVirtExecutorResponse::Deleted { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let mut timed = requested_instance();
+    let now = store.current_time().await?;
+    timed.operation.accepted_at = now;
+    timed.operation.next_attempt_at = now;
+    timed.operation.deadline_at = container_add_time(now, time::Duration::milliseconds(350))?;
+    timed.eligibility_expires_at = Some(container_add_time(now, time::Duration::minutes(1))?);
+    store.create("timeout-authority", &timed).await?;
+    dropped.store(false, Ordering::SeqCst);
+    let timeout_request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(timed.id),
+        timed.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        timed.operation.deadline_at,
+    )?;
+    let terminal = executor.execute(timeout_request.clone()).await?;
+    assert!(matches!(
+        terminal.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Timeout,
+                ..
+            }
+        }
+    ));
+    assert!(dropped.load(Ordering::SeqCst));
+    let count = calls.load(Ordering::SeqCst);
+    assert_eq!(
+        serde_json::to_value(executor.execute(timeout_request).await?.response)?,
+        serde_json::to_value(terminal.response)?
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+    Ok(())
+}
+
+struct PendingProvider;
+#[async_trait]
+impl EnvironmentProvider for PendingProvider {
+    fn binding(&self) -> &'static str {
+        "container-primary-v1"
+    }
+    async fn execute(
+        &self,
+        _: ReconcileAction,
+        _: &contracts::environment::EnvironmentInstance,
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        Ok(environment_service::ProviderOutcome::Pending)
+    }
+}
+#[tokio::test]
+async fn pending_reconcile_changes_only_schedule_without_retry_event_or_usage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut instance = requested_instance();
+    instance.operation.accepted_at = now;
+    instance.operation.next_attempt_at = now;
+    instance.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
+    instance.eligibility_expires_at = Some(instance.operation.deadline_at);
+    store.create("pending-reconcile", &instance).await?;
+    let before_events: i64 = sqlx::query_scalar("SELECT count(*) FROM environment.outbox_events")
+        .fetch_one(&pool)
+        .await?;
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(PendingProvider))?;
+    let worker = ReconcileWorker::new(
+        store.clone(),
+        Reconciler::new(registry, Duration::from_secs(1))?
+            .with_resource_allocator(support::TestResourceAllocator),
+        Duration::from_secs(2),
+        Duration::from_millis(10),
+    )?;
+    for _ in 0..2 {
+        assert_eq!(
+            worker
+                .run_once("pending-worker", store.current_time().await?)
+                .await?,
+            ReconcileWorkerOutcome::Pending
+        );
+        let current = store.load(instance.id).await?;
+        let mut expected = instance.clone();
+        expected.operation.next_attempt_at = current.operation.next_attempt_at;
+        assert_eq!(current, expected);
+        assert!(current.operation.next_attempt_at <= instance.operation.deadline_at);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM environment.outbox_events")
+            .fetch_one(&pool)
+            .await?,
+        before_events
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM environment.resource_meter_deliveries")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn kubevirt_incarnation_recovery_and_terminal_commit_retry_do_not_repeat_effects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut authority = requested_instance();
+    authority.operation.accepted_at = now;
+    authority.operation.next_attempt_at = now;
+    authority.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
+    authority.eligibility_expires_at = Some(authority.operation.deadline_at);
+    store.create("incarnation-recovery", &authority).await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let instance = executor_instance();
+    let backend = || BlockingKubeVirtExecutor {
+        calls: Arc::clone(&calls),
+        entered: Arc::clone(&entered),
+        dropped: Arc::clone(&dropped),
+        observed_at: now,
+    };
+    let original = Arc::new(FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        backend(),
+        instance.clone(),
+    ));
+    let request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(authority.id),
+        authority.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        authority.operation.deadline_at,
+    )?;
+    let task = {
+        let original = Arc::clone(&original);
+        let request = request.clone();
+        tokio::spawn(async move { original.execute(request).await })
+    };
+    entered.notified().await;
+    task.abort();
+    let _ = task.await;
+    assert!(dropped.load(Ordering::SeqCst));
+    drop(original);
+    // A different Pod, even when the old Pod is no longer observable, cannot prove termination.
+    let mut foreign = instance.clone();
+    foreign.pod_uid = uuid::Uuid::new_v4();
+    foreign.boot_token = uuid::Uuid::new_v4();
+    let foreign = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        backend(),
+        foreign,
+    );
+    foreign.prepare_startup().await?;
+    assert!(matches!(
+        foreign.execute(request.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1"
+        )
+        .bind(authority.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        None
+    );
+    // This fixture models the next isolated PID1 boot of that same container, not Pod disappearance.
+    let mut replacement = instance.clone();
+    replacement.boot_token = uuid::Uuid::new_v4();
+    let replacement = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        backend(),
+        replacement,
+    );
+    replacement.prepare_startup().await?;
+    assert!(matches!(
+        replacement.execute(request).await?.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                ..
+            }
+        }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut second = requested_instance();
+    second.operation.accepted_at = now;
+    second.operation.next_attempt_at = now;
+    second.operation.deadline_at = authority.operation.deadline_at;
+    second.eligibility_expires_at = Some(authority.operation.deadline_at);
+    store.create("terminal-commit-retry", &second).await?;
+    let executor = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        CountingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            observed_at: now,
+        },
+        instance,
+    );
+    sqlx::raw_sql("CREATE FUNCTION environment.reject_terminal_once() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'terminal persistence unavailable'; END $$; CREATE TRIGGER reject_terminal BEFORE UPDATE ON environment.kubevirt_executor_fences FOR EACH ROW WHEN (NEW.last_response IS NOT NULL) EXECUTE FUNCTION environment.reject_terminal_once();").execute(&pool).await?;
+    let request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(second.id),
+        second.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        second.operation.deadline_at,
+    )?;
+    assert!(matches!(
+        executor.execute(request.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    let count = calls.load(Ordering::SeqCst);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1"
+        )
+        .bind(second.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        None
+    );
+    sqlx::query("DROP TRIGGER reject_terminal ON environment.kubevirt_executor_fences")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        executor.execute(request.clone()).await?.response,
+        KubeVirtExecutorResponse::Running { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+    // Admission deadline is re-read after the database row lock, never before it.
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT environment_id FROM environment.kubevirt_executor_fences WHERE environment_id=$1 FOR UPDATE").bind(second.id.as_uuid()).fetch_one(&mut *transaction).await?;
+    let deadline = container_add_time(
+        store.current_time().await?,
+        time::Duration::milliseconds(100),
+    )?;
+    let next = kubevirt_executor_envelope(
+        kubevirt_executor_plan(second.id),
+        second.operation.id,
+        1,
+        2,
+        ReconcileAction::Provision,
+        deadline,
+    )?;
+    let executor = Arc::new(executor);
+    let task = {
+        let executor = Arc::clone(&executor);
+        tokio::spawn(async move { executor.execute(next).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    transaction.commit().await?;
+    assert!(matches!(
+        task.await?,
+        Err(KubeVirtExecutorFenceError::DeadlineExceeded)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+    Ok(())
+}
+
+#[tokio::test]
+async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit()
+-> Result<(), Box<dyn std::error::Error>> {
+    use testcontainers::{
+        GenericImage,
+        core::{IntoContainerPort, WaitFor},
+    };
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut authority = requested_instance();
+    authority.operation.accepted_at = now;
+    authority.operation.next_attempt_at = now;
+    authority.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
+    authority.eligibility_expires_at = Some(authority.operation.deadline_at);
+    store.create("graceful-drain", &authority).await?;
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        BlockingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            entered: Arc::clone(&entered),
+            dropped: Arc::clone(&dropped),
+            observed_at: now,
+        },
+        executor_instance(),
+    );
+    executor.prepare_startup().await?;
+    let nats = GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(4222.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .start()
+        .await?;
+    let client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let server = NatsKubeVirtExecutorServer::new(
+        client.clone(),
+        "fixture.kubevirt.drain".to_owned(),
+        executor,
+    )?;
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move { server.serve(receiver).await });
+    // Subscription readiness is observed through NATS, not an arbitrary sleep.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let response = client
+                .send_request(
+                    "fixture.kubevirt.drain",
+                    async_nats::Request::new()
+                        .timeout(Some(Duration::from_millis(50)))
+                        .payload(b"invalid-contract".to_vec().into()),
+                )
+                .await;
+            if !response.is_err_and(|error| {
+                error.kind() == async_nats::client::RequestErrorKind::NoResponders
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(authority.id),
+        authority.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        authority.operation.deadline_at,
+    )?;
+    let payload = serde_json::to_vec(&request)?;
+    let request_task = tokio::spawn(async move {
+        client
+            .request("fixture.kubevirt.drain", payload.into())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    shutdown.send_replace(true);
+    let response = request_task.await??;
+    let response: environment_service::KubeVirtExecutorResponseEnvelope =
+        serde_json::from_slice(&response.payload)?;
+    assert!(matches!(
+        response.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                ..
+            }
+        }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), task).await???;
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let terminal: serde_json::Value = sqlx::query_scalar(
+        "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1",
+    )
+    .bind(authority.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal["failure"]["code"], "cancelled");
+    Ok(())
 }

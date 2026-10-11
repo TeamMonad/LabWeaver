@@ -1,6 +1,6 @@
 import { effectScope, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchProjectWorkEnvironments, useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
+import { fetchProjectEnvironments, fetchProjectWorkEnvironments, useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
 
 const listEnvironments = vi.hoisted(() => vi.fn())
 
@@ -48,6 +48,25 @@ describe('fetchProjectWorkEnvironments', () => {
       diagnosticCode: 'PROJECT_WORK_ENVIRONMENTS_CURSOR_REPEATED',
     })
     expect(listEnvironments).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('fetchProjectEnvironments', () => {
+  it('loads every project environment page without narrowing the class', async () => {
+    listEnvironments
+      .mockResolvedValueOnce(page([environment('experiment-1')], 'cursor-2'))
+      .mockResolvedValueOnce(page([environment('work-1')]))
+
+    await expect(fetchProjectEnvironments({ projectId: 'project-1' })).resolves.toEqual([
+      environment('experiment-1'),
+      environment('work-1'),
+    ])
+    expect(listEnvironments).toHaveBeenNthCalledWith(1, {
+      query: { projectId: 'project-1' },
+    })
+    expect(listEnvironments).toHaveBeenNthCalledWith(2, {
+      query: { projectId: 'project-1', cursor: 'cursor-2' },
+    })
   })
 })
 

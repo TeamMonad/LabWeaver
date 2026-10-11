@@ -10,6 +10,7 @@
     {% endfor %}
   ],
   "role_assignments": {{ identity_service_role_assignments | to_json }},
+  "realm_role_assignments": {{ identity_service_realm_role_assignments | to_json }},
   "gateway_vip": {{ identity_gateway_vip | to_json }},
   "keycloak_image": {{ identity_lock.images.keycloak | to_json }},
   "postgres_image": {{ identity_lock.images.postgres | to_json }}

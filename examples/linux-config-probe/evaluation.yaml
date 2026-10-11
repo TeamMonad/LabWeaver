@@ -1,0 +1,135 @@
+{
+  "apiVersion": "evaluation.labweaver.io/v1",
+  "kind": "EvaluationSpec",
+  "metadata": {
+    "name": "linux-config-probe",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "submission": {
+      "collector": {
+        "kind": "workspace_snapshot",
+        "include": [
+          "report.md"
+        ],
+        "exclude": [],
+        "maxBytes": 65536
+      },
+      "llmReadable": []
+    },
+    "steps": [
+      {
+        "role": "gate",
+        "id": "report-present",
+        "dependsOn": [],
+        "runner": {
+          "kind": "file_assertion",
+          "requiredFiles": [
+            "report.md"
+          ]
+        },
+        "checker": {
+          "kind": "exit_code",
+          "expected": 0
+        },
+        "failurePolicy": "stop"
+      },
+      {
+        "role": "gate",
+        "id": "ssh-prerequisites",
+        "dependsOn": [
+          "report-present"
+        ],
+        "runner": {
+          "kind": "ansible_probe",
+          "playbookProfile": "profiles/linux-config-probe-v1/playbook.yml",
+          "moduleAllowlist": [
+            "ansible.builtin.package_facts",
+            "ansible.builtin.service_facts",
+            "ansible.builtin.stat"
+          ],
+          "readOnly": true,
+          "assertions": [
+            {
+              "fact": "host.reachable",
+              "expected": true
+            },
+            {
+              "fact": "package.openssh-server.installed",
+              "expected": true
+            },
+            {
+              "fact": "service.ssh.active",
+              "expected": true
+            }
+          ]
+        },
+        "checker": {
+          "kind": "exit_code",
+          "expected": 0
+        },
+        "failurePolicy": "stop"
+      },
+      {
+        "role": "score",
+        "id": "configuration",
+        "dependsOn": [
+          "ssh-prerequisites"
+        ],
+        "runner": {
+          "kind": "ansible_probe",
+          "playbookProfile": "profiles/linux-config-probe-v1/playbook.yml",
+          "moduleAllowlist": [
+            "ansible.builtin.package_facts",
+            "ansible.builtin.service_facts",
+            "ansible.builtin.stat"
+          ],
+          "readOnly": true,
+          "assertions": [
+            {
+              "fact": "file./home/lab/workspace/application.conf.exists",
+              "expected": true
+            },
+            {
+              "fact": "file./home/lab/workspace/application.conf.sha256",
+              "expected": "61c08a6acdad445d33fbf0c40e8d63440f9f1544232404645bebba8e61d7ea6c"
+            },
+            {
+              "fact": "file./home/lab/workspace/application.conf.mode",
+              "expected": "0644"
+            }
+          ]
+        },
+        "checker": {
+          "kind": "exit_code",
+          "expected": 0
+        },
+        "score": {
+          "max": 100
+        },
+        "failurePolicy": "continue"
+      }
+    ],
+    "aggregation": {
+      "kind": "deterministic_sum",
+      "maxScore": 100,
+      "gates": [
+        {
+          "step": "report-present",
+          "requiredStatus": "passed"
+        },
+        {
+          "step": "ssh-prerequisites",
+          "requiredStatus": "passed"
+        }
+      ]
+    },
+    "review": {
+      "teacherApprovalRequiredForRelease": true,
+      "forceManualWhen": [
+        "infrastructureError",
+        "invalidEvidence"
+      ]
+    }
+  }
+}

@@ -1,0 +1,128 @@
+import { expect } from '@playwright/test'
+import AxeBuilder from '@axe-core/playwright'
+
+/**
+ * Indeterminate loading indicators the SPA renders while a request is in
+ * flight: `AsyncStateView` renders `.spinner`, `DataTable` renders
+ * `.skeleton-row`. A determinate `[role="progressbar"]` is deliberately absent
+ * here so it is reported as fabricated progress instead of a stuck indicator.
+ */
+const LOADING_INDICATOR_SELECTOR = '.spinner, .skeleton-row, [aria-busy="true"]'
+/**
+ * Surfaces that would have to carry a server-reported ratio before a page may
+ * display a percentage. The platform never reports determinate progress, so a
+ * numeric value or `%` text on these elements is fabricated.
+ */
+const DETERMINATE_PROGRESS_SELECTOR = '[role="progressbar"], progress, [aria-valuenow], [aria-valuetext], .progress, .progress-bar'
+const LOADING_SETTLE_TIMEOUT_MS = 30_000
+const AXE_TAGS = Object.freeze(['wcag2a', 'wcag2aa'])
+const BLOCKING_IMPACTS = Object.freeze(['serious', 'critical'])
+
+/**
+ * Chromium reports a failed subresource or fetch as a console message of type
+ * `error`, even when the application handled it (for example the console page
+ * polling `console-capabilities` while a freshly provisioned environment is
+ * still starting and the platform answers 503). That message is browser noise,
+ * not an application error: nothing about it reaches the user as an unhandled
+ * surface. Keep the two apart so the assertion still covers what a user cannot
+ * act on while raw network messages remain in memory for diagnostics.
+ */
+const BROWSER_RESOURCE_LOG = /^Failed to load resource:/
+
+/**
+ * Collect the two failure classes a user cannot act on: unhandled console
+ * errors and uncaught page exceptions. Call `assertCleanConsole` at each
+ * journey checkpoint so the failing surface is named. Browser resource-load
+ * logs are recorded separately and never printed or asserted.
+ */
+export function installUsabilityGuards(page) {
+  const consoleErrors = []
+  const networkErrors = []
+  const pageErrors = []
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return
+    const text = message.text()
+    if (BROWSER_RESOURCE_LOG.test(text)) {
+      networkErrors.push(text)
+      return
+    }
+    consoleErrors.push(text)
+  })
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.stack ?? error.message)
+  })
+  return Object.freeze({
+    consoleErrors,
+    networkErrors,
+    pageErrors,
+    assertCleanConsole(label) {
+      const recorded = [
+        ...consoleErrors.map((text) => `console: ${text}`),
+        ...pageErrors.map((text) => `pageerror: ${text}`),
+      ]
+      if (recorded.length === 0) return
+      throw new Error(`${label}:LW_ACCEPTANCE_CONSOLE_ERROR:${recorded.join(' | ')}`)
+    },
+  })
+}
+
+/**
+ * Assert the surface settled: no loading indicator survives the bounded wait,
+ * and no visible element claims a determinate progress value.
+ */
+export async function assertNoStuckProgress(page, label, { timeout = LOADING_SETTLE_TIMEOUT_MS } = {}) {
+  const loading = page.locator(`${LOADING_INDICATOR_SELECTOR}:visible`)
+  let stuck = []
+  try {
+    await expect
+      .poll(
+        async () => {
+          stuck = await loading.evaluateAll((elements) => elements.map((element) => {
+            const container = element.closest('.state-message') ?? element
+            const identity = typeof element.className === 'string' && element.className ? element.className : element.tagName
+            return `${identity}: ${(container.textContent ?? '').trim().slice(0, 120)}`
+          }))
+          return stuck.length
+        },
+        { timeout, intervals: [250, 500, 1000, 2000] },
+      )
+      .toBe(0)
+  } catch (error) {
+    throw new Error(
+      `${label}:LW_ACCEPTANCE_STUCK_PROGRESS:${JSON.stringify(stuck)} after ${timeout}ms`,
+      { cause: error },
+    )
+  }
+
+  const fabricated = await page.locator(`${DETERMINATE_PROGRESS_SELECTOR}:visible`).evaluateAll((elements) => elements
+    .map((element) => {
+      const identity = typeof element.className === 'string' && element.className ? element.className : element.tagName
+      return {
+        element: identity,
+        valueNow: element.getAttribute('aria-valuenow'),
+        valueText: element.getAttribute('aria-valuetext'),
+        value: element.hasAttribute('value') ? element.getAttribute('value') : null,
+        text: (element.textContent ?? '').trim().slice(0, 120),
+      }
+    })
+    .filter((item) => /\d+(?:[.,]\d+)?\s*%/.test(`${item.valueNow ?? ''} ${item.valueText ?? ''} ${item.value ?? ''} ${item.text}`)))
+  if (fabricated.length > 0) {
+    throw new Error(`${label}:LW_ACCEPTANCE_FABRICATED_PROGRESS:${JSON.stringify(fabricated)}`)
+  }
+}
+
+/**
+ * Run the WCAG A/AA axe scan. Serious and critical violations fail the journey.
+ * The scan stays in-process and does not attach reports or other artifacts.
+ */
+export async function auditAccessibility(page, label) {
+  const results = await new AxeBuilder({ page }).withTags([...AXE_TAGS]).analyze()
+  const blocking = results.violations.filter((violation) => BLOCKING_IMPACTS.includes(violation.impact))
+  if (blocking.length > 0) {
+    throw new Error(`${label}:LW_ACCEPTANCE_A11Y_SERIOUS:${blocking.map((violation) => `${violation.impact}:${violation.id} (${violation.nodes.length} node(s): ${violation.nodes
+      .slice(0, 3)
+      .map((node) => node.target.join(' '))
+      .join(', ')})`).join(' | ')}`)
+  }
+  return results
+}

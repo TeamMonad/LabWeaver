@@ -185,6 +185,10 @@ platform_application_keycloak_required_users: [platform-teacher, platform-studen
 platform_application_access_seed_file: ""
 platform_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 platform_application_values_files: []
+# Runtime upload lifetimes are fields in the reviewed configuration bundle,
+# not Ansible role defaults. The Control profile keeps object_store and control
+# uploadTtlSeconds at 14400 seconds for new sessions; the role applies that
+# bundle verbatim and never rewrites existing session metadata.
 platform_application_configuration_bundle: ""
 platform_application_configuration_manifest: "{{ playbook_dir }}/../../config/platform-bundle-manifest.json"
 platform_application_nats_credential_validator: "{{ playbook_dir }}/../../../tools/validate_nats_user_credentials.py"
@@ -231,6 +235,15 @@ platform_application_portal_tls_ca_file: ""
 platform_application_object_store_route_enabled: false
 platform_application_object_store_service_name: minio
 platform_application_object_store_service_port: 9000
+# Reviewed host model endpoint port admitted to the Agent service and the
+# authoring sandbox as a Cilium `host`/`remote-node` entity allowance.
+platform_application_model_service_port: 11434
+# Optional exact external model hostnames. They are rendered as Cilium
+# toFQDNs rules at the same port; an empty list keeps the in-cluster and node
+# entity allowances above without opening arbitrary external egress.
+platform_application_model_egress_fqdns: []
+# Namespace that fronts the reviewed model endpoint for in-cluster callers.
+platform_application_model_namespace: labweaver-llm
 platform_application_object_store_backend_hostname: minio.labweaver-data.svc
 platform_application_object_store_external_cidr: ""
 platform_application_ssh_load_balancer_ip: ""

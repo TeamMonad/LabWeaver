@@ -17,13 +17,13 @@ export type NavigationItemId =
   | 'workspaces'
   | 'work-environments'
   | 'work-software'
+  | 'work-ai-policy'
   | 'work-resources'
   | 'admin-resource-approval'
   | 'admin-policies'
   | 'admin-platform-images'
   | 'admin-gpu-catalog'
   | 'admin-finance'
-  | 'admin-audit'
 
 export interface NavigationItem {
   id: NavigationItemId
@@ -95,6 +95,7 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
         icon: 'desktop_windows',
         keywords: ['教学环境', '环境', '教师', 'console'],
         allowedRoles: TEACHER_ONLY,
+        projectScoped: true,
       },
       {
         id: 'teacher-approvals',
@@ -188,6 +189,16 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
         projectScoped: true,
       },
       {
+        id: 'work-ai-policy',
+        label: '项目 AI 设置',
+        description: '为当前项目配置模型、材料出站范围和 Agent 预算。',
+        path: '/researcher/ai-policy',
+        icon: 'policy',
+        keywords: ['项目', 'AI', '模型', '出站', '预算', 'policy'],
+        allowedRoles: ALL_PLATFORM_ROLES,
+        projectScoped: true,
+      },
+      {
         id: 'work-resources',
         label: '资源申请',
         description: '为当前项目申请 Work 容量并查看使用授权。',
@@ -248,15 +259,6 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
         keywords: ['管理员', '预算', '费用', '计费', 'finance'],
         allowedRoles: ADMIN_ONLY,
         projectScoped: true,
-      },
-      {
-        id: 'admin-audit',
-        label: '审计日志',
-        description: '查看平台操作和资源生命周期记录。',
-        path: '/admin/audit',
-        icon: 'history',
-        keywords: ['管理员', '审计', '日志', 'audit'],
-        allowedRoles: ADMIN_ONLY,
       },
     ],
   },

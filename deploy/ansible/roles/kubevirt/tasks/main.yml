@@ -1,3 +1,53 @@
+- name: Validate explicit KubeVirt mediated-device resources
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.mdevNameSelector | default('') is string
+      - item.mdevNameSelector | default('') | length > 0
+      - item.resourceName | default('') is string
+      - item.resourceName | default('') | length > 0
+      - >-
+        item.externalResourceProvider is not defined or
+        item.externalResourceProvider is boolean
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_RESOURCE_INVALID
+  loop: "{{ kubevirt_permitted_mediated_devices }}"
+  loop_control:
+    label: "{{ item.mdevNameSelector | default('unnamed') }}"
+  tags: [kubevirt-mdev]
+
+- name: Require mediated-device resources and node configuration together
+  ansible.builtin.assert:
+    that:
+      - >-
+        (kubevirt_permitted_mediated_devices | length > 0) ==
+        (kubevirt_mediated_devices_configuration | length > 0)
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_CONFIGURATION_INCOMPLETE
+  tags: [kubevirt-mdev]
+
+- name: Validate explicit global KubeVirt mediated-device types
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item | length > 0
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_TYPE_INVALID
+  loop: "{{ kubevirt_mediated_device_types }}"
+  tags: [kubevirt-mdev]
+
+- name: Validate explicit KubeVirt mediated-device node configuration
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.mediatedDeviceTypes is sequence
+      - item.mediatedDeviceTypes is not string
+      - item.mediatedDeviceTypes | length > 0
+      - item.nodeSelector is mapping
+      - item.nodeSelector | length > 0
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_CONFIGURATION_INVALID
+  loop: "{{ kubevirt_mediated_devices_configuration }}"
+  loop_control:
+    label: "{{ item.nodeSelector | default({}) | to_json }}"
+  tags: [kubevirt-mdev]
+
 - name: Label selected KVM-capable workers for KubeVirt scheduling
   ansible.builtin.command: >-
     kubectl label node {{ item }} {{ kubevirt_node_label }}=true --overwrite
@@ -36,6 +86,28 @@
           developerConfiguration:
             useEmulation: false
 
+- name: Configure explicitly selected KubeVirt mediated devices
+  kubernetes.core.k8s:
+    state: present
+    # Keep this as a merge update for the two fields owned by this opt-in
+    # task. Server-side apply would record a partial KubeVirt document and
+    # could remove unrelated configuration on a later role run.
+    definition:
+      apiVersion: kubevirt.io/v1
+      kind: KubeVirt
+      metadata:
+        name: kubevirt
+        namespace: kubevirt
+      spec:
+        configuration:
+          permittedHostDevices:
+            mediatedDevices: "{{ kubevirt_permitted_mediated_devices }}"
+          mediatedDevicesConfiguration: >-
+            {{ {'mediatedDeviceTypes': kubevirt_mediated_device_types,
+                 'nodeMediatedDeviceTypes': kubevirt_mediated_devices_configuration} }}
+  when: kubevirt_permitted_mediated_devices | length > 0
+  tags: [kubevirt-mdev]
+
 - name: Install CDI operator and custom resource
   kubernetes.core.k8s:
     state: present
@@ -59,3 +131,116 @@
       spec:
         config:
           scratchSpaceStorageClass: "{{ storageclass_local_path }}"
+
+- name: Validate explicit CDI node-pull references
+  ansible.builtin.assert:
+    that:
+      - kubevirt_cdi_image_pull_secrets is sequence
+      - kubevirt_cdi_image_pull_secrets is not string
+      - kubevirt_cdi_image_pull_secrets is not mapping
+      - platform_application_namespace is defined
+      - platform_application_namespace is string
+      - platform_application_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_namespace | length <= 63
+    fail_msg: CDI_NODE_PULL_CONFIGURATION_INVALID
+  when: kubevirt_cdi_image_pull_secrets | length > 0
+  tags: [kubevirt-cdi-pull]
+
+- name: Validate each CDI node-pull reference
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | list == ['name']
+      - item.name is string
+      - item.name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - item.name | length <= 63
+    fail_msg: CDI_NODE_PULL_REFERENCE_INVALID
+  loop: "{{ kubevirt_cdi_image_pull_secrets }}"
+  tags: [kubevirt-cdi-pull]
+
+- name: Read existing platform-owned CDI node-pull credentials
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ platform_application_namespace }}"
+    name: "{{ item.name }}"
+  loop: "{{ kubevirt_cdi_image_pull_secrets }}"
+  register: kubevirt_cdi_node_pull_credentials
+  no_log: true
+  tags: [kubevirt-cdi-pull]
+
+- name: Require existing Docker registry credentials in the runtime base namespace
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 1
+      - item.resources[0].type == 'kubernetes.io/dockerconfigjson'
+      - item.resources[0].data['.dockerconfigjson'] is defined
+    fail_msg: CDI_NODE_PULL_SECRET_INVALID
+  loop: "{{ kubevirt_cdi_node_pull_credentials.results }}"
+  no_log: true
+  tags: [kubevirt-cdi-pull]
+
+- name: Configure CDI node-pull references through the CDI owner
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cdi.kubevirt.io/v1beta1
+      kind: CDI
+      metadata:
+        name: cdi
+      spec:
+        config:
+          imagePullSecrets: "{{ kubevirt_cdi_image_pull_secrets }}"
+  when: kubevirt_cdi_image_pull_secrets | length > 0
+  tags: [kubevirt-cdi-pull]
+
+- name: Allow KubeVirt control-plane access to the adopted API endpoint
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cilium.io/v2
+      kind: CiliumNetworkPolicy
+      metadata:
+        name: kubevirt-control-plane
+        namespace: kubevirt
+      spec:
+        endpointSelector: {}
+        egress:
+          - toEntities: [kube-apiserver]
+            toPorts:
+              - ports: [{port: "6443", protocol: TCP}, {port: "443", protocol: TCP}]
+          - toEndpoints:
+              - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s:k8s-app: kube-dns}
+            toPorts:
+              - ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]
+          - toEntities: [cluster]
+        ingress:
+          - fromEntities: [cluster, health, remote-node]
+  when: kubevirt_control_plane_egress_enabled | bool
+
+- name: Place the KubeVirt control plane on the selected nodes
+  when: kubevirt_control_plane_node_selector | length > 0
+  block:
+    - name: Remove the control-plane-only affinity from KubeVirt control-plane deployments
+      kubernetes.core.k8s_json_patch:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: kubevirt
+        name: "{{ item }}"
+        patch:
+          - op: remove
+            path: /spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution
+      loop: [virt-operator, virt-api, virt-controller]
+      failed_when: false
+
+    - name: Apply the reviewed KubeVirt control-plane node selector
+      kubernetes.core.k8s_json_patch:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: kubevirt
+        name: "{{ item }}"
+        patch:
+          - op: add
+            path: /spec/template/spec/nodeSelector
+            value: "{{ kubevirt_control_plane_node_selector }}"
+      loop: [virt-operator, virt-api, virt-controller]

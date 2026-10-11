@@ -390,7 +390,13 @@ async fn validate_response(
         || resolution.course_id != request.course_id
         || resolution.owner_actor_id != request.owner_actor_id
         || resolution.environment_revision != request.expected_revision
-        || resolution.eligibility_expires_at <= now
+        || resolution
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= now)
+        || resolution
+            .lease_fence
+            .as_ref()
+            .is_some_and(|fence| fence.expires_at <= now)
         || etag != expected_etag
     {
         return Err(OwnerResolverClientError::ResponseInvalid);

@@ -192,6 +192,65 @@ async fn resolve_generated_context<A: AgentAuthority>(
     Ok(Some(record))
 }
 
+async fn resolve_evaluation_runner_context<A: AgentAuthority>(
+    control: &ControlService,
+    agent: &A,
+    run: &contracts::authoring::AgentRun,
+    evaluation: Option<&contracts::authoring::EvaluationCandidate>,
+) -> Result<Option<GeneratedArtifactRecord>, ContextResolutionError> {
+    let Some(candidate) = evaluation else {
+        return Ok(None);
+    };
+    let Some(runner_build_context) = &candidate.runner_build_context else {
+        return Ok(None);
+    };
+    let package = match control
+        .project_package(run.project_id, run.package_id)
+        .await
+    {
+        Ok(package) => package,
+        Err(ControlError::PersistenceFailed) => return Err(ContextResolutionError::Retryable),
+        Err(_) => return Err(ContextResolutionError::Rejected),
+    };
+    if package.validate().is_err()
+        || package.project_id != run.project_id
+        || package.course_id != run.course_id
+    {
+        return Err(ContextResolutionError::Rejected);
+    }
+    if package
+        .files
+        .iter()
+        .any(|file| file.object == *runner_build_context)
+    {
+        return Ok(None);
+    }
+    let query = GeneratedArtifactQuery {
+        project_id: run.project_id,
+        course_id: run.course_id,
+        package_id: run.package_id,
+        package_revision: package.revision,
+    };
+    let record = match agent
+        .generated_artifact(runner_build_context.artifact_id, &query)
+        .await
+    {
+        Ok(record) => record,
+        Err(DownstreamError::Unavailable) => return Err(ContextResolutionError::Retryable),
+        Err(_) => return Err(ContextResolutionError::Rejected),
+    };
+    if record.kind != GeneratedArtifactKind::EvaluationRunnerBuildContext
+        || record.artifact != *runner_build_context
+        || record.project_id != package.project_id
+        || record.course_id != package.course_id
+        || record.package_id != package.id
+        || record.package_revision != package.revision
+    {
+        return Err(ContextResolutionError::Rejected);
+    }
+    Ok(Some(record))
+}
+
 /// Evaluation-owned release authority used by the authoring publication worker.
 #[async_trait]
 pub trait EvaluationAuthority: Send + Sync {
@@ -563,6 +622,49 @@ impl AgentRunConsumer {
                 }
             }
         };
+        let evaluation_runner_context = match resolve_evaluation_runner_context(
+            control,
+            agent,
+            &run,
+            evaluation.as_ref(),
+        )
+        .await
+        {
+            Ok(record) => record,
+            Err(ContextResolutionError::Retryable) => {
+                message
+                    .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                    .await
+                    .map_err(|_| MessagingError::Ack)?;
+                return Ok(());
+            }
+            Err(ContextResolutionError::Rejected) => {
+                tracing::error!(
+                    event = "control.agent_run_context_resolution_rejected",
+                    component = "control-service",
+                    operation = "agent_run.evaluation_runner_context.resolve",
+                    outcome = "quarantined",
+                    duration_ms = 0_u64,
+                    event_id = %event.id,
+                    run_id = %run.id,
+                    candidate_id = evaluation.as_ref().map(|candidate| candidate.id.to_string()),
+                    diagnostic_code = "LW_EVALUATION_RUNNER_CONTEXT_READBACK_REJECTED",
+                    failure_stage = "agent_run.evaluation_runner_context.resolve",
+                    retryable = false,
+                );
+                self.quarantine(
+                    &message,
+                    Some(event.id),
+                    "LW_EVALUATION_RUNNER_CONTEXT_READBACK_REJECTED",
+                )
+                .await?;
+                message
+                    .double_ack_with(AckKind::Term)
+                    .await
+                    .map_err(|_| MessagingError::Ack)?;
+                return Ok(());
+            }
+        };
         match control
             .consume_agent_run_event(
                 &event,
@@ -571,6 +673,7 @@ impl AgentRunConsumer {
                 evaluation.as_ref(),
                 environment_image_export.as_ref(),
                 generated_context.as_ref(),
+                evaluation_runner_context.as_ref(),
             )
             .await
         {

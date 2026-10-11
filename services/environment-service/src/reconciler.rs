@@ -4,8 +4,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::UtcTimestamp;
+use contracts::authoring::EnvironmentClass;
 use contracts::environment::{
-    EnvironmentInstance, EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
+    ActivateEnvironmentResourceReservationRequest, EnvironmentInstance, EnvironmentOperationKind,
+    EnvironmentResourceReservationState, ObservedEnvironmentState, OperationState,
+    SuspendEnvironmentResourceReservationRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
@@ -16,6 +19,23 @@ use crate::{
 };
 
 pub type ProviderObservation = crate::lifecycle::AppliedProviderObservation;
+
+/// An accepted execution may still be in progress without a new observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderOutcome<T> {
+    Pending,
+    Completed(T),
+}
+
+impl<T> ProviderOutcome<T> {
+    #[must_use]
+    pub fn completed(self) -> Option<T> {
+        match self {
+            Self::Pending => None,
+            Self::Completed(value) => Some(value),
+        }
+    }
+}
 
 /// One explicit, bounded Provider side effect selected from durable state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -56,6 +76,8 @@ pub enum ProviderFailureCode {
     Rejected,
     ObservationInvalid,
     CleanupFailed,
+    Timeout,
+    Cancelled,
 }
 
 impl ProviderFailureCode {
@@ -67,6 +89,8 @@ impl ProviderFailureCode {
             Self::Rejected => "LW_ENVIRONMENT_PROVIDER_REJECTED",
             Self::ObservationInvalid => "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID",
             Self::CleanupFailed => "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+            Self::Timeout => "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
+            Self::Cancelled => "LW_ENVIRONMENT_PROVIDER_CANCELLED",
         }
     }
 }
@@ -80,7 +104,7 @@ pub trait EnvironmentProvider: Send + Sync {
         &self,
         action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<ProviderObservation>, ProviderFailure>;
 }
 
 /// Exact-name Provider registry. Duplicate and empty bindings are rejected.
@@ -114,6 +138,7 @@ impl ProviderRegistry {
 pub struct Reconciler {
     registry: ProviderRegistry,
     provider_timeout: Duration,
+    resource_reservations: Option<Arc<dyn crate::metering::ExperimentResourceAllocator>>,
 }
 
 /// Durable one-item reconciler worker. A caller may drive this in a bounded loop.
@@ -155,6 +180,10 @@ impl ReconcileWorker {
     }
 
     /// Claims and processes at most one due operation.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the lease, pending schedule and observation commit share one bounded reconcile decision"
+    )]
     pub async fn run_once(
         &self,
         worker_id: &str,
@@ -184,7 +213,18 @@ impl ReconcileWorker {
             });
         }
         match self.reconciler.execute_once(&lease.instance, now).await {
-            Ok(observation) => {
+            Ok(ProviderOutcome::Pending) => {
+                let updated = Self::defer_non_terminal_observation(
+                    &lease.instance,
+                    self.store.current_time().await?,
+                    self.retry_delay,
+                )?;
+                if !self.persist_reconciled(&lease, &updated).await? {
+                    return Ok(ReconcileWorkerOutcome::LeaseLost);
+                }
+                Ok(ReconcileWorkerOutcome::Pending)
+            }
+            Ok(ProviderOutcome::Completed(observation)) => {
                 let returned_observation = (observation.next_state, observation.operation_complete);
                 let updated = match apply_provider_observation(
                     &lease.instance,
@@ -203,7 +243,8 @@ impl ReconcileWorker {
                             return Ok(ReconcileWorkerOutcome::LeaseLost);
                         }
                         return Ok(ReconcileWorkerOutcome::Failed {
-                            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID",
+                            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID"
+                                .to_owned(),
                         });
                     }
                     Err(error) => return Err(error.into()),
@@ -229,7 +270,7 @@ impl ReconcileWorker {
                 })
             }
             Err(error) => {
-                let diagnostic_code = error.diagnostic_code();
+                let diagnostic_code = error.diagnostic_code().to_owned();
                 if error.retryable()
                     && lease.instance.operation.attempt < lease.instance.operation.max_attempts
                 {
@@ -238,7 +279,7 @@ impl ReconcileWorker {
                         let updated = apply_retry(
                             &lease.instance,
                             lease.instance.operation.id,
-                            diagnostic_code,
+                            &diagnostic_code,
                             retry_at,
                         )?;
                         if !self.persist_reconciled(&lease, &updated).await? {
@@ -252,7 +293,7 @@ impl ReconcileWorker {
                 let updated = apply_provider_failure(
                     &lease.instance,
                     lease.instance.operation.id,
-                    diagnostic_code,
+                    &diagnostic_code,
                 )?;
                 if !self.persist_reconciled(&lease, &updated).await? {
                     return Ok(ReconcileWorkerOutcome::LeaseLost);
@@ -321,8 +362,9 @@ impl ReconcileWorker {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconcileWorkerOutcome {
+    Pending,
     Idle,
     /// The aggregate revision or operation lease changed while this worker was reconciling.
     LeaseLost,
@@ -334,7 +376,7 @@ pub enum ReconcileWorkerOutcome {
         attempt: u32,
     },
     Failed {
-        diagnostic_code: &'static str,
+        diagnostic_code: String,
     },
 }
 
@@ -373,21 +415,122 @@ impl Reconciler {
         Ok(Self {
             registry,
             provider_timeout,
+            resource_reservations: None,
         })
+    }
+
+    /// Installs the Resource authority used to fence Experiment start, stop, and restart
+    /// provider side effects. Work instances intentionally bypass this boundary.
+    #[must_use]
+    pub fn with_resource_allocator<T>(mut self, allocator: T) -> Self
+    where
+        T: crate::metering::ExperimentResourceAllocator + 'static,
+    {
+        self.resource_reservations = Some(Arc::new(allocator));
+        self
     }
 
     pub async fn execute_once(
         &self,
         instance: &EnvironmentInstance,
         now: UtcTimestamp,
-    ) -> Result<ProviderObservation, ReconcileError> {
+    ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
+        if requires_experiment_activation(instance, action) {
+            self.activate_experiment_reservation(instance).await?;
+        }
         let provider = self.registry.resolve(&instance.provider_binding)?;
         let result = timeout(self.provider_timeout, provider.execute(action, instance))
             .await
             .map_err(|_| ReconcileError::ProviderTimeout)?;
-        result.map_err(ReconcileError::Provider)
+        let outcome = result.map_err(ReconcileError::Provider)?;
+        if instance.class == EnvironmentClass::Experiment
+            && instance.desired_state != contracts::environment::DesiredEnvironmentState::Deleted
+            && let ProviderOutcome::Completed(observation) = &outcome
+            && observation.next_state == ObservedEnvironmentState::Stopped
+            && observation.operation_complete
+        {
+            self.suspend_experiment_reservation(instance).await?;
+        }
+        Ok(outcome)
     }
+
+    async fn activate_experiment_reservation(
+        &self,
+        instance: &EnvironmentInstance,
+    ) -> Result<(), ReconcileError> {
+        let allocator = self
+            .resource_reservations
+            .as_ref()
+            .ok_or(ReconcileError::ResourceUnavailable)?;
+        let request = ActivateEnvironmentResourceReservationRequest {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            provider_binding: instance.provider_binding.clone(),
+            approved_resources: instance.approved_resources.clone(),
+            gpu: instance.approved_resources.gpu.clone(),
+            expected_allocation: instance.gpu_allocation.clone(),
+            operation_id: instance.operation.id,
+            environment_generation: instance.generation,
+            trace_id: instance.operation.trace_id.clone(),
+        };
+        let response = allocator
+            .activate_resource_reservation(&request)
+            .await
+            .map_err(ReconcileError::Resource)?;
+        if response.state != EnvironmentResourceReservationState::Reserved
+            || response.environment_generation != instance.generation
+            || response.allocation != instance.gpu_allocation
+        {
+            return Err(ReconcileError::ResourceFence);
+        }
+        Ok(())
+    }
+
+    async fn suspend_experiment_reservation(
+        &self,
+        instance: &EnvironmentInstance,
+    ) -> Result<(), ReconcileError> {
+        let allocator = self
+            .resource_reservations
+            .as_ref()
+            .ok_or(ReconcileError::ResourceUnavailable)?;
+        let request = SuspendEnvironmentResourceReservationRequest {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            owner_actor_id: instance.owner_id,
+            operation_id: instance.operation.id,
+            environment_generation: instance.generation,
+            trace_id: instance.operation.trace_id.clone(),
+        };
+        let response = allocator
+            .suspend_resource_reservation(&request)
+            .await
+            .map_err(ReconcileError::ResourceSuspension)?;
+        if response.state != EnvironmentResourceReservationState::Suspended
+            || response.environment_generation != instance.generation
+        {
+            return Err(ReconcileError::ResourceFence);
+        }
+        Ok(())
+    }
+}
+
+fn requires_experiment_activation(instance: &EnvironmentInstance, action: ReconcileAction) -> bool {
+    if instance.class != EnvironmentClass::Experiment {
+        return false;
+    }
+    matches!(
+        action,
+        ReconcileAction::Provision
+            | ReconcileAction::Start
+            | ReconcileAction::Restart
+            | ReconcileAction::Reset
+    )
 }
 
 /// Selects the next action solely from the persisted operation and lifecycle state.
@@ -430,7 +573,10 @@ pub fn next_action(
             Ok(ReconcileAction::Provision)
         }
         (Operation::Start, State::Stopped) => Ok(ReconcileAction::Start),
-        (Operation::Stop | Operation::Retry | Operation::Recover, State::Stopping)
+        (
+            Operation::Stop | Operation::Reset | Operation::Retry | Operation::Recover,
+            State::Stopping,
+        )
         | (Operation::Expire | Operation::Retry | Operation::Recover, State::Expiring) => {
             Ok(ReconcileAction::Stop)
         }
@@ -463,13 +609,21 @@ pub enum ReconcileError {
     OperationTerminal,
     #[error("LW_ENVIRONMENT_RECONCILE_ACTION_INVALID")]
     NoAction,
+    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_UNAVAILABLE")]
+    ResourceUnavailable,
+    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_FENCE")]
+    ResourceFence,
+    #[error("{0}")]
+    Resource(crate::metering::ResourceUsageClientError),
+    #[error("{0}")]
+    ResourceSuspension(crate::metering::ResourceUsageClientError),
     #[error("{0:?}")]
     Provider(ProviderFailure),
 }
 
 impl ReconcileError {
     #[must_use]
-    pub const fn diagnostic_code(&self) -> &'static str {
+    pub fn diagnostic_code(&self) -> &str {
         match self {
             Self::InvalidProviderRegistry => "LW_ENVIRONMENT_PROVIDER_REGISTRY_INVALID",
             Self::ProviderUnavailable => "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
@@ -477,6 +631,9 @@ impl ReconcileError {
             Self::ProviderTimeout => "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
             Self::OperationTerminal => "LW_ENVIRONMENT_OPERATION_TERMINAL",
             Self::NoAction => "LW_ENVIRONMENT_RECONCILE_ACTION_INVALID",
+            Self::ResourceUnavailable => "LW_ENVIRONMENT_RESOURCE_RESERVATION_UNAVAILABLE",
+            Self::ResourceFence => "LW_ENVIRONMENT_RESOURCE_RESERVATION_FENCE",
+            Self::Resource(error) | Self::ResourceSuspension(error) => error.diagnostic_code(),
             Self::Provider(failure) => failure.code.diagnostic_code(),
         }
     }
@@ -489,7 +646,10 @@ impl ReconcileError {
             Self::InvalidProviderRegistry
             | Self::InvalidTimeout
             | Self::OperationTerminal
-            | Self::NoAction => false,
+            | Self::NoAction
+            | Self::ResourceUnavailable
+            | Self::ResourceFence => false,
+            Self::Resource(error) | Self::ResourceSuspension(error) => error.retryable(),
         }
     }
 }
@@ -531,6 +691,7 @@ mod tests {
         DesiredEnvironmentState, EnvironmentOperation, EnvironmentOperationKind,
         ObservedEnvironmentState, OperationState,
     };
+    use contracts::resource::WorkloadResources;
     use contracts::{
         ActorId, CourseId, EnvironmentId, OperationId, ProjectId, ReleaseId, Revision, UtcTimestamp,
     };
@@ -557,6 +718,14 @@ mod tests {
             release_version: 1,
             lease_id: None,
             capacity_binding: None,
+            approved_resources: WorkloadResources {
+                cpu_millicores: 1,
+                memory_bytes: 1,
+                storage_bytes: 1,
+                gpu: None,
+            },
+            gpu_allocation: None,
+            resource_reservation_released: false,
             provider_binding: "container-primary-v1".to_owned(),
             desired_state: DesiredEnvironmentState::Running,
             observed_state: ObservedEnvironmentState::Provisioning,
@@ -590,7 +759,7 @@ mod tests {
                 reset_target: None,
                 lease_authorization: None,
             },
-            eligibility_expires_at: timestamp("2026-07-23T00:00:00.000Z"),
+            eligibility_expires_at: Some(timestamp("2026-07-23T00:00:00.000Z")),
             endpoints: Vec::new(),
             last_diagnostic_code: None,
             failed_phase: None,

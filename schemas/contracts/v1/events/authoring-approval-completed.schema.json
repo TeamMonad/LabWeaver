@@ -40,6 +40,17 @@
         "evaluationCandidateRevision": {
           "$ref": "#/$defs/Revision"
         },
+        "evaluationRunnerImageArtifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact per-experiment Evaluation runner image frozen with this approval.\n\nContainer experiments must carry their own built runner image. VM experiments use the\ndeployment-owned Evaluation runtime and leave this absent."
+        },
         "evaluationRuntimeIdentity": {
           "$ref": "#/$defs/EvaluationRuntimeIdentity",
           "description": "Exact Evaluation execution identity frozen when this approval is completed."

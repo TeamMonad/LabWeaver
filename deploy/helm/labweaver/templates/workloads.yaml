@@ -32,6 +32,10 @@ spec:
         checksum/object-store-proxy: {{ printf "%s\n%s\n%s\n%s" $root.Values.objectStoreRoute.caCertificate $root.Values.objectStoreRoute.backendHostname $root.Values.objectStoreRoute.pathPrefix $root.Values.objectStoreRoute.serviceName | sha256sum | quote }}
       {{- end }}
     spec:
+      {{- if eq $name "kubevirt-executor" }}
+      hostPID: false
+      shareProcessNamespace: false
+      {{- end }}
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: {{ default false $configuration.kubernetesApi }}
       {{- with $root.Values.imagePullSecrets }}
@@ -53,12 +57,25 @@ spec:
         - name: {{ $name }}
           image: {{ include "labweaver.image" (dict "key" $imageKey "value" $image) | quote }}
           imagePullPolicy: IfNotPresent
+          {{- if eq $name "kubevirt-executor" }}
+          command: ["/usr/local/bin/labweaver-service"]
+          {{- end }}
           {{- with $configuration.args }}
           args:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or $configuration.env $configuration.secretEnv }}
+          {{- if or $configuration.env $configuration.secretEnv (eq $name "kubevirt-executor") }}
           env:
+            {{- if eq $name "kubevirt-executor" }}
+            - name: LABWEAVER_EXECUTOR_POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: LABWEAVER_EXECUTOR_POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: LABWEAVER_EXECUTOR_POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+            - name: LABWEAVER_EXECUTOR_CONTAINER_NAME
+              value: {{ $name | quote }}
+            {{- end }}
             {{- range $key, $value := $configuration.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

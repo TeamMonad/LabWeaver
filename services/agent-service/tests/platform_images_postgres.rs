@@ -12,6 +12,7 @@ use agent_service::build_store::PgBuildStore;
 use agent_service::generated_artifacts::GeneratedArtifactStore;
 use agent_service::llm_review::LlmReviewStore;
 use agent_service::oci_registry::RegistryCredentials;
+use agent_service::platform_image_jobs::PlatformImageImportJobStore;
 use agent_service::platform_images::{
     DisablePlatformImage, PgPlatformImageCatalog, PlatformImageKind, PlatformImageRegistry,
     PlatformImageSeed, PlatformImageSeedOutcome, PlatformImageStatus, PlatformImageStoreError,
@@ -393,7 +394,8 @@ async fn spawn_api(
         build_store: PgBuildStore::new(pool.clone()),
         generated_artifacts: GeneratedArtifactStore::new(pool.clone()),
         llm_reviews: LlmReviewStore::new(pool.clone()),
-        platform_images: PgPlatformImageCatalog::new(pool),
+        platform_images: PgPlatformImageCatalog::new(pool.clone()),
+        platform_image_import_jobs: PlatformImageImportJobStore::new(pool),
         platform_registry: Some(PlatformImageRegistry::for_test(
             reqwest::Url::parse(registry_base)?,
             reqwest::Client::builder().no_proxy().build()?,

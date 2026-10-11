@@ -67,6 +67,7 @@
             <option value="container_time_slice">container_time_slice</option>
             <option value="vm_vgpu">vm_vgpu</option>
           </select>
+          <small v-if="createForm.mode === 'container_time_slice'" data-testid="gpu-sharing-limit" class="field-note">容器时间片不提供独占显存或固定比例算力，其他任务可能影响性能。</small>
         </label>
         <label>
           <span>provider binding</span>
@@ -171,6 +172,7 @@ onMounted(() => catalog.load())
 .catalog-card, .create-card { display: grid; gap: 16px; padding: 20px; }
 .admin-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
 .admin-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.field-note { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.4; }
 .admin-form button { justify-self: start; }
 .text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .state-chip { display: inline-flex; white-space: nowrap; padding: 3px 8px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }

@@ -24,8 +24,38 @@ type StartResult =
   | { data: AgentRunSchema; error?: undefined }
   | { data?: undefined; error: unknown }
 
+export type ProjectAgentRunPurposeExpectation =
+  | { kind: 'authoring'; environmentClass?: 'experiment' | 'work' }
+  | { kind: 'work_configuration'; environmentId?: string }
+
+function purposeDiagnostic(
+  data: AgentRunSchema,
+  expectedPurpose: ProjectAgentRunPurposeExpectation | undefined,
+): DiagnosticViewModel | undefined {
+  if (!expectedPurpose) return undefined
+  if (data.purpose.kind !== expectedPurpose.kind) {
+    return makeDiagnostic(
+      'PROJECT_RUN_PURPOSE_MISMATCH',
+      expectedPurpose.kind === 'work_configuration'
+        ? '当前任务不是 Work 配置任务，已停止恢复。请从当前操作重新打开。'
+        : '当前任务用途与当前页面不符，已停止恢复。请从当前操作重新打开。',
+      false,
+    )
+  }
+  if (expectedPurpose.kind === 'authoring' && data.purpose.kind === 'authoring' && expectedPurpose.environmentClass && data.purpose.environmentClass !== expectedPurpose.environmentClass) {
+    return makeDiagnostic('PROJECT_RUN_PURPOSE_MISMATCH', '当前任务不属于该模板类型，已停止恢复。请重新打开对应任务。', false)
+  }
+  if (expectedPurpose.kind === 'work_configuration' && data.purpose.kind === 'work_configuration' && expectedPurpose.environmentId && data.purpose.environmentId !== expectedPurpose.environmentId) {
+    return makeDiagnostic('PROJECT_RUN_ENVIRONMENT_MISMATCH', '当前任务绑定了另一 Work 环境，已停止恢复。请从该环境重新打开。', false)
+  }
+  return undefined
+}
+
 /** Project-owned Agent run lifecycle used by authoring and Work configuration. */
-export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | null>>) {
+export function useProjectAgentRun(
+  projectId: ReturnType<typeof ref<string | null>>,
+  expectedPurpose?: ProjectAgentRunPurposeExpectation,
+) {
   const run = ref<AsyncState<AgentRunSchema>>({ kind: 'idle' })
   const acting = ref<string | null>(null)
   const outcome = ref<DiagnosticViewModel | null>(null)
@@ -49,35 +79,42 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
     pollTimer = setTimeout(() => void load(runData.id, true), 3000)
   }
 
-  async function load(runId: string, silent = false) {
+  async function load(runId: string, silent = false): Promise<boolean> {
     const id = projectId.value
     const generation = ++loadGeneration
     if (!id || !runId) {
-      run.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_RUN_ID_MISSING', '缺少项目或 AgentRun ID。', false) }
-      return
+      run.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_RUN_ID_MISSING', '缺少项目或生成任务标识。', false) }
+      return false
     }
-    if (!silent) run.value = { kind: 'loading', message: '加载 AgentRun…' }
+    if (!silent) run.value = { kind: 'loading', message: '加载生成任务…' }
     const result = await getProjectAgentRun({ path: { projectId: id, runId } })
-    if (generation !== loadGeneration || projectId.value !== id) return
+    if (generation !== loadGeneration || projectId.value !== id) return false
     if (result.error) {
-      run.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_RUN_LOAD_FAILED', '加载 AgentRun 失败') }
+      run.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_RUN_LOAD_FAILED', '加载生成任务失败') }
       stopPolling()
-      return
+      return false
     }
     if (result.data.id !== runId || result.data.projectId !== id) {
       run.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(
           'PROJECT_RUN_STALE_CONTEXT',
-          'AgentRun 返回的项目引用已变化，已停止恢复以避免显示过期任务。请从当前项目重新打开。',
+          '生成任务返回的项目引用已变化，已停止恢复以避免显示过期任务。请从当前项目重新打开。',
           false,
         ),
       }
       stopPolling()
-      return
+      return false
+    }
+    const purposeError = purposeDiagnostic(result.data, expectedPurpose)
+    if (purposeError) {
+      run.value = { kind: 'error', diagnostic: purposeError }
+      stopPolling()
+      return false
     }
     run.value = { kind: 'success', data: result.data }
     schedulePoll(result.data)
+    return true
   }
 
   async function start(input: Omit<CreateAgentRunRequestSchema, 'projectId'>): Promise<boolean> {
@@ -88,9 +125,9 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
         body: { ...input, projectId: id },
       })
       if ('error' in result && result.error !== undefined) return { error: result.error }
-      if (!result.data) return { error: new Error('AgentRun response did not include data') }
+      if (!result.data) return { error: new Error('Generation task response did not include data') }
       return { data: result.data }
-    }, 'PROJECT_RUN_START_FAILED', '启动 AgentRun 失败')
+    }, 'PROJECT_RUN_START_FAILED', '启动生成任务失败')
   }
 
   async function startWorkConfiguration(input: Omit<CreateWorkConfigurationRunRequestSchema, 'projectId'>): Promise<boolean> {
@@ -101,9 +138,9 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
         body: { ...input, projectId: id },
       })
       if ('error' in result && result.error !== undefined) return { error: result.error }
-      if (!result.data) return { error: new Error('Work configuration AgentRun response did not include data') }
+      if (!result.data) return { error: new Error('Work configuration generation task response did not include data') }
       return { data: result.data }
-    }, 'PROJECT_WORK_RUN_START_FAILED', '启动 Work 配置 AgentRun 失败')
+    }, 'PROJECT_WORK_RUN_START_FAILED', '启动 Work 配置生成任务失败')
   }
 
   async function startRequest(
@@ -139,9 +176,15 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
         return false
       }
       const accepted = result.data
+      const purposeError = purposeDiagnostic(accepted, expectedPurpose)
+      if (purposeError) {
+        run.value = { kind: 'error', diagnostic: purposeError }
+        stopPolling()
+        return false
+      }
       startRequestSucceeded = true
       run.value = { kind: 'success', data: accepted }
-      outcome.value = makeDiagnostic('PROJECT_RUN_ACCEPTED', `AgentRun ${accepted.id} 已接受。`, false)
+      outcome.value = makeDiagnostic('PROJECT_RUN_ACCEPTED', '生成任务已受理。', false)
       schedulePoll(accepted)
       return true
     } finally {
@@ -149,10 +192,30 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
     }
   }
 
+  function reset() {
+    loadGeneration += 1
+    stopPolling()
+    run.value = { kind: 'idle' }
+    outcome.value = null
+    startRequestFingerprint = null
+    startRequestKey = null
+    startRequestSucceeded = false
+  }
+
+  function invalidate(diagnostic: DiagnosticViewModel) {
+    loadGeneration += 1
+    stopPolling()
+    run.value = { kind: 'error', diagnostic }
+    outcome.value = diagnostic
+    startRequestFingerprint = null
+    startRequestKey = null
+    startRequestSucceeded = false
+  }
+
   watch(projectId, (id) => {
     loadGeneration += 1
     stopPolling()
-    run.value = id ? { kind: 'idle' } : { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', 'ȱ����Ŀ�� AgentRun��', false) }
+    run.value = id ? { kind: 'idle' } : { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '缺少项目上下文，无法读取生成任务。', false) }
     outcome.value = null
     startRequestFingerprint = null
     startRequestKey = null
@@ -173,7 +236,7 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
       })
       if (generation !== loadGeneration || projectId.value !== id) return false
       if (result.error) {
-        outcome.value = errorDiagnostic(result.error, 'PROJECT_RUN_CANCEL_FAILED', '取消 AgentRun 失败')
+        outcome.value = errorDiagnostic(result.error, 'PROJECT_RUN_CANCEL_FAILED', '取消生成任务失败')
         return false
       }
       run.value = { kind: 'success', data: result.data }
@@ -224,5 +287,5 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
   })
 
-  return reactive({ run, acting, outcome, load, start, startWorkConfiguration, cancel, retryTrack, stopPolling })
+  return reactive({ run, acting, outcome, load, start, startWorkConfiguration, cancel, retryTrack, stopPolling, reset, invalidate })
 }

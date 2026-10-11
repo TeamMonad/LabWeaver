@@ -1,6 +1,7 @@
 //! Real `PostgreSQL` migration and concurrency evidence for the Issue #48 control plane.
 
 use std::collections::BTreeSet;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
@@ -22,7 +23,7 @@ use contracts::http::{
     CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
     EnvironmentPublicationAdmissionQuery, GeneratedArtifactKind, GeneratedArtifactRecord,
     IdempotencyKey, PlatformImageEntry, PlatformImageKind, PlatformImageStatus,
-    ProblemPackageUploadFile, WorkConfigurationAdmissionQuery,
+    ProblemPackageRetentionChoice, ProblemPackageUploadFile, WorkConfigurationAdmissionQuery,
 };
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::{
@@ -160,6 +161,37 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
         1
     );
 
+    let permanent_course = contracts::CourseId::new();
+    let mut permanent_request = upload_request(permanent_course)?;
+    permanent_request.retention_choice = ProblemPackageRetentionChoice::Permanent;
+    let permanent_session = service
+        .create_upload(
+            permanent_course,
+            &permanent_request,
+            &IdempotencyKey::parse("issue-48-permanent-create")?,
+            now,
+        )
+        .await?;
+    let permanent_package = service
+        .complete_upload(
+            permanent_course,
+            permanent_session.id,
+            permanent_session.revision,
+            &IdempotencyKey::parse("issue-48-permanent-complete")?,
+            now,
+        )
+        .await?;
+    assert!(permanent_package.retention.is_permanent());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT retention_choice FROM control.problem_package_upload_sessions WHERE upload_id=$1",
+        )
+        .bind(permanent_session.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "permanent"
+    );
+
     let recovery_course = contracts::CourseId::new();
     let recovery_session = service
         .create_upload(
@@ -258,6 +290,93 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
 }
 
 #[tokio::test]
+async fn project_policy_updates_require_current_revision_and_replay_idempotently()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+
+    let project_id = ProjectId::new();
+    let project = project_fixture(project_id, ActorId::new(), None)?;
+    insert_project(&pool, &project).await?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+
+    let created = service
+        .activate_project_policy(
+            project_id,
+            authoring_policy(project_id, None, "2026-07-16T08:00:00.000Z".parse()?)?,
+            &IdempotencyKey::parse("project-policy-create")?,
+            None,
+        )
+        .await?;
+    assert_eq!(created.revision, Revision::new(1)?);
+
+    let update_key = IdempotencyKey::parse("project-policy-update")?;
+    let update_policy = authoring_policy(project_id, None, "2026-07-16T08:00:01.000Z".parse()?)?;
+    let updated = service
+        .activate_project_policy(
+            project_id,
+            update_policy.clone(),
+            &update_key,
+            Some(created.revision),
+        )
+        .await?;
+    assert_eq!(updated.revision, Revision::new(2)?);
+
+    let stale = service
+        .activate_project_policy(
+            project_id,
+            authoring_policy(project_id, None, "2026-07-16T08:00:02.000Z".parse()?)?,
+            &IdempotencyKey::parse("project-policy-stale")?,
+            Some(created.revision),
+        )
+        .await;
+    assert!(matches!(stale, Err(ControlError::RevisionConflict)));
+
+    let missing = service
+        .activate_project_policy(
+            project_id,
+            authoring_policy(project_id, None, "2026-07-16T08:00:03.000Z".parse()?)?,
+            &IdempotencyKey::parse("project-policy-missing-fence")?,
+            None,
+        )
+        .await;
+    assert!(matches!(missing, Err(ControlError::RevisionConflict)));
+
+    let replay = service
+        .activate_project_policy(
+            project_id,
+            update_policy,
+            &update_key,
+            Some(created.revision),
+        )
+        .await?;
+    assert_eq!(replay, updated);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.project_llm_policies WHERE project_id=$1",
+        )
+        .bind(project_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    assert_eq!(service.active_project_policy(project_id).await?, updated);
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn candidate_decision_route_kind_is_bound_before_approval()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -271,6 +390,16 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         .connect(&url)
         .await?;
     apply_domain_migrations(&pool, Domain::Control).await?;
+    sqlx::query(
+        "DO $$ BEGIN
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'lw_control_runtime') THEN
+                 CREATE ROLE lw_control_runtime NOLOGIN;
+             END IF;
+         END $$",
+    )
+    .execute(&pool)
+    .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
     let config = control_config()?;
     let evaluation_schema = config.evaluation_schema_sha256;
     let environment_schema = config.environment_schema_sha256;
@@ -328,6 +457,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             Revision::new(1)?,
             &IdempotencyKey::parse("candidate-kind-mismatch")?,
             "2026-07-16T08:00:00.000Z".parse()?,
+            &[],
         )
         .await;
     assert!(matches!(result, Err(ControlError::CandidateKindMismatch)));
@@ -461,6 +591,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             None,
             None,
             None,
+            None,
         )
         .await;
     assert!(matches!(
@@ -485,6 +616,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             EventId::new(),
             &run,
             Some(&environment_candidate),
+            None,
             None,
             None,
             None,
@@ -519,6 +651,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             Revision::new(1)?,
             &IdempotencyKey::parse("approve-container-candidate")?,
             "2026-07-16T08:00:00.000Z".parse()?,
+            &[],
         )
         .await;
     let approval = approval_result?;
@@ -535,7 +668,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         1
     );
     let requested_view = service
-        .project_environment_candidate_view(project_id, environment_candidate.id)
+        .project_environment_candidate_view(project_id, environment_candidate.id, &[])
         .await?;
     assert_eq!(requested_view.candidate, environment_candidate);
     assert_eq!(requested_view.approvals, vec![approval.clone()]);
@@ -613,7 +746,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         )
         .await?;
     let succeeded_view = service
-        .environment_candidate_view(course_id, environment_candidate.id)
+        .environment_candidate_view(course_id, environment_candidate.id, &[])
         .await?;
     let succeeded_build = succeeded_view.build.ok_or("missing succeeded build view")?;
     assert_eq!(
@@ -640,6 +773,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             &IdempotencyKey::parse("publish-container-release")?,
             "2026-07-16T08:30:00.000Z".parse()?,
             "trace-publish-container-release",
+            &[],
         )
         .await?;
     let work_admission = service
@@ -750,7 +884,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .execute(&pool)
     .await?;
     let current_view = service
-        .project_environment_candidate_view(project_id, current_candidate.id)
+        .project_environment_candidate_view(project_id, current_candidate.id, &[])
         .await?;
     assert_eq!(current_view.candidate, current_candidate);
     assert!(current_view.build.is_none());
@@ -805,7 +939,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: "2026-12-31T08:00:00.000Z".parse()?,
+            retain_until: Some("2026-12-31T08:00:00.000Z".parse()?),
             disposition: RetentionDisposition::Delete,
         },
         completed_at: now,
@@ -866,6 +1000,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             Some(&evaluation),
             None,
             Some(&generated),
+            None,
         )
         .await?;
     service
@@ -876,6 +1011,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             Some(&evaluation),
             None,
             Some(&generated),
+            None,
         )
         .await?;
     let object_key: String = sqlx::query_scalar(
@@ -903,6 +1039,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
                 Some(&evaluation),
                 None,
                 Some(&wrong_revision),
+                None,
             )
             .await,
         Err(ControlError::PersistenceIdentityMismatch)
@@ -918,6 +1055,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
                 Some(&evaluation),
                 None,
                 Some(&changed_key),
+                None,
             )
             .await,
         Err(ControlError::ProjectionConflict)
@@ -1000,6 +1138,7 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
             Some(&evaluation),
             Some(&export),
             None,
+            None,
         )
         .await?;
     let source_kind: String = sqlx::query_scalar(
@@ -1035,6 +1174,7 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
             Some(&evaluation),
             Some(&export),
             None,
+            None,
         )
         .await?;
     assert_eq!(
@@ -1057,10 +1197,83 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
                 Some(&evaluation),
                 Some(&changed_key),
                 None,
+                None,
             )
             .await,
         Err(ControlError::ProjectionConflict)
     ));
+    let build_id: Uuid = sqlx::query_scalar(
+        "SELECT build_request_id FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let build_id = BuildRequestId::from_str(&build_id.to_string())?;
+    service
+        .project_build_failure(
+            EventId::new(),
+            project_id,
+            Some(course_id),
+            &contracts::events::AgentBuildFailed {
+                build_request_id: build_id,
+                diagnostic_code: "LW_AGENT_BUILD_CANCELLED".to_owned(),
+                retryable: false,
+                cleanup_verified: true,
+            },
+        )
+        .await?;
+    // A replayed authoring outcome must not rebuild the cancelled immutable candidate.
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            Some(&export),
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.outbox_events WHERE subject=$1")
+            .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED)
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    let artifact = ImageArtifact::Container {
+        id: ImageArtifactId::new(),
+        build_request_id: build_id,
+        repository: "harbor.internal/labweaver-system/late-cancelled-image".to_owned(),
+        digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    assert!(matches!(
+        service
+            .project_artifact(EventId::new(), project_id, Some(course_id), &artifact)
+            .await,
+        Err(ControlError::ProjectionConflict)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM control.container_build_projections WHERE build_request_id=$1"
+        )
+        .bind(build_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "cancelled"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.image_artifact_projections WHERE image_artifact_id=$1"
+        )
+        .bind(match artifact {
+            ImageArtifact::Container { id, .. } => id.as_uuid(),
+            ImageArtifact::VirtualMachine { .. } => unreachable!(),
+        })
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
     Ok(())
 }
 
@@ -1106,6 +1319,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             project_id,
             policy.clone(),
             &IdempotencyKey::parse("authoring-approval-policy")?,
+            None,
         )
         .await?;
     let upload = service
@@ -1154,6 +1368,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             Some(&evaluation),
             None,
             None,
+            None,
         )
         .await?;
 
@@ -1172,6 +1387,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         evaluation_candidate_id: evaluation.id,
         evaluation_candidate_revision: evaluation.revision,
         image_artifact: image_artifact.clone(),
+        evaluation_runner_image_artifact: None,
         reason: "teacher approved the complete package".to_owned(),
     };
     let approval_key = IdempotencyKey::parse("authoring-approval-complete")?;
@@ -1443,6 +1659,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
             project_id,
             policy.clone(),
             &IdempotencyKey::parse("vm-base-policy")?,
+            None,
         )
         .await?;
     let upload = service
@@ -1466,7 +1683,9 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
     let catalog_digest = format!("sha256:{}", Sha256Digest::of_bytes(b"catalog-vm-base"));
     let catalog_base = VirtualMachineBaseDisk {
         binding: "rocky-9-v1".to_owned(),
-        source_registry_digest: format!("docker://quay.io/containerdisks/rocky-9@{catalog_digest}"),
+        source_registry_digest: format!(
+            "docker://harbor.internal/labweaver-system/rocky-9@{catalog_digest}"
+        ),
         capacity_bytes: 21_474_836_480,
     };
     // The candidate declares the catalog base; the deployment policy only owns unrelated statics.
@@ -1497,6 +1716,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             None,
             None,
         )
@@ -1535,6 +1755,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
         evaluation_candidate_id: evaluation.id,
         evaluation_candidate_revision: evaluation.revision,
         image_artifact: image_artifact.clone(),
+        evaluation_runner_image_artifact: None,
         reason: "administrator catalog base reviewed".to_owned(),
     };
 
@@ -1562,6 +1783,10 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
     disabled.status = PlatformImageStatus::Disabled;
     let mut inventory_only = entry.clone();
     inventory_only.disk_sha256 = None;
+    let mut stale_trust = entry.clone();
+    stale_trust.trust_revision += 1;
+    let mut repository_drift = entry.clone();
+    repository_drift.source_reference = "harbor.internal/other-project/rocky-9:1".to_owned();
 
     for (index, drifted) in [
         digest_drift,
@@ -1569,6 +1794,8 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
         format_drift,
         disabled,
         inventory_only,
+        stale_trust,
+        repository_drift,
     ]
     .into_iter()
     .enumerate()
@@ -1613,6 +1840,298 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
             .await,
         Err(ControlError::ArtifactMismatch)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+
+    let now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    let config = control_config()?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        config,
+    )?;
+    let project_id = ProjectId::new();
+    let owner = ActorId::new();
+    let course_id = CourseId::new();
+    insert_project(&pool, &project_fixture(project_id, owner, Some(course_id))?).await?;
+
+    let policy = authoring_policy(project_id, Some(course_id), now)?;
+    service
+        .activate_project_policy(
+            project_id,
+            policy.clone(),
+            &IdempotencyKey::parse("runner-policy")?,
+            None,
+        )
+        .await?;
+    let upload = service
+        .create_project_upload(
+            project_id,
+            &authoring_upload_request(project_id, Some(course_id))?,
+            &IdempotencyKey::parse("runner-upload")?,
+            now,
+        )
+        .await?;
+    let package = service
+        .complete_project_upload(
+            project_id,
+            upload.id,
+            upload.revision,
+            &IdempotencyKey::parse("runner-package")?,
+            now,
+        )
+        .await?;
+    package.validate()?;
+
+    let mut environment = environment_candidate(
+        project_id,
+        Some(course_id),
+        Sha256Digest::of_bytes(b"environment"),
+    )?;
+    let mut environment_value = serde_json::to_value(&environment)?;
+    environment_value["spec"]["class"] = serde_json::json!("experiment");
+    environment.spec = serde_json::from_value(environment_value["spec"].clone())?;
+    environment.validate()?;
+    let environment_context = match &environment.spec.runtime {
+        contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
+            build_context.clone()
+        }
+        contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
+            return Err("fixture must be Container".into());
+        }
+    };
+    let runner_context = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "approved-context-v1".to_owned(),
+        object_version: "runner-version-1".to_owned(),
+        size_bytes: 11,
+        media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_owned(),
+    };
+    let mut evaluation =
+        evaluation_candidate(project_id, Some(course_id), environment.run_id, now)?;
+    evaluation.runner_build_context = Some(runner_context.clone());
+    evaluation.validate()?;
+
+    let run = succeeded_agent_run(
+        project_id,
+        Some(course_id),
+        package.id,
+        policy.id,
+        environment.run_id,
+        environment.id,
+        Some(evaluation.id),
+        EnvironmentClass::Experiment,
+    )?;
+    let environment_generated = GeneratedArtifactRecord {
+        artifact: environment_context.clone(),
+        project_id,
+        course_id: Some(course_id),
+        package_id: package.id,
+        package_revision: package.revision,
+        kind: GeneratedArtifactKind::BuildContext,
+        object_key: format!(
+            "generated-build-contexts/{project_id}/{}.tar.gz",
+            environment_context.artifact_id
+        ),
+        content_sha256: Sha256Digest::of_bytes(b"runner-environment-context").to_string(),
+    };
+    let runner_generated = GeneratedArtifactRecord {
+        artifact: runner_context.clone(),
+        project_id,
+        course_id: Some(course_id),
+        package_id: package.id,
+        package_revision: package.revision,
+        kind: GeneratedArtifactKind::EvaluationRunnerBuildContext,
+        object_key: format!(
+            "generated-evaluation-runners/{project_id}/{}.tar.gz",
+            runner_context.artifact_id
+        ),
+        content_sha256: Sha256Digest::of_bytes(b"runner-generated-context").to_string(),
+    };
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            None,
+            Some(&environment_generated),
+            Some(&runner_generated),
+        )
+        .await?;
+
+    let projections: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT target,build_request_id FROM control.container_build_projections \
+         WHERE project_id=$1 ORDER BY target",
+    )
+    .bind(project_id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        projections.len(),
+        2,
+        "a Container experiment must project both an environment and a runner build"
+    );
+    let environment_build = projections
+        .iter()
+        .find(|(target, _)| target == "environment")
+        .ok_or("missing environment build projection")?
+        .1;
+    let runner_build = projections
+        .iter()
+        .find(|(target, _)| target == "evaluation_runner")
+        .ok_or("missing Evaluation runner build projection")?
+        .1;
+
+    let repository_prefix = "harbor.internal/labweaver-system";
+    let environment_artifact = ImageArtifact::Container {
+        id: ImageArtifactId::new(),
+        build_request_id: BuildRequestId::from_str(&environment_build.to_string())?,
+        repository: format!("{repository_prefix}/course-{course_id}-{}", environment.id),
+        digest: format!("sha256:{}", "b".repeat(64)),
+    };
+    let runner_artifact = ImageArtifact::Container {
+        id: ImageArtifactId::new(),
+        build_request_id: BuildRequestId::from_str(&runner_build.to_string())?,
+        repository: format!(
+            "{repository_prefix}/course-{course_id}-{}-evaluation-runner",
+            evaluation.id
+        ),
+        digest: format!("sha256:{}", "c".repeat(64)),
+    };
+    service
+        .project_artifact(
+            EventId::new(),
+            project_id,
+            Some(course_id),
+            &environment_artifact,
+        )
+        .await?;
+    service
+        .project_artifact(
+            EventId::new(),
+            project_id,
+            Some(course_id),
+            &runner_artifact,
+        )
+        .await?;
+
+    let request = CompleteAuthoringApprovalRequest {
+        project_id,
+        course_id: Some(course_id),
+        package_id: package.id,
+        package_revision: package.revision,
+        environment_candidate_id: environment.id,
+        environment_candidate_revision: environment.revision,
+        evaluation_candidate_id: evaluation.id,
+        evaluation_candidate_revision: evaluation.revision,
+        image_artifact: environment_artifact.clone(),
+        evaluation_runner_image_artifact: Some(runner_artifact.clone()),
+        reason: "teacher approved the container experiment".to_owned(),
+    };
+    let mut missing_runner = request.clone();
+    missing_runner.evaluation_runner_image_artifact = None;
+    assert!(matches!(
+        service
+            .complete_authoring_approval(
+                project_id,
+                &missing_runner,
+                owner,
+                &IdempotencyKey::parse("runner-approval-missing")?,
+                now,
+                "trace-runner-approval-missing",
+                &[],
+            )
+            .await,
+        Err(ControlError::EvaluationRunnerArtifactRequired)
+    ));
+    let mut mismatched_runner = request.clone();
+    if let Some(ImageArtifact::Container { digest, .. }) =
+        &mut mismatched_runner.evaluation_runner_image_artifact
+    {
+        *digest = format!("sha256:{}", "d".repeat(64));
+    }
+    assert!(matches!(
+        service
+            .complete_authoring_approval(
+                project_id,
+                &mismatched_runner,
+                owner,
+                &IdempotencyKey::parse("runner-approval-mismatch")?,
+                now,
+                "trace-runner-approval-mismatch",
+                &[],
+            )
+            .await,
+        Err(ControlError::ArtifactMismatch)
+    ));
+
+    let approval = service
+        .complete_authoring_approval(
+            project_id,
+            &request,
+            owner,
+            &IdempotencyKey::parse("runner-approval")?,
+            now,
+            "trace-runner-approval",
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        approval.evaluation_runner_image_artifact,
+        Some(runner_artifact.clone())
+    );
+    let expected_runner_image = match &runner_artifact {
+        ImageArtifact::Container {
+            repository, digest, ..
+        } => format!("{repository}@{digest}"),
+        ImageArtifact::VirtualMachine { .. } => {
+            return Err("runner fixture must be a Container artifact".into());
+        }
+    };
+    assert_eq!(
+        approval.evaluation_runtime_identity.runner_image,
+        expected_runner_image
+    );
+    let persisted_runner_artifact: Option<Uuid> = sqlx::query_scalar(
+        "SELECT evaluation_runner_image_artifact_id FROM control.authoring_approvals \
+         WHERE approval_id=$1",
+    )
+    .bind(approval.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        persisted_runner_artifact,
+        Some(runner_artifact.id().as_uuid())
+    );
+
+    let view = service
+        .project_evaluation_candidate_view(project_id, evaluation.id)
+        .await?;
+    assert_eq!(view.runner_image_artifact, Some(runner_artifact));
+    assert_eq!(
+        view.runner_build.map(|build| build.state),
+        Some(contracts::http::CandidateBuildState::Succeeded)
+    );
     Ok(())
 }
 
@@ -1665,6 +2184,7 @@ async fn authoring_publication_failure_is_durable_and_not_admissible()
             base_disk: config.virtual_machine_bases.bases[0].base_disk.clone(),
             format: config.virtual_machine_bases.bases[0].format,
         },
+        evaluation_runner_image_artifact: None,
         actor_id,
         reason: "fixture approval for durable publication failure".to_owned(),
         approved_at: now,
@@ -1807,6 +2327,7 @@ async fn private_work_environment_approval_requires_project_owner()
             project_id,
             policy.clone(),
             &IdempotencyKey::parse("private-work-policy")?,
+            None,
         )
         .await?;
     let environment =
@@ -1822,7 +2343,15 @@ async fn private_work_environment_approval_requires_project_owner()
         EnvironmentClass::Work,
     )?;
     service
-        .project_candidates(EventId::new(), &run, Some(&environment), None, None, None)
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            None,
+            None,
+            None,
+            None,
+        )
         .await?;
     let request = CandidateDecisionRequest {
         candidate_revision: environment.revision,
@@ -1842,6 +2371,7 @@ async fn private_work_environment_approval_requires_project_owner()
                 Revision::new(1)?,
                 &IdempotencyKey::parse("private-work-outsider")?,
                 now,
+                &[],
             )
             .await,
         Err(ControlError::ProjectGovernanceDenied)
@@ -1856,6 +2386,7 @@ async fn private_work_environment_approval_requires_project_owner()
             Revision::new(1)?,
             &IdempotencyKey::parse("private-work-owner")?,
             now,
+            &[],
         )
         .await?;
     assert_eq!(approval.actor_id, owner);
@@ -2031,6 +2562,16 @@ async fn project_release_reads_are_project_scoped_and_course_filtered()
         .connect(&url)
         .await?;
     apply_domain_migrations(&pool, Domain::Control).await?;
+    sqlx::query(
+        "DO $$ BEGIN
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'lw_control_runtime') THEN
+                 CREATE ROLE lw_control_runtime NOLOGIN;
+             END IF;
+         END $$",
+    )
+    .execute(&pool)
+    .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
     let service = ControlService::new(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
@@ -2289,6 +2830,7 @@ fn authoring_upload_request(
             },
         ],
         retention_policy_revision: Revision::new(1)?,
+        retention_choice: contracts::http::ProblemPackageRetentionChoice::Finite,
     })
 }
 
@@ -2304,7 +2846,7 @@ fn authoring_policy(
         "revision": 1,
         "binding": {
             "runtimeBinding": "claude-code-test",
-            "model": "claude-sonnet-4-6-20260601",
+            "model": "fixture-provider-v1",
             "claudeCodeVersion": "2.1.207",
             "maxInFlightPerWorker": 2
         },
@@ -2354,7 +2896,8 @@ fn vm_environment_candidate(
         "storage_class_binding":base.storage_class_binding,
         "ssh_port":22
     });
-    value["spec"]["retention"]["retainUntil"] = serde_json::to_value(now)?;
+    value["spec"]["retention"]["retainUntil"] =
+        serde_json::to_value(UtcTimestamp::from_utc(now.get() + time::Duration::days(1))?)?;
     candidate.spec = serde_json::from_value(value["spec"].clone())?;
     candidate.validate()?;
     Ok(candidate)
@@ -2406,6 +2949,7 @@ fn evaluation_candidate_from_yaml(
         spec: EvaluationSpec::from_yaml(yaml)?,
         policy_revision: Revision::new(1)?,
         model: "fixture-provider-v1".to_owned(),
+        runner_build_context: None,
         created_at: now,
     })
 }
@@ -2552,6 +3096,7 @@ fn upload_request(
             },
         ],
         retention_policy_revision: Revision::new(1)?,
+        retention_choice: contracts::http::ProblemPackageRetentionChoice::Finite,
     })
 }
 
@@ -2574,6 +3119,7 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             builder_binding: "buildkit-primary-v1".to_owned(),
             output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
+            runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,
             max_cpu_millicores: 2_000,
@@ -2602,6 +3148,16 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         evaluation_runtime: control_service::EvaluationRuntimePolicy {
             provider_binding: "evaluation-primary-v1".to_owned(),
             runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+        },
+        llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+            models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                model: "fixture-provider-v1".to_owned(),
+                label: "Fixture model".to_owned(),
+            }],
+            default_model: "fixture-provider-v1".to_owned(),
+            runtime_binding: "claude-code-test".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
         },
     })
 }

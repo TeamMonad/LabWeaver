@@ -110,26 +110,31 @@
         环境控制台
       </h3>
 
-      <div
+      <details
         v-if="!isEnvironmentLoaded || environmentToolsOpen"
-        class="environment-selector"
+        class="environment-id-input-details"
+        :open="environmentToolsOpen"
+        @toggle="syncEnvironmentToolsOpen"
       >
-        <label for="env-id-input">环境 ID</label>
-        <input
-          id="env-id-input"
-          v-model="environmentIdInput"
-          type="text"
-          class="text-input"
-          placeholder="输入环境 ID 或从创建请求获取"
-        >
-        <button
-          type="button"
-          class="filled-button"
-          @click="applyEnvironmentId"
-        >
-          加载
-        </button>
-      </div>
+        <summary>高级：输入已有环境 ID</summary>
+        <div class="environment-selector">
+          <label for="env-id-input">环境 ID</label>
+          <input
+            id="env-id-input"
+            v-model="environmentIdInput"
+            type="text"
+            class="text-input"
+            placeholder="输入环境 ID 或从创建请求获取"
+          >
+          <button
+            type="button"
+            class="filled-button"
+            @click="applyEnvironmentId"
+          >
+            加载
+          </button>
+        </div>
+      </details>
 
       <div
         v-if="!selectedEnvironmentId"
@@ -140,7 +145,13 @@
           size="lg"
           aria-hidden="true"
         />
-        <p>选择版本创建环境，或输入已有环境 ID 开始管理。</p>
+        <p>{{ environmentEmptyHint }}</p>
+        <RouterLink
+          class="filled-button"
+          :to="{ path: environmentListPath, query: projectId ? { projectId } : undefined }"
+        >
+          {{ environmentListActionLabel }}
+        </RouterLink>
       </div>
 
       <template v-else>
@@ -148,10 +159,10 @@
           <div class="gcp-resource-header">
             <div class="gcp-breadcrumbs">
               <RouterLink
-                :to="{ path: isWorkConnection ? '/researcher/workspaces' : '/student/labs', query: projectId ? { projectId } : undefined }"
+                :to="{ path: environmentListPath, query: projectId ? { projectId } : undefined }"
                 class="breadcrumb-link"
               >
-                {{ isWorkConnection ? 'Work 项目环境' : '课程实验环境' }}
+                {{ breadcrumbLabel }}
               </RouterLink>
               <span class="breadcrumb-sep">/</span>
               <span
@@ -240,11 +251,11 @@
                 class="text-button error"
                 :disabled="!canDelete(env.instance.data)"
                 :title="lifecycleActionReason(env.instance.data, 'delete')"
-                aria-label="删除"
+                :aria-label="failedCleanup(env.instance.data) ? '重试回收' : '删除'"
                 aria-describedby="lifecycle-action-hint"
                 @click="openDelete(env.instance.data)"
               >
-                删除
+                {{ failedCleanup(env.instance.data) ? '重试回收' : '删除' }}
               </button>
             </template>
           </GcpActionBar>
@@ -265,7 +276,7 @@
             <DiagnosticBanner
               :code="lifecycleDiagnostic.code"
               :message="lifecycleDiagnostic.message"
-              :retryable="lifecycleDiagnostic.retryable"
+              :retryable="lifecycleDiagnostic.retryable && !(env.instance.kind === 'success' && env.instance.data.desiredState === 'deleted')"
               severity="error"
               @retry="retryLifecycle"
             />
@@ -316,7 +327,7 @@
               <span>异步操作与诊断</span>
             </button>
             <button
-              v-if="!isWorkConnection"
+              v-if="!isWorkConnection && !props.teacherMode"
               type="button"
               class="detail-tab"
               :class="{ 'detail-tab--active': activeTab === 'freeze' }"
@@ -333,7 +344,7 @@
 
           <AsyncStateView
             :state="env.instance"
-            @retry="env.load"
+            @retry="env.startPolling"
           >
             <template #success="{ data }">
               <!-- TAB 1: Overview & Endpoints -->
@@ -352,17 +363,15 @@
                       <span class="meta-item__value">{{ desiredEnvironmentStateLabel(data.desiredState) }}</span>
                     </div>
                     <div class="meta-item">
-                      <span class="meta-item__label">修订版本</span>
-                      <span class="meta-item__value">rev-{{ data.revision }}</span>
-                    </div>
-                    <div class="meta-item">
-                      <span class="meta-item__label">过期时间</span>
-                      <span class="meta-item__value">{{ formatTimestamp(data.eligibilityExpiresAt) }}</span>
+                      <span class="meta-item__label">材料保留至</span>
+                      <span class="meta-item__value">{{ environmentMaterialDeadlineLabel(data.eligibilityExpiresAt) }}</span>
                     </div>
                   </div>
                   <details class="environment-id-details">
-                    <summary>查看环境 ID</summary>
+                    <summary>查看高级详情</summary>
+                    <span>环境 ID</span>
                     <code>{{ data.id }}</code>
+                    <span>内部修订版本：rev-{{ data.revision }}</span>
                   </details>
                 </div>
 
@@ -483,7 +492,7 @@
                             class="runtime-access"
                           >
                             <div
-                              v-if="httpsGrant(g)"
+                              v-if="webGrant(g)"
                               class="access-card"
                             >
                               <h5 class="access-card__title">
@@ -582,9 +591,9 @@
                   <button
                     type="button"
                     class="outlined-button"
-                    @click="activeTab = 'freeze'"
+                    @click="activeTab = props.teacherMode ? 'operations' : 'freeze'"
                   >
-                    查看提交状态
+                    {{ props.teacherMode ? '查看操作状态' : '查看提交状态' }}
                   </button>
                 </div>
                 <div
@@ -801,7 +810,7 @@
 
               <!-- TAB 4: Freeze & Submission -->
               <div
-                v-if="!isWorkConnection"
+                v-if="!isWorkConnection && !props.teacherMode"
                 v-show="activeTab === 'freeze'"
                 class="tab-pane"
               >
@@ -1019,9 +1028,9 @@
 
     <ConfirmDialog
       :open="deleteEnvironment !== null"
-      title="删除环境"
-      description="确定删除该环境吗？所有未持久化的数据将丢失。"
-      confirm-text="删除"
+      :title="deleteEnvironment && failedCleanup(deleteEnvironment) ? '重试回收环境' : '删除环境'"
+      :description="deleteEnvironment && failedCleanup(deleteEnvironment) ? '上次回收失败，资源释放尚未确认。重试会继续回收该环境，并删除仍存在的工作目录及关联容器存储或虚拟机磁盘；操作不可恢复。项目材料、已冻结提交和评测记录不在本环境回收范围内。确定继续吗？' : '删除会回收整个环境，删除工作目录及关联容器存储或虚拟机磁盘；操作不可恢复。项目材料、已冻结提交和评测记录不在本环境删除范围内。确定继续吗？'"
+      :confirm-text="deleteEnvironment && failedCleanup(deleteEnvironment) ? '重试回收' : '删除'"
       severity="error"
       @cancel="deleteEnvironment = null"
       @confirm="confirmDeleteEnvironment"
@@ -1030,7 +1039,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
@@ -1069,6 +1078,13 @@ import {
   type EnvironmentInstanceWithFreeze,
 } from '@/types/access'
 
+const props = withDefaults(defineProps<{
+  /** Teacher inventory and console share the same lifecycle/access controls. */
+  teacherMode?: boolean
+}>(), {
+  teacherMode: false,
+})
+
 const route = useRoute()
 const router = useRouter()
 const projects = useProjects()
@@ -1090,16 +1106,20 @@ const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
 const createGrantDiagnostic = ref<DiagnosticViewModel | null>(null)
 const environmentToolsOpen = ref(false)
 
-const env = useEnvironmentInstance(selectedEnvironmentId)
+const routeProjectId = computed(() => {
+  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
+  return id || undefined
+})
+const waitForEnvironmentHandoff = computed(() => route.path.startsWith('/researcher/'))
+const handoffProjectId = computed(() => waitForEnvironmentHandoff.value
+  ? routeProjectId.value ?? projects.selectedProjectId ?? undefined
+  : undefined)
+const env = useEnvironmentInstance(selectedEnvironmentId, handoffProjectId)
 const isEnvironmentLoaded = computed(() => env.instance.kind === 'success')
 const environmentTitle = computed(() => {
   if (env.instance.kind === 'success') return env.instance.data.displayLabel
   if (env.instance.kind === 'loading') return '正在加载环境'
   return null
-})
-const routeProjectId = computed(() => {
-  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
-  return id || undefined
 })
 const environmentProjectId = computed(() => (
   env.instance.kind === 'success' ? env.instance.data.projectId : undefined
@@ -1115,7 +1135,21 @@ const courseId = computed(() => {
   return selectedProject.value?.courseId ?? undefined
 })
 const isContextMissing = computed(() => !projectId.value)
-const isWorkConnection = computed(() => route.path.startsWith('/researcher/') || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
+const isWorkConnection = computed(() => waitForEnvironmentHandoff.value || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
+const environmentListPath = computed(() => props.teacherMode
+  ? '/teacher/environments'
+  : isWorkConnection.value ? '/researcher/workspaces' : '/student/labs')
+const environmentListActionLabel = computed(() => props.teacherMode
+  ? '查看项目环境'
+  : isWorkConnection.value ? '选择已有 Work 环境' : '选择已有实验环境')
+const environmentEmptyHint = computed(() => props.teacherMode
+  ? '请从教师项目环境列表选择已有环境，或从上方创建环境。'
+  : isWorkConnection.value
+    ? '请从项目工作空间选择已有 Work 环境，或在资源申请中创建新的 Work 环境。'
+    : '请从课程实验列表选择已有环境，或从上方已发布模板创建环境。')
+const breadcrumbLabel = computed(() => props.teacherMode
+  ? '教师项目环境'
+  : isWorkConnection.value ? 'Work 项目环境' : '课程实验环境')
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
 const lifecycle = useEnvironmentLifecycle(projectId, courseId)
 
@@ -1274,6 +1308,12 @@ function clearEnvironmentSelection() {
   environmentToolsOpen.value = true
 }
 
+function syncEnvironmentToolsOpen(event: Event) {
+  if (event.currentTarget instanceof HTMLDetailsElement) {
+    environmentToolsOpen.value = event.currentTarget.open
+  }
+}
+
 watch(
   [() => projects.projects, routeProjectId, environmentProjectId],
   ([state, requestedProjectId, instanceProjectId]) => {
@@ -1303,22 +1343,40 @@ onBeforeRouteUpdate((to) => {
   return true
 })
 
-watch(
-  () => projects.selectedProjectId,
-  (selectedId, previousId) => {
-    if (!selectedId || !hasProject(selectedId)) return
-    if (routeNavigationProjectId.value === selectedId) {
-      routeNavigationProjectId.value = null
-      return
-    }
-    const contextProjectId = routeProjectId.value ?? environmentProjectId.value
-    if (routeProjectId.value && !hasProject(routeProjectId.value)) return
-    if (contextProjectId === selectedId) return
-    if (selectedEnvironmentId.value && !environmentProjectId.value && (env.instance.kind === 'idle' || env.instance.kind === 'loading') && previousId === null) return
-    clearEnvironmentSelection()
-    void router.replace({ query: { ...route.query, projectId: selectedId, environmentId: undefined } })
-  },
-)
+function syncSelectedProjectToRoute(selectedId: string | null, previousId: string | null = null) {
+  if (!selectedId || !hasProject(selectedId)) return
+  if (routeNavigationProjectId.value === selectedId) {
+    routeNavigationProjectId.value = null
+    return
+  }
+  const contextProjectId = routeProjectId.value ?? environmentProjectId.value
+  if (routeProjectId.value && !hasProject(routeProjectId.value)) return
+  if (contextProjectId === selectedId) return
+  if (selectedEnvironmentId.value && !environmentProjectId.value && (env.instance.kind === 'idle' || env.instance.kind === 'loading') && previousId === null) return
+  clearEnvironmentSelection()
+  void router.replace({ query: { ...route.query, projectId: selectedId, environmentId: undefined } })
+}
+
+// Wait until this route has mounted before synchronizing project context. A
+// project list can resolve while the router is still running the auth guard;
+// replacing from setup in that window would use the previous route (often the
+// root route) and cancel the user's navigation. Mounting is the router's
+// committed route boundary, so the same synchronization remains immediate for
+// this page without racing a pending navigation.
+onMounted(() => {
+  if (selectedEnvironmentId.value) {
+    watch(
+      () => projects.selectedProjectId,
+      syncSelectedProjectToRoute,
+    )
+    return
+  }
+  watch(
+    [() => projects.selectedProjectId, () => projects.projects],
+    ([selectedId], [previousId]) => syncSelectedProjectToRoute(selectedId, previousId),
+    { immediate: true },
+  )
+})
 
 watch(
   () =>
@@ -1372,6 +1430,7 @@ const failedOperation = computed<EnvironmentOperationSnapshotSchema | null>(() =
 })
 
 const retryableOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
+  if (env.instance.kind === 'success' && env.instance.data.desiredState === 'deleted') return null
   if (operations.operations.kind !== 'success') return null
   return operations.operations.data
     .filter((op) => op.state === 'failed' && op.retryEligible)
@@ -1479,6 +1538,7 @@ function operationTimelineDescription(op: EnvironmentOperationSnapshotSchema): s
 }
 
 function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
+  if (failedCleanup(data)) return '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。'
   const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
   return `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`
 }
@@ -1493,12 +1553,12 @@ async function cancelCurrentOperation() {
   }
 }
 
-function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'https' | 'ssh') {
+function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'http' | 'https' | 'ssh') {
   return g.endpointGrants.find((eg) => eg.protocol === protocol && eg.health === 'healthy') ?? null
 }
 
-function httpsGrant(g: AccessGrantWithGateway) {
-  return endpointGrantOf(g, 'https')
+function webGrant(g: AccessGrantWithGateway) {
+  return endpointGrantOf(g, 'https') ?? endpointGrantOf(g, 'http')
 }
 
 function sshGrant(g: AccessGrantWithGateway) {
@@ -1506,7 +1566,7 @@ function sshGrant(g: AccessGrantWithGateway) {
 }
 
 function connectUrl(g: AccessGrantWithGateway): string | null {
-  const eg = httpsGrant(g)
+  const eg = webGrant(g)
   return eg ? resolveConnectUrl(eg) : null
 }
 
@@ -1541,6 +1601,10 @@ function desiredEnvironmentStateLabel(value: string): string {
     stopped: '已停止',
     deleted: '已删除',
   } as Record<string, string>)[value] ?? environmentStateLabel(value)
+}
+
+function environmentMaterialDeadlineLabel(deadline: string | null): string {
+  return deadline === null ? '不过期，直到明确撤回' : formatTimestamp(deadline)
 }
 
 function accessGrantRequestEnvironment(): EnvironmentInstanceSchema | null {
@@ -1728,7 +1792,16 @@ async function retryFreeze() {
 function hasActiveLifecycleOperation(data: EnvironmentInstanceSchema): boolean {
   const current = data.operation.state
   if (current === 'accepted' || current === 'running' || current === 'cancelling') return true
+  const accepted = lifecycle.lastAccepted
+  if (accepted?.environmentId === data.id && accepted.revision > data.revision) return true
   return activeOperation.value?.environmentId === data.id
+}
+
+function failedCleanup(data: EnvironmentInstanceSchema): boolean {
+  return data.desiredState === 'deleted'
+    && data.observedState === 'failed'
+    && data.operation.state === 'failed'
+    && ['delete', 'expire', 'cleanup', 'cancel'].includes(data.operation.kind)
 }
 
 function isTerminalEnvironment(data: EnvironmentInstanceSchema): boolean {
@@ -1763,13 +1836,16 @@ function canRestart(data: EnvironmentInstanceSchema) {
 
 function canDelete(data: EnvironmentInstanceSchema) {
   return !isTerminalEnvironment(data)
-    && data.desiredState !== 'deleted'
+    && (data.desiredState !== 'deleted' || (failedCleanup(data) && !hasActiveLifecycleOperation(data)))
     && !(hasActiveLifecycleOperation(data) && data.operation.kind === 'delete')
     && !lifecycle.operating.has(`${data.id}:delete`)
 }
 
 function lifecycleActionReason(data: EnvironmentInstanceSchema, action: LifecycleTarget['action']): string {
   if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
+  if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return action === 'delete'
+    ? '上次回收失败，资源释放尚未确认；重新回收会删除仍存在的工作目录和关联磁盘数据。'
+    : '环境正在等待回收，只能重试回收，不能重新启动或恢复环境。'
   if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，请等待清理完成。'
   if (hasActiveLifecycleOperation(data) && (action !== 'delete' || data.operation.kind === 'delete')) {
     return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请等待操作完成。`
@@ -1784,10 +1860,16 @@ function lifecycleActionReason(data: EnvironmentInstanceSchema, action: Lifecycl
 
 function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
   if (data.observedState === 'deleted') return '此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。'
+  if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return '环境回收失败，资源释放尚未确认。请重试回收；回收完成前不能打开控制台或重新启动环境。'
   if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
   if (hasActiveLifecycleOperation(data)) return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
   if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
-  if (data.observedState === 'stopped') return '环境已停止，启动后才能打开终端。'
+  if (data.observedState === 'stopped') {
+    const resourceHint = data.class === 'experiment'
+      ? 'GPU 预留已释放，重新启动时会重新进行 GPU 资源准入。'
+      : 'GPU 预留和 Work 资源租约会保留，删除环境并完成回收后才归还容量。'
+    return `环境已停止，启动后才能打开终端。计算用量已停止计量；工作目录和磁盘仍保留并继续按存储费率核算。${resourceHint}`
+  }
   if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
   return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
 }
@@ -1845,7 +1927,7 @@ async function runLifecycle(data: EnvironmentInstanceSchema, action: LifecycleTa
   }
   // Refresh the operations timeline immediately so the new command shows up
   // instead of waiting for the next full page load.
-  await operations.load()
+  await Promise.all([env.load(), operations.load()])
 }
 
 async function retryFailedOperation(data: EnvironmentInstanceSchema) {
@@ -1877,7 +1959,7 @@ async function retryLifecycle() {
   const { environmentId, action } = target
   if (action === 'delete') {
     const instance = env.instance.kind === 'success' ? env.instance.data : undefined
-    if (instance && instance.id === environmentId) {
+    if (instance && instance.id === environmentId && canDelete(instance)) {
       await runLifecycle(instance, 'delete')
     }
     return
@@ -1889,13 +1971,16 @@ async function retryLifecycle() {
 }
 
 function openDelete(data: EnvironmentInstanceSchema) {
+  if (!canDelete(data)) return
   deleteEnvironment.value = data
 }
 
 async function confirmDeleteEnvironment() {
   if (!deleteEnvironment.value) return
-  const data = deleteEnvironment.value
+  const requested = deleteEnvironment.value
   deleteEnvironment.value = null
+  const data = env.instance.kind === 'success' ? env.instance.data : null
+  if (!data || data.id !== requested.id || !canDelete(data)) return
   await runLifecycle(data, 'delete')
 }
 
@@ -2075,13 +2160,15 @@ async function revokeAccessGrant() {
   color: var(--md-sys-color-on-surface);
 }
 
-.environment-id-details {
+.environment-id-details,
+.environment-id-input-details {
   margin: 0 16px 16px;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
 }
 
-.environment-id-details summary {
+.environment-id-details summary,
+.environment-id-input-details summary {
   cursor: pointer;
 }
 
@@ -2090,6 +2177,11 @@ async function revokeAccessGrant() {
   margin-top: 6px;
   overflow-wrap: anywhere;
   color: var(--md-sys-color-on-surface);
+}
+
+.environment-id-details span {
+  display: block;
+  margin-top: 6px;
 }
 
 .console-unauthorized-pane {

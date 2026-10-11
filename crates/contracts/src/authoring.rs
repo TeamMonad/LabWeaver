@@ -41,6 +41,9 @@ pub struct ProblemPackage {
 impl ProblemPackage {
     /// Validates atomic package identity.
     pub fn validate(&self) -> Result<(), AuthoringError> {
+        self.retention.validate().map_err(|_| {
+            AuthoringError::InvalidPackage("retention decision is invalid".to_owned())
+        })?;
         if self.files.is_empty() {
             return Err(AuthoringError::InvalidPackage(
                 "files must not be empty".to_owned(),
@@ -138,6 +141,84 @@ pub struct ProjectLlmEgressPolicy {
     pub denied_data_classes: Vec<DeniedDataClass>,
     pub student_content_mode: StudentContentMode,
     pub activated_at: UtcTimestamp,
+}
+
+/// One deployment-approved model that a project manager may select.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectLlmPolicyModelOption {
+    /// Stable model name accepted by the configured LLM runtime.
+    pub model: String,
+    /// User-facing name for the model. This must not contain credentials or runtime secrets.
+    pub label: String,
+}
+
+/// Non-secret deployment-owned defaults used to author a project LLM policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectLlmPolicyOptions {
+    pub models: Vec<ProjectLlmPolicyModelOption>,
+    pub default_model: String,
+    pub runtime_binding: String,
+    pub claude_code_version: String,
+    pub max_in_flight_per_worker: u16,
+}
+
+impl ProjectLlmPolicyOptions {
+    /// Validates deployment-owned defaults before they can be exposed to callers.
+    pub fn validate(&self) -> Result<(), AuthoringError> {
+        if self.models.is_empty() {
+            return Err(AuthoringError::ModelRequired);
+        }
+        let mut seen = BTreeSet::new();
+        for option in &self.models {
+            let normalized_model = option.model.to_ascii_lowercase();
+            if !valid_runtime_identity(&option.model, 256)
+                || matches!(
+                    normalized_model.as_str(),
+                    "default" | "sonnet" | "opus" | "haiku" | "opusplan"
+                )
+                || option.label.trim().is_empty()
+                || option.label.len() > 256
+                || !seen.insert(option.model.clone())
+            {
+                return Err(AuthoringError::ModelRequired);
+            }
+        }
+        if !seen.contains(&self.default_model) {
+            return Err(AuthoringError::ModelRequired);
+        }
+        if !valid_runtime_identity(&self.runtime_binding, 256)
+            || self.runtime_binding.contains("://")
+            || !valid_claude_code_version(&self.claude_code_version)
+            || !(1..=64).contains(&self.max_in_flight_per_worker)
+        {
+            return Err(AuthoringError::RuntimeIdentityInvalid);
+        }
+        Ok(())
+    }
+
+    /// Verifies that a submitted policy uses the deployment-owned runtime binding and model.
+    pub fn validate_policy_binding(
+        &self,
+        binding: &ClaudeCodeBindingV1,
+    ) -> Result<(), AuthoringError> {
+        self.validate()?;
+        if binding.runtime_binding != self.runtime_binding
+            || binding.claude_code_version != self.claude_code_version
+            || binding.max_in_flight_per_worker != self.max_in_flight_per_worker
+        {
+            return Err(AuthoringError::RuntimeIdentityInvalid);
+        }
+        if !self
+            .models
+            .iter()
+            .any(|option| option.model == binding.model)
+        {
+            return Err(AuthoringError::ModelRequired);
+        }
+        Ok(())
+    }
 }
 
 impl ProjectLlmEgressPolicy {
@@ -398,12 +479,15 @@ impl WorkConfigurationPreauthorization {
 }
 
 /// Bounded runtime resources expressed without Kubernetes-dependent parsing.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceRequirements {
     pub cpu_millicores: u32,
     pub memory_bytes: u64,
     pub storage_bytes: u64,
+    /// Policy-catalogued GPU class and count. It never carries a Kubernetes resource name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<crate::resource::GpuRequest>,
 }
 
 /// Network egress posture for a published environment.
@@ -591,6 +675,9 @@ impl<'de> Deserialize<'de> for EnvironmentSpec {
 impl EnvironmentSpec {
     /// Validates required bindings, resources, and runtime-specific guards.
     pub fn validate(&self) -> Result<(), AuthoringError> {
+        self.retention.validate().map_err(|_| {
+            AuthoringError::InvalidEnvironmentSpec("retention decision is invalid".to_owned())
+        })?;
         if self.name.trim().is_empty() {
             return Err(AuthoringError::InvalidEnvironmentSpec(
                 "name is required".to_owned(),
@@ -603,6 +690,13 @@ impl EnvironmentSpec {
             return Err(AuthoringError::InvalidEnvironmentSpec(
                 "resource requirements must be non-zero".to_owned(),
             ));
+        }
+        if let Some(gpu) = &self.resources.gpu {
+            gpu.validate().map_err(|_| {
+                AuthoringError::InvalidEnvironmentSpec(
+                    "gpu must name a catalog class with a non-zero count".to_owned(),
+                )
+            })?;
         }
         if self.entries.is_empty() || self.security.security_profile_binding.trim().is_empty() {
             return Err(AuthoringError::InvalidEnvironmentSpec(
@@ -792,6 +886,32 @@ pub struct AgentRun {
     pub revision: Revision,
     pub tracks: Vec<AgentTrack>,
     pub plan: Option<WorkConfigurationPlan>,
+}
+
+/// Bounded project-scoped history item.  Full run details remain available
+/// through the existing `getProjectAgentRun` operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunHistoryItem {
+    pub id: AgentRunId,
+    pub project_id: ProjectId,
+    /// Course association copied from the Agent-owned run row so Control can
+    /// enforce the same project/course binding as the detail endpoint.
+    pub course_id: Option<CourseId>,
+    pub purpose: AgentRunPurpose,
+    pub state: AgentRunState,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+}
+
+/// Page of Agent-owned project run history.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunHistoryPage {
+    pub items: Vec<AgentRunHistoryItem>,
+    pub page: u32,
+    pub page_size: u16,
+    pub has_more: bool,
 }
 
 impl AgentRun {
@@ -1055,6 +1175,13 @@ pub struct EvaluationCandidate {
     pub spec: EvaluationSpec,
     pub policy_revision: Revision,
     pub model: String,
+    /// Generated build context for this experiment's own Evaluation runner image.
+    ///
+    /// Only Container experiments carry a runner image; deployment-owned VM evaluation leaves this
+    /// absent. Control resolves the object key from the Agent artifact authority before enqueueing
+    /// the second single-image build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_build_context: Option<ArtifactRef>,
     pub created_at: UtcTimestamp,
 }
 
@@ -1064,6 +1191,9 @@ impl EvaluationCandidate {
             return Err(AuthoringError::InvalidAgentRun(
                 "candidate model is invalid".to_owned(),
             ));
+        }
+        if let Some(runner) = &self.runner_build_context {
+            validate_artifact_ref(runner)?;
         }
         Ok(())
     }
@@ -1142,6 +1272,12 @@ pub struct AuthoringApproval {
     /// Exact Evaluation execution identity frozen when this approval is completed.
     pub evaluation_runtime_identity: EvaluationRuntimeIdentity,
     pub image_artifact: ImageArtifact,
+    /// Exact per-experiment Evaluation runner image frozen with this approval.
+    ///
+    /// Container experiments must carry their own built runner image. VM experiments use the
+    /// deployment-owned Evaluation runtime and leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_runner_image_artifact: Option<ImageArtifact>,
     pub actor_id: ActorId,
     pub reason: String,
     pub approved_at: UtcTimestamp,
@@ -1161,7 +1297,27 @@ impl AuthoringApproval {
             .map_err(|_| AuthoringError::InvalidApproval)?;
         self.image_artifact
             .validate()
-            .map_err(|_| AuthoringError::InvalidArtifactReference)
+            .map_err(|_| AuthoringError::InvalidArtifactReference)?;
+        match (&self.image_artifact, &self.evaluation_runner_image_artifact) {
+            (ImageArtifact::Container { .. }, Some(runner)) => {
+                if !matches!(runner, ImageArtifact::Container { .. }) {
+                    return Err(AuthoringError::InvalidApproval);
+                }
+                runner
+                    .validate()
+                    .map_err(|_| AuthoringError::InvalidArtifactReference)?;
+            }
+            (ImageArtifact::Container { .. }, None) => {
+                return Err(AuthoringError::InvalidApproval);
+            }
+            (ImageArtifact::VirtualMachine { .. }, Some(runner)) => {
+                runner
+                    .validate()
+                    .map_err(|_| AuthoringError::InvalidArtifactReference)?;
+            }
+            (ImageArtifact::VirtualMachine { .. }, None) => {}
+        }
+        Ok(())
     }
 
     /// Verifies that the approval belongs to the requested project context.

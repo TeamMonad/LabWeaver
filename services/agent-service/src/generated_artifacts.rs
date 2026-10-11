@@ -20,6 +20,7 @@ const MAX_OBJECT_KEY_BYTES: usize = 2 * 1024;
 fn kind_name(kind: GeneratedArtifactKind) -> &'static str {
     match kind {
         GeneratedArtifactKind::BuildContext => "build_context",
+        GeneratedArtifactKind::EvaluationRunnerBuildContext => "evaluation_runner_build_context",
         GeneratedArtifactKind::WorkScript => "work_script",
         GeneratedArtifactKind::VerificationScript => "verification_script",
     }
@@ -28,6 +29,9 @@ fn kind_name(kind: GeneratedArtifactKind) -> &'static str {
 fn parse_kind(value: &str) -> Result<GeneratedArtifactKind, GeneratedArtifactStoreError> {
     match value {
         "build_context" => Ok(GeneratedArtifactKind::BuildContext),
+        "evaluation_runner_build_context" => {
+            Ok(GeneratedArtifactKind::EvaluationRunnerBuildContext)
+        }
         "work_script" => Ok(GeneratedArtifactKind::WorkScript),
         "verification_script" => Ok(GeneratedArtifactKind::VerificationScript),
         _ => Err(GeneratedArtifactStoreError::InvalidMetadata),
@@ -379,7 +383,9 @@ pub enum GeneratedArtifactStoreError {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{GeneratedArtifactKind, GeneratedArtifactRecord, validate_record};
+    use super::{
+        GeneratedArtifactKind, GeneratedArtifactRecord, kind_name, parse_kind, validate_record,
+    };
     use contracts::{ArtifactId, ArtifactRef, ProblemPackageId, ProjectId, Revision};
 
     fn record() -> GeneratedArtifactRecord {
@@ -399,6 +405,18 @@ mod tests {
             object_key: "generated-work-configuration-scripts/project/script.sh".to_owned(),
             content_sha256: "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b3f8e6"
                 .to_owned(),
+        }
+    }
+
+    #[test]
+    fn every_artifact_kind_name_round_trips() {
+        for kind in [
+            GeneratedArtifactKind::BuildContext,
+            GeneratedArtifactKind::EvaluationRunnerBuildContext,
+            GeneratedArtifactKind::WorkScript,
+            GeneratedArtifactKind::VerificationScript,
+        ] {
+            assert_eq!(parse_kind(kind_name(kind)).ok(), Some(kind));
         }
     }
 

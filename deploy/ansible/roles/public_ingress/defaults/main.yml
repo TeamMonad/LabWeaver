@@ -15,6 +15,9 @@ public_ingress_domain: labweaver.2018wzh.top
 public_ingress_gateway_name: labweaver-public
 public_ingress_gateway_vip: 10.99.0.140
 public_ingress_gateway_class: cilium
+# The OpenSSH Gateway keeps its dedicated TCP/2222 LoadBalancer VIP. The
+# public node listener bridges this VIP separately from the HTTP Gateway.
+public_ingress_ssh_gateway_vip: 10.99.0.130
 
 public_ingress_tls_mode: selfsigned
 public_ingress_certificate_name: labweaver-public-wildcard
@@ -33,34 +36,69 @@ public_ingress_cloudflare_secret_name: labweaver-cloudflare-api-token
 # The node's own public address cannot terminate on the Cilium Gateway VIP:
 # tc-ingress eBPF resolves the LoadBalancer VIP before netfilter DNAT, so a
 # firewalld/iptables forward-port never reaches the Gateway. A hostNetwork
-# DaemonSet binds the node's 80/443 and forwards to the VIP over the socket
-# path, which Cilium's socket load balancer does resolve.
+# DaemonSet binds the node's 80/443 and SSH/2222 and forwards each listener to
+# its reviewed VIP over the socket path, which Cilium's socket load balancer
+# does resolve.
 public_ingress_entry_enabled: true
 public_ingress_entry_name: labweaver-public-entry
 public_ingress_entry_image: haproxy:2.9-alpine
+# The listener uses hostNetwork/hostPorts so the node's public address can
+# reach the Cilium Gateway VIP. Keep that exception in a namespace dedicated
+# to this one infrastructure workload instead of weakening the application
+# namespace's PodSecurity policy.
+public_ingress_entry_namespace: labweaver-public-entry
 public_ingress_entry_node_selector:
   node-role.kubernetes.io/control-plane: ""
 
 # Hostnames published through the public Gateway. Each route lives in the
 # namespace of its backend Service so no cross-namespace ReferenceGrant is
 # needed for the backend reference.
+#
+# A route carries an ordered `rules` list. Each rule matches one or more path
+# prefixes and names the backend Service that serves them; the browser reaches
+# the API and the console WebSocket on the same origin as the single-page app,
+# so those paths are routed to the access Service instead of the static web
+# runtime. A rule may instead carry a `redirect` (no backend), which is how the
+# bare apex hostname sends visitors to the portal.
 public_ingress_routes:
   - name: portal-public
     namespace: labweaver-system
     hostnames:
-      - labweaver.2018wzh.top
       - portal.labweaver.2018wzh.top
-    service: web
-    port: 8080
+    rules:
+      - paths:
+          - /api
+          - /auth
+          - /connect
+        service: access-service
+        port: 8080
+      - paths:
+          - /
+        service: web
+        port: 8080
+  - name: portal-apex-redirect
+    namespace: labweaver-system
+    hostnames:
+      - labweaver.2018wzh.top
+    redirect:
+      scheme: https
+      hostname: portal.labweaver.2018wzh.top
+      status_code: 301
   - name: keycloak-public
     namespace: keycloak-system
     hostnames:
       - keycloak.labweaver.2018wzh.top
-    service: labweaver-keycloak-http
-    port: 8080
+    rules:
+      - paths:
+          - /
+        service: labweaver-keycloak-http
+        port: 8080
   - name: harbor-public
     namespace: harbor
     hostnames:
       - harbor.labweaver.2018wzh.top
-    service: harbor
-    port: 80
+    rules:
+      - paths:
+          - /
+        service: harbor
+        port: 80

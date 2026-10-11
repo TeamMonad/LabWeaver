@@ -21,6 +21,7 @@ pnpm --dir web test
 
 ## 文档
 
+- [用户操作说明](docs/usage.md)
 - [开发约定](AGENTS.md)
 - [服务边界](docs/architecture/service-boundaries.md)
 - [数据所有权](docs/architecture/data-ownership.md)

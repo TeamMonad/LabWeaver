@@ -10,11 +10,16 @@ use regex::RegexSet;
 use crate::claude_code::{EgressClassificationError, EgressClassifier};
 
 /// Reviewed deterministic classifier profile. Pattern classes are fixed in code and versioned.
+///
+/// The profile intentionally filters only credentials and secret material
+/// (private keys, tokens, secret literals). Public teaching material may cite
+/// personal contact details, so personally identifiable information is not a
+/// blocking content class here; the policy contract still reserves the class
+/// for deployment-controlled classifiers.
 pub struct DeterministicEgressClassifier {
     binding: String,
     revision: Revision,
     secrets: RegexSet,
-    pii: RegexSet,
 }
 
 impl DeterministicEgressClassifier {
@@ -41,17 +46,10 @@ impl DeterministicEgressClassifier {
             r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*",
         ])
         .map_err(|_| EgressClassificationError)?;
-        let pii = RegexSet::new([
-            r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-            r"\b1[3-9][0-9]{9}\b",
-            r"\b[1-9][0-9]{5}(?:18|19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9Xx]\b",
-        ])
-        .map_err(|_| EgressClassificationError)?;
         Ok(Self {
             binding,
             revision,
             secrets,
-            pii,
         })
     }
 }
@@ -80,9 +78,6 @@ impl EgressClassifier for DeterministicEgressClassifier {
                 denied.insert(DeniedDataClass::PrivateKey);
             }
         }
-        if self.pii.is_match(text) {
-            denied.insert(DeniedDataClass::PersonallyIdentifiableInformation);
-        }
         Ok(denied)
     }
 }
@@ -108,8 +103,12 @@ mod tests {
             )
             .await?;
         assert!(denied.contains(&DeniedDataClass::PrivateKey));
-        assert!(denied.contains(&DeniedDataClass::PersonallyIdentifiableInformation));
+        assert!(!denied.contains(&DeniedDataClass::PersonallyIdentifiableInformation));
         assert!(!denied.contains(&DeniedDataClass::UnallowlistedStudentSubmission));
+        let contact_only = classifier
+            .classify("xv6/README", b"contact rtm@mit.edu for details\n")
+            .await?;
+        assert!(contact_only.is_empty());
         let allowed = classifier
             .classify("student/auth.c", b"int authenticate(void) { return 0; }\n")
             .await?;

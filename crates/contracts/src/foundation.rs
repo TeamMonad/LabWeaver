@@ -6,6 +6,7 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
 };
+use thiserror::Error;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
@@ -325,7 +326,7 @@ pub struct ArtifactRef {
 }
 
 /// Frozen data-retention decision for an immutable resource.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RetentionSnapshot {
     /// Policy identity.
@@ -334,10 +335,93 @@ pub struct RetentionSnapshot {
     pub policy_revision: Revision,
     /// Stable retention class.
     pub class: RetentionClass,
-    /// Absolute retention boundary.
-    pub retain_until: UtcTimestamp,
+    /// Absolute retention boundary. `None` is valid only for an explicitly permanent course
+    /// material decision whose disposition is `RetainUntilRevoked`.
+    #[schemars(required, schema_with = "required_nullable_timestamp_schema")]
+    pub retain_until: Option<UtcTimestamp>,
     /// Required terminal disposition.
     pub disposition: RetentionDisposition,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetentionSnapshotWire {
+    policy_id: PolicyId,
+    policy_revision: Revision,
+    class: RetentionClass,
+    retain_until: serde_json::Value,
+    disposition: RetentionDisposition,
+}
+
+impl<'de> Deserialize<'de> for RetentionSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RetentionSnapshotWire::deserialize(deserializer)?;
+        let snapshot = Self {
+            policy_id: wire.policy_id,
+            policy_revision: wire.policy_revision,
+            class: wire.class,
+            retain_until: match wire.retain_until {
+                serde_json::Value::Null => None,
+                value => serde_json::from_value(value).map_err(de::Error::custom)?,
+            },
+            disposition: wire.disposition,
+        };
+        snapshot.validate().map_err(de::Error::custom)?;
+        Ok(snapshot)
+    }
+}
+
+pub(crate) fn required_nullable_timestamp_schema(
+    _generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "null"]
+    })
+}
+
+impl RetentionSnapshot {
+    /// Validates the shape of the frozen retention decision without consulting wall-clock time.
+    ///
+    /// A finite decision may already be expired when it is read, so the active-time check stays
+    /// at the approval and publication boundaries. The permanent form is deliberately narrow:
+    /// only CourseMaterial may be retained until explicit revocation.
+    pub fn validate(&self) -> Result<(), RetentionError> {
+        match (self.class, self.retain_until, self.disposition) {
+            (RetentionClass::CourseMaterial, None, RetentionDisposition::RetainUntilRevoked)
+            | (
+                _,
+                Some(_),
+                RetentionDisposition::Delete
+                | RetentionDisposition::PurgeAfterExport
+                | RetentionDisposition::RetainSanitizedReceipt,
+            ) => Ok(()),
+            _ => Err(RetentionError::InvalidDecision),
+        }
+    }
+
+    /// Returns whether this snapshot is the explicit permanent CourseMaterial form.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        self.retain_until.is_none()
+            && matches!(
+                (self.class, self.disposition),
+                (
+                    RetentionClass::CourseMaterial,
+                    RetentionDisposition::RetainUntilRevoked
+                )
+            )
+    }
+}
+
+/// Invalid combinations in a frozen retention decision.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RetentionError {
+    /// The deadline and disposition do not agree with the retention class.
+    #[error("invalid retention decision")]
+    InvalidDecision,
 }
 
 /// Retention classes with distinct privacy and recovery requirements.
@@ -358,6 +442,7 @@ pub enum RetentionDisposition {
     Delete,
     PurgeAfterExport,
     RetainSanitizedReceipt,
+    RetainUntilRevoked,
 }
 
 /// Strict safe path selector shared by packages, collectors, and LLM allowlists.
@@ -542,7 +627,10 @@ pub enum FoundationError {
 mod tests {
     use std::str::FromStr;
 
-    use super::{CourseId, UtcTimestamp, parse_strict_json, validate_relative_path};
+    use super::{
+        CourseId, PolicyId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
+        UtcTimestamp, parse_strict_json, validate_relative_path,
+    };
 
     #[test]
     fn identifiers_round_trip_and_reject_uuid_v4() -> Result<(), Box<dyn std::error::Error>> {
@@ -611,6 +699,92 @@ mod tests {
                 values: vec![1, 2, 3],
                 ratio: 1.25,
             })
+        );
+    }
+
+    #[test]
+    fn retention_deadline_requires_explicit_null_for_permanent_material() {
+        let policy_id = PolicyId::new();
+        let permanent = serde_json::json!({
+            "policyId": policy_id,
+            "policyRevision": 1,
+            "class": "course_material",
+            "retainUntil": null,
+            "disposition": "retain_until_revoked"
+        });
+        let decoded: RetentionSnapshot = serde_json::from_value(permanent)
+            .unwrap_or_else(|error| unreachable!("explicit null should decode: {error}"));
+        assert!(decoded.is_permanent());
+        assert!(
+            serde_json::from_value::<RetentionSnapshot>(serde_json::json!({
+                "policyId": policy_id,
+                "policyRevision": 1,
+                "class": "course_material",
+                "disposition": "retain_until_revoked"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RetentionSnapshot>(serde_json::json!({
+                "policyId": policy_id,
+                "policyRevision": 1,
+                "class": "build_evidence",
+                "retainUntil": null,
+                "disposition": "retain_until_revoked"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RetentionSnapshot>(serde_json::json!({
+                "policyId": policy_id,
+                "policyRevision": 1,
+                "class": "course_material",
+                "retainUntil": "2027-01-01T00:00:00.000Z",
+                "disposition": "retain_until_revoked"
+            }))
+            .is_err()
+        );
+
+        let finite: RetentionSnapshot = serde_json::from_value(serde_json::json!({
+            "policyId": policy_id,
+            "policyRevision": 1,
+            "class": "course_material",
+            "retainUntil": "2027-01-01T00:00:00.000Z",
+            "disposition": "delete"
+        }))
+        .unwrap_or_else(|error| unreachable!("finite decision should decode: {error}"));
+        assert_eq!(
+            finite.retain_until,
+            Some("2027-01-01T00:00:00.000Z".parse().unwrap_or_else(|error| {
+                unreachable!("static timestamp should parse: {error}")
+            }))
+        );
+        assert!(
+            RetentionSnapshot {
+                policy_id,
+                policy_revision: Revision::new(1)
+                    .unwrap_or_else(|error| unreachable!("static revision should parse: {error}")),
+                class: RetentionClass::BuildEvidence,
+                retain_until: None,
+                disposition: RetentionDisposition::RetainUntilRevoked,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retention_schema_requires_nullable_deadline() {
+        let schema = serde_json::to_value(schemars::schema_for!(RetentionSnapshot))
+            .unwrap_or_else(|error| unreachable!("retention schema should serialize: {error}"));
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "retainUntil"))
+        );
+        assert_eq!(
+            schema["properties"]["retainUntil"]["type"],
+            serde_json::json!(["string", "null"])
         );
     }
 }

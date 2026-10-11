@@ -1,5 +1,7 @@
 //! Explicit Provider selection and bounded timeout coverage.
 
+#![allow(clippy::expect_used)]
+
 mod support;
 
 use std::sync::Arc;
@@ -7,8 +9,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::environment::{
-    EnvironmentInstance, EnvironmentOperationKind, ObservedEnvironmentState,
+    ActivateEnvironmentResourceReservationRequest, ActivateEnvironmentResourceReservationResponse,
+    EnvironmentInstance, EnvironmentOperationKind, EnvironmentResourceReservationState,
+    ObservedEnvironmentState, ReleaseEnvironmentResourceReservationRequest,
+    ResolveEnvironmentResourceReservationRequest, SuspendEnvironmentResourceReservationRequest,
+    SuspendEnvironmentResourceReservationResponse,
 };
+use contracts::resource::GpuAllocation;
 use contracts::{ActorId, OperationId};
 use environment_service::{
     EnvironmentProvider, LifecycleCommand, ProviderFailure, ProviderObservation, ProviderRegistry,
@@ -16,6 +23,108 @@ use environment_service::{
 };
 
 use support::{ready_instance, requested_instance, revision, timestamp};
+
+#[derive(Clone)]
+struct RecordingAllocator {
+    events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+fn test_allocator() -> RecordingAllocator {
+    RecordingAllocator {
+        events: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }
+}
+
+#[async_trait]
+impl environment_service::ExperimentResourceAllocator for RecordingAllocator {
+    async fn resolve_resource_reservation(
+        &self,
+        _request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, environment_service::ResourceUsageClientError> {
+        Err(environment_service::ResourceUsageClientError::Rejected { retryable: false })
+    }
+
+    async fn release_resource_reservation(
+        &self,
+        _request: &ReleaseEnvironmentResourceReservationRequest,
+    ) -> Result<bool, environment_service::ResourceUsageClientError> {
+        Ok(true)
+    }
+
+    async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<
+        ActivateEnvironmentResourceReservationResponse,
+        environment_service::ResourceUsageClientError,
+    > {
+        self.events.lock().expect("event mutex").push("activate");
+        Ok(ActivateEnvironmentResourceReservationResponse {
+            version: 1,
+            environment_id: request.environment_id,
+            state: EnvironmentResourceReservationState::Reserved,
+            reservation_generation: 2,
+            environment_generation: request.environment_generation,
+            allocation: request.expected_allocation.clone(),
+            applied: true,
+        })
+    }
+
+    async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<
+        SuspendEnvironmentResourceReservationResponse,
+        environment_service::ResourceUsageClientError,
+    > {
+        self.events.lock().expect("event mutex").push("suspend");
+        Ok(SuspendEnvironmentResourceReservationResponse {
+            version: 1,
+            environment_id: request.environment_id,
+            state: EnvironmentResourceReservationState::Suspended,
+            reservation_generation: 3,
+            environment_generation: request.environment_generation,
+            allocation: None,
+            applied: true,
+        })
+    }
+}
+
+struct RecordingProvider {
+    events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl EnvironmentProvider for RecordingProvider {
+    fn binding(&self) -> &'static str {
+        "container-primary-v1"
+    }
+
+    async fn execute(
+        &self,
+        action: ReconcileAction,
+        instance: &EnvironmentInstance,
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        self.events.lock().expect("event mutex").push(match action {
+            ReconcileAction::Start | ReconcileAction::Restart => "provider_start",
+            ReconcileAction::Stop => "provider_stop",
+            _ => "provider_other",
+        });
+        let next_state = if action == ReconcileAction::Stop {
+            ObservedEnvironmentState::Stopped
+        } else {
+            ObservedEnvironmentState::Ready
+        };
+        Ok(environment_service::ProviderOutcome::Completed(
+            ProviderObservation {
+                next_state,
+                endpoints: instance.endpoints.clone(),
+                cleanup_evidence: None,
+                operation_complete: true,
+            },
+        ))
+    }
+}
 
 struct FakeProvider {
     binding: &'static str,
@@ -32,14 +141,18 @@ impl EnvironmentProvider for FakeProvider {
         &self,
         _action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        tokio::time::sleep(self.delay).await;
-        Ok(ProviderObservation {
-            next_state: contracts::environment::ObservedEnvironmentState::Ready,
-            endpoints: instance.endpoints.clone(),
-            cleanup_evidence: None,
-            operation_complete: true,
-        })
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            tokio::time::sleep(self.delay).await;
+            Ok(ProviderObservation {
+                next_state: contracts::environment::ObservedEnvironmentState::Ready,
+                endpoints: instance.endpoints.clone(),
+                cleanup_evidence: None,
+                operation_complete: true,
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
@@ -73,10 +186,13 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
         binding: "container-primary-v1",
         delay: Duration::ZERO,
     }))?;
-    let reconciler = Reconciler::new(exact, Duration::from_secs(1))?;
+    let reconciler =
+        Reconciler::new(exact, Duration::from_secs(1))?.with_resource_allocator(test_allocator());
     let observation = reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
-        .await?;
+        .await?
+        .completed()
+        .ok_or("provider did not complete")?;
     assert!(observation.operation_complete);
 
     let mut wrong = ProviderRegistry::default();
@@ -84,7 +200,8 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
         binding: "different-provider-v1",
         delay: Duration::ZERO,
     }))?;
-    let reconciler = Reconciler::new(wrong, Duration::from_secs(1))?;
+    let reconciler =
+        Reconciler::new(wrong, Duration::from_secs(1))?.with_resource_allocator(test_allocator());
     assert!(matches!(
         reconciler
             .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
@@ -109,13 +226,126 @@ async fn duplicate_binding_and_provider_timeout_fail_closed()
         })),
         Err(ReconcileError::InvalidProviderRegistry)
     ));
-    let reconciler = Reconciler::new(registry, Duration::from_millis(1))?;
+    let reconciler = Reconciler::new(registry, Duration::from_millis(1))?
+        .with_resource_allocator(test_allocator());
     assert!(matches!(
         reconciler
             .execute_once(&planned_restart()?, timestamp("2026-07-14T01:00:01.000Z"))
             .await,
         Err(ReconcileError::ProviderTimeout)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn experiment_resource_fence_wraps_provider_start_and_stop_in_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(RecordingProvider {
+        events: Arc::clone(&events),
+    }))?;
+    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?.with_resource_allocator(
+        RecordingAllocator {
+            events: Arc::clone(&events),
+        },
+    );
+
+    let mut start = ready_instance();
+    start.observed_state = ObservedEnvironmentState::Stopped;
+    start.operation.kind = EnvironmentOperationKind::Start;
+    start.operation.state = contracts::environment::OperationState::Accepted;
+    start.generation = 2;
+    start.operation.id = OperationId::new();
+    reconciler
+        .execute_once(&start, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["activate", "provider_start"]
+    );
+
+    events.lock().expect("event mutex").clear();
+    let mut stop = ready_instance();
+    stop.observed_state = ObservedEnvironmentState::Stopping;
+    stop.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
+    stop.operation.kind = EnvironmentOperationKind::Stop;
+    stop.operation.state = contracts::environment::OperationState::Accepted;
+    stop.generation = 3;
+    stop.operation.id = OperationId::new();
+    reconciler
+        .execute_once(&stop, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["provider_stop", "suspend"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn experiment_reset_and_recovered_provision_require_resource_activation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(RecordingProvider {
+        events: Arc::clone(&events),
+    }))?;
+    let mut instance = ready_instance();
+    instance.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
+    instance.observed_state = ObservedEnvironmentState::Provisioning;
+    instance.operation.kind = EnvironmentOperationKind::Reset;
+    instance.operation.state = contracts::environment::OperationState::Accepted;
+    instance.operation.id = OperationId::new();
+    instance.generation = 2;
+
+    let without_resource = Reconciler::new(registry, Duration::from_secs(1))?;
+    assert!(matches!(
+        without_resource
+            .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+            .await,
+        Err(ReconcileError::ResourceUnavailable)
+    ));
+
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(RecordingProvider {
+        events: Arc::clone(&events),
+    }))?;
+    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?.with_resource_allocator(
+        RecordingAllocator {
+            events: Arc::clone(&events),
+        },
+    );
+    reconciler
+        .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["activate", "provider_other"]
+    );
+
+    events.lock().expect("event mutex").clear();
+    instance.operation.kind = EnvironmentOperationKind::Retry;
+    instance.operation.id = OperationId::new();
+    reconciler
+        .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["activate", "provider_other"]
+    );
+
+    events.lock().expect("event mutex").clear();
+    instance.operation.kind = EnvironmentOperationKind::Create;
+    instance.desired_state = contracts::environment::DesiredEnvironmentState::Running;
+    instance.operation.id = OperationId::new();
+    reconciler
+        .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["activate", "provider_other"]
+    );
     Ok(())
 }
 
@@ -172,6 +402,12 @@ fn reset_build_and_expire_cleanup_have_durable_next_actions()
     assert_eq!(
         next_action(&expire, timestamp("2026-07-14T01:00:01.000Z"))?,
         ReconcileAction::Cleanup
+    );
+    reset.observed_state = ObservedEnvironmentState::Stopping;
+    reset.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
+    assert_eq!(
+        next_action(&reset, timestamp("2026-07-14T01:00:01.000Z"))?,
+        ReconcileAction::Stop
     );
     Ok(())
 }

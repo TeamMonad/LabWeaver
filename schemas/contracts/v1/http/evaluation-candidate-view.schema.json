@@ -122,6 +122,50 @@
       "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
       "type": "string"
     },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
     "CandidateApproval": {
       "additionalProperties": false,
       "description": "Human decision bound to an exact candidate and dependency identity.",
@@ -164,6 +208,55 @@
         "decision",
         "reason",
         "decidedAt"
+      ],
+      "type": "object"
+    },
+    "CandidateBuildState": {
+      "description": "Public state of the deterministic Container build attached to one approved candidate.",
+      "enum": [
+        "requested",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "CandidateBuildView": {
+      "additionalProperties": false,
+      "description": "Control-owned build projection exposed for teacher review without leaking object keys or\nexecutor internals.",
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanupVerified": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "diagnosticCode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/CandidateBuildState"
+        }
+      },
+      "required": [
+        "state"
       ],
       "type": "object"
     },
@@ -460,6 +553,10 @@
         }
       ]
     },
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
     "EvaluationApiVersion": {
       "enum": [
         "evaluation.labweaver.io/v1"
@@ -528,6 +625,17 @@
         },
         "runId": {
           "$ref": "#/$defs/AgentRunId"
+        },
+        "runnerBuildContext": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Generated build context for this experiment's own Evaluation runner image.\n\nOnly Container experiments carry a runner image; deployment-owned VM evaluation leaves this\nabsent. Control resolves the object key from the Agent artifact authority before enqueueing\nthe second single-image build."
         },
         "spec": {
           "$ref": "#/$defs/EvaluationSpec"
@@ -776,6 +884,69 @@
         }
       ]
     },
+    "ImageArtifact": {
+      "description": "Complete immutable runtime artifact identity.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "build_request_id": {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "id": {
+              "$ref": "#/$defs/ImageArtifactId"
+            },
+            "kind": {
+              "const": "container",
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "build_request_id",
+            "repository",
+            "digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "base_disk": {
+              "$ref": "#/$defs/VirtualMachineBaseDisk"
+            },
+            "format": {
+              "$ref": "#/$defs/VirtualMachineDiskFormat"
+            },
+            "id": {
+              "$ref": "#/$defs/ImageArtifactId"
+            },
+            "kind": {
+              "const": "virtual_machine",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "base_disk",
+            "format"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ImageArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
+      "type": "string"
+    },
     "ManualReviewReason": {
       "description": "Conditions that force manual teacher review.",
       "oneOf": [
@@ -923,6 +1094,37 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "VirtualMachineBaseDisk": {
+      "additionalProperties": false,
+      "description": "Deployment-owned immutable KubeVirt base-disk identity.\n\nUnlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported\ndisk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.",
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "capacityBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceRegistryDigest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "sourceRegistryDigest",
+        "capacityBytes"
+      ],
+      "type": "object"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -937,6 +1139,28 @@
     },
     "candidate": {
       "$ref": "#/$defs/EvaluationCandidate"
+    },
+    "runnerBuild": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CandidateBuildView"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Per-experiment runner build resolved by Control from the authoritative build projection.\n\nThis remains null for deployment-owned VM evaluation, which has no per-experiment runner\nimage, and while a Container experiment's runner build is incomplete."
+    },
+    "runnerImageArtifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImageArtifact"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exact runner artifact a teacher can approve for a Container experiment."
     },
     "trustRevision": {
       "$ref": "#/$defs/Revision"

@@ -257,8 +257,8 @@ FOR _rec IN
                 AND membership.set_option
                 AND NOT membership.inherit_option)
             OR (member.rolname = 'postgres-admin'
-                AND membership.set_option
-                AND NOT membership.inherit_option)
+                AND NOT membership.inherit_option
+                AND (membership.set_option OR membership.admin_option))
             OR (parent.rolname IN ('lw_control_owner', 'lw_access_owner',
                                    'lw_environment_owner', 'lw_agent_owner',
                                    'lw_evaluation_owner', 'lw_resource_owner')
@@ -303,8 +303,8 @@ BEGIN
                 AND membership.set_option
                 AND NOT membership.inherit_option)
             OR (member.rolname = 'postgres-admin'
-                AND membership.set_option
-                AND NOT membership.inherit_option)
+                AND NOT membership.inherit_option
+                AND (membership.set_option OR membership.admin_option))
             OR (parent.rolname IN ('lw_control_owner', 'lw_access_owner',
                                    'lw_environment_owner', 'lw_agent_owner',
                                    'lw_evaluation_owner', 'lw_resource_owner')

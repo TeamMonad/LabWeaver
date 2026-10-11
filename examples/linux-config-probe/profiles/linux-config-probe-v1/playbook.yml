@@ -1,0 +1,17 @@
+- name: Observe the approved configuration experiment
+  hosts: probe
+  gather_facts: false
+  tasks:
+    - name: Observe installed packages
+      ansible.builtin.package_facts:
+        manager: auto
+    - name: Observe system services
+      ansible.builtin.service_facts: {}
+    - name: Observe the student configuration
+      ansible.builtin.stat:
+        path: /home/lab/workspace/application.conf
+        get_checksum: true
+        checksum_algorithm: sha256
+        follow: false
+        get_mime: false
+        get_attributes: false

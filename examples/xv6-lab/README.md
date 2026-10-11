@@ -10,15 +10,25 @@ direct argv vectors; no shell command is assembled from student input. The
 compile script extracts the pinned xv6 source archive into the writable attempt
 directory, installs the submitted user program as `user/student.c`, and builds
 the real kernel and filesystem image. The run script boots that image with
-`qemu-system-riscv64` in TCG mode, applies a five-second timeout, and returns
+`qemu-system-riscv64` in TCG mode, applies a twenty-second timeout, and returns
 only the student's tagged line for deterministic checking. The worker only
 substitutes its four approved path tokens (`{source}`, `{binary}`,
 `{submission_dir}`, and `{evaluator_dir}`).
 
-The checked-in files are public teaching material. Hidden tests, the reference
-program, and the exact toolchain image are controlled artifacts bound by the
-teacher during publication. They are deliberately represented by evaluator
-locators in `evaluation.yaml` and are not copied into this repository.
+The student source, scripts, and vendored xv6 tree are public teaching material.
+The concrete evaluator inputs under `tests/` are runner-only: they are never
+copied into the student environment image. Hidden tests, the reference program,
+and the exact toolchain image are controlled artifacts bound by the teacher
+during publication and are deliberately represented by evaluator locators in
+`evaluation.yaml`.
+
+The package carries two build recipes. The root `Dockerfile` produces the
+student environment image and contains no evaluator fixtures. The mandatory
+`evaluation/Dockerfile` produces the per-experiment Evaluation runner image. It
+installs the RISC-V toolchain and QEMU, obtains the platform worker with
+`COPY --from=${LABWEAVER_SERVICE_IMAGE}`, bakes the evaluator fixtures at
+`/opt/labweaver/hidden-tests`, and runs as UID/GID 65532 with the worker
+entrypoint.
 
 The image places the initial public workspace below
 `/opt/labweaver/workspace-seed`. The platform mounts the persistent workspace
@@ -39,11 +49,13 @@ server.
 - `student/student.c` is a minimal xv6 user program that can be replaced by a
   student submission.
 - `scripts/` contains the bounded build and QEMU TCG entry points.
-- `tests/xv6-riscv64/` contains the concrete public input/output cases.
+- `tests/xv6-riscv64/` contains the concrete evaluator input/output cases. They
+  ship only in the runner image and in the frozen evaluator material.
 - `xv6/` vendors the MIT-licensed reference source and its source archive.
+- `evaluation/Dockerfile` is the per-experiment Evaluation runner recipe.
 - `manifest.json` lists every package payload file and its digest.
 
-`Dockerfile` builds the same ordinary runner image locally with a pinned Debian
+`Dockerfile` builds the student environment image locally with a pinned Debian
 base, the RISC-V cross compiler, and `qemu-system-riscv64`; it does not require
 privileged mode, KVM, or a host toolchain. Run `docker build -t labweaver-xv6
 examples/xv6-lab` followed by the command below to build the package and

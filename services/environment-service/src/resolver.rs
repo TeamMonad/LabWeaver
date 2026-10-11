@@ -144,11 +144,6 @@ impl OwnerResolver {
                 })
             }
         };
-        let eligibility_expires_at = lease_fence
-            .as_ref()
-            .map_or(instance.eligibility_expires_at, |fence| {
-                std::cmp::min(instance.eligibility_expires_at, fence.expires_at)
-            });
         let resolution = EnvironmentConsoleEligibility {
             environment_id: instance.id,
             project_id: instance.project_id,
@@ -159,7 +154,7 @@ impl OwnerResolver {
             environment_revision: instance.revision,
             release_id: instance.release_id,
             release_version: instance.release_version,
-            eligibility_expires_at,
+            eligibility_expires_at: instance.eligibility_expires_at,
             lease_fence,
             binding,
         };
@@ -186,7 +181,10 @@ fn authorize_console_instance(
     }
     if instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
-        || instance.eligibility_expires_at <= now
+        || instance
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= now)
+        || !resource_lease_active(instance, now)
     {
         return Err(OwnerResolverError::EnvironmentUnavailable);
     }
@@ -209,7 +207,10 @@ pub fn authorize_owner_resolution(
     }
     if instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
-        || instance.eligibility_expires_at <= now
+        || instance
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= now)
+        || !resource_lease_active(instance, now)
         || instance.endpoints.is_empty()
         || instance.endpoints.iter().any(|endpoint| {
             endpoint.health != EndpointHealth::Healthy || endpoint.revision != instance.revision
@@ -224,6 +225,7 @@ pub fn authorize_owner_resolution(
         owner_actor_id: instance.owner_id,
         environment_revision: instance.revision,
         eligibility_expires_at: instance.eligibility_expires_at,
+        lease_fence: resource_lease_fence(instance, now),
     })
 }
 
@@ -252,7 +254,10 @@ pub fn authorize_endpoint_eligibility(
     }
     if instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
-        || instance.eligibility_expires_at <= now
+        || instance
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= now)
+        || !resource_lease_active(instance, now)
     {
         return Err(OwnerResolverError::EnvironmentUnavailable);
     }
@@ -276,8 +281,28 @@ pub fn authorize_endpoint_eligibility(
         owner_actor_id: instance.owner_id,
         environment_revision: instance.revision,
         eligibility_expires_at: instance.eligibility_expires_at,
+        lease_fence: resource_lease_fence(instance, now),
         endpoints,
     })
+}
+
+fn resource_lease_fence(
+    instance: &EnvironmentInstance,
+    now: UtcTimestamp,
+) -> Option<ConsoleLeaseFence> {
+    if instance.class != EnvironmentClass::Work {
+        return None;
+    }
+    let authorization = instance.operation.lease_authorization.as_ref()?;
+    (authorization.expires_at > now).then_some(ConsoleLeaseFence {
+        lease_id: authorization.lease_id,
+        lease_revision: authorization.lease_revision,
+        expires_at: authorization.expires_at,
+    })
+}
+
+fn resource_lease_active(instance: &EnvironmentInstance, now: UtcTimestamp) -> bool {
+    instance.class == EnvironmentClass::Experiment || resource_lease_fence(instance, now).is_some()
 }
 
 /// Builds the internal route. Service JWT middleware must inject `ServiceIdentity`.

@@ -31,11 +31,12 @@ test('role projects are uniquely derived from the authoritative definition', () 
   assert.equal('metadata' in config, false)
 })
 
-test('configuration contract retains Playwright debugging on failure', async () => {
+test('acceptance configuration keeps browser output ephemeral', async () => {
   const result = await validateConfiguration()
   assert.deepEqual(result.diagnostics, [])
   const config = createPlaywrightConfig({ ci: true })
-  assert.equal(config.use.trace, 'retain-on-failure')
-  assert.equal(config.use.screenshot, 'only-on-failure')
-  assert.equal(config.use.video, 'retain-on-failure')
+  assert.equal(config.use.trace, 'off')
+  assert.equal(config.use.screenshot, 'off')
+  assert.equal(config.use.video, 'off')
+  assert.deepEqual(config.reporter, [['list']])
 })

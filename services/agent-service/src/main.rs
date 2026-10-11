@@ -26,6 +26,7 @@ use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
 use agent_service::oci_registry::RegistryCredentials;
+use agent_service::platform_image_jobs::{PlatformImageImportJobStore, PlatformImageImportWorker};
 use agent_service::platform_images::{
     PgPlatformImageCatalog, PlatformImageRegistry, PlatformImageSeed, PlatformImageSeedOutcome,
 };
@@ -87,6 +88,12 @@ struct DeploymentFile {
     sandbox: SandboxFileConfig,
     /// Optional platform registry used by the administrator image catalog.
     platform_registry: Option<PlatformRegistryFileConfig>,
+    /// Container provider bindings this deployment registers.
+    ///
+    /// Stated in the authoring prompt so a candidate can never name a binding
+    /// that the environment service cannot resolve.
+    #[serde(default)]
+    authoring_provider_bindings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,7 +405,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         Arc::clone(&service_token_client),
         required_set("LABWEAVER_SERVICE_SCOPES")?,
     )?;
-    let process: Arc<dyn ClaudeCodeProcess> = Arc::new(SandboxAuthoringProcess::new(
+    let sandbox_process = Arc::new(SandboxAuthoringProcess::new(
         SandboxProcessConfiguration {
             sandbox: sandbox.to_configuration(
                 &object_store_prefix,
@@ -419,6 +426,12 @@ async fn run_agent_service() -> Result<(), StartupError> {
         store.clone(),
         Arc::clone(&objects),
     )?);
+    let mut sandbox_cleanup_worker = tokio_util::task::AbortOnDropHandle::new(
+        sandbox_process
+            .spawn_cleanup_worker()
+            .ok_or(StartupError::Configuration)?,
+    );
+    let process: Arc<dyn ClaudeCodeProcess> = sandbox_process;
     let platform_registry = load_platform_registry(deployment.platform_registry.as_ref())?;
     let seed_images = if let Some(config) = deployment.platform_registry.as_ref() {
         config.seed_images.clone()
@@ -427,6 +440,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
     };
     let api_objects: Arc<dyn ImmutableObjectStore> = objects.clone();
     let platform_images = PgPlatformImageCatalog::new(store.pool().clone());
+    let platform_image_import_jobs = PlatformImageImportJobStore::new(store.pool().clone());
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
@@ -435,6 +449,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         platform_images: platform_images.clone(),
         platform_registry,
         objects: api_objects,
+        platform_image_import_jobs: platform_image_import_jobs.clone(),
     });
     spawn_platform_image_seeds(
         &platform_images,
@@ -457,6 +472,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         dispatch_lease: Duration::from_secs(deployment.dispatch_lease_seconds),
         track_lease: Duration::from_secs(deployment.track_lease_seconds),
         poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
+        provider_bindings: deployment.authoring_provider_bindings.clone(),
     };
     let review_worker = LlmReviewWorker {
         store: llm_reviews,
@@ -476,6 +492,15 @@ async fn run_agent_service() -> Result<(), StartupError> {
         &work_execution_configuration,
     )
     .map_err(StartupError::WorkExecution)?;
+    let platform_image_import_worker = PlatformImageImportWorker {
+        jobs: platform_image_import_jobs,
+        catalog: platform_images,
+        registry: state.platform_registry.clone(),
+        objects: Arc::clone(&state.objects),
+        worker_id: format!("{}:platform-image-import", deployment.worker_id),
+        lease_duration: Duration::from_secs(deployment.track_lease_seconds),
+        poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
+    };
     tokio::select! {
         result = http_transport::serve_tls(
             listener,
@@ -485,6 +510,11 @@ async fn run_agent_service() -> Result<(), StartupError> {
         result = worker.run() => result?,
         result = review_worker.run() => result?,
         result = work_execution_worker.run() => result?,
+        result = platform_image_import_worker.run() => result.map_err(StartupError::PlatformImageImport)?,
+        result = &mut sandbox_cleanup_worker => {
+            result.map_err(|_| StartupError::SandboxCleanupWorker)?;
+            return Err(StartupError::SandboxCleanupWorker);
+        },
         result = build_command_loop(build_consumer, build_store) => result?,
         result = build_worker_loop(
             build_worker,
@@ -785,72 +815,99 @@ struct Worker {
     dispatch_lease: Duration,
     track_lease: Duration,
     poll_interval: Duration,
+    provider_bindings: Vec<String>,
 }
 
 impl Worker {
     #[allow(
         clippy::large_futures,
-        reason = "the dispatch loop owns preparation and execution as one durable boundary"
+        reason = "the supervisor awaits the whole reserved-dispatch boundary"
     )]
     async fn run(self) -> Result<(), StartupError> {
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tracing::info!(
+            event = "agent.dispatch.worker_started",
+            poll_interval = ?self.poll_interval,
+        );
         loop {
             ticker.tick().await;
-            let Some(lease) = self.store.claim_dispatch(self.dispatch_lease).await? else {
-                continue;
-            };
-            let reader: Arc<dyn ProblemPackageReader> = Arc::new(DispatchReader {
-                objects: Arc::clone(&self.objects),
-                locators: lease.object_locators.clone(),
-            });
-            let gate = ProblemPackageEgressGate::new(reader, Arc::clone(&self.classifier));
-            let now = timestamp()?;
-            let input = match gate.prepare(&lease.package, &lease.policy).await {
-                Ok(input) => input,
-                Err(error) => {
-                    let run = self
-                        .store
-                        .fail_dispatch_preparation(&lease, error.diagnostic_code(), now)
-                        .await?;
-                    tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false, safe_detail = error.safe_detail());
-                    continue;
-                }
-            };
-            self.store
-                .bind_prepared_dispatch(&lease, input.sha256())
-                .await?;
-            let materializer = Arc::new(S3EnvironmentCandidateMaterializer::new(
-                Arc::clone(&self.objects),
-                lease.package.clone(),
-                self.generated_artifacts.clone(),
-            ));
-            let runtime = agent_service::claude_code::ClaudeCodeRuntime::new_with_materializer(
-                lease.policy.clone(),
-                self.process.clone(),
-                materializer,
-            )?;
-            let service = AgentRunService::new(
-                self.store.clone(),
-                runtime,
-                self.runtime_identity.clone(),
-                self.track_lease,
-            )?;
-            let outcome = service
-                .execute_reserved_dispatch(lease, input, RunCancellation::new(), now)
-                .await?;
-            let run_id = match &outcome {
-                agent_service::run_store::AgentRunDispatch::Executed(value) => value.run.id,
-                agent_service::run_store::AgentRunDispatch::Replayed(run)
-                | agent_service::run_store::AgentRunDispatch::Progressed(run) => run.id,
-            };
-            let dispatch_outcome = match outcome {
-                agent_service::run_store::AgentRunDispatch::Executed(_) => "executed",
-                agent_service::run_store::AgentRunDispatch::Replayed(_) => "replayed",
-                agent_service::run_store::AgentRunDispatch::Progressed(_) => "progressed",
-            };
-            tracing::info!(event = "agent.dispatch.completed", run_id = %run_id, outcome = dispatch_outcome);
+            if let Err(error) = self.tick().await {
+                // One reserved dispatch that fails outside the per-track failure
+                // boundary would otherwise end the worker without naming a
+                // reason; record the closed error kind before it propagates.
+                tracing::error!(
+                    event = "agent.dispatch.worker_failed",
+                    error_kind = ?error,
+                    "agent dispatch worker stopped on a reserved dispatch",
+                );
+                return Err(error);
+            }
         }
+    }
+
+    #[allow(
+        clippy::large_futures,
+        reason = "one reserved dispatch owns preparation and execution as one durable boundary"
+    )]
+    async fn tick(&self) -> Result<(), StartupError> {
+        let Some(lease) = self.store.claim_dispatch(self.dispatch_lease).await? else {
+            return Ok(());
+        };
+        tracing::info!(event = "agent.dispatch.claimed", run_id = %lease.run.id);
+        let reader: Arc<dyn ProblemPackageReader> = Arc::new(DispatchReader {
+            objects: Arc::clone(&self.objects),
+            locators: lease.object_locators.clone(),
+        });
+        let gate = ProblemPackageEgressGate::new(reader, Arc::clone(&self.classifier));
+        let now = timestamp()?;
+        let input = match gate.prepare(&lease.package, &lease.policy).await {
+            Ok(input) => input,
+            Err(error) => {
+                let run = self
+                    .store
+                    .fail_dispatch_preparation(&lease, error.diagnostic_code(), now)
+                    .await?;
+                tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false, safe_detail = error.safe_detail());
+                return Ok(());
+            }
+        };
+        self.store
+            .bind_prepared_dispatch(&lease, input.sha256())
+            .await?;
+        let materializer = Arc::new(S3EnvironmentCandidateMaterializer::new(
+            Arc::clone(&self.objects),
+            lease.package.clone(),
+            self.generated_artifacts.clone(),
+            lease.object_locators.clone(),
+        ));
+        let runtime = agent_service::claude_code::ClaudeCodeRuntime::new_with_materializer(
+            lease.policy.clone(),
+            self.process.clone(),
+            materializer,
+        )?
+        .with_provider_bindings(self.provider_bindings.clone());
+        let service = AgentRunService::new(
+            self.store.clone(),
+            runtime,
+            self.runtime_identity.clone(),
+            self.track_lease,
+        )?;
+        let outcome = service
+            .execute_reserved_dispatch(lease, input, RunCancellation::new(), now)
+            .await?;
+        let run_id = match &outcome {
+            agent_service::run_store::AgentRunDispatch::Executed(value) => value.run.id,
+            agent_service::run_store::AgentRunDispatch::Replayed(run)
+            | agent_service::run_store::AgentRunDispatch::Progressed(run) => run.id,
+        };
+        let dispatch_outcome = match outcome {
+            agent_service::run_store::AgentRunDispatch::Executed(_) => "executed",
+            agent_service::run_store::AgentRunDispatch::Replayed(_) => "replayed",
+            agent_service::run_store::AgentRunDispatch::Progressed(_) => "progressed",
+        };
+        tracing::info!(event = "agent.dispatch.completed", run_id = %run_id, outcome = dispatch_outcome);
+        Ok(())
     }
 }
 
@@ -914,6 +971,7 @@ fn load_platform_registry(
     let ca = reqwest::Certificate::from_pem(&ca).map_err(|_| StartupError::Configuration)?;
     let client = reqwest::Client::builder()
         .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .add_root_certificate(ca)
         .build()
@@ -1068,7 +1126,13 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
           AND to_regclass('agent.build_commands') IS NOT NULL \
           AND to_regclass('agent.generated_artifacts') IS NOT NULL \
           AND to_regclass('agent.llm_review_runs') IS NOT NULL \
-          AND to_regclass('agent.authoring_sandbox_attempts') IS NOT NULL",
+          AND to_regclass('agent.authoring_sandbox_attempts') IS NOT NULL \
+          AND to_regclass('agent.platform_image_import_jobs') IS NOT NULL \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' \
+                      AND table_name='authoring_sandbox_attempts' AND column_name='usage_payload') \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' AND table_name='authoring_sandbox_attempts' AND column_name='terminal_receipt') \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' AND table_name='authoring_sandbox_attempts' AND column_name='request_payload') \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' AND table_name='agent_track_work_items' AND column_name='attempt_started_at')",
     )
     .fetch_one(pool)
     .await?;
@@ -1092,6 +1156,8 @@ enum StartupError {
     Configuration,
     #[error("LW_AGENT_SCHEMA_UNAVAILABLE")]
     SchemaUnavailable,
+    #[error("LW_AGENT_SANDBOX_CLEANUP_WORKER_STOPPED")]
+    SandboxCleanupWorker,
     #[error("LW_AGENT_CLOCK_INVALID")]
     Clock,
     #[error(transparent)]
@@ -1128,6 +1194,8 @@ enum StartupError {
     Messaging(#[from] agent_service::messaging::AgentMessagingError),
     #[error(transparent)]
     BuildExecutor(#[from] agent_service::build_provider::BuildExecutorFenceError),
+    #[error(transparent)]
+    PlatformImageImport(#[from] agent_service::platform_image_jobs::PlatformImageImportJobError),
     #[error(transparent)]
     Service(#[from] service_runtime::StartupError),
 }

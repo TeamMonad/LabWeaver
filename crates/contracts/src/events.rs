@@ -472,8 +472,8 @@ impl AgentBuildFailed {
     pub fn validate(&self) -> Result<(), EventError> {
         crate::DiagnosticCode::parse(&self.diagnostic_code)
             .map_err(|_| EventError::PayloadIdentityMismatch)?;
-        let cleanup_failed = self.diagnostic_code == "LW_AGENT_BUILD_CLEANUP_FAILED";
-        if self.cleanup_verified == cleanup_failed || (self.retryable && !self.cleanup_verified) {
+        // The primary failure is immutable; cleanup can subsequently recover.
+        if self.retryable && !self.cleanup_verified {
             return Err(EventError::PayloadIdentityMismatch);
         }
         Ok(())
@@ -758,5 +758,25 @@ mod tests {
             cleanup_verified: true,
         };
         assert!(cleaned_failure.validate().is_ok());
+        for diagnostic_code in [
+            "LW_AGENT_BUILD_TIMEOUT",
+            "LW_AGENT_BUILD_CANCELLED",
+            "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+        ] {
+            let pending = AgentBuildFailed {
+                build_request_id,
+                diagnostic_code: diagnostic_code.to_owned(),
+                retryable: false,
+                cleanup_verified: false,
+            };
+            assert!(pending.validate().is_ok());
+        }
+        let recovered = AgentBuildFailed {
+            build_request_id,
+            diagnostic_code: "LW_AGENT_BUILD_CLEANUP_FAILED".to_owned(),
+            retryable: false,
+            cleanup_verified: true,
+        };
+        assert!(recovered.validate().is_ok());
     }
 }

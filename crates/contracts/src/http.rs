@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::supply_chain::VirtualMachineDiskFormat;
 use crate::{
@@ -31,6 +31,20 @@ pub struct OperationAccepted {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddProjectMembershipRequest {
+    /// Exact issuer username resolved by Access before the membership
+    /// transaction.  Local actor identifiers are never accepted from a
+    /// browser request.
+    pub username: String,
+    pub role: PlatformRole,
+    pub expires_at: Option<UtcTimestamp>,
+}
+
+/// Access-to-Control request after the issuer username has been resolved to
+/// the durable local actor.  This is an internal gateway payload and is not a
+/// browser contract.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedProjectMembershipRequest {
     pub actor_id: ActorId,
     pub role: PlatformRole,
     pub expires_at: Option<UtcTimestamp>,
@@ -134,12 +148,8 @@ pub struct ReleaseTaskResourceRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecordResourceUsageRequest {
-    pub project_id: ProjectId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub course_id: Option<CourseId>,
     pub kind: crate::resource::ResourceUsageKind,
-    pub request_id: ResourceRequestId,
-    pub lease_id: Option<LeaseId>,
+    pub target: crate::resource::ResourceUsageTarget,
     pub source_event_id: crate::EventId,
     pub measured_from: UtcTimestamp,
     pub measured_until: UtcTimestamp,
@@ -158,6 +168,13 @@ pub struct CreateResourceRateRequest {
     pub unit_price: crate::resource::Money,
     pub effective_from: UtcTimestamp,
     pub effective_until: Option<UtcTimestamp>,
+}
+
+/// Closes one open immutable rate version at a future timestamp.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndResourceRateRequest {
+    pub effective_until: UtcTimestamp,
 }
 
 /// Project budget mutation. Amounts are decimal strings with six fractional digits.
@@ -225,6 +242,16 @@ pub struct ProblemPackageUploadFile {
     pub media_type: String,
 }
 
+/// Explicit retention choice made when a new CourseMaterial package upload starts.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemPackageRetentionChoice {
+    /// Use the configured finite CourseMaterial policy.
+    Finite,
+    /// Retain the completed material until an explicit business revocation.
+    Permanent,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateProblemPackageUploadRequest {
@@ -232,6 +259,7 @@ pub struct CreateProblemPackageUploadRequest {
     pub course_id: Option<CourseId>,
     pub files: Vec<ProblemPackageUploadFile>,
     pub retention_policy_revision: Revision,
+    pub retention_choice: ProblemPackageRetentionChoice,
 }
 
 /// Short-lived, per-object upload authority returned only by session creation.
@@ -262,6 +290,15 @@ pub struct CompleteProblemPackageUploadRequest {}
 
 /// Reviewed archive media type accepted for an administrator OCI layout upload.
 pub const PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE: &str = "application/vnd.oci.image.layout.v1+tar";
+
+/// Maximum compressed archive object accepted for a platform image import.
+///
+/// The expanded OCI/disk validation budget is enforced by Agent separately; this bound is the
+/// object-store and browser upload budget and is deliberately independent of virtual disk capacity.
+pub const PLATFORM_IMAGE_ARCHIVE_MAX_BYTES: u64 = 5_000_000_000;
+
+/// Fixed multipart part size for platform image browser uploads.
+pub const PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Returns whether a catalog binding uses the reviewed lowercase locator charset.
 #[must_use]
@@ -454,13 +491,32 @@ pub struct CreatePlatformImageUploadRequest {
     pub reason: String,
 }
 
-/// Short-lived per-object upload authority for one OCI archive.
+/// One short-lived presigned multipart part authority for one OCI archive.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlatformImageUploadTarget {
+pub struct PlatformImageUploadPartTarget {
+    pub part_number: u32,
     pub upload_url: String,
     pub required_headers: BTreeMap<String, String>,
     pub expires_at: UtcTimestamp,
+}
+
+/// Short-lived multipart upload authority for one OCI archive.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformImageUploadTarget {
+    pub part_size_bytes: u64,
+    pub parts: Vec<PlatformImageUploadPartTarget>,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Actual part observed by the object store during upload status refresh.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageUploadedPart {
+    pub part_number: u32,
+    pub etag: String,
+    pub size_bytes: u64,
 }
 
 /// Staged OCI archive upload session owned by Control.
@@ -480,14 +536,63 @@ pub struct PlatformImageUploadSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_bytes: Option<u64>,
     pub upload_target: PlatformImageUploadTarget,
+    pub uploaded_parts: Vec<PlatformImageUploadedPart>,
     pub expires_at: UtcTimestamp,
     pub revision: Revision,
+}
+
+/// Control-owned lifecycle state for a platform image upload.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformImageUploadState {
+    Pending,
+    Queued,
+    Freezing,
+    Importing,
+    Cancelling,
+    Imported,
+    Failed,
+    Cancelled,
+}
+
+/// Public status of a platform image upload and its asynchronous import.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageUploadStatus {
+    pub upload_id: UploadSessionId,
+    pub state: PlatformImageUploadState,
+    pub revision: Revision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_target: Option<PlatformImageUploadTarget>,
+    #[serde(default)]
+    pub uploaded_parts: Vec<PlatformImageUploadedPart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<PlatformImageId>,
+}
+
+/// ETag receipt for one completed multipart part.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompletePlatformImageUploadPart {
+    pub part_number: u32,
+    pub etag: String,
 }
 
 /// Completion request for one staged OCI archive upload.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CompletePlatformImageUploadRequest {}
+pub struct CompletePlatformImageUploadRequest {
+    pub parts: Vec<CompletePlatformImageUploadPart>,
+}
+
+/// Revision-fenced cancellation of a platform image upload.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelPlatformImageUploadRequest {
+    pub expected_revision: Revision,
+}
 
 /// Internal registration request; the actor is the verified Control caller's decision actor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -546,6 +651,46 @@ pub struct InternalPlatformImageImportRequest {
     pub reason: String,
 }
 
+/// Durable Agent import job submission. The upload id is the stable idempotency identity across
+/// Control retries and Agent restarts; the embedded request is immutable after acceptance.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageImportEnqueueRequest {
+    pub upload_id: UploadSessionId,
+    pub request: InternalPlatformImageImportRequest,
+}
+
+/// Agent-owned lifecycle state for one durable platform image import job.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformImageImportJobState {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// Short Agent response used by Control while polling a durable import job.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageImportJobStatus {
+    pub upload_id: UploadSessionId,
+    pub state: PlatformImageImportJobState,
+    pub revision: Revision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<PlatformImageId>,
+}
+
+/// Internal cancellation request for the Agent-owned import job.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageImportCancelRequest {
+    pub upload_id: UploadSessionId,
+}
+
 /// One teacher command for approving an immutable Environment/Evaluation authoring package.
 ///
 /// The selected artifact is checked against Control's authoritative build projection before the
@@ -562,6 +707,12 @@ pub struct CompleteAuthoringApprovalRequest {
     pub evaluation_candidate_id: CandidateId,
     pub evaluation_candidate_revision: Revision,
     pub image_artifact: crate::supply_chain::ImageArtifact,
+    /// Exact per-experiment Evaluation runner image selected for a Container experiment.
+    ///
+    /// Container experiments must select the runner artifact produced by their own runner build;
+    /// VM experiments omit it and use the deployment-owned Evaluation runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_runner_image_artifact: Option<crate::supply_chain::ImageArtifact>,
     pub reason: String,
 }
 
@@ -654,6 +805,32 @@ pub struct CandidateBuildView {
     pub cleanup_verified: Option<bool>,
 }
 
+/// One existing build target attached to an immutable candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateBuildTarget {
+    Environment,
+    EvaluationRunner,
+}
+
+/// Authoritative Agent task state for one project-scoped candidate build.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CandidateBuildTask {
+    pub candidate_id: CandidateId,
+    pub target: CandidateBuildTarget,
+    pub status: InternalAgentBuildCancellationResult,
+}
+
+/// The state and revision the caller actually reviewed before requesting cancellation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelCandidateBuildRequest {
+    pub build_request_id: crate::BuildRequestId,
+    pub expected_state: InternalAgentBuildState,
+    pub expected_revision: Revision,
+}
+
 /// Control-owned teacher read model for one immutable Environment candidate.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -676,6 +853,13 @@ pub struct EnvironmentCandidateView {
 pub struct EvaluationCandidateView {
     pub candidate: crate::authoring::EvaluationCandidate,
     pub approvals: Vec<crate::authoring::CandidateApproval>,
+    /// Per-experiment runner build resolved by Control from the authoritative build projection.
+    ///
+    /// This remains null for deployment-owned VM evaluation, which has no per-experiment runner
+    /// image, and while a Container experiment's runner build is incomplete.
+    pub runner_build: Option<CandidateBuildView>,
+    /// Exact runner artifact a teacher can approve for a Container experiment.
+    pub runner_image_artifact: Option<crate::supply_chain::ImageArtifact>,
     pub trust_revision: Revision,
 }
 
@@ -1078,6 +1262,7 @@ pub struct GeneratedArtifactRecord {
 #[serde(rename_all = "snake_case")]
 pub enum GeneratedArtifactKind {
     BuildContext,
+    EvaluationRunnerBuildContext,
     WorkScript,
     VerificationScript,
 }
@@ -1135,6 +1320,8 @@ pub struct InternalAgentBuildCancellationResult {
     pub state: InternalAgentBuildState,
     pub revision: Revision,
     pub cancellation_requested: bool,
+    pub diagnostic_code: Option<DiagnosticCode>,
+    pub cleanup_verified: Option<bool>,
 }
 
 /// Terminal or in-progress Agent result used to rebuild Control projections after replay.
@@ -1738,6 +1925,75 @@ pub struct CursorPage<T> {
     pub next_cursor: Option<String>,
 }
 
+/// Page parameters for bounded offset-list endpoints.
+///
+/// Offset pagination is intentionally bounded to the range accepted by the
+/// public APIs.  Keeping the overflow check in the contract crate lets each
+/// service reject an invalid page before converting it to a provider or SQL
+/// offset.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageQuery {
+    #[serde(default, deserialize_with = "deserialize_query_u32")]
+    pub page: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_query_u16")]
+    pub page_size: Option<u16>,
+}
+
+fn deserialize_query_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_query_number(deserializer)
+}
+
+fn deserialize_query_u16<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_query_number(deserializer)
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum QueryNumber<T> {
+    Numeric(T),
+    Text(String),
+}
+
+fn deserialize_query_number<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    Option::<QueryNumber<T>>::deserialize(deserializer)?
+        .map(|value| match value {
+            QueryNumber::Numeric(value) => Ok(value),
+            QueryNumber::Text(value) => value.parse().map_err(|error: T::Err| {
+                serde::de::Error::custom(format!("invalid page number: {error}"))
+            }),
+        })
+        .transpose()
+}
+
+impl PageQuery {
+    /// Returns the canonical page, page size, and checked zero-based offset.
+    pub fn normalized(&self) -> Result<(u32, u16, u32), HttpContractError> {
+        let page = self.page.unwrap_or(1);
+        let page_size = self.page_size.unwrap_or(25);
+        if page == 0 || !(1..=100).contains(&page_size) {
+            return Err(HttpContractError::InvalidCursorPage);
+        }
+        let offset = page
+            .checked_sub(1)
+            .and_then(|value| value.checked_mul(u32::from(page_size)))
+            .filter(|value| i32::try_from(*value).is_ok())
+            .ok_or(HttpContractError::InvalidCursorPage)?;
+        Ok((page, page_size, offset))
+    }
+}
+
 /// Cursor page bound to one consistent REST/SSE snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2040,6 +2296,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/directory/users",
+        "listOrganizationUsers",
+        "directory:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        TEACHER_OR_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects",
         "listProjects",
         "project:read",
@@ -2090,7 +2360,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2104,7 +2374,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2118,7 +2388,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2132,7 +2402,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         201,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2146,7 +2416,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2218,6 +2488,48 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         ALL_ROLES,
         Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/llm-egress-policy-options",
+        "getProjectLlmPolicyOptions",
+        "llm_policy:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/llm-egress-policies",
+        "createCourseLlmPolicy",
+        "llm_policy:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/llm-egress-policies/active",
+        "getActiveCourseLlmPolicy",
+        "llm_policy:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
     ),
     op!(
         GatewayInternal,
@@ -2292,6 +2604,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/projects/{projectId}/agent-runs",
+        "listProjectAgentRuns",
+        "agent_run:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects/{projectId}/agent-runs/{runId}/work-configuration/plan",
         "getProjectWorkConfigurationPlan",
         "agent_run:read",
@@ -2342,6 +2668,34 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}",
+        "getProjectCandidateBuild",
+        "candidate:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}/cancel",
+        "cancelProjectCandidateBuild",
+        "candidate:approve",
+        Oidc,
+        IdempotentRevisioned,
+        202,
+        false,
+        false,
         ALL_ROLES,
         Project
     ),
@@ -2697,6 +3051,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Post,
+        "/api/v1/resource/rates/{rateId}/end",
+        "endResourceRate",
+        "resource_rate:write",
+        BffSession,
+        IdempotentCreate,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
         Get,
         "/api/v1/projects/{projectId}/resource-budget",
         "getProjectResourceBudget",
@@ -2728,6 +3096,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/projects/{projectId}/charges",
         "listProjectResourceCharges",
+        "resource_charge:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/usage",
+        "listProjectResourceUsage",
         "resource_charge:read",
         BffSession,
         None,
@@ -2930,7 +3312,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -3382,20 +3764,6 @@ pub const OPERATIONS: &[OperationContract] = &[
         Service
     ),
     op!(
-        Public,
-        Post,
-        "/api/v1/resource/usage",
-        "recordResourceUsage",
-        "resource:usage_record",
-        BffSession,
-        None,
-        200,
-        false,
-        true,
-        PLATFORM_ADMIN,
-        Project
-    ),
-    op!(
         GatewayInternal,
         Post,
         "/internal/v1/llm-reviews",
@@ -3683,8 +4051,36 @@ pub const OPERATIONS: &[OperationContract] = &[
         "platform_image:write",
         BffSession,
         IdempotentRevisioned,
-        201,
+        202,
+        true,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/images/uploads/{uploadId}",
+        "getPlatformImageUpload",
+        "platform_image:read",
+        BffSession,
+        None,
+        200,
         false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/images/uploads/{uploadId}/cancel",
+        "cancelPlatformImageUpload",
+        "platform_image:write",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        true,
         true,
         PLATFORM_ADMIN,
         Global
@@ -3692,14 +4088,42 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         GatewayInternal,
         Post,
-        "/internal/v1/platform-images/imports",
-        "importPlatformImage",
+        "/internal/v1/platform-images/import-jobs",
+        "enqueuePlatformImageImport",
         "agent.control.invoke",
         ServiceJwt,
         IdempotentCreate,
-        201,
+        202,
         false,
         true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/platform-images/import-jobs/{uploadId}",
+        "getPlatformImageImportJob",
+        "agent.control.invoke",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/platform-images/import-jobs/{uploadId}/cancel",
+        "cancelPlatformImageImportJob",
+        "agent.control.invoke",
+        ServiceJwt,
+        IdempotentCreate,
+        202,
+        true,
+        false,
         PLATFORM_ADMIN,
         Service
     ),
@@ -3785,6 +4209,7 @@ mod tests {
     fn operation_ids_and_surfaces_are_sound() -> Result<(), HttpContractError> {
         validate_operation_catalog()
     }
+
     #[test]
     fn weak_etag_is_rejected() {
         assert!(matches!(
@@ -3792,6 +4217,45 @@ mod tests {
             Err(HttpContractError::WeakEtag)
         ));
     }
+
+    #[test]
+    fn offset_page_rejects_zero_and_unrepresentable_offsets() -> Result<(), HttpContractError> {
+        assert!(matches!(
+            PageQuery {
+                page: Some(0),
+                page_size: Some(25),
+            }
+            .normalized(),
+            Err(HttpContractError::InvalidCursorPage)
+        ));
+        assert!(matches!(
+            PageQuery {
+                page: Some(u32::MAX),
+                page_size: Some(100),
+            }
+            .normalized(),
+            Err(HttpContractError::InvalidCursorPage)
+        ));
+        assert_eq!(
+            PageQuery {
+                page: Some(2),
+                page_size: Some(25),
+            }
+            .normalized()?,
+            (2, 25, 25)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn page_query_defaults_when_fields_are_missing() -> Result<(), Box<dyn std::error::Error>> {
+        let query: PageQuery = serde_json::from_str("{}")?;
+        assert_eq!(query.normalized()?, (1, 25, 0));
+        let query: PageQuery = serde_json::from_str(r#"{"page":2,"pageSize":10}"#)?;
+        assert_eq!(query.normalized()?, (2, 10, 10));
+        Ok(())
+    }
+
     #[test]
     fn sse_cursor_sources_must_agree() {
         let above_javascript_safe_integer = StreamSequence(9_007_199_254_740_992);

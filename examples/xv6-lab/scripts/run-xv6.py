@@ -27,7 +27,7 @@ READY_MARKER = b"init: starting sh"
 READY_PROMPT = b"$ "
 DONE_MARKER = b"__LABWEAVER_XV6_DONE__"
 MAX_OUTPUT_BYTES = 1_048_576
-RUN_DEADLINE_SECONDS = 5.0
+RUN_DEADLINE_SECONDS = 20.0
 TERMINATE_GRACE_SECONDS = 1.0
 
 
@@ -126,6 +126,8 @@ def run(arguments: list[str]) -> int:
 
     command = [
         "/usr/bin/qemu-system-riscv64",
+        "-accel",
+        "tcg,tb-size=32",
         "-machine",
         "virt",
         "-bios",

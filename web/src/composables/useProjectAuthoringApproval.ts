@@ -35,8 +35,9 @@ function staleContextDiagnostic(subject: string): DiagnosticViewModel {
 /**
  * Loads the complete, project-scoped authoring review and submits the one
  * teacher command that binds both candidates, the package revision and the
- * resolved image artifact. Candidate decisions remain read-only context here;
- * the durable approval is the single authoritative publish prerequisite.
+ * resolved environment and per-experiment runner image artifacts. Candidate
+ * decisions remain read-only context here; the durable approval is the single
+ * authoritative publish prerequisite.
  */
 export function useProjectAuthoringApproval(
   projectId: Ref<string | null>,
@@ -61,6 +62,8 @@ export function useProjectAuthoringApproval(
   let evaluationCandidateRetryId: string | null = null
   let environmentCandidateRetryCount = 0
   let evaluationCandidateRetryCount = 0
+  let environmentArtifactRetryCount = 0
+  let evaluationArtifactRetryCount = 0
   let completionIdempotencyKey: string | null = null
   let completionFingerprint: string | null = null
 
@@ -88,6 +91,8 @@ export function useProjectAuthoringApproval(
     evaluationCandidateRetryId = null
     environmentCandidateRetryCount = 0
     evaluationCandidateRetryCount = 0
+    environmentArtifactRetryCount = 0
+    evaluationArtifactRetryCount = 0
   }
 
   function scheduleEnvironmentCandidateRetry(project: string, candidateId: string, generation: number) {
@@ -113,6 +118,7 @@ export function useProjectAuthoringApproval(
     if (!silent || environmentCandidateRetryId !== candidateId) {
       environmentCandidateRetryId = candidateId
       environmentCandidateRetryCount = 0
+      environmentArtifactRetryCount = 0
     }
     if (!silent) environmentCandidate.value = { kind: 'loading', message: '加载 Environment 候选…' }
     const result = await getProjectEnvironmentCandidate({ path: { projectId: project, candidateId } })
@@ -142,6 +148,20 @@ export function useProjectAuthoringApproval(
     }
     environmentCandidateRetryCount = 0
     environmentCandidate.value = { kind: 'success', data: result.data }
+    if (result.data.imageArtifact) {
+      environmentArtifactRetryCount = 0
+    } else if (
+      result.data.build != null
+      && result.data.build.state !== 'failed'
+      && result.data.build.state !== 'cancelled'
+      && environmentArtifactRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES
+    ) {
+      // Control resolves the immutable image artifact slightly after the
+      // candidate projection appears. Keep polling until it is bound so the
+      // approval command is not permanently disabled by a one-shot load.
+      environmentArtifactRetryCount += 1
+      scheduleEnvironmentCandidateRetry(project, candidateId, generation)
+    }
   }
 
   async function loadEvaluationCandidate(project: string, candidateId: string, generation: number, silent = false) {
@@ -149,6 +169,7 @@ export function useProjectAuthoringApproval(
     if (!silent || evaluationCandidateRetryId !== candidateId) {
       evaluationCandidateRetryId = candidateId
       evaluationCandidateRetryCount = 0
+      evaluationArtifactRetryCount = 0
     }
     if (!silent) evaluationCandidate.value = { kind: 'loading', message: '加载 Evaluation 候选…' }
     const result = await getProjectEvaluationCandidate({ path: { projectId: project, candidateId } })
@@ -178,6 +199,19 @@ export function useProjectAuthoringApproval(
     }
     evaluationCandidateRetryCount = 0
     evaluationCandidate.value = { kind: 'success', data: result.data }
+    if (result.data.runnerImageArtifact) {
+      evaluationArtifactRetryCount = 0
+    } else if (
+      result.data.runnerBuild != null
+      && result.data.runnerBuild.state !== 'failed'
+      && result.data.runnerBuild.state !== 'cancelled'
+      && evaluationArtifactRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES
+    ) {
+      // The per-experiment runner artifact is resolved after the runner build
+      // projection appears; poll until Control binds it.
+      evaluationArtifactRetryCount += 1
+      scheduleEvaluationCandidateRetry(project, candidateId, generation)
+    }
   }
 
   function schedulePublicationPoll(data: AuthoringApprovalPublicationStatusSchema) {
@@ -223,6 +257,17 @@ export function useProjectAuthoringApproval(
     return artifact ? (artifact as CompleteAuthoringApprovalRequestSchemaImageArtifact) : null
   })
 
+  const runnerImageArtifact = computed<CompleteAuthoringApprovalRequestSchemaImageArtifact | null>(() => {
+    if (evaluationCandidate.value.kind !== 'success') return null
+    const artifact = evaluationCandidate.value.data.runnerImageArtifact
+    return artifact ? (artifact as CompleteAuthoringApprovalRequestSchemaImageArtifact) : null
+  })
+
+  const runnerArtifactRequired = computed(() => (
+    environmentCandidate.value.kind === 'success' &&
+    environmentCandidate.value.data.candidate.spec.runtime.kind === 'container'
+  ))
+
   const canApprove = computed(() => {
     return (
       run.value.kind === 'success' &&
@@ -230,6 +275,7 @@ export function useProjectAuthoringApproval(
       evaluationCandidate.value.kind === 'success' &&
       problemPackage.value.kind === 'success' &&
       imageArtifact.value !== null &&
+      (!runnerArtifactRequired.value || runnerImageArtifact.value !== null) &&
       // An approval id identifies an already-created immutable approval. Its
       // publication may still be pending, but the same candidate tuple cannot
       // be approved again. Keep the form closed while that status is rebuilt.
@@ -331,8 +377,11 @@ export function useProjectAuthoringApproval(
     const evaluation = evaluationCandidate.value.kind === 'success' ? evaluationCandidate.value.data : null
     const pkg = problemPackage.value.kind === 'success' ? problemPackage.value.data : null
     const artifact = imageArtifact.value
+    const runnerArtifact = runnerImageArtifact.value
+    const runnerRequired = environment?.candidate.spec.runtime.kind === 'container'
     const trimmedReason = reason.trim()
     if (!runData || !environment || !evaluation || !pkg || !artifact || !trimmedReason || trimmedReason.length > 500) return false
+    if (runnerRequired && !runnerArtifact) return false
 
     const body = {
       projectId: id,
@@ -344,6 +393,7 @@ export function useProjectAuthoringApproval(
       evaluationCandidateId: evaluation.candidate.id,
       evaluationCandidateRevision: evaluation.candidate.revision,
       imageArtifact: artifact,
+      evaluationRunnerImageArtifact: runnerArtifact,
       reason: trimmedReason,
     }
     const fingerprint = JSON.stringify(body)
@@ -387,6 +437,9 @@ export function useProjectAuthoringApproval(
     approval,
     publication,
     imageArtifact,
+    runnerImageArtifact,
+    evaluationRunnerImageArtifact: runnerImageArtifact,
+    runnerArtifactRequired,
     canApprove,
     acting,
     load,

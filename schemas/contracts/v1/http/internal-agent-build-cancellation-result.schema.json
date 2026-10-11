@@ -8,6 +8,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
     "InternalAgentBuildState": {
       "description": "Agent-owned durable state used as an optimistic precondition for build cancellation.",
       "enum": [
@@ -40,10 +44,26 @@
     "cancellationRequested": {
       "type": "boolean"
     },
+    "cleanupVerified": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "courseId": {
       "anyOf": [
         {
           "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diagnosticCode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DiagnosticCode"
         },
         {
           "type": "null"

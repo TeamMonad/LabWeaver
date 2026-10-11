@@ -4,6 +4,21 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "ProblemPackageRetentionChoice": {
+      "description": "Explicit retention choice made when a new CourseMaterial package upload starts.",
+      "oneOf": [
+        {
+          "const": "finite",
+          "description": "Use the configured finite CourseMaterial policy.",
+          "type": "string"
+        },
+        {
+          "const": "permanent",
+          "description": "Retain the completed material until an explicit business revocation.",
+          "type": "string"
+        }
+      ]
+    },
     "ProblemPackageUploadFile": {
       "additionalProperties": false,
       "properties": {
@@ -59,6 +74,9 @@
     "projectId": {
       "$ref": "#/$defs/ProjectId"
     },
+    "retentionChoice": {
+      "$ref": "#/$defs/ProblemPackageRetentionChoice"
+    },
     "retentionPolicyRevision": {
       "$ref": "#/$defs/Revision"
     }
@@ -66,7 +84,8 @@
   "required": [
     "projectId",
     "files",
-    "retentionPolicyRevision"
+    "retentionPolicyRevision",
+    "retentionChoice"
   ],
   "title": "CreateProblemPackageUploadRequest",
   "type": "object"

@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Revision-fenced cancellation of a platform image upload.",
+  "properties": {
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "expectedRevision"
+  ],
+  "title": "CancelPlatformImageUploadRequest",
+  "type": "object"
+}

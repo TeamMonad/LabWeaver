@@ -252,6 +252,10 @@ spec:
         # remains bound to one immutable submission and has no write credentials.
         - namespaceSelector:
             matchLabels: {labweaver.io/environment: "true"}
+        # The authoring sandbox reads its reviewed material and writes its
+        # result through the object store from a fixed platform namespace.
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: labweaver-authoring}
   egress:
     - to:
         - podSelector: {}
