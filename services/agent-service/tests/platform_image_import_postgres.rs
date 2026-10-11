@@ -360,7 +360,7 @@ async fn run_import(
     let initial: InternalPlatformImageImportJobStatus = serde_json::from_slice(&body)?;
     assert_eq!(initial.upload_id, upload_id);
     assert_eq!(initial.state, PlatformImageImportJobState::Queued);
-    let _worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(api.worker.clone().run()));
+    let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(api.worker.clone().run()));
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         let response = client
@@ -387,8 +387,8 @@ async fn run_import(
                 .entries
                 .into_iter()
                 .find(|entry| Some(entry.catalog_id) == status.catalog_id);
-            _worker.abort();
-            let _ = _worker.await;
+            worker.abort();
+            let _ = worker.await;
             return Ok((status, entry));
         }
         assert!(
