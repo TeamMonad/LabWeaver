@@ -229,15 +229,41 @@ export async function requestProjectResourceByUi(page, {
     .locator('select')
   await expect(releaseSelect).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   // The release set is an event-sourced read model: the template release is
-  // projected asynchronously, so a bare evaluateAll can observe the empty
-  // state before the projection lands. Poll for a usable option like the
-  // student journey does, then read the rendered list.
-  await expect(releaseSelect.locator('option:not([value=""])').first()).toBeAttached({
-    timeout: RESOURCE_PAGE_TIMEOUT_MS,
-  })
-  const releases = await releaseSelect.locator('option').evaluateAll((elements) => elements
+  // projected asynchronously, so a bare evaluateAll can observe an incomplete
+  // list before the requested release lands. Poll for the exact requested
+  // option when the caller supplied release identity; otherwise keep the
+  // default first-release journey.
+  const readReleases = () => releaseSelect.locator('option').evaluateAll((elements) => elements
     .map((element) => ({ value: element.value, label: (element.textContent ?? '').trim() }))
     .filter((option) => option.value !== ''))
+  let releases = []
+  if (releaseId === null) {
+    await expect(releaseSelect.locator('option:not([value=""])').first()).toBeAttached({
+      timeout: RESOURCE_PAGE_TIMEOUT_MS,
+    })
+    releases = await readReleases()
+  } else {
+    const targetReleaseValue = `${releaseId}:${releaseVersion}`
+    let targetWaitError = null
+    try {
+      await expect.poll(
+        async () => {
+          releases = await readReleases()
+          return releases.some((option) => option.value === targetReleaseValue)
+        },
+        { timeout: RESOURCE_PAGE_TIMEOUT_MS, intervals: [250, 500, 1000] },
+      ).toBe(true)
+    } catch (error) {
+      targetWaitError = error
+    }
+    if (targetWaitError) {
+      releases = await readReleases()
+      if (releases.length === 0) {
+        throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_MISSING:${scope}`, { cause: targetWaitError })
+      }
+      throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_NOT_VISIBLE:${releaseId}:${releaseVersion}`, { cause: targetWaitError })
+    }
+  }
   if (releases.length === 0) {
     await expect(page.getByText('当前项目没有可用的已发布版本。')).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
     throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_MISSING:${scope}`)

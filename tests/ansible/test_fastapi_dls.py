@@ -3,6 +3,9 @@
 import hashlib
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -83,6 +86,7 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
             fastapi_dls_debug=False,
             fastapi_dls_data_pvc_name="fastapi-dls-data",
             fastapi_dls_tls_secret_name="fastapi-dls-tls",
+            fastapi_dls_tls_public_checksum="public-tls-checksum",
         )
         containers = deployment["spec"]["template"]["spec"]["containers"]
         self.assertFalse(deployment["spec"]["template"]["spec"]["automountServiceAccountToken"])
@@ -94,8 +98,20 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
         annotations = deployment["spec"]["template"]["metadata"]["annotations"]
         checksum = annotations["checksum/fastapi-dls-proxy-config"]
         self.assertEqual(checksum, hashlib.sha256(proxy_template.encode()).hexdigest())
+        self.assertEqual(annotations["checksum/fastapi-dls-tls"], "public-tls-checksum")
         backend = next(container for container in containers if container["name"] == "fastapi-dls")
         proxy = next(container for container in containers if container["name"] == "tls-proxy")
+        tls_volume = next(
+            volume for volume in deployment["spec"]["template"]["spec"]["volumes"] if volume["name"] == "tls"
+        )
+        self.assertEqual(
+            tls_volume["secret"]["items"],
+            [
+                {"key": "ca.crt", "path": "ca.crt"},
+                {"key": "webserver.crt", "path": "webserver.crt"},
+                {"key": "webserver.key", "path": "webserver.key"},
+            ],
+        )
         env = {item["name"]: item["value"] for item in backend["env"]}
         mounts = {mount["mountPath"]: mount for mount in backend["volumeMounts"]}
 
@@ -299,12 +315,207 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
         )
 
     def test_tls_bootstrap_always_removes_temporary_material(self) -> None:
-        bootstrap = task_named(self.tasks, "Bootstrap FastAPI-DLS TLS material")
-        cleanup = bootstrap["always"][0]
+        issuance = task_named(self.tasks, "Issue a FastAPI-DLS CA and server certificate")
+        cleanup = issuance["always"][0]
 
         self.assertEqual(cleanup["name"], "Remove the temporary FastAPI-DLS TLS material")
         self.assertEqual(cleanup["ansible.builtin.file"]["state"], "absent")
         self.assertEqual(cleanup["ansible.builtin.file"]["path"], "{{ fastapi_dls_tls_temp.path }}")
+
+    def test_tls_issuance_keeps_ca_and_leaf_in_one_common_path(self) -> None:
+        issuance = task_named(self.tasks, "Issue a FastAPI-DLS CA and server certificate")
+        included = load_yaml(ROLE_DIR / "tasks/issue_tls_material.yml")
+        included_names = [task["name"] for task in included]
+
+        self.assertIn("Include the common FastAPI-DLS leaf issuance tasks", [task["name"] for task in issuance["block"]])
+        self.assertIn("Sign the FastAPI-DLS server certificate with the retained CA", included_names)
+        self.assertNotIn("'-x509'", repr(included))
+        extension_tasks = [
+            task
+            for task in issuance["block"]
+            if task["name"] == "Write the FastAPI-DLS server certificate extensions"
+        ]
+        self.assertEqual(len(extension_tasks), 0)
+        extension_task = task_named(included, "Write the FastAPI-DLS server certificate extensions")
+        extension_text = extension_task["ansible.builtin.copy"]["content"]
+        self.assertIn("basicConstraints = critical,CA:FALSE", extension_text)
+        self.assertIn("extendedKeyUsage = serverAuth", extension_text)
+
+        ca_config_task = task_named(issuance["block"], "Write the FastAPI-DLS CA certificate configuration")
+        self.assertIn("basicConstraints = critical,CA:TRUE,pathlen:1", ca_config_task["ansible.builtin.copy"]["content"])
+        sign_task = task_named(included, "Sign the FastAPI-DLS server certificate with the retained CA")
+        sign_argv = sign_task["ansible.builtin.command"]["argv"]
+        self.assertIn("-CA", sign_argv)
+        self.assertIn("-CAkey", sign_argv)
+        self.assertIn("-extensions", sign_argv)
+
+        secret_task = task_named(included, "Reconcile the issued FastAPI-DLS TLS Secret")
+        self.assertIn("ca.key", secret_task["kubernetes.core.k8s"]["definition"]["data"])
+        tls_volume = next(
+            volume
+            for volume in task_named(self.tasks, "Reconcile the FastAPI-DLS Deployment")[
+                "kubernetes.core.k8s"
+            ]["definition"]["spec"]["template"]["spec"]["volumes"]
+            if volume["name"] == "tls"
+        )
+        self.assertNotIn("ca.key", [item["key"] for item in tls_volume["secret"]["items"]])
+
+    def test_tls_repair_only_targets_the_legacy_equal_certificate_layout(self) -> None:
+        layout = task_named(self.tasks, "Determine the retained FastAPI-DLS TLS material layout")
+        facts = layout["ansible.builtin.set_fact"]
+        self.assertIn("data['ca.crt']", facts["fastapi_dls_tls_legacy_ca_as_leaf"])
+        self.assertIn("data['webserver.crt']", facts["fastapi_dls_tls_legacy_ca_as_leaf"])
+        self.assertEqual(
+            facts["fastapi_dls_tls_ca_certificate_b64"],
+            "{{ fastapi_dls_tls_secret.resources[0].data['ca.crt'] }}",
+        )
+        checksum = task_named(self.tasks, "Calculate the FastAPI-DLS public TLS material checksum")
+        checksum_expression = checksum["ansible.builtin.set_fact"]["fastapi_dls_tls_public_checksum"]
+        self.assertIn("fastapi_dls_tls_ca_certificate_b64", checksum_expression)
+        self.assertIn("fastapi_dls_tls_server_certificate_b64", checksum_expression)
+        self.assertNotIn("fastapi_dls_tls_ca_key_b64", checksum_expression)
+
+    def test_tls_issuance_produces_a_verifiable_ca_false_leaf_and_retains_ca(self) -> None:
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            self.skipTest("openssl is required for the FastAPI-DLS TLS profile")
+
+        issuance = task_named(self.tasks, "Issue a FastAPI-DLS CA and server certificate")
+        included = load_yaml(ROLE_DIR / "tasks/issue_tls_material.yml")
+        ca_config = task_named(
+            issuance["block"], "Write the FastAPI-DLS CA certificate configuration"
+        )["ansible.builtin.copy"]["content"]
+        server_config = task_named(
+            included, "Write the FastAPI-DLS server certificate request configuration"
+        )["ansible.builtin.copy"]["content"]
+        server_extensions = task_named(
+            included, "Write the FastAPI-DLS server certificate extensions"
+        )["ansible.builtin.copy"]["content"]
+        template = Environment(undefined=StrictUndefined)
+        render_values = {
+            "fastapi_dls_service_name": "fastapi-dls",
+            "fastapi_dls_tls_san": (
+                "DNS:fastapi-dls,DNS:fastapi-dls.labweaver-gpu-license,"
+                "DNS:fastapi-dls.labweaver-gpu-license.svc,"
+                "DNS:fastapi-dls.labweaver-gpu-license.svc.cluster.local"
+            ),
+        }
+
+        with tempfile.TemporaryDirectory(prefix="fastapi-dls-tls-test-") as directory:
+            root = Path(directory)
+            (root / "ca.cnf").write_text(
+                template.from_string(ca_config).render(**render_values), encoding="utf-8"
+            )
+            (root / "server.cnf").write_text(
+                template.from_string(server_config).render(**render_values), encoding="utf-8"
+            )
+            (root / "server.ext").write_text(
+                template.from_string(server_extensions).render(**render_values), encoding="utf-8"
+            )
+
+            def run(*arguments: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [openssl, *arguments],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            run(
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                str(root / "ca.key"),
+            )
+            run(
+                "req",
+                "-x509",
+                "-new",
+                "-sha256",
+                "-key",
+                str(root / "ca.key"),
+                "-out",
+                str(root / "ca.crt"),
+                "-days",
+                "2",
+                "-config",
+                str(root / "ca.cnf"),
+            )
+            ca_before = run(
+                "x509",
+                "-in",
+                str(root / "ca.crt"),
+                "-noout",
+                "-fingerprint",
+                "-sha256",
+            ).stdout
+            run(
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                str(root / "webserver.key"),
+            )
+            run(
+                "req",
+                "-new",
+                "-sha256",
+                "-key",
+                str(root / "webserver.key"),
+                "-out",
+                str(root / "webserver.csr"),
+                "-config",
+                str(root / "server.cnf"),
+            )
+            run(
+                "x509",
+                "-req",
+                "-sha256",
+                "-in",
+                str(root / "webserver.csr"),
+                "-CA",
+                str(root / "ca.crt"),
+                "-CAkey",
+                str(root / "ca.key"),
+                "-CAcreateserial",
+                "-out",
+                str(root / "webserver.crt"),
+                "-days",
+                "2",
+                "-extfile",
+                str(root / "server.ext"),
+                "-extensions",
+                "v3_server",
+            )
+
+            leaf_text = run(
+                "x509", "-in", str(root / "webserver.crt"), "-noout", "-text"
+            ).stdout
+            self.assertIn("CA:FALSE", leaf_text)
+            self.assertIn("TLS Web Server Authentication", leaf_text)
+            self.assertEqual(
+                run(
+                    "verify",
+                    "-CAfile",
+                    str(root / "ca.crt"),
+                    str(root / "webserver.crt"),
+                ).stdout.strip(),
+                f"{root / 'webserver.crt'}: OK",
+            )
+            ca_after = run(
+                "x509",
+                "-in",
+                str(root / "ca.crt"),
+                "-noout",
+                "-fingerprint",
+                "-sha256",
+            ).stdout
+            self.assertEqual(ca_before, ca_after)
 
 
 if __name__ == "__main__":
