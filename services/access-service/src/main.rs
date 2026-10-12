@@ -182,6 +182,14 @@ fn browser_routes() -> Router<Arc<AppState>> {
             "/api/v1/projects/{project_id}/me/evaluation-results/{run_id}",
             get(proxy::forward_evaluation),
         )
+        .route(
+            "/api/v1/projects/{project_id}/me/evaluation-tasks/{run_id}",
+            get(proxy::forward_evaluation),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/me/evaluation-tasks/submissions/{submission_id}",
+            get(proxy::forward_evaluation),
+        )
         .merge(control_browser_router())
         .route(
             "/api/v1/environments/{environment_id}",
@@ -445,6 +453,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}",
             axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/task-progress",
+            get(proxy::forward_control),
         )
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/work-configuration/approve",

@@ -110,6 +110,10 @@ pub struct InternalCreateTaskResourceRequest {
     pub request_key: String,
     pub resources: crate::resource::WorkloadResources,
     pub duration_seconds: u64,
+    /// Approval wait captured once by Resource using its database clock.
+    /// Same-attempt recovery keeps the original deadline.
+    #[schemars(range(min = 1, max = 3_600_000))]
+    pub approval_timeout_milliseconds: u64,
 }
 
 /// PostgreSQL-authoritative one-shot task resource state returned to Evaluation.
@@ -2846,6 +2850,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/projects/{projectId}/agent-runs/{runId}/task-progress",
+        "getProjectAgentTaskProgress",
+        "agent_run:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects/{projectId}/agent-runs",
         "listProjectAgentRuns",
         "agent_run:read",
@@ -3490,6 +3508,34 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/projects/{projectId}/me/evaluation-tasks/submissions/{submissionId}",
+        "getOwnProjectEvaluationTaskForSubmission",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Student],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/me/evaluation-tasks/{runId}",
+        "getOwnProjectEvaluationTaskProgress",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Student],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects/{projectId}/environment-template-releases",
         "listEnvironmentTemplateReleases",
         "release:read",
@@ -4052,6 +4098,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/internal/v1/agent-runs/{runId}/work-execution-intent",
         "getInternalAgentWorkExecutionIntent",
+        "agent.control.invoke",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/agent-runs/{runId}/task-progress",
+        "getInternalAgentTaskProgress",
         "agent.control.invoke",
         ServiceJwt,
         None,

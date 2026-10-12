@@ -214,9 +214,6 @@ impl SandboxAuthoringProcess {
         if cancellation.is_cancelled() {
             return Err(ClaudeCodeProcessError::Cancelled);
         }
-        if tokio::time::Instant::now() >= command.deadline() {
-            return Err(ClaudeCodeProcessError::TimedOut);
-        }
         Box::pin(self.execute_new_attempt(scope, command, cancellation, None)).await
     }
 
@@ -281,9 +278,13 @@ impl SandboxAuthoringProcess {
         {
             return Err(ClaudeCodeProcessError::Io);
         }
-        let request: SandboxResourceRequest =
-            serde_json::from_value(saved.request_payload.ok_or(ClaudeCodeProcessError::Io)?)
-                .map_err(|_| ClaudeCodeProcessError::Io)?;
+        let request: SandboxResourceRequest = serde_json::from_value(
+            saved
+                .request_payload
+                .clone()
+                .ok_or(ClaudeCodeProcessError::Io)?,
+        )
+        .map_err(|_| ClaudeCodeProcessError::Io)?;
         if request.project_id != scope.project_id
             || request.course_id != scope.course_id
             || request.actor_id != scope.actor_id
@@ -296,43 +297,88 @@ impl SandboxAuthoringProcess {
             .fence_sandbox_generation(scope)
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
-        let deadline = command.deadline();
         let (cancel_token, _bridge) = bridge_cancellation(&cancellation);
         // The reservation has to exist before it can be claimed: the claim path reads the
         // authoritative request projection and never invents one, so an attempt that skipped this
         // step would fail before any cluster object existed. The POST is awaited before
         // cancellation is observed so an in-flight request cannot be dropped and then commit after
         // the attempt already stopped.
-        lifecycle.create().await.map_err(|error| {
-            tracing::error!(
-                event = "agent.authoring.sandbox.stage_failed",
-                failure_stage = "sandbox.resource.create",
-                error_kind = ?error,
-                task_run_id = %task_run_id.as_uuid(),
-                "authoring attempt could not create its Resource request",
-            );
-            map_task_resource(&error)
-        })?;
-        if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
-            lifecycle
-                .cancel("authoring attempt cancelled before resource claim")
-                .await
-                .map_err(|error| map_task_resource(&error))?;
-            return Err(if cancellation.is_cancelled() {
-                ClaudeCodeProcessError::Cancelled
-            } else {
-                ClaudeCodeProcessError::TimedOut
-            });
-        }
-        let approval_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let approval = lifecycle
-            .claim_after_approval(OBSERVE_POLL, approval_timeout, &cancel_token)
+        lifecycle
+            .create(Duration::from_secs(request.duration_seconds))
             .await
-            .map_err(|error| map_task_resource(&error))?;
-        let status = lifecycle
+            .map_err(|error| {
+                tracing::error!(
+                    event = "agent.authoring.sandbox.stage_failed",
+                    failure_stage = "sandbox.resource.create",
+                    error_kind = ?error,
+                    task_run_id = %task_run_id.as_uuid(),
+                    "authoring attempt could not create its Resource request",
+                );
+                map_task_resource(&error)
+            })?;
+        if cancellation.is_cancelled() {
+            self.stop_before_submission(scope, &saved, &lifecycle, "LW_AGENT_SANDBOX_CANCELLED")
+                .await?;
+            return Err(ClaudeCodeProcessError::Cancelled);
+        }
+        // A checkpoint with an admitted binding may already own a Job whose submit response
+        // was lost. Settle the read/claim, then record cancellation for owned cleanup.
+        let claim_cancellation = if saved.binding.is_some() {
+            tokio_util::sync::CancellationToken::new()
+        } else {
+            cancel_token
+        };
+        let approval = match lifecycle
+            .claim_after_approval(OBSERVE_POLL, &claim_cancellation)
+            .await
+        {
+            Ok(approval) => approval,
+            Err(TaskResourceError::ResourceLeaseExpired) => {
+                self.stop_before_submission(
+                    scope,
+                    &saved,
+                    &lifecycle,
+                    "LW_RESOURCE_TASK_LEASE_EXPIRED",
+                )
+                .await?;
+                return Err(ClaudeCodeProcessError::ResourceLeaseExpired);
+            }
+            Err(error) => return Err(map_task_resource(&error)),
+        };
+        if cancellation.is_cancelled() {
+            self.stop_before_submission(scope, &saved, &lifecycle, "LW_AGENT_SANDBOX_CANCELLED")
+                .await?;
+            return Err(ClaudeCodeProcessError::Cancelled);
+        }
+        let status = match lifecycle
             .acknowledge(&approval, &self.configuration.sandbox.namespace)
             .await
-            .map_err(|error| map_task_resource(&error))?;
+        {
+            Ok(status) => status,
+            Err(TaskResourceError::ResourceLeaseExpired) => {
+                self.stop_before_submission(
+                    scope,
+                    &saved,
+                    &lifecycle,
+                    "LW_RESOURCE_TASK_LEASE_EXPIRED",
+                )
+                .await?;
+                return Err(ClaudeCodeProcessError::ResourceLeaseExpired);
+            }
+            Err(error) => return Err(map_task_resource(&error)),
+        };
+        let lease_window = status
+            .lease
+            .expires_at
+            .zip(status.lease.active_from)
+            .map(|(end, start)| end.get() - start.get())
+            .filter(|window| window.is_positive())
+            .ok_or(ClaudeCodeProcessError::Io)?;
+        let execution_budget = command
+            .timeout()
+            .min(Duration::from_secs(request.duration_seconds))
+            .min(lease_window.unsigned_abs());
+        let deadline = tokio::time::Instant::now() + execution_budget;
         let admitted = AdmittedExecution::admit(
             &status,
             scope.execution_generation,
@@ -361,10 +407,17 @@ impl SandboxAuthoringProcess {
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
         if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
-            lifecycle
-                .cancel("authoring deadline or cancellation before submission")
-                .await
-                .map_err(|e| map_task_resource(&e))?;
+            self.stop_before_submission(
+                scope,
+                &saved,
+                &lifecycle,
+                if cancellation.is_cancelled() {
+                    "LW_AGENT_SANDBOX_CANCELLED"
+                } else {
+                    "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED"
+                },
+            )
+            .await?;
             return Err(if cancellation.is_cancelled() {
                 ClaudeCodeProcessError::Cancelled
             } else {
@@ -435,10 +488,17 @@ impl SandboxAuthoringProcess {
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() || cancellation.is_cancelled() {
-            lifecycle
-                .cancel("authoring deadline before Job start")
-                .await
-                .map_err(|e| map_task_resource(&e))?;
+            self.stop_before_submission(
+                scope,
+                &saved,
+                &lifecycle,
+                if cancellation.is_cancelled() {
+                    "LW_AGENT_SANDBOX_CANCELLED"
+                } else {
+                    "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED"
+                },
+            )
+            .await?;
             return Err(if cancellation.is_cancelled() {
                 ClaudeCodeProcessError::Cancelled
             } else {
@@ -482,15 +542,41 @@ impl SandboxAuthoringProcess {
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
         if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
-            lifecycle
-                .cancel("authoring deadline before Job apply")
-                .await
-                .map_err(|e| map_task_resource(&e))?;
+            self.stop_before_submission(
+                scope,
+                &saved,
+                &lifecycle,
+                if cancellation.is_cancelled() {
+                    "LW_AGENT_SANDBOX_CANCELLED"
+                } else {
+                    "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED"
+                },
+            )
+            .await?;
             return Err(if cancellation.is_cancelled() {
                 ClaudeCodeProcessError::Cancelled
             } else {
                 ClaudeCodeProcessError::TimedOut
             });
+        }
+        // Upload preparation can outlast an admitted lease. Revalidate with Resource's clock
+        // immediately before the side effect; a replay neither extends the lease nor emits events.
+        match lifecycle
+            .acknowledge(&status, &self.configuration.sandbox.namespace)
+            .await
+        {
+            Ok(_) => {}
+            Err(TaskResourceError::ResourceLeaseExpired) => {
+                self.stop_before_submission(
+                    scope,
+                    &saved,
+                    &lifecycle,
+                    "LW_RESOURCE_TASK_LEASE_EXPIRED",
+                )
+                .await?;
+                return Err(ClaudeCodeProcessError::ResourceLeaseExpired);
+            }
+            Err(error) => return Err(map_task_resource(&error)),
         }
         self.api
             .start(&bundle)
@@ -512,6 +598,25 @@ impl SandboxAuthoringProcess {
 
         let expected_uid = job_uid(&refs);
         loop {
+            let current = lifecycle
+                .load_status()
+                .await
+                .map_err(|error| map_task_resource(&error))?;
+            if current.request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+            {
+                self.store
+                    .complete_sandbox_attempt(
+                        &intent,
+                        None,
+                        1,
+                        Some("LW_RESOURCE_TASK_LEASE_EXPIRED"),
+                    )
+                    .await
+                    .map_err(|_| ClaudeCodeProcessError::Io)?;
+                self.cleanup_and_release(&intent, &bundle, &current, ExecutionTiming::unknown())
+                    .await;
+                return Err(ClaudeCodeProcessError::ResourceLeaseExpired);
+            }
             if cancellation.is_cancelled() {
                 let _ = self
                     .store
@@ -618,6 +723,43 @@ impl SandboxAuthoringProcess {
             }
             tokio::time::sleep(OBSERVE_POLL).await;
         }
+    }
+
+    async fn stop_before_submission(
+        &self,
+        scope: &AuthoringAttemptScope,
+        saved: &SandboxAttemptCheckpoint,
+        lifecycle: &TaskResourceLifecycle,
+        diagnostic: &str,
+    ) -> Result<(), ClaudeCodeProcessError> {
+        self.store
+            .fence_sandbox_generation(scope)
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        if let Some(binding) = &saved.binding {
+            // A recovery checkpoint with a binding may have submitted a Job before losing its
+            // response. The existing cleanup worker must query and delete owned objects first.
+            let intent = SandboxAttemptIntent {
+                run_id: scope.run_id,
+                track: scope.track,
+                attempt: scope.attempt,
+                task_run_id: saved.task_run_id,
+                execution_generation: saved.execution_generation,
+                namespace: saved.namespace.clone(),
+                workload_name: saved.workload_name.clone(),
+                binding: binding.clone(),
+            };
+            self.store
+                .complete_sandbox_attempt(&intent, None, 1, Some(diagnostic))
+                .await
+                .map_err(|_| ClaudeCodeProcessError::Io)?;
+        } else {
+            lifecycle
+                .cancel("authoring attempt stopped before workload submission")
+                .await
+                .map_err(|error| map_task_resource(&error))?;
+        }
+        Ok(())
     }
 
     // This ordered recovery path must checkpoint usage before deletion and release independently
@@ -875,6 +1017,29 @@ impl SandboxAuthoringProcess {
                     .await
                     .map_err(Into::into);
             }
+            let status = self
+                .resources
+                .get_task_resource(
+                    TaskRunId::from_str(&intent.task_run_id.to_string())
+                        .map_err(|_| ClaudeCodeProcessError::Io)?,
+                )
+                .await
+                .map_err(|_| ClaudeCodeProcessError::Io)?;
+            if status.project_id != scope.project_id || status.owner_id != scope.actor_id {
+                return Err(ClaudeCodeProcessError::Io);
+            }
+            if status.request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED") {
+                self.store
+                    .complete_sandbox_attempt(
+                        intent,
+                        None,
+                        1,
+                        Some("LW_RESOURCE_TASK_LEASE_EXPIRED"),
+                    )
+                    .await
+                    .map_err(|_| ClaudeCodeProcessError::Io)?;
+                return Err(ClaudeCodeProcessError::ResourceLeaseExpired);
+            }
             match self
                 .api
                 .observe(identity, job_uid(objects).as_deref())
@@ -945,9 +1110,27 @@ impl SandboxAuthoringProcess {
                     return Err(sandbox_failure(&diagnostic_code));
                 }
                 KubernetesJobObservation::Running if cancellation.is_cancelled() => {
+                    self.store
+                        .complete_sandbox_attempt(
+                            intent,
+                            None,
+                            1,
+                            Some("LW_AGENT_SANDBOX_CANCELLED"),
+                        )
+                        .await
+                        .map_err(|_| ClaudeCodeProcessError::Io)?;
                     return Err(ClaudeCodeProcessError::Cancelled);
                 }
                 KubernetesJobObservation::Running if tokio::time::Instant::now() >= deadline => {
+                    self.store
+                        .complete_sandbox_attempt(
+                            intent,
+                            None,
+                            1,
+                            Some("LW_AGENT_SANDBOX_DEADLINE_EXCEEDED"),
+                        )
+                        .await
+                        .map_err(|_| ClaudeCodeProcessError::Io)?;
                     return Err(ClaudeCodeProcessError::TimedOut);
                 }
                 KubernetesJobObservation::Missing => {
@@ -1801,6 +1984,10 @@ fn bridge_cancellation(cancellation: &RunCancellation) -> (CancellationToken, Ca
 fn map_task_resource(error: &TaskResourceError) -> ClaudeCodeProcessError {
     match error {
         TaskResourceError::Cancelled => ClaudeCodeProcessError::Cancelled,
+        TaskResourceError::ResourceLeaseExpired => ClaudeCodeProcessError::ResourceLeaseExpired,
+        TaskResourceError::ResourceApprovalExpired => {
+            ClaudeCodeProcessError::ResourceApprovalExpired
+        }
         TaskResourceError::ResourceApprovalTimeout => {
             ClaudeCodeProcessError::ResourceApprovalTimeout
         }
@@ -1830,6 +2017,8 @@ fn attempt_ownership_from_parts(
 fn sandbox_failure(diagnostic: &str) -> ClaudeCodeProcessError {
     match diagnostic {
         "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED" => ClaudeCodeProcessError::TimedOut,
+        "LW_RESOURCE_TASK_LEASE_EXPIRED" => ClaudeCodeProcessError::ResourceLeaseExpired,
+        "LW_RESOURCE_APPROVAL_EXPIRED" => ClaudeCodeProcessError::ResourceApprovalExpired,
         "LW_TASK_RESOURCE_APPROVAL_TIMEOUT" => ClaudeCodeProcessError::ResourceApprovalTimeout,
         _ => ClaudeCodeProcessError::Io,
     }

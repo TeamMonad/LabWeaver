@@ -227,8 +227,8 @@ pub struct EvaluationAttemptContext {
     pub release: EvaluationRelease,
     pub step: EvaluationStep,
     pub execution_plan: StepExecutionPlan,
-    /// Cancelled when the durable worker lease is lost.  A runner must stop
-    /// external work and complete cleanup before returning after cancellation.
+    /// Cancelled for a user-requested cancellation while the worker still owns
+    /// the durable lease. The runner must confirm cleanup before completion.
     pub cancellation: CancellationToken,
     /// Cancelled only when the durable lease fence is lost, so cleanup cannot continue under a
     /// stale worker even when the run itself is also being cancelled.
@@ -377,7 +377,6 @@ impl<R: EvaluationAttemptRunner> EvaluationWorker<R> {
                             "stopping attempt after durable lease renewal failure",
                         );
                         heartbeat_lease_lost.cancel();
-                        heartbeat_cancellation.cancel();
                         break;
                     }
                 }
@@ -392,7 +391,14 @@ impl<R: EvaluationAttemptRunner> EvaluationWorker<R> {
             cancellation: cancellation.clone(),
             lease_lost,
         };
-        let completion = self.runner.execute(context).await;
+        // Lease loss transfers recovery to the next owner of the same attempt.
+        // It must never enter the user-cancellation path and release that
+        // owner's authorization. Uncertain external writes remain recoverable.
+        let completion = tokio::select! {
+            biased;
+            () = attempt_lease_lost.cancelled() => Err(ExecutionError::LeaseLost),
+            result = self.runner.execute(context) => result,
+        };
         heartbeat.abort();
         let mut completion = completion?;
         if attempt_lease_lost.is_cancelled() {
@@ -487,6 +493,8 @@ impl std::fmt::Display for TaskResourceFailure {
             TaskResourceError::RequestInvalid => "LW_EVALUATION_TASK_RESOURCE_REQUEST_INVALID",
             TaskResourceError::ResponseInvalid => "LW_EVALUATION_TASK_RESOURCE_RESPONSE_INVALID",
             TaskResourceError::IdentityMismatch => "LW_EVALUATION_TASK_RESOURCE_IDENTITY_MISMATCH",
+            TaskResourceError::ResourceLeaseExpired => "LW_RESOURCE_TASK_LEASE_EXPIRED",
+            TaskResourceError::ResourceApprovalExpired => "LW_RESOURCE_APPROVAL_EXPIRED",
             TaskResourceError::ResourceTerminal => "LW_EVALUATION_TASK_RESOURCE_TERMINAL",
             TaskResourceError::ResourceApprovalTimeout => {
                 "LW_EVALUATION_TASK_RESOURCE_APPROVAL_TIMEOUT"
@@ -506,6 +514,7 @@ impl std::fmt::Display for TaskResourceFailure {
                 ResourceClientError::RequestMissing => "LW_EVALUATION_RESOURCE_REQUEST_MISSING",
                 ResourceClientError::TaskResourceMissing => "LW_EVALUATION_RESOURCE_TASK_MISSING",
                 ResourceClientError::Denied => "LW_EVALUATION_RESOURCE_DENIED",
+                ResourceClientError::LeaseExpired => "LW_RESOURCE_TASK_LEASE_EXPIRED",
                 ResourceClientError::Conflict => "LW_EVALUATION_RESOURCE_CONFLICT",
                 ResourceClientError::Rejected => "LW_EVALUATION_RESOURCE_REJECTED",
                 ResourceClientError::Unavailable => "LW_EVALUATION_RESOURCE_UNAVAILABLE",

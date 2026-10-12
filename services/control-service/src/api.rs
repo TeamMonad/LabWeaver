@@ -160,6 +160,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(get_project_agent_run),
         )
         .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/task-progress",
+            get(get_project_agent_task_progress),
+        )
+        .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/cancel",
             post(cancel_project_agent_run),
         )
@@ -944,6 +948,39 @@ async fn get_project_agent_run(
     .await?;
     let run = current_project_agent_run(&state, project_id, run_id).await?;
     Ok(with_etag(StatusCode::OK, &run, run.revision))
+}
+
+async fn get_project_agent_task_progress(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, run_id)): Path<(ProjectId, AgentRunId)>,
+    Query(query): Query<PageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectAgentTaskProgress",
+        project_id,
+    )
+    .await?;
+    query
+        .normalized()
+        .map_err(|_| ApiError::bad_request("LW_TASK_PROGRESS_PAGE_INVALID"))?;
+    let run = current_project_agent_run(&state, project_id, run_id).await?;
+    let progress = state.agent.task_progress(run_id, &query).await?;
+    if progress.run_id != run_id
+        || progress.project_id != project_id
+        || progress.revision != run.revision
+    {
+        return Err(DownstreamError::IdentityMismatch.into());
+    }
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(progress),
+    )
+        .into_response())
 }
 
 async fn list_project_agent_runs(

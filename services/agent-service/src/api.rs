@@ -53,6 +53,8 @@ pub const LLM_REVIEW_CANCEL_PERMISSION: &str = "agent.llm_review.cancel";
 /// Agent internal API state.
 #[derive(Clone)]
 pub struct AgentApiState {
+    /// Resource authority used by task progress reads; missing binding fails closed.
+    pub resource: Option<task_execution::resource::ResourceClient>,
     /// Agent-owned run repository.
     pub store: PostgresAgentRunStore,
     /// Agent-owned build command repository.
@@ -88,6 +90,10 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
             get(list_project_runs),
         )
         .route("/internal/v1/agent-runs/{run_id}", get(get_run))
+        .route(
+            "/internal/v1/agent-runs/{run_id}/task-progress",
+            get(get_task_progress),
+        )
         .route("/internal/v1/agent-runs/{run_id}/cancel", post(cancel_run))
         .route(
             "/internal/v1/build-requests/{build_request_id}/cancel",
@@ -211,6 +217,54 @@ async fn get_run(
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
     Ok(Json(state.store.load(run_id).await?).into_response())
+}
+
+async fn get_task_progress(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(run_id): Path<AgentRunId>,
+    Query(query): Query<PageQuery>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let progress = state
+        .store
+        .task_progress(run_id, state.resource.as_ref(), &query)
+        .await
+        .map_err(AgentApiError::from)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(progress),
+    )
+        .into_response())
+}
+
+impl From<crate::task_progress::TaskProgressError> for AgentApiError {
+    fn from(error: crate::task_progress::TaskProgressError) -> Self {
+        use crate::task_progress::TaskProgressError;
+        match error {
+            TaskProgressError::Store(error) => error.into(),
+            TaskProgressError::PageInvalid => Self {
+                status: StatusCode::BAD_REQUEST,
+                diagnostic: "LW_TASK_PROGRESS_PAGE_INVALID",
+                retryable: false,
+            },
+            TaskProgressError::IdentityMismatch => Self {
+                status: StatusCode::CONFLICT,
+                diagnostic: "LW_TASK_PROGRESS_IDENTITY_MISMATCH",
+                retryable: false,
+            },
+            TaskProgressError::Changed => Self {
+                status: StatusCode::CONFLICT,
+                diagnostic: "LW_TASK_PROGRESS_CHANGED",
+                retryable: true,
+            },
+            TaskProgressError::ResourceUnavailable => Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                diagnostic: "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+                retryable: true,
+            },
+        }
+    }
 }
 
 async fn list_project_runs(
