@@ -53,6 +53,7 @@ workloadInputs: {}
 
 # Filled only by the authenticated encrypted Bundle opening path.
 managedControlConfiguration: {}
+environmentExecutorAuthority: {}
 
 workloads:
   control-service:

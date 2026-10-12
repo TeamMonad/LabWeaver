@@ -81,6 +81,8 @@ jobs:
         run: cargo test -p control-service --test platform_configuration_loaded actual_bundle_load_is_required_for_success_and_failure_keeps_effective --locked -- --ignored --exact --test-threads=1
       - name: Verify both actual Control replica snapshots before applied
         run: cargo test -p control-service --test platform_configuration_replicas all_control_replicas_must_report_actual_loaded_source_before_applied --locked -- --ignored --exact --test-threads=1
+      - name: Verify actual Bundle loading in both Environment executor Resource clients
+        run: cargo test -p environment-service --lib metering::bundle_configuration_tests::authenticated_bundle_loads_both_executor_clients --locked -- --ignored --exact --test-threads=1
       - name: Run generated SDK against real Control and PostgreSQL
         run: cargo test -p control-service --test platform_configuration browser_sdk_registers_real_ciphertext_and_reads_durable_failure --locked -- --ignored --exact --test-threads=1
       - name: Run native Keycloak login and Bundle CSRF against actual Access and Control

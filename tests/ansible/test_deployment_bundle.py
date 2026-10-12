@@ -78,6 +78,28 @@ class DeploymentBundleTests(unittest.TestCase):
                     self.root / path,
                     credentials if key == "nats.creds" else self.secret,
                 )
+        secrets["environment-service-secrets"]["nats-server"] = "secrets/nats-server"
+        write(
+            self.root / configmaps["environment-service-config"]["providers.json"],
+            (
+                REPOSITORY / "deploy/config/environment-providers.json.example"
+            ).read_bytes(),
+        )
+        write(self.root / "secrets/nats-server", b"tls://nats.labweaver-data.svc:4222")
+        for name in ("container-executor-config", "kubevirt-executor-config"):
+            executor = yaml.safe_load(
+                (
+                    REPOSITORY / "deploy/config/runtime-executor.yaml.example"
+                ).read_bytes()
+            )
+            executor["nats"].pop("server")
+            executor["nats"][
+                "serverFile"
+            ] = "/etc/labweaver/environment-authority/nats-server"
+            write(
+                self.root / configmaps[name]["config.yaml"],
+                yaml.safe_dump(executor).encode(),
+            )
         self.model = {
             "apiVersion": bundle.API_VERSION,
             "revision": 7,
@@ -323,7 +345,9 @@ class DeploymentBundleTests(unittest.TestCase):
         values = yaml.safe_load(
             (self.private / "rendered-inputs/helm-values.yaml").read_bytes()
         )
-        self.assertEqual(values["workloadInputs"], inputs)
+        for name in inputs:
+            if name not in {"container-executor", "kubevirt-executor"}:
+                self.assertEqual(values["workloadInputs"][name], inputs[name])
         self.assertNotIn("workloads", values)
         del inputs["control-service"]["env"]["LABWEAVER_SERVICE_SCOPES"]
         self.save_model()
@@ -555,7 +579,7 @@ class DeploymentBundleTests(unittest.TestCase):
         for document in yaml.safe_load_all((second / "application.yaml").read_bytes()):
             if document["kind"] == "Secret":
                 for key, payload in document["data"].items():
-                    if key != "nats.creds":
+                    if key not in {"nats.creds", "nats-server"}:
                         self.assertEqual(
                             base64.b64decode(payload),
                             b"rotated-synthetic-credential-9876543210",

@@ -88,6 +88,29 @@ application:
 
 主应用 profile 不管理 Resource workload。使用下述 `resource` profile 在同一归档中携带其输入，保留原独立 Helm release 与对象归属。
 
+### Environment owner 与运行执行器共用输入
+
+启用 `container-executor` 或 `kubevirt-executor` 时，必须启用原 `environment-service`。Bundle 从该 owner 的 `workloadInputs` 派生两个执行器的 Resource 地址、受信 CA、audience、scope、timeout，以及已有 service client ID、secret 文件和 OIDC issuer。执行器可省略这些继承字段；旧副本字段只能与 owner 相同。独立值返回 `LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT`。
+
+执行器只读挂载 `/etc/labweaver/environment-authority`。投影仅包含 owner 已声明的 database-url、nats-server、nats-ca.pem、oidc-ca.pem、mtls-ca.pem 和 service-client-secret，不挂载 owner 的其他私钥。owner 的数据库 Secret env 与执行器的 databaseUrlFile 引用同一数据库文件。旧 executor Secret 中的 database-url、postgres-ca.pem、nats-ca.pem 必须引用 owner 同一源文件，防止未使用的旧输入产生歧义。
+
+Bundle 中两个 runtime YAML 的 NATS 输入使用下面的文件引用，不能将 Secret endpoint 复制到 ConfigMap：
+
+```yaml
+nats:
+  serverFile: /etc/labweaver/environment-authority/nats-server
+```
+
+派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。原非 Bundle YAML 仍支持单个 server 字符串；server 与 serverFile 同时提供或均缺失时启动失败。
+
+有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
+
+`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。#207 的执行器启动在原 `EnvironmentRuntimeAdmission::from_env` 路径消费这些输入；需要同时使用包含该读取路径的 Environment 镜像。
+
+CI 显式运行 `metering::bundle_configuration_tests::authenticated_bundle_loads_both_executor_clients`。该测试生成合成 age 密文，通过原解密/派生入口取得文件，让两个消费进程读取同一 PostgreSQL 数据库，并以原 ResourceUsage client 读取 HTTPS 服务。它验证错误 client secret、错误 CA 与日志不含凭据。外部 issuer/token/Resource 响应和投影目录是合成边界；该结果不是 Kubernetes 安装、真实 NATS 身份或资金授权验收。
+
+原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照。它们不会把 Environment 配置渲染或上述本地消费测试当作其他服务已经部署、已加载或已应用的事实。
+
 ## 同一目录中的 Resource profile
 
 在 `config/bundle.yaml` 中添加 `resource`。该字段不建立第二个配置目录或秘密仓库。
