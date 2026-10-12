@@ -441,8 +441,10 @@ async fn progress(
 ) -> TestResult<PlatformConfigurationStatus> {
     let apply = state.latest_apply.as_ref().ok_or("no attempt")?;
     let desired = configuration::get_version(pool, apply.desired_revision).await?;
+    let loaded = configuration_common::loaded(&desired, &apply.encrypted_bundle_sha256)?;
     Ok(configuration::report(
         pool,
+        Some(&loaded),
         "synthetic-deployment-executor",
         apply.id,
         &ReportPlatformConfigurationApplyRequest {
@@ -542,6 +544,7 @@ async fn applying_requires_ordered_matching_observations_and_one_executor() -> T
     assert!(matches!(
         configuration::report(
             &pool,
+            None,
             "executor-one",
             apply.id,
             &report,
@@ -563,6 +566,7 @@ async fn applying_requires_ordered_matching_observations_and_one_executor() -> T
     assert!(matches!(
         configuration::report(
             &pool,
+            None,
             "different-executor",
             apply.id,
             &wrong_owner,
@@ -580,6 +584,7 @@ async fn applying_requires_ordered_matching_observations_and_one_executor() -> T
     assert!(matches!(
         configuration::report(
             &pool,
+            None,
             "synthetic-deployment-executor",
             apply.id,
             &mismatched,
