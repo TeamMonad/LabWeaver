@@ -4835,6 +4835,29 @@ async fn credits_http_requires_signed_admin_and_exact_workload_owner()
         RESOURCE_AUTH_AUDIENCE,
         &["resource.credits.hold", "resource.credits.resolve"],
     )?;
+    let mut invalid_amount = hold.clone();
+    invalid_amount["amount"] = json!("1.0");
+    let malformed = router
+        .clone()
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            "/internal/v1/credits/holds",
+            &invalid_amount,
+            "http-invalid-amount",
+        )?)
+        .await?;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        malformed
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let problem: contracts::ProblemDetails =
+        serde_json::from_slice(&to_bytes(malformed.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(problem.diagnostic_code.as_str(), "LW_CREDITS_INVALID");
     let response = router
         .clone()
         .oneshot(credit_http_request(
