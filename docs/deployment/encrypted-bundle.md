@@ -177,6 +177,8 @@ Resource 当前使用独立 manifest/profile。现有应用 Bundle 未携带 Res
 
 `managedConfigurationSha256` 是管理设置的 canonical 摘要，格式为64个小写十六进制字符。它等于版本 API 的 `configurationSha256`。`applicationObjectsSha256` 是渲染对象的摘要，带 `sha256:` 前缀。执行观察使用管理设置摘要和加密文件摘要，不能把对象摘要当作管理设置摘要。
 
+`seal` 返回实际导出文件的 `encryptedBundleSha256`，并同时返回其源 revision 和管理设置摘要。获准操作员核对它们与当前 desired 一致后，将密文摘要交给管理员应用请求。不要从配置摘要推算密文摘要。导出成功没有批准生产部署。当前 API 尚无获准导出登记或按 desired 查询该登记的入口，执行者仍须核对实际归档。
+
 ## 解密、恢复和使用
 
 1. 在新目录中验证加密文件。
@@ -234,6 +236,6 @@ Resource 当前使用独立 manifest/profile。现有应用 Bundle 未携带 Res
 
 ## 当前未完成范围
 
-管理版本导出、加密携带、恢复和条件导入请求已接入现有 Control 契约。当前应用 profile 的服务环境值来自同一 Bundle。Resource 独立 profile、基础设施 inventory、旧凭据签发路径和首装初始化仍未整体归并。7天/30天/24h/1h/60秒的服务消费者、Grok 表单和实际执行观察器仍未交付。本切片没有放宽 namespace Pod Security，也没有落实 #207 的实际运行授权或执行位置。
+管理版本导出、加密携带、恢复和条件导入请求已接入现有 Control 契约。当前应用 profile 的服务环境值来自同一 Bundle。Resource 独立 profile、基础设施 inventory、旧凭据签发路径和首装初始化仍未整体归并。7天/30天/24h/1h/60秒的服务消费者、管理界面的本分支集成与真实后端浏览器流程、实际执行观察器仍需完成。本切片没有放宽 namespace Pod Security，也没有落实 #207 的实际运行授权或执行位置。
 
 剩余范围仍属于 #203 和明确的下游消费者。公共契约已由父线程协调，生成 SDK 从 `crates/contracts` 产生。不要用本地加密或状态测试替代实际授权、执行位置和前后端验收。

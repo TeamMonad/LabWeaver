@@ -583,6 +583,24 @@ class DeploymentBundleTests(unittest.TestCase):
             self.assertTrue((rendered / "application.yaml").exists())
         self.clean_runtime()
 
+    def test_seal_reports_the_actual_ciphertext_digest_bound_to_the_managed_version(
+        self,
+    ) -> None:
+        result = bundle.seal_bundle(self.root, self.archive, [self.key()], self.runtime)
+        self.assertEqual(result["revision"], self.version["revision"])
+        self.assertEqual(
+            result["managedConfigurationSha256"], self.version["configurationSha256"]
+        )
+        self.assertEqual(
+            result["encryptedBundleSha256"],
+            hashlib.sha256(self.archive.read_bytes()).hexdigest(),
+        )
+        self.assertNotEqual(
+            result["encryptedBundleSha256"], result["managedConfigurationSha256"]
+        )
+        self.assertNotIn(self.secret.decode(), json.dumps(result))
+        self.clean_runtime()
+
     def test_wrong_key_fails_and_cleans_partial_plaintext(self) -> None:
         self.seal()
         other_key = self.directory / "wrong-key.txt"
