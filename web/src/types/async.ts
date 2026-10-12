@@ -26,6 +26,8 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '材料保留期限已过期。请重新上传材料，并重新生成、审批和发布；重试当前过期版本无法恢复。'
     case 'LW_RESOURCE_GPU_CAPACITY_EXHAUSTED':
       return 'GPU 容量当前不可用，可能已被其他任务占用。请稍后重试或调整资源申请。'
+    case 'LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED':
+      return '实验环境创建尚未接通原 ResourceRequest→批准→lease→handoff 路径。已拨款的 Experiment lease 走旧 reservation 会返回 422；请等待统一资金/handoff 流程就绪后再创建。'
     default:
       return message
   }

@@ -78,7 +78,7 @@ export const environmentCandidateView = {
       resources: { cpuMillicores: 2000, memoryBytes: 4 * GIB, storageBytes: 10 * GIB, gpu: null },
       retention: { class: 'course_material', disposition: 'retain_until_revoked' },
       runtime: { kind: 'container', provider_binding: 'gvisor-default', service_port: 8888, build_context: { artifactId: 'ctx-1', mediaType: 'application/x-tar', objectVersion: 'v1', sha256: 'sha256:aa', sizeBytes: 1 }, terminal: { executable: '/bin/bash', workingDirectory: '/workspace' } },
-      security: { privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', rootFilesystemPolicy: 'read_only_required', securityProfileBinding: 'restricted-v1', userPolicy: 'non_root_required' },
+      security: { privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', rootFilesystemPolicy: 'read_only_required', securityProfileBinding: 'restricted-v1', runAsUser: 65534, privileged: false, capabilities: [], seccomp: 'runtime_default' },
     },
   },
   approvals: [],
@@ -166,7 +166,7 @@ export const workCandidateView = {
       entries: [{ name: 'jupyter', protocol: 'https', servicePort: 8888 }, { name: 'ssh', protocol: 'ssh', servicePort: 22 }],
       network: { mode: 'allow_all' },
       resources: { cpuMillicores: 4000, memoryBytes: 16 * GIB, storageBytes: 50 * GIB, gpu: { class: 'nvidia-l4', count: 1 } },
-      security: { privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', rootFilesystemPolicy: 'mutable_required', securityProfileBinding: 'restricted-v1', userPolicy: 'non_root_required' },
+      security: { privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', rootFilesystemPolicy: 'mutable_required', securityProfileBinding: 'restricted-v1', runAsUser: 65534, privileged: false, capabilities: [], seccomp: 'runtime_default' },
     },
   },
 } as unknown as EnvironmentCandidateViewSchema

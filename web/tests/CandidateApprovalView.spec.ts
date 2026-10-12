@@ -76,16 +76,17 @@ describe('CandidateApprovalView (审核与发布)', () => {
     expect(wrapper.get('#review-title').text()).toBe('光的干涉 · Python 数据分析实验')
   })
 
-  it('shows readable environment permissions and scoring, and an honest gap for privileged mode', async () => {
+  it('shows readable environment permissions and scoring, and an honest residual admin-scope gap', async () => {
     const { wrapper } = await mountAt({ projectId: PROJECT, runId: reviewRun.id })
     const tabs = wrapper.findAll('[role="tab"]')
     expect(tabs.map((tab) => tab.text())).toEqual(['概览', '环境与权限', '评分规则', '材料', '学生预览', '技术详情'])
     await tabs[1].trigger('mousedown', { button: 0 })
     await flushPromises()
     const text = wrapper.text()
-    expect(text).toContain('普通用户（不能使用 root）')
+    expect(text).toContain('UID 65534')
+    expect(text).toContain('特权模式')
     expect(text).toContain('只能访问平台允许的地址')
-    expect(wrapper.get('[data-testid="permission-gap"]').text()).toContain('特权模式（privileged）是否开启')
+    expect(wrapper.get('[data-testid="permission-gap"]').text()).toContain('管理员策略允许的能力上限')
 
     await wrapper.findAll('[role="tab"]')[2].trigger('mousedown', { button: 0 })
     await flushPromises()
