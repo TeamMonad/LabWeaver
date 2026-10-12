@@ -239,3 +239,6 @@ domains:
       - id: 19
         file: resource/0019_build_metering.sql
         sha256: 3429e29240d69fae733faf7a7e87810039a421145b8d8f357efab85939410012
+      - id: 20
+        file: resource/0020_environment_funding.sql
+        sha256: 3889f72ee93635cfc8b030d55840625a799124e2307519352862d9b9102fdf3d

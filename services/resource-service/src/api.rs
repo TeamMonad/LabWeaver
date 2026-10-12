@@ -39,6 +39,7 @@ use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 mod build_costing;
 mod costing;
 mod credits;
+mod environment_funding;
 
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 
@@ -101,6 +102,7 @@ impl ResourceApiState {
     /// Restricts Environment-owned usage records to the configured Environment service account.
     #[must_use]
     pub fn with_environment_service_client_id(mut self, client_id: String) -> Self {
+        self.store = self.store.with_environment_credit_owner(client_id.clone());
         self.environment_service_client_id = Some(client_id);
         self
     }
@@ -187,6 +189,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .merge(credits::internal_routes())
         .merge(costing::internal_routes())
         .merge(build_costing::internal_routes())
+        .route(
+            "/internal/v1/environment-credit-grants/{lease_id}",
+            get(environment_funding::record),
+        )
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
             "/internal/v1/task-resources/{task_run_id}/request",
@@ -1376,6 +1382,9 @@ async fn internal_service_auth(
 }
 
 fn internal_route_permission(path: &str) -> Option<&'static str> {
+    if path.starts_with("/internal/v1/environment-credit-grants/") {
+        return Some("resource.environment.resolve");
+    }
     if path == "/internal/v1/build-cost-admissions"
         || path == "/internal/v1/build-cost-reconciliations"
         || path.starts_with("/internal/v1/build-costs/")

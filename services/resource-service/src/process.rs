@@ -100,7 +100,8 @@ impl ResourceProcessRuntime {
         let build_service_client_id = std::env::var("LABWEAVER_AGENT_SERVICE_CLIENT_ID")
             .ok()
             .filter(|v| !v.trim().is_empty());
-        let store = PgResourceStore::new(pool);
+        let store = PgResourceStore::new(pool)
+            .with_environment_credit_owner(environment_service_client_id.clone());
         seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
             .map_err(ResourceProcessRuntimeError::Outbox)?;
@@ -276,6 +277,9 @@ async fn run_accounting(
             _=interval.tick()=>{
                 if let Err(error)=store.reconcile_build_deadlines_once().await {
                     tracing::warn!(event="resource.build_cost.deadline_failed",diagnostic_code=%error,outcome="will_retry");
+                }
+                if let Err(error)=store.reconcile_environment_funding_deadlines_once().await {
+                    tracing::warn!(event="resource.environment_cost.deadline_failed",diagnostic_code=%error,outcome="will_retry");
                 }
                 if let Err(error)=credits.expire_unknown_once().await {
                     tracing::warn!(event="resource.credits.unknown_deadline_failed",diagnostic_code=%error,outcome="will_retry");

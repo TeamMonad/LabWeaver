@@ -3109,6 +3109,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         GatewayInternal,
+        Get,
+        "/internal/v1/environment-credit-grants/{leaseId}",
+        "getEnvironmentCreditGrant",
+        "resource.environment.resolve",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        false,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
         Post,
         "/internal/v1/build-cost-admissions",
         "admitBuildCost",

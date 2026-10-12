@@ -124,7 +124,8 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
 async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenced_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool.clone());
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let now = store.current_time().await?;
     let resources = WorkloadResources {
         cpu_millicores: 500,
@@ -236,18 +237,17 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         .await?;
     assert_eq!(ready.state, contracts::resource::CapacityClaimState::Ready);
     assert!(store.claim_next_capacity_shell().await?.is_none());
-    let active_from = store.current_time().await?;
-    let active_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?;
-    let active = store
-        .activate_lease(
-            allocation.lease_id,
-            Revision::new(1)?,
-            active_from,
-            active_expires,
-            approval.approver_id,
-            "trace-resource-activate",
-        )
-        .await?;
+    let active = activate_synthetic_environment(
+        &pool,
+        &store,
+        allocation.lease_id,
+        approval.approver_id,
+        request.project_id,
+        now,
+        600,
+        false,
+    )
+    .await?;
     assert_eq!(
         store.load(request.id).await?.state,
         ResourceRequestState::Active
@@ -302,7 +302,9 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         i64::try_from(handoff.lease.revision.get())?
     );
     assert!(store.next_ready_capacity_handoff().await?.is_none());
-    let renewed_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(15))?;
+    let renewed_expires = UtcTimestamp::from_utc(
+        active.active_from.ok_or("active start")?.get() + time::Duration::minutes(15),
+    )?;
     let renewed = store
         .renew_lease(
             "resource-renew-1",
@@ -479,7 +481,8 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
 async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool.clone());
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let now = store.current_time().await?;
     let resources = WorkloadResources {
         cpu_millicores: 500,
@@ -562,18 +565,17 @@ async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
             "quota-uid",
         )
         .await?;
-    let active_from = store.current_time().await?;
-    let active_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?;
-    let active = store
-        .activate_lease(
-            allocation.lease_id,
-            Revision::new(1)?,
-            active_from,
-            active_expires,
-            approval.approver_id,
-            "trace-activate-cleanup",
-        )
-        .await?;
+    let active = activate_synthetic_environment(
+        &pool,
+        &store,
+        allocation.lease_id,
+        approval.approver_id,
+        request.project_id,
+        now,
+        600,
+        false,
+    )
+    .await?;
     let handoff = store
         .next_ready_capacity_handoff()
         .await?
@@ -1032,7 +1034,7 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
 async fn gpu_catalog_rejects_cross_mode_binding_collision() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let exclusive = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
         class: "a100-exclusive".into(),
@@ -1070,7 +1072,7 @@ async fn gpu_catalog_rejects_cross_mode_binding_collision() -> Result<(), Box<dy
 async fn gpu_catalog_rejects_cross_provider_active_alias() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let first = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
         class: "a100-provider-one".into(),
@@ -1141,7 +1143,7 @@ fn reviewed_seed_json() -> Value {
 async fn gpu_catalog_seed_provisions_reviewed_class_once() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let seed = review_seed("nvidia-cuda");
 
     let created = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
@@ -1164,7 +1166,7 @@ async fn gpu_catalog_seed_provisions_reviewed_class_once() -> Result<(), Box<dyn
 async fn gpu_catalog_seed_is_idempotent_and_never_bumps_revision()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let seed = review_seed("nvidia-cuda");
 
     let first = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
@@ -1183,7 +1185,7 @@ async fn gpu_catalog_seed_is_idempotent_and_never_bumps_revision()
 async fn gpu_catalog_seed_conflict_fails_and_leaves_existing_row_untouched()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let seed = review_seed("nvidia-cuda");
     store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
 
@@ -1220,7 +1222,7 @@ async fn gpu_catalog_seed_conflict_fails_and_leaves_existing_row_untouched()
 async fn gpu_catalog_seed_does_not_reactivate_disabled_class()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let disabled = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
         class: "nvidia-cuda".to_owned(),
@@ -1309,7 +1311,7 @@ fn gpu_catalog_seed_parses_the_shipped_capacity_example() {
 async fn gpu_time_slice_approval_rejects_count_above_one_with_stable_catalog_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let project_id = ProjectId::new();
     let course_id = Some(CourseId::new());
@@ -1422,7 +1424,7 @@ async fn gpu_time_slice_approval_rejects_count_above_one_with_stable_catalog_err
 async fn gpu_reservation_counts_across_catalog_revisions_for_one_physical_pool()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let project_id = ProjectId::new();
     let provider_binding = "kubernetes-standard".to_owned();
@@ -1651,7 +1653,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
         gpu_class: None,
         gpu_mode: None,
         unit_price: Money {
-            currency: "USD".to_owned(),
+            currency: "CREDITS".to_owned(),
             amount: FixedDecimal::parse("1.000000").expect("fixed GPU test rate"),
         },
         effective_from: now,
@@ -1679,7 +1681,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
                 gpu_class: Some(catalog.class.clone()),
                 gpu_mode: Some(catalog.mode),
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("1.000000")?,
                 },
                 effective_from: now,
@@ -2164,6 +2166,11 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0020_environment_funding.sql"
+    ))
+    .execute(&pool)
+    .await?;
     let store = PgResourceStore::new(pool.clone());
     let resolve_request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
@@ -2223,7 +2230,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         gpu_class: None,
         gpu_mode: None,
         unit_price: Money {
-            currency: "USD".to_owned(),
+            currency: "CREDITS".to_owned(),
             amount: FixedDecimal::parse(amount).expect("fixed test rate"),
         },
         effective_from: usage_start,
@@ -2445,7 +2452,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
 async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let provider_binding = "kubernetes-standard".to_owned();
     let catalog = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
@@ -2498,7 +2505,7 @@ async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
 async fn concurrent_gpu_approvals_serialize_on_the_shared_admission_lock()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let catalog = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
@@ -2606,11 +2613,11 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
                 project_id,
                 course_id: None,
                 limit: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("10.000000")?,
                 },
                 warning_at: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("5.000000")?,
                 },
             },
@@ -2620,7 +2627,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     assert_eq!(budget.spent.amount.as_str(), "0.000000");
 
     let (request, lease) =
-        create_active_request(&store, now, project_id, actor_id, "billing-workload").await?;
+        create_active_request(&pool, &store, now, project_id, actor_id, "billing-workload").await?;
     assert_eq!(lease.state, contracts::resource::ResourceLeaseState::Active);
 
     let boundary = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
@@ -2635,7 +2642,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
                 gpu_class: None,
                 gpu_mode: None,
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.100000")?,
                 },
                 effective_from: now,
@@ -2677,7 +2684,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
                 gpu_class: None,
                 gpu_mode: None,
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.200000")?,
                 },
                 effective_from: boundary,
@@ -2703,6 +2710,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     };
     let second_usage = store.record_usage(&second_input, end).await?;
     let (crossing_request, crossing_lease) = create_active_request(
+        &pool,
         &store,
         now,
         project_id,
@@ -2847,7 +2855,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     assert_eq!(unconfigured_charge_count, 0);
 
     let adjustment_amount = Money {
-        currency: "USD".to_owned(),
+        currency: "CREDITS".to_owned(),
         amount: FixedDecimal::parse("-0.250000")?,
     };
     let adjustment = store
@@ -2911,11 +2919,11 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
                 project_id,
                 course_id: None,
                 limit: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("100.000000")?,
                 },
                 warning_at: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("50.000000")?,
                 },
             },
@@ -2930,7 +2938,7 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
         gpu_class: None,
         gpu_mode: None,
         unit_price: Money {
-            currency: "USD".to_owned(),
+            currency: "CREDITS".to_owned(),
             amount: FixedDecimal::parse(price).expect("fixed test price"),
         },
         effective_from: now,
@@ -2964,7 +2972,7 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
                 gpu_class: Some("replay-gpu".to_owned()),
                 gpu_mode: Some(GpuAllocationMode::ContainerTimeSlice),
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.030000")?,
                 },
                 effective_from: now,
@@ -3028,8 +3036,15 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
         Err(ResourceStoreError::IdempotencyConflict)
     ));
 
-    let (request, lease) =
-        create_active_request(&store, now, project_id, actor_id, "rate-end-workload").await?;
+    let (request, lease) = create_active_request(
+        &pool,
+        &store,
+        now,
+        project_id,
+        actor_id,
+        "rate-end-workload",
+    )
+    .await?;
     let usage_until = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(2))?;
     let usage = store
         .record_usage(
@@ -3097,12 +3112,19 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
 async fn concurrent_usage_and_lease_revoke_keep_foreign_key_lock_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let project_id = ProjectId::new();
     let actor_id = ActorId::new();
-    let (request, lease) =
-        create_active_request(&store, now, project_id, actor_id, "usage-revoke-lock-order").await?;
+    let (request, lease) = create_active_request(
+        &pool,
+        &store,
+        now,
+        project_id,
+        actor_id,
+        "usage-revoke-lock-order",
+    )
+    .await?;
     let measured_until = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
     let usage_input = RecordResourceUsageRequest {
         kind: ResourceUsageKind::Compute,
@@ -3166,11 +3188,11 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
                 project_id,
                 course_id: None,
                 limit: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("100.000000")?,
                 },
                 warning_at: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("50.000000")?,
                 },
             },
@@ -3187,7 +3209,7 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
                 gpu_class: None,
                 gpu_mode: None,
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.010000")?,
                 },
                 effective_from: now,
@@ -3196,6 +3218,7 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
         )
         .await?;
     let (request, lease) = create_active_request(
+        &pool,
         &store,
         now,
         project_id,
@@ -3289,6 +3312,7 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
     let actor_id = ActorId::new();
     let now = store.current_time().await?;
     let (request, lease) = create_active_request(
+        &pool,
         &store,
         now,
         project_id,
@@ -3359,13 +3383,13 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
     Ok(())
 }
 
-async fn create_active_request(
+async fn create_allocating_request(
     store: &PgResourceStore,
     now: UtcTimestamp,
     project_id: ProjectId,
     requester_id: ActorId,
     request_key: &str,
-) -> Result<(ResourceRequest, contracts::resource::ResourceLease), Box<dyn std::error::Error>> {
+) -> Result<(ResourceRequest, LeaseId), Box<dyn std::error::Error>> {
     let resources = WorkloadResources {
         cpu_millicores: 1000,
         memory_bytes: 1024 * 1024 * 1024,
@@ -3439,20 +3463,171 @@ async fn create_active_request(
         .await
         .map_err(|error| format!("approve: {error}"))?;
     assert_eq!(approved.state, ResourceRequestState::Allocating);
-    let active_from = store.current_time().await?;
-    let expires_at = UtcTimestamp::from_utc(active_from.get() + time::Duration::hours(1))?;
+    store
+        .claim_next_capacity_shell()
+        .await?
+        .ok_or("reserved billing claim")?;
+    Ok((request, lease_id))
+}
+
+async fn create_active_request(
+    pool: &sqlx::PgPool,
+    store: &PgResourceStore,
+    now: UtcTimestamp,
+    project_id: ProjectId,
+    requester_id: ActorId,
+    request_key: &str,
+) -> Result<(ResourceRequest, contracts::resource::ResourceLease), Box<dyn std::error::Error>> {
+    let (request, lease_id) =
+        create_allocating_request(store, now, project_id, requester_id, request_key).await?;
+    let lease = activate_synthetic_environment(
+        pool,
+        store,
+        lease_id,
+        requester_id,
+        project_id,
+        now,
+        3600,
+        true,
+    )
+    .await?;
+    Ok((request, lease))
+}
+
+// Prices here are explicit isolated fixture data, not an unconfigured free-execution fallback.
+// Remove fixture-only coverage after activation so existing missing-rate tests retain that behavior.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit isolated finance fixture inputs"
+)]
+async fn activate_synthetic_environment(
+    pool: &sqlx::PgPool,
+    store: &PgResourceStore,
+    lease_id: LeaseId,
+    actor: ActorId,
+    project: ProjectId,
+    usage_boundary: UtcTimestamp,
+    seconds: i64,
+    end_fixture_rates: bool,
+) -> Result<contracts::resource::ResourceLease, Box<dyn std::error::Error>> {
+    let store = store
+        .clone()
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
+    let from = store.current_time().await?;
+    let until = UtcTimestamp::from_utc(from.get() + time::Duration::seconds(seconds))?;
+    let rates = store.list_rates().await?;
+    let mut synthetic_rates = Vec::new();
+    for (unit, gpu_class, gpu_mode) in [
+        (ResourceBillingUnit::CpuMillicoreSecond, None, None),
+        (ResourceBillingUnit::MemoryByteSecond, None, None),
+        (ResourceBillingUnit::StorageByteSecond, None, None),
+        (
+            ResourceBillingUnit::GpuUnitSecond,
+            Some("handoff-gpu".to_owned()),
+            Some(GpuAllocationMode::Exclusive),
+        ),
+    ] {
+        let dimension = rates
+            .iter()
+            .filter(|r| r.unit == unit && r.gpu_class == gpu_class && r.gpu_mode == gpu_mode)
+            .collect::<Vec<_>>();
+        if dimension
+            .iter()
+            .any(|r| r.effective_until.is_none_or(|end| end >= until))
+        {
+            continue;
+        }
+        let effective_from = dimension
+            .iter()
+            .filter_map(|r| r.effective_until)
+            .max()
+            .unwrap_or(UtcTimestamp::from_utc(
+                usage_boundary.get() - time::Duration::days(1),
+            )?);
+        synthetic_rates.push(
+            store
+                .create_rate(
+                    &Uuid::now_v7().to_string(),
+                    &CreateResourceRateRequest {
+                        unit,
+                        unit_quantity: 1,
+                        gpu_class,
+                        gpu_mode,
+                        builder_binding: None,
+                        unit_price: Money {
+                            currency: "CREDITS".into(),
+                            amount: FixedDecimal::zero(),
+                        },
+                        effective_from,
+                        effective_until: None,
+                    },
+                )
+                .await?,
+        );
+    }
+    // Existing nonzero prices also require real synthetic funds; never relax the production guard.
+    let original = store.load_lease(lease_id).await?;
+    let request = store.load(original.request_id).await?;
+    let quote = store
+        .estimate_cost(
+            project,
+            &contracts::resource::costing::ResourceCostEstimateRequest {
+                resources: request.requested_resources,
+                compute_from: from,
+                compute_until: until,
+                storage_from: from,
+                storage_until: until,
+            },
+        )
+        .await?;
+    let credits = resource_service::credits::PgCreditStore::new(pool.clone());
+    if quote.total.amount.scaled() > credits.account(project).await?.available.scaled() {
+        credits
+            .admin(
+                &Uuid::now_v7().to_string(),
+                actor,
+                &[PlatformRole::PlatformAdmin],
+                &contracts::resource::credits::CreditAdminOperation::Grant {
+                    project_id: project,
+                    amount: quote.total.amount,
+                    reason: "isolated legacy fixture priced allowance".into(),
+                },
+            )
+            .await?;
+    }
     let lease = store
         .activate_lease(
             lease_id,
             Revision::new(1)?,
-            active_from,
-            expires_at,
-            approval.approver_id,
-            "billing-activate-trace",
+            from,
+            until,
+            actor,
+            "synthetic-financed-activation",
         )
-        .await
-        .map_err(|error| format!("activate: {error}"))?;
-    Ok((request, lease))
+        .await?;
+    for rate in synthetic_rates
+        .into_iter()
+        .filter(|rate| end_fixture_rates && rate.effective_from < usage_boundary)
+    {
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    unit: rate.unit,
+                    unit_quantity: rate.unit_quantity,
+                    gpu_class: rate.gpu_class,
+                    gpu_mode: rate.gpu_mode,
+                    builder_binding: rate.builder_binding,
+                    unit_price: rate.unit_price,
+                    effective_from: UtcTimestamp::from_utc(
+                        usage_boundary.get() - time::Duration::milliseconds(1),
+                    )?,
+                    effective_until: Some(usage_boundary),
+                },
+            )
+            .await?;
+    }
+    Ok(lease)
 }
 
 // A real GPU reservation makes cleanup/admission assertions exercise the pool authority.
@@ -3468,7 +3643,8 @@ async fn work_handoff_fixture(
     ),
     Box<dyn std::error::Error>,
 > {
-    let store = PgResourceStore::new(pool.clone());
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let now = store.current_time().await?;
     let catalog = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
@@ -3524,17 +3700,17 @@ async fn work_handoff_fixture(
             "quota-uid",
         )
         .await?;
-    let active_from = store.current_time().await?;
-    let lease = store
-        .activate_lease(
-            allocation.lease_id,
-            Revision::new(1)?,
-            active_from,
-            UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?,
-            approval.approver_id,
-            "trace-activate",
-        )
-        .await?;
+    let lease = activate_synthetic_environment(
+        pool,
+        &store,
+        allocation.lease_id,
+        approval.approver_id,
+        request.project_id,
+        now,
+        60,
+        false,
+    )
+    .await?;
     Ok((
         store.clone(),
         store.load(request.id).await?,
@@ -4041,6 +4217,11 @@ async fn migrated_pool()
     .await?;
     sqlx::raw_sql(include_str!(
         "../../../migrations/resource/0019_build_metering.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0020_environment_funding.sql"
     ))
     .execute(&pool)
     .await?;
@@ -4680,8 +4861,8 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
             },
         )
         .await?;
-    let (request, lease) =
-        create_active_request(&resource, now, project, actor, "credit-metered-work").await?;
+    let (request, lease_id) =
+        create_allocating_request(&resource, now, project, actor, "credit-metered-work").await?;
     let _hold = credits
         .hold(
             "bridge-hold",
@@ -4694,6 +4875,9 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
             },
         )
         .await?;
+    let lease =
+        activate_synthetic_environment(&pool, &resource, lease_id, actor, project, now, 3600, true)
+            .await?;
     resource
         .create_rate(
             "bridge-rate",
@@ -4819,8 +5003,8 @@ async fn credits_http_requires_signed_admin_and_exact_workload_owner()
     let actor = ActorId::new();
     let project = ProjectId::new();
     let now = store.current_time().await?;
-    let (request, _lease) =
-        create_active_request(&store, now, project, actor, "credits-http-work").await?;
+    let (request, lease) =
+        create_active_request(&pool, &store, now, project, actor, "credits-http-work").await?;
     let state = resource_service::api::ResourceApiState::new(store)
         .with_service_verifier(Arc::new(verifier))
         .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
@@ -4926,6 +5110,61 @@ async fn credits_http_requires_signed_admin_and_exact_workload_owner()
         RESOURCE_AUTH_AUDIENCE,
         &["resource.credits.hold", "resource.credits.resolve"],
     )?;
+    let grant_path = format!("/internal/v1/environment-credit-grants/{}", lease.id);
+    for (client, permissions, expected) in [
+        (
+            RESOURCE_ENVIRONMENT_CLIENT_ID,
+            vec!["resource.environment.resolve"],
+            StatusCode::OK,
+        ),
+        (
+            RESOURCE_ACCESS_CLIENT_ID,
+            vec!["resource.environment.resolve"],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            RESOURCE_AGENT_CLIENT_ID,
+            vec!["resource.environment.resolve"],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            RESOURCE_ENVIRONMENT_CLIENT_ID,
+            vec!["resource.usage.record"],
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let token = signed_resource_token(
+            &authority.material,
+            &authority.issuer,
+            client,
+            RESOURCE_AUTH_AUDIENCE,
+            &permissions,
+        )?;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&grant_path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            let grant: contracts::resource::environment_funding::EnvironmentCreditGrant =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+            assert_eq!(grant.request_id, request.id);
+            assert_eq!(grant.lease_id, lease.id);
+            assert_eq!(grant.lease_revision, lease.revision);
+            assert_eq!(grant.hold.project_id, project);
+            assert!(grant.can_authorize_execution);
+        }
+    }
+    let anonymous = router
+        .clone()
+        .oneshot(Request::builder().uri(&grant_path).body(Body::empty())?)
+        .await?;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
     let mut invalid_amount = hold.clone();
     invalid_amount["amount"] = json!("1.0");
     let malformed = router
@@ -5035,7 +5274,7 @@ async fn estimated_cost_http_uses_signed_user_preview_and_exact_service_scope()
     let actor = ActorId::new();
     let now = store.current_time().await?;
     let (request, _lease) =
-        create_active_request(&store, now, project, actor, "estimate-http-work").await?;
+        create_allocating_request(&store, now, project, actor, "estimate-http-work").await?;
     for unit in [
         ResourceBillingUnit::CpuMillicoreSecond,
         ResourceBillingUnit::MemoryByteSecond,
