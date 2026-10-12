@@ -5,7 +5,7 @@
       <AlertDialogContent class="pc-dialog">
         <AlertDialogTitle class="pc-dialog__title">提交应用请求：desired revision {{ desiredRevision }}</AlertDialogTitle>
         <AlertDialogDescription class="pc-dialog__description">
-          这只会记录一次应用请求（202），不会在浏览器中执行部署。获准执行者会使用既有部署入口执行，并报告校验、应用、验证阶段；只有完整验证成功后 applied 才会更新。
+          这只会记录一次应用请求（202），不会在浏览器中执行部署。获准执行者会使用既有部署入口执行，并报告校验、应用、验证阶段；只有完整验证成功后 applied 才会更新。服务端使用已登记 Bundle 的密文摘要绑定本次尝试，无需也不允许手填 digest。
         </AlertDialogDescription>
 
         <div class="pc-dialog__impact">
@@ -20,24 +20,40 @@
           当前外部结果待核对。新尝试不会清除待核对状态；请先确认外部真实状态。
         </p>
 
-        <label class="pc-dialog__field">
-          <span>加密 Bundle 密文文件 SHA-256</span>
-          <input
-            v-model.trim="bundleSha"
-            class="text-input"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="64 位小写十六进制"
-            :aria-invalid="bundleSha.length > 0 && !shaValid"
-            data-testid="pc-bundle-sha"
-          />
-          <small>用获准方式准备与此 desired 对应的加密 Bundle，并对密文文件计算 SHA-256。浏览器不接触 Bundle 内容或密钥。</small>
-          <small v-if="bundleSha.length > 0 && !shaValid" class="invalid">须为 64 位小写十六进制。</small>
-        </label>
+        <div v-if="registeredBundle" class="pc-dialog__bundle" data-testid="pc-apply-registered">
+          <strong>将绑定的已登记 Bundle</strong>
+          <dl>
+            <div>
+              <dt>密文 SHA-256</dt>
+              <dd><code class="digest">{{ registeredBundle.encryptedBundleSha256 }}</code></dd>
+            </div>
+            <div>
+              <dt>设置绑定</dt>
+              <dd><code class="digest">{{ registeredBundle.configurationSha256 }}</code></dd>
+            </div>
+            <div>
+              <dt>大小</dt>
+              <dd>{{ formatBytes(registeredBundle.encryptedBytes) }}</dd>
+            </div>
+            <div>
+              <dt>登记</dt>
+              <dd>{{ registeredBundle.registeredBy }} · {{ formatTimestamp(registeredBundle.registeredAt) }} · aggregate revision {{ registeredBundle.registeredAtRevision }}</dd>
+            </div>
+          </dl>
+        </div>
+        <p v-else class="pc-dialog__warn" data-testid="pc-apply-missing-bundle">
+          当前 desired 尚无 Bundle 登记。请先上传实际 .age 文件完成登记后再提交应用请求。
+        </p>
 
         <div class="pc-dialog__actions">
           <AlertDialogCancel class="text-button">取消</AlertDialogCancel>
-          <button type="button" class="filled-button" :disabled="!shaValid || busy" data-testid="pc-apply-confirm" @click="$emit('confirm', bundleSha)">
+          <button
+            type="button"
+            class="filled-button"
+            :disabled="!registeredBundle || busy"
+            data-testid="pc-apply-confirm"
+            @click="$emit('confirm')"
+          >
             {{ busy ? '提交中…' : '记录应用请求' }}
           </button>
         </div>
@@ -47,7 +63,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import {
   AlertDialogCancel,
   AlertDialogContent,
@@ -57,23 +73,23 @@ import {
   AlertDialogRoot,
   AlertDialogTitle,
 } from 'reka-ui'
-import type { PlatformConfigurationAppliedState, PlatformConfigurationImpact } from '@/generated/contracts'
-import { SHA256_PATTERN } from '@/utils/platformConfiguration'
+import type {
+  PlatformConfigurationAppliedState,
+  PlatformConfigurationBundle,
+  PlatformConfigurationImpact,
+} from '@/generated/contracts'
+import { formatBytes, formatTimestamp } from '@/utils/format'
 
 const props = defineProps<{
   open: boolean
   desiredRevision: number
   impact: PlatformConfigurationImpact
   appliedState: PlatformConfigurationAppliedState
+  registeredBundle: PlatformConfigurationBundle | null
   busy: boolean
 }>()
 
-defineEmits<{ confirm: [sha256: string]; cancel: [] }>()
-
-const bundleSha = ref('')
-const shaValid = computed(() => SHA256_PATTERN.test(bundleSha.value))
-
-watch(() => props.open, (open) => { if (open) bundleSha.value = '' })
+defineEmits<{ confirm: []; cancel: [] }>()
 
 const impactItems = computed(() => {
   const items: string[] = []
@@ -92,10 +108,11 @@ const impactItems = computed(() => {
 .pc-dialog__impact ul { margin: 4px 0 0; padding-left: 20px; }
 .pc-dialog__impact p { margin: 4px 0 0; }
 .pc-dialog__warn { padding: 8px 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
-.pc-dialog__field { display: grid; gap: 6px; font: var(--md-sys-label-medium); color: var(--md-sys-color-on-surface-variant); }
-.pc-dialog__field small { font: var(--md-sys-body-small); }
-.invalid { color: var(--md-sys-color-error); }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: 13px/1.4 var(--md-sys-typescale-mono, monospace); }
+.pc-dialog__bundle { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); font: var(--md-sys-body-medium); color: var(--md-sys-color-on-surface); }
+.pc-dialog__bundle dl { display: grid; gap: 8px; margin: 0; }
+.pc-dialog__bundle dt { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.pc-dialog__bundle dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.digest { font-size: 12px; }
 .pc-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; }
 .text-button { min-height: 40px; padding: 0 12px; border: 0; background: transparent; color: var(--md-sys-color-primary); font: var(--md-sys-label-large); cursor: pointer; }
 .filled-button { min-height: 40px; padding: 0 20px; border: 0; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); font: var(--md-sys-label-large); cursor: pointer; }

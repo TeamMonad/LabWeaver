@@ -35,6 +35,15 @@
         <dt>已观察 Bundle SHA-256</dt>
         <dd><code class="digest">{{ status.appliedBundleSha256 }}</code></dd>
       </div>
+      <div data-testid="pc-registered-bundle">
+        <dt>已登记 Bundle（当前 desired）</dt>
+        <dd v-if="status.registeredBundle">
+          <code class="digest">{{ status.registeredBundle.encryptedBundleSha256 }}</code>
+          <span class="muted">{{ formatBytes(status.registeredBundle.encryptedBytes) }} · desired revision {{ status.registeredBundle.desiredRevision }} · {{ status.registeredBundle.registeredBy }} · {{ formatTimestamp(status.registeredBundle.registeredAt) }}</span>
+          <span class="muted">设置绑定 <code class="digest">{{ status.registeredBundle.configurationSha256 }}</code> · 登记时 aggregate revision {{ status.registeredBundle.registeredAtRevision }}</span>
+        </dd>
+        <dd v-else class="muted">无。保存新 desired 会清空登记；提交应用前需重新选择 .age 文件登记。</dd>
+      </div>
     </dl>
 
     <div class="impact" data-testid="pc-impact">
@@ -94,7 +103,7 @@
 import { computed } from 'vue'
 import type { PlatformConfigurationApply, PlatformConfigurationApplyStage, PlatformConfigurationStatusSchema } from '@/generated/contracts'
 import type { PlatformConfigurationFailure } from '@/composables/usePlatformConfiguration'
-import { formatTimestamp } from '@/utils/format'
+import { formatBytes, formatTimestamp } from '@/utils/format'
 import { APPLY_STAGES, appliedStateLabel, applyStageLabel, failureReasonLabel, nextStepLabel } from '@/utils/platformConfiguration'
 import PlatformConfigurationFailureNotice from './PlatformConfigurationFailureNotice.vue'
 

@@ -4,6 +4,7 @@ import {
   getPlatformConfiguration,
   getPlatformConfigurationApply,
   getPlatformConfigurationVersion,
+  registerPlatformConfigurationBundle,
   updatePlatformConfiguration,
 } from '@/generated/contracts'
 import type {
@@ -16,6 +17,9 @@ import type {
 import { extractProblemDetails } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 import { canonicalJson, cloneConfiguration, parseRequestYaml } from '@/utils/platformConfiguration'
+
+/** Maximum encrypted Bundle upload accepted by Control (70 MiB). */
+export const PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES = 73_400_320
 
 /** A failure shown to the administrator: Chinese reason and recovery first, identifiers after. */
 export interface PlatformConfigurationFailure {
@@ -46,19 +50,25 @@ function readEtag(result: ResponseLike, revision: number): string {
 function failureFrom(error: unknown, fallbackMessage: string, fallbackRecovery: string): PlatformConfigurationFailure {
   const problem: ProblemDetails | undefined = extractProblemDetails(error)
   const status = problem?.status
-  const recovery = status === 403
-    ? '只有平台管理员可以读取或修改平台配置；请使用管理员账号登录。'
-    : status === 401
-      ? '会话已失效，请重新登录后再试。'
-      : status === 422 || status === 400
-        ? '检查标出的字段后重新提交；草稿已保留。'
-        : problem?.retryable
-          ? '稍后重试；草稿已保留。'
-          : fallbackRecovery
+  const code = problem?.diagnosticCode ?? 'LW_PLATFORM_CONFIGURATION_REQUEST_FAILED'
+  let recovery = fallbackRecovery
+  if (status === 403) {
+    recovery = '只有平台管理员可以读取或修改平台配置；请使用管理员账号登录。'
+  } else if (status === 401) {
+    recovery = '会话已失效，请重新登录后再试。'
+  } else if (code === 'LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED') {
+    recovery = '请先选择实际 .age 密文文件完成 Bundle 登记，再用登记成功后的服务端事实提交应用请求。'
+  } else if (status === 422 || status === 400) {
+    recovery = '检查标出的字段后重新提交；草稿与所选文件已保留。'
+  } else if (status === 413) {
+    recovery = `上传文件不能超过 ${PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES} 字节（约 70 MiB）；所选文件已保留。`
+  } else if (problem?.retryable) {
+    recovery = '稍后重试；草稿与所选文件已保留。可用相同文件与原幂等键重试，不要重新 seal。'
+  }
   return {
     message: problem?.detail ?? fallbackMessage,
     recovery,
-    code: problem?.diagnosticCode ?? 'LW_PLATFORM_CONFIGURATION_REQUEST_FAILED',
+    code,
     requestId: problem?.requestId,
     traceId: problem?.traceId,
     status,
@@ -70,13 +80,18 @@ function isRevisionConflict(error: unknown): boolean {
   return status === 409 || status === 412
 }
 
+function fileFingerprint(file: File, desiredRevision: number, configurationSha256: string): string {
+  return `register:${desiredRevision}:${configurationSha256}:${file.name}:${file.size}:${file.lastModified}`
+}
+
 /**
  * Administrator platform configuration over the Control SDK.
  *
- * The server is the only writer of revisions, desired versions and apply
- * facts. This composable keeps one editable draft copied from the server,
- * submits it with the observed revision/ETag, keeps the draft on any failure,
- * and never advances local state from an older replayed response.
+ * The server is the only writer of revisions, desired versions, registration
+ * digests and apply facts. This composable keeps one editable draft copied from
+ * the server, submits it with the observed revision/ETag, keeps the draft and
+ * selected Bundle file on any failure, and never advances local state from an
+ * older replayed response.
  */
 export function usePlatformConfiguration() {
   const status = ref<PlatformConfigurationStatusSchema | null>(null)
@@ -92,10 +107,14 @@ export function usePlatformConfiguration() {
   const baseEtag = ref('')
 
   const saving = ref(false)
+  const registering = ref(false)
   const applying = ref(false)
   const actionFailure = ref<PlatformConfigurationFailure | null>(null)
   const conflict = ref<PlatformConfigurationConflict | null>(null)
   const notice = ref<string | null>(null)
+
+  /** Selected ciphertext file for register; kept across 409/412 and network retries. */
+  const selectedBundleFile = ref<File | null>(null)
 
   const applyHistory = ref<PlatformConfigurationApply[]>([])
   const historyLoading = ref(false)
@@ -103,13 +122,15 @@ export function usePlatformConfiguration() {
 
   // Idempotency keys stay stable while the same request is retried, and change with the request.
   let saveKey: { fingerprint: string; key: string } | null = null
+  let registerKey: { fingerprint: string; key: string } | null = null
   let applyKey: { fingerprint: string; key: string } | null = null
 
-  function stableKey(slot: 'save' | 'apply', fingerprint: string): string {
-    const current = slot === 'save' ? saveKey : applyKey
+  function stableKey(slot: 'save' | 'register' | 'apply', fingerprint: string): string {
+    const current = slot === 'save' ? saveKey : slot === 'register' ? registerKey : applyKey
     if (current && current.fingerprint === fingerprint) return current.key
     const next = { fingerprint, key: idempotencyKey() }
     if (slot === 'save') saveKey = next
+    else if (slot === 'register') registerKey = next
     else applyKey = next
     return next.key
   }
@@ -121,6 +142,21 @@ export function usePlatformConfiguration() {
   const draftDirty = computed(() =>
     draft.value !== null && draftBase.value !== null && canonicalJson(draft.value) !== canonicalJson(draftBase.value),
   )
+
+  const registeredBundle = computed(() => status.value?.registeredBundle ?? null)
+
+  const canApply = computed(() => {
+    const current = status.value
+    const registered = current?.registeredBundle
+    return Boolean(
+      current?.desired
+      && registered
+      && registered.desiredRevision === current.desired.revision
+      && !applying.value
+      && !registering.value
+      && conflict.value === null,
+    )
+  })
 
   function resetDraftFromServer(): void {
     const source = serverConfiguration.value
@@ -173,7 +209,7 @@ export function usePlatformConfiguration() {
       actionFailure.value = {
         ...outcome.failure,
         message: '配置已被其他管理员更新，但重新读取最新配置失败。',
-        recovery: '草稿已保留。稍后点击刷新，再比较并重新提交。',
+        recovery: '草稿与所选文件已保留。稍后点击刷新，再比较并重新提交。',
       }
       return
     }
@@ -232,7 +268,9 @@ export function usePlatformConfiguration() {
         return true
       }
       resetDraftFromServer()
-      notice.value = `已保存为 desired revision ${result.data.desired?.revision ?? result.data.revision}。保存不等于部署；需要提交应用请求并由获准执行者执行。`
+      // New desired clears the registration pointer server-side; drop stale register idempotency.
+      registerKey = null
+      notice.value = `已保存为 desired revision ${result.data.desired?.revision ?? result.data.revision}。保存会清空当前 Bundle 登记，需要重新选择 .age 文件登记后再提交应用；保存不等于部署。`
       return true
     } finally {
       saving.value = false
@@ -249,6 +287,7 @@ export function usePlatformConfiguration() {
     baseEtag.value = conflict.value.etag
     conflict.value = null
     saveKey = null
+    registerKey = null
   }
 
   /** Drop the draft and continue from the newer server configuration. */
@@ -257,18 +296,112 @@ export function usePlatformConfiguration() {
     acceptStatus(conflict.value.latest, conflict.value.etag)
     conflict.value = null
     saveKey = null
+    registerKey = null
     resetDraftFromServer()
   }
 
-  async function requestApply(encryptedBundleSha256: string): Promise<boolean> {
+  function selectBundleFile(file: File | null): void {
+    selectedBundleFile.value = file
+    registerKey = null
+    actionFailure.value = null
+  }
+
+  /**
+   * Upload the selected .age ciphertext. Digests come from the server response;
+   * query parameters are taken from the current status — never invented locally.
+   */
+  async function registerBundle(file?: File | null): Promise<boolean> {
+    const current = status.value
+    const bundle = file ?? selectedBundleFile.value
+    if (!current?.desired || !bundle || registering.value) return false
+    actionFailure.value = null
+    notice.value = null
+
+    if (bundle.size <= 0) {
+      actionFailure.value = {
+        message: '所选文件为空，无法登记。',
+        recovery: '请选择实际导出的 .age 密文文件。',
+        code: 'LW_PLATFORM_CONFIGURATION_BUNDLE_EMPTY',
+      }
+      return false
+    }
+    if (bundle.size > PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES) {
+      actionFailure.value = {
+        message: `所选文件 ${bundle.size} 字节超过服务端上限 ${PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES} 字节。`,
+        recovery: '请使用不超过约 70 MiB 的加密 Bundle；所选文件已保留。',
+        code: 'LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE',
+      }
+      return false
+    }
+
+    selectedBundleFile.value = bundle
+    const desiredRevision = current.desired.revision
+    const configurationSha256 = current.desired.configurationSha256
+    const fingerprint = fileFingerprint(bundle, desiredRevision, configurationSha256)
+    registering.value = true
+    try {
+      const result = await registerPlatformConfigurationBundle({
+        path: { revision: desiredRevision },
+        query: {
+          expectedRevision: current.revision,
+          configurationSha256,
+        },
+        headers: {
+          'Idempotency-Key': stableKey('register', fingerprint),
+          'If-Match': etag.value || ifMatch(current.revision),
+        } as Parameters<typeof registerPlatformConfigurationBundle>[0]['headers'],
+        body: bundle,
+      })
+      if (result.error || !result.data) {
+        if (isRevisionConflict(result.error)) {
+          await handleConflict()
+          actionFailure.value = {
+            message: '配置 revision 已变化，Bundle 登记未完成。',
+            recovery: '所选 .age 文件已保留。比较最新配置后，若 desired 未变可重新登记；若已保存新 desired 需重新导出并选择对应文件。',
+            code: extractProblemDetails(result.error)?.diagnosticCode ?? 'LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT',
+            requestId: extractProblemDetails(result.error)?.requestId,
+            status: extractProblemDetails(result.error)?.status,
+          }
+          return false
+        }
+        actionFailure.value = failureFrom(result.error, '登记加密 Bundle 失败。', '所选文件已保留；可用相同文件与原幂等键重试，不要重新 seal。')
+        return false
+      }
+      registerKey = null
+      conflict.value = null
+      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision))
+      if (!accepted) {
+        notice.value = '收到的是较早登记请求的回放结果，已保留更新的服务端事实。'
+        await load({ keepDraft: true })
+        return true
+      }
+      const registered = result.data.registeredBundle
+      notice.value = registered
+        ? `已登记 Bundle（密文 SHA-256 ${registered.encryptedBundleSha256.slice(0, 12)}…，${registered.encryptedBytes} 字节）。登记只保存可查询事实，不是批准或部署；可用当前 Status 提交应用请求。`
+        : 'Bundle 登记已完成。登记不是批准或部署。'
+      return true
+    } finally {
+      registering.value = false
+    }
+  }
+
+  /** Record an apply intent using the current Status fence after a successful registration. */
+  async function requestApply(): Promise<boolean> {
     const current = status.value
     if (!current?.desired || applying.value) return false
     actionFailure.value = null
     notice.value = null
+    if (!current.registeredBundle || current.registeredBundle.desiredRevision !== current.desired.revision) {
+      actionFailure.value = {
+        message: '当前 desired 尚无有效的 Bundle 登记。',
+        recovery: '请先选择实际 .age 文件完成登记，再用登记成功后的服务端事实提交应用请求。',
+        code: 'LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED',
+      }
+      return false
+    }
     const body = {
       expectedRevision: current.revision,
       desiredRevision: current.desired.revision,
-      encryptedBundleSha256,
     }
     applying.value = true
     try {
@@ -281,17 +414,23 @@ export function usePlatformConfiguration() {
       })
       if (result.error || !result.data) {
         if (isRevisionConflict(result.error)) {
+          await handleConflict()
           actionFailure.value = {
             ...failureFrom(result.error, '配置 revision 已变化，应用请求未记录。', ''),
-            recovery: '刷新查看最新 desired，确认要应用的版本后重新提交。',
+            recovery: '所选文件与草稿已保留。刷新比较最新 desired 与登记后重新提交。',
           }
           return false
         }
-        actionFailure.value = failureFrom(result.error, '记录应用请求失败。', '核对 Bundle 摘要后重试。')
+        actionFailure.value = failureFrom(result.error, '记录应用请求失败。', '确认已完成 Bundle 登记后重试。')
         return false
       }
       applyKey = null
-      acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision))
+      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision))
+      if (!accepted) {
+        notice.value = '收到的是较早应用请求的回放结果，已保留更新的服务端事实。'
+        await load({ keepDraft: true })
+        return true
+      }
       notice.value = '应用请求已记录（202）。这只表示请求已登记，部署需由获准执行者执行，并以其报告的阶段为准。'
       return true
     } finally {
@@ -344,10 +483,14 @@ export function usePlatformConfiguration() {
     baseRevision,
     draftDirty,
     saving,
+    registering,
     applying,
     actionFailure,
     conflict,
     notice,
+    selectedBundleFile,
+    registeredBundle,
+    canApply,
     applyHistory,
     historyLoading,
     historyFailure,
@@ -356,6 +499,8 @@ export function usePlatformConfiguration() {
     rebaseDraftOnLatest,
     discardDraftForLatest,
     resetDraftFromServer,
+    selectBundleFile,
+    registerBundle,
     requestApply,
     loadPreviousApply,
     refreshApply,

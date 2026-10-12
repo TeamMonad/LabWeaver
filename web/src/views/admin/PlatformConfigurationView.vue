@@ -101,21 +101,76 @@
           <p class="muted">保存只记录期望配置，不会部署，也不会改变 applied。</p>
         </section>
 
+        <section class="register md-card" aria-labelledby="pc-register-heading">
+          <div class="section-heading">
+            <div>
+              <h3 id="pc-register-heading">登记加密 Bundle</h3>
+              <p v-if="config.status.desired">
+                选择与 desired revision {{ config.status.desired.revision }} 对应的实际 .age 密文文件。服务端流式计算密文 SHA 并绑定当前设置摘要；登记只保存可查询事实，不是批准或部署。
+              </p>
+              <p v-else>尚无已保存的 desired 版本；请先保存配置后再登记 Bundle。</p>
+            </div>
+          </div>
+          <p v-if="config.draftDirty" class="muted">编辑器中有未保存修改；登记与应用只针对已保存的 desired。保存新 desired 会清空现有登记。</p>
+          <label class="file-field">
+            <span>加密 Bundle 文件（.age）</span>
+            <input
+              ref="bundleInput"
+              type="file"
+              accept=".age,application/octet-stream"
+              data-testid="pc-bundle-file"
+              :disabled="!config.status.desired || config.registering || config.conflict !== null"
+              @change="onBundleSelected"
+            />
+          </label>
+          <p v-if="config.selectedBundleFile" class="muted" data-testid="pc-bundle-file-name">
+            已选择：{{ config.selectedBundleFile.name }}（{{ formatBytes(config.selectedBundleFile.size) }}）
+          </p>
+          <div class="actions">
+            <button
+              type="button"
+              class="filled-button"
+              :disabled="!config.status.desired || !config.selectedBundleFile || config.registering || config.conflict !== null"
+              data-testid="pc-register"
+              @click="registerBundle"
+            >
+              {{ config.registering ? '登记中…' : '登记所选 Bundle' }}
+            </button>
+            <button
+              type="button"
+              class="outlined-button"
+              :disabled="!config.selectedBundleFile || config.registering"
+              data-testid="pc-bundle-clear"
+              @click="clearBundle"
+            >
+              清除所选文件
+            </button>
+          </div>
+          <PlatformConfigurationFailureNotice
+            v-if="config.actionFailure && failureSource === 'register'"
+            :failure="config.actionFailure"
+            @dismiss="config.actionFailure = null"
+          />
+          <p class="muted">登记参数（revision、expectedRevision、configurationSha256）取自当前服务端状态，不会在浏览器中构造或手填 digest。网络失败时用相同文件与原幂等键重试，不要重新 seal。</p>
+        </section>
+
         <section class="apply md-card" aria-labelledby="pc-apply-request-heading">
           <div class="section-heading">
             <div>
               <h3 id="pc-apply-request-heading">提交应用请求</h3>
               <p v-if="config.status.desired">
-                对 desired revision {{ config.status.desired.revision }} 记录应用意图。请求只登记，部署由获准执行者执行；进度以执行者报告的真实阶段为准。
+                对 desired revision {{ config.status.desired.revision }} 记录应用意图。请求只含 expectedRevision 与 desiredRevision，由服务端绑定已登记 Bundle；部署由获准执行者执行。
               </p>
               <p v-else>尚无已保存的 desired 版本；请先保存配置。</p>
             </div>
           </div>
-          <p v-if="config.draftDirty" class="muted">编辑器中有未保存修改；应用请求只针对已保存的 desired。</p>
+          <p v-if="!config.status.registeredBundle && config.status.desired" class="muted" data-testid="pc-apply-needs-register">
+            当前 desired 尚无 Bundle 登记；请先完成登记后再提交应用请求。
+          </p>
           <button
             type="button"
             class="filled-button"
-            :disabled="!config.status.desired || config.applying || config.conflict !== null"
+            :disabled="!config.canApply"
             data-testid="pc-apply"
             @click="applyOpen = true"
           >
@@ -135,6 +190,7 @@
         :desired-revision="config.status.desired.revision"
         :impact="config.status.impact"
         :applied-state="config.status.appliedState"
+        :registered-bundle="config.status.registeredBundle ?? null"
         :busy="config.applying"
         @cancel="applyOpen = false"
         @confirm="confirmApply"
@@ -161,6 +217,7 @@ import PlatformConfigurationStatusPanel from '@/components/platform-configuratio
 import PlatformConfigurationVersionDialog from '@/components/platform-configuration/PlatformConfigurationVersionDialog.vue'
 import { usePlatformConfiguration, type PlatformConfigurationFailure } from '@/composables/usePlatformConfiguration'
 import type { PlatformConfigurationVersionSchema } from '@/generated/contracts'
+import { formatBytes } from '@/utils/format'
 import { diffConfigurations, parseRequestYaml, requestToYaml } from '@/utils/platformConfiguration'
 
 const config = usePlatformConfiguration()
@@ -169,7 +226,8 @@ const editorMode = ref<'form' | 'yaml'>('form')
 const yamlText = ref('')
 const yamlError = ref<string | null>(null)
 const applyOpen = ref(false)
-const failureSource = ref<'save' | 'apply'>('save')
+const bundleInput = ref<HTMLInputElement | null>(null)
+const failureSource = ref<'save' | 'apply' | 'register'>('save')
 
 const versionView = reactive<{
   revision: number | null
@@ -224,9 +282,25 @@ function resetDraft() {
   if (editorMode.value === 'yaml') syncYamlFromDraft()
 }
 
-async function confirmApply(sha256: string) {
+function onBundleSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  config.selectBundleFile(file)
+}
+
+function clearBundle() {
+  config.selectBundleFile(null)
+  if (bundleInput.value) bundleInput.value.value = ''
+}
+
+async function registerBundle() {
+  failureSource.value = 'register'
+  await config.registerBundle()
+}
+
+async function confirmApply() {
   failureSource.value = 'apply'
-  await config.requestApply(sha256)
+  await config.requestApply()
   // Close either way so the outcome (notice or failure with recovery) is visible next to the apply action.
   applyOpen.value = false
 }
@@ -260,8 +334,10 @@ onMounted(async () => {
 .section-heading h3, .conflict h3 { margin: 0; font: var(--md-sys-title-large); color: var(--md-sys-color-on-surface); }
 .page-subtitle, .section-heading p, .conflict p { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
 .pc-layout { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); align-items: start; }
-.pc-layout > :first-child { grid-row: span 2; }
-.editor, .apply, .conflict { display: grid; gap: 14px; padding: 20px; }
+.pc-layout > :first-child { grid-row: span 3; }
+.editor, .register, .apply, .conflict { display: grid; gap: 14px; padding: 20px; }
+.file-field { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.file-field input[type="file"] { font: var(--md-sys-body-medium); color: var(--md-sys-color-on-surface); }
 .conflict { border: 1px solid var(--md-sys-color-error); }
 .notice { padding: 10px 16px; border-radius: var(--md-sys-shape-medium); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-body-medium); }
 .muted { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
