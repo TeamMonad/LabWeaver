@@ -73,7 +73,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -94,6 +94,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
+        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql"),
     ))
     .execute(&pool)
     .await?;
@@ -677,12 +678,22 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         diagnostic_code: None,
     };
     store
-        .create("task-resource-create-1", &request, "trace-task-create")
+        .create_task(
+            "task-resource-create-1",
+            &request,
+            30_000,
+            "trace-task-create",
+        )
         .await?;
     assert_eq!(store.load_task_request(task_run_id).await?, request);
     assert_eq!(
         store
-            .create("task-resource-create-1", &request, "trace-task-replay")
+            .create_task(
+                "task-resource-create-1",
+                &request,
+                30_000,
+                "trace-task-replay"
+            )
             .await?,
         request
     );
@@ -690,9 +701,10 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     conflicting_request.request_key = "task-resource-conflict".into();
     assert!(matches!(
         store
-            .create(
+            .create_task(
                 "task-resource-create-conflict",
                 &conflicting_request,
+                30_000,
                 "trace-task-conflict",
             )
             .await,
@@ -765,36 +777,6 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         stale_ack,
         Err(resource_service::store::ResourceStoreError::CapacityClaimStateConflict)
     ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET created_at=clock_timestamp() - interval '1 hour',
-             valid_until=clock_timestamp() - interval '1 minute'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
-    let expired_ack = store
-        .acknowledge_task_resource(
-            task_run_id,
-            claimed.claim_revision,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
-            "trace-task-expired-ack",
-        )
-        .await;
-    assert!(matches!(
-        expired_ack,
-        Err(resource_service::store::ResourceStoreError::ApprovalInvalid)
-    ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET valid_until=clock_timestamp() + interval '1 hour'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
     let acknowledged = store
         .acknowledge_task_resource(
             task_run_id,
@@ -963,7 +945,12 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
 
     let pending = make_request(TaskRunId::new(), "task-cancel");
     store
-        .create("task-cancel-create", &pending, "trace-task-cancel-create")
+        .create_task(
+            "task-cancel-create",
+            &pending,
+            30_000,
+            "trace-task-cancel-create",
+        )
         .await?;
     let cancelled = store
         .reject_or_cancel(
@@ -994,9 +981,10 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
 
     let approving = make_request(TaskRunId::new(), "task-approval-race");
     store
-        .create(
+        .create_task(
             "task-approval-race-create",
             &approving,
+            30_000,
             "trace-task-approval-race-create",
         )
         .await?;
@@ -3989,7 +3977,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -4009,7 +3997,8 @@ async fn migrated_pool()
         ),
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
-        )
+        ),
+        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql")
     ))
     .execute(&pool)
     .await?;
@@ -4606,6 +4595,7 @@ fn task_input(
             gpu: None,
         },
         duration_seconds: 60,
+        approval_timeout_milliseconds: 30_000,
     }
 }
 

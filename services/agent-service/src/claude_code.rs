@@ -1166,6 +1166,10 @@ pub enum ClaudeCodeProcessError {
     /// Resource approval did not complete before the bounded wait expired.
     #[error("Claude Code worker resource approval timed out")]
     ResourceApprovalTimeout,
+    #[error("LW_RESOURCE_APPROVAL_EXPIRED")]
+    ResourceApprovalExpired,
+    #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
+    ResourceLeaseExpired,
     /// The invocation exceeded its complete wall-clock budget.
     #[error("Claude Code worker timed out")]
     TimedOut,
@@ -1759,6 +1763,12 @@ impl ClaudeCodeRuntime {
                     }
                     ClaudeCodeProcessError::TimedOut => ClaudeCodeRuntimeError::TimedOut,
                     ClaudeCodeProcessError::Cancelled => ClaudeCodeRuntimeError::Cancelled,
+                    ClaudeCodeProcessError::ResourceLeaseExpired => {
+                        ClaudeCodeRuntimeError::ResourceLeaseExpired
+                    }
+                    ClaudeCodeProcessError::ResourceApprovalExpired => {
+                        ClaudeCodeRuntimeError::ResourceApprovalExpired
+                    }
                     ClaudeCodeProcessError::ResourceApprovalTimeout => {
                         ClaudeCodeRuntimeError::ResourceApprovalTimeout
                     }
@@ -2018,6 +2028,14 @@ impl ClaudeCodeRuntime {
                     ClaudeCodeProcessError::Cancelled => {
                         review_failure(ClaudeCodeRuntimeError::Cancelled, usage_option(total_usage))
                     }
+                    ClaudeCodeProcessError::ResourceLeaseExpired => review_failure(
+                        ClaudeCodeRuntimeError::ResourceLeaseExpired,
+                        usage_option(total_usage),
+                    ),
+                    ClaudeCodeProcessError::ResourceApprovalExpired => review_failure(
+                        ClaudeCodeRuntimeError::ResourceApprovalExpired,
+                        usage_option(total_usage),
+                    ),
                     ClaudeCodeProcessError::ResourceApprovalTimeout => review_failure(
                         ClaudeCodeRuntimeError::ResourceApprovalTimeout,
                         usage_option(total_usage),
@@ -2691,6 +2709,12 @@ impl ClaudeCodeRuntime {
                         ClaudeCodeRuntimeError::RuntimeUnavailable
                     }
                     ClaudeCodeProcessError::TimedOut => ClaudeCodeRuntimeError::TimedOut,
+                    ClaudeCodeProcessError::ResourceLeaseExpired => {
+                        ClaudeCodeRuntimeError::ResourceLeaseExpired
+                    }
+                    ClaudeCodeProcessError::ResourceApprovalExpired => {
+                        ClaudeCodeRuntimeError::ResourceApprovalExpired
+                    }
                     ClaudeCodeProcessError::ResourceApprovalTimeout => {
                         ClaudeCodeRuntimeError::ResourceApprovalTimeout
                     }
@@ -3899,6 +3923,10 @@ pub enum ClaudeCodeRuntimeError {
     /// Resource approval did not complete before the bounded wait expired.
     #[error("LW_TASK_RESOURCE_APPROVAL_TIMEOUT: resource approval did not complete")]
     ResourceApprovalTimeout,
+    #[error("LW_RESOURCE_APPROVAL_EXPIRED")]
+    ResourceApprovalExpired,
+    #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
+    ResourceLeaseExpired,
     /// Claude Code reported provider throttling after its own bounded retries.
     #[error("LW_LLM_RATE_LIMITED: Claude Code provider rate limit exhausted")]
     RateLimited,
@@ -3930,6 +3958,8 @@ impl ClaudeCodeRuntimeError {
             Self::ProtectedField => diagnostic::ACCESS_DENIED,
             Self::TimedOut => diagnostic::PROVIDER_TIMEOUT,
             Self::Cancelled => diagnostic::CONFLICT,
+            Self::ResourceLeaseExpired => "LW_RESOURCE_TASK_LEASE_EXPIRED",
+            Self::ResourceApprovalExpired => "LW_RESOURCE_APPROVAL_EXPIRED",
             Self::ResourceApprovalTimeout => "LW_TASK_RESOURCE_APPROVAL_TIMEOUT",
             Self::RateLimited => diagnostic::RATE_LIMITED,
             Self::Refused => diagnostic::PROVIDER_REJECTED,

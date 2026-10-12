@@ -106,6 +106,10 @@ pub struct InternalCreateTaskResourceRequest {
     pub request_key: String,
     pub resources: crate::resource::WorkloadResources,
     pub duration_seconds: u64,
+    /// Approval wait captured once by Resource using its database clock.
+    /// Same-attempt recovery keeps the original deadline.
+    #[schemars(range(min = 1, max = 3_600_000))]
+    pub approval_timeout_milliseconds: u64,
 }
 
 /// PostgreSQL-authoritative one-shot task resource state returned to Evaluation.

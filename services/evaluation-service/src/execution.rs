@@ -493,6 +493,8 @@ impl std::fmt::Display for TaskResourceFailure {
             TaskResourceError::RequestInvalid => "LW_EVALUATION_TASK_RESOURCE_REQUEST_INVALID",
             TaskResourceError::ResponseInvalid => "LW_EVALUATION_TASK_RESOURCE_RESPONSE_INVALID",
             TaskResourceError::IdentityMismatch => "LW_EVALUATION_TASK_RESOURCE_IDENTITY_MISMATCH",
+            TaskResourceError::ResourceLeaseExpired => "LW_RESOURCE_TASK_LEASE_EXPIRED",
+            TaskResourceError::ResourceApprovalExpired => "LW_RESOURCE_APPROVAL_EXPIRED",
             TaskResourceError::ResourceTerminal => "LW_EVALUATION_TASK_RESOURCE_TERMINAL",
             TaskResourceError::ResourceApprovalTimeout => {
                 "LW_EVALUATION_TASK_RESOURCE_APPROVAL_TIMEOUT"
@@ -512,6 +514,7 @@ impl std::fmt::Display for TaskResourceFailure {
                 ResourceClientError::RequestMissing => "LW_EVALUATION_RESOURCE_REQUEST_MISSING",
                 ResourceClientError::TaskResourceMissing => "LW_EVALUATION_RESOURCE_TASK_MISSING",
                 ResourceClientError::Denied => "LW_EVALUATION_RESOURCE_DENIED",
+                ResourceClientError::LeaseExpired => "LW_RESOURCE_TASK_LEASE_EXPIRED",
                 ResourceClientError::Conflict => "LW_EVALUATION_RESOURCE_CONFLICT",
                 ResourceClientError::Rejected => "LW_EVALUATION_RESOURCE_REJECTED",
                 ResourceClientError::Unavailable => "LW_EVALUATION_RESOURCE_UNAVAILABLE",
