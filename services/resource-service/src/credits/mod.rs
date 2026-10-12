@@ -850,7 +850,8 @@ async fn stage_target_hold(
     business: &str,
     amount: &FixedDecimal,
 ) -> Result<CreditHold, CreditError> {
-    if owner.is_empty() || amount.scaled() < 0 || amount.scaled().unsigned_abs() >= 10_u128.pow(38) {
+    if owner.is_empty() || amount.scaled() < 0 || amount.scaled().unsigned_abs() >= 10_u128.pow(38)
+    {
         return Err(CreditError::Invalid);
     }
     lock_account(tx, project).await?;

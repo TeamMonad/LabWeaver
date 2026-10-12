@@ -87,7 +87,7 @@ async fn price(
 }
 
 /// Called while the real Agent command and its attempt are locked; no remote operation runs here.
-pub async fn admit_in_transaction(
+pub(crate) async fn admit_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     owner: &str,
     request: &BuildRequest,
@@ -146,6 +146,7 @@ pub async fn admit_in_transaction(
     Ok(BuildCostRecord {
         build_request_id: request.id,
         attempt,
+        execution_authorized: false,
         estimate,
         hold,
         measurement: None,
@@ -156,7 +157,7 @@ pub async fn admit_in_transaction(
 }
 
 /// A terminal fact is settled together with the Agent transition. Unknown facts remain observable.
-pub async fn observe_in_transaction(
+pub(crate) async fn observe_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     owner: &str,
     build: BuildRequestId,
@@ -180,7 +181,11 @@ pub async fn observe_in_transaction(
         }
         return Ok(old);
     }
-    if matches!(measurement,BuildUsageMeasurement::Unknown{..}) && old.first_unknown_observation.is_some() {return Ok(old);}
+    if matches!(measurement, BuildUsageMeasurement::Unknown { .. })
+        && old.first_unknown_observation.is_some()
+    {
+        return Ok(old);
+    }
     let resolution = match measurement {
         BuildUsageMeasurement::Known {
             started_at,
@@ -238,6 +243,7 @@ async fn decode_record(
             .map_err(|_| ResourceStoreError::Wire)?,
         attempt: u32::try_from(row.try_get::<i32, _>("attempt")?)
             .map_err(|_| ResourceStoreError::Wire)?,
+        execution_authorized: row.try_get("execution_authorized")?,
         estimate: serde_json::from_value(row.try_get("estimate")?)?,
         hold: crate::credits::decode_hold(&hold)?,
         measurement: row
@@ -291,4 +297,166 @@ pub(crate) async fn settled_after_boundary(
     boundary: UtcTimestamp,
 ) -> Result<bool, ResourceStoreError> {
     Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource.build_metering_attempts WHERE charged_total IS NOT NULL AND (measurement->>'finishedAt')::timestamptz>$1 AND EXISTS(SELECT 1 FROM jsonb_array_elements(charged_lines) line WHERE line->>'rateId'=$2))").bind(boundary.get()).bind(rate.to_string()).fetch_one(&mut **tx).await?)
+}
+
+impl PgResourceStore {
+    /// The authenticated Agent identity is checked by the API before this bounded authority read.
+    pub async fn admit_build_cost(
+        &self,
+        owner: &str,
+        input: &contracts::resource::build_costing::BuildCostAdmissionRequest,
+    ) -> Result<BuildCostRecord, ResourceStoreError> {
+        if input.attempt == 0
+            || input.stage_request_id.len() != 64
+            || !input
+                .stage_request_id
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        let mut tx = self.pool().begin().await?;
+        let row=sqlx::query("SELECT command,state,attempt,lease_token,lease_expires_at FROM agent.build_commands WHERE build_request_id=$1").bind(input.build_request_id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
+        let command: contracts::events::AgentBuildRequested =
+            serde_json::from_value(row.try_get("command")?)?;
+        let now: time::OffsetDateTime =
+            sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+                .fetch_one(&mut *tx)
+                .await?;
+        if row.try_get::<String, _>("state")? != "running"
+            || row.try_get::<i32, _>("attempt")?
+                != i32::try_from(input.attempt).map_err(|_| ResourceStoreError::ScopeConflict)?
+            || row.try_get::<Option<Uuid>, _>("lease_token")? != Some(input.lease_token)
+            || row
+                .try_get::<Option<time::OffsetDateTime>, _>("lease_expires_at")?
+                .is_none_or(|t| t <= now)
+            || input.execution_deadline.get() <= now
+            || input.execution_deadline.get()
+                > now
+                    + time::Duration::milliseconds(
+                        i64::try_from(command.request.max_duration_milliseconds)
+                            .map_err(|_| ResourceStoreError::NumericOverflow)?,
+                    )
+        {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        if !matches!(
+            command.request.source,
+            contracts::supply_chain::BuildSource::Dockerfile { .. }
+        ) {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        let record = admit_in_transaction(
+            &mut tx,
+            owner,
+            &command.request,
+            input.attempt,
+            input.lease_token,
+        )
+        .await?;
+        let updated=sqlx::query("UPDATE resource.build_metering_attempts SET execution_deadline=COALESCE(execution_deadline,$3),build_stage_request_id=COALESCE(build_stage_request_id,$4),execution_authorized=execution_authorized OR $5 WHERE build_request_id=$1 AND attempt=$2 AND (execution_deadline IS NULL OR execution_deadline=$3) AND (build_stage_request_id IS NULL OR build_stage_request_id=$4)").bind(input.build_request_id.as_uuid()).bind(i32::try_from(input.attempt).map_err(|_|ResourceStoreError::ScopeConflict)?).bind(input.execution_deadline.get()).bind(&input.stage_request_id).bind(input.authorize_execution).execute(&mut *tx).await?;
+        if updated.rows_affected() != 1 {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        tx.commit().await?;
+        Ok(BuildCostRecord {
+            execution_authorized: input.authorize_execution || record.execution_authorized,
+            ..record
+        })
+    }
+    pub async fn get_build_cost(
+        &self,
+        owner: &str,
+        build: BuildRequestId,
+        attempt: u32,
+    ) -> Result<BuildCostRecord, ResourceStoreError> {
+        let mut tx = self.pool().begin().await?;
+        let row=sqlx::query("SELECT * FROM resource.build_metering_attempts WHERE build_request_id=$1 AND attempt=$2 AND owner_client_id=$3").bind(build.as_uuid()).bind(i32::try_from(attempt).map_err(|_|ResourceStoreError::ScopeConflict)?).bind(owner).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
+        let record = decode_record(&mut tx, &row).await?;
+        tx.commit().await?;
+        Ok(record)
+    }
+    pub async fn observe_build_cost(
+        &self,
+        owner: &str,
+        input: &contracts::resource::build_costing::ObserveBuildCostRequest,
+    ) -> Result<BuildCostRecord, ResourceStoreError> {
+        let mut tx = self.pool().begin().await?;
+        let token:Option<Uuid>=sqlx::query_scalar("SELECT lease_token FROM resource.build_metering_attempts WHERE build_request_id=$1 AND attempt=$2 AND owner_client_id=$3").bind(input.build_request_id.as_uuid()).bind(i32::try_from(input.attempt).map_err(|_|ResourceStoreError::ScopeConflict)?).bind(owner).fetch_optional(&mut *tx).await?;
+        if token != Some(input.lease_token) {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        let record = observe_in_transaction(
+            &mut tx,
+            owner,
+            input.build_request_id,
+            input.attempt,
+            &input.measurement,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(record)
+    }
+}
+
+impl PgResourceStore {
+    pub async fn get_project_build_cost(
+        &self,
+        project: ProjectId,
+        build: BuildRequestId,
+        attempt: u32,
+    ) -> Result<BuildCostRecord, ResourceStoreError> {
+        let mut tx = self.pool().begin().await?;
+        let row=sqlx::query("SELECT * FROM resource.build_metering_attempts WHERE project_id=$1 AND build_request_id=$2 AND attempt=$3").bind(project.as_uuid()).bind(build.as_uuid()).bind(i32::try_from(attempt).map_err(|_|ResourceStoreError::ScopeConflict)?).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
+        let record = decode_record(&mut tx, &row).await?;
+        tx.commit().await?;
+        Ok(record)
+    }
+}
+
+impl PgResourceStore {
+    pub async fn get_build_cost_with_fence(
+        &self,
+        owner: &str,
+        build: BuildRequestId,
+        attempt: u32,
+        token: Uuid,
+    ) -> Result<BuildCostRecord, ResourceStoreError> {
+        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource.build_metering_attempts WHERE build_request_id=$1 AND attempt=$2 AND owner_client_id=$3 AND lease_token=$4)").bind(build.as_uuid()).bind(i32::try_from(attempt).map_err(|_|ResourceStoreError::ScopeConflict)?).bind(owner).bind(token).fetch_one(&self.pool()).await?;
+        if !exists {
+            return Err(ResourceStoreError::NotFound);
+        }
+        self.get_build_cost(owner, build, attempt).await
+    }
+}
+
+impl PgResourceStore {
+    /// A crashed sender cannot leave a pending build preauthorization frozen indefinitely.
+    pub async fn reconcile_build_deadlines_once(&self) -> Result<bool, ResourceStoreError> {
+        let rows=sqlx::query("SELECT build_request_id,attempt,owner_client_id FROM resource.build_metering_attempts WHERE charged_total IS NULL AND first_unknown_observation IS NULL AND execution_deadline<=clock_timestamp() AND (measurement IS NULL OR measurement->>'state'<>'not_started') ORDER BY execution_deadline,build_request_id LIMIT 100").fetch_all(&self.pool()).await?;
+        let changed = !rows.is_empty();
+        for row in rows {
+            let mut tx = self.pool().begin().await?;
+            let build: BuildRequestId = row
+                .try_get::<Uuid, _>("build_request_id")?
+                .to_string()
+                .parse()
+                .map_err(|_| ResourceStoreError::Wire)?;
+            let attempt = u32::try_from(row.try_get::<i32, _>("attempt")?)
+                .map_err(|_| ResourceStoreError::Wire)?;
+            let owner: String = row.try_get("owner_client_id")?;
+            observe_in_transaction(
+                &mut tx,
+                &owner,
+                build,
+                attempt,
+                &BuildUsageMeasurement::Unknown {
+                    reason: "build deadline passed without authoritative terminal history".into(),
+                },
+            )
+            .await?;
+            tx.commit().await?;
+        }
+        Ok(changed)
+    }
 }

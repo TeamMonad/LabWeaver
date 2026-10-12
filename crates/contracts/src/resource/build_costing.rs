@@ -4,6 +4,29 @@ use crate::{BuildRequestId, ProjectId, UtcTimestamp};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Agent supplies only its execution identity; Resource reads the approved build command.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildCostAdmissionRequest {
+    pub build_request_id: BuildRequestId,
+    pub attempt: u32,
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub lease_token: uuid::Uuid,
+    pub execution_deadline: UtcTimestamp,
+    pub stage_request_id: String,
+    pub authorize_execution: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObserveBuildCostRequest {
+    pub build_request_id: BuildRequestId,
+    pub attempt: u32,
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub lease_token: uuid::Uuid,
+    pub measurement: BuildUsageMeasurement,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuildCostEstimateRequest {
@@ -66,6 +89,7 @@ impl BuildUsageMeasurement {
 pub struct BuildCostRecord {
     pub build_request_id: BuildRequestId,
     pub attempt: u32,
+    pub execution_authorized: bool,
     pub estimate: BuildCostEstimate,
     pub hold: super::credits::CreditHold,
     pub measurement: Option<BuildUsageMeasurement>,

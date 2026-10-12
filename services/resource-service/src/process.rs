@@ -53,6 +53,7 @@ pub struct ResourceProcessRuntime {
     access_service_client_id: String,
     environment_service_client_id: String,
     task_service_client_ids: BTreeSet<String>,
+    build_service_client_id: Option<String>,
     capacity_worker: CapacityReconcileWorker,
     outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
@@ -96,6 +97,9 @@ impl ResourceProcessRuntime {
         let access_service_client_id = required(ACCESS_SERVICE_CLIENT_ID)?;
         let environment_service_client_id = required(ENVIRONMENT_SERVICE_CLIENT_ID)?;
         let task_service_client_ids = required_set(TASK_SERVICE_CLIENT_IDS)?;
+        let build_service_client_id = std::env::var("LABWEAVER_AGENT_SERVICE_CLIENT_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
         let store = PgResourceStore::new(pool);
         seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
@@ -111,6 +115,7 @@ impl ResourceProcessRuntime {
             access_service_client_id,
             environment_service_client_id,
             task_service_client_ids,
+            build_service_client_id,
             capacity_worker,
             outbox,
             readiness: Arc::new(AtomicBool::new(true)),
@@ -131,6 +136,7 @@ impl ResourceProcessRuntime {
             .with_access_service_client_id(self.access_service_client_id.clone())
             .with_environment_service_client_id(self.environment_service_client_id.clone())
             .with_task_service_client_ids(self.task_service_client_ids.clone())
+            .with_build_service_client_id(self.build_service_client_id.clone())
     }
 
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
@@ -145,6 +151,7 @@ impl ResourceProcessRuntime {
             access_service_client_id: _access_service_client_id,
             environment_service_client_id: _environment_service_client_id,
             task_service_client_ids: _task_service_client_ids,
+            build_service_client_id: _build_service_client_id,
             _shutdown_sender,
             shutdown,
         } = self;
@@ -267,6 +274,9 @@ async fn run_accounting(
             biased;
             changed=shutdown.changed()=>{if changed.is_err() || *shutdown.borrow(){return Ok(());}}
             _=interval.tick()=>{
+                if let Err(error)=store.reconcile_build_deadlines_once().await {
+                    tracing::warn!(event="resource.build_cost.deadline_failed",diagnostic_code=%error,outcome="will_retry");
+                }
                 if let Err(error)=credits.expire_unknown_once().await {
                     tracing::warn!(event="resource.credits.unknown_deadline_failed",diagnostic_code=%error,outcome="will_retry");
                 }

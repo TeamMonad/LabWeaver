@@ -288,6 +288,30 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::credits::CreditAdminOperation
     );
     document!(
+        "schemas/contracts/v1/build-cost-estimate-request.schema.json",
+        crate::resource::build_costing::BuildCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-estimate.schema.json",
+        crate::resource::build_costing::BuildCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-record.schema.json",
+        crate::resource::build_costing::BuildCostRecord
+    );
+    document!(
+        "schemas/contracts/v1/build-usage-measurement.schema.json",
+        crate::resource::build_costing::BuildUsageMeasurement
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-admission-request.schema.json",
+        crate::resource::build_costing::BuildCostAdmissionRequest
+    );
+    document!(
+        "schemas/contracts/v1/observe-build-cost-request.schema.json",
+        crate::resource::build_costing::ObserveBuildCostRequest
+    );
+    document!(
         "schemas/contracts/v1/resource-cost-estimate-request.schema.json",
         crate::resource::costing::ResourceCostEstimateRequest
     );
@@ -1680,6 +1704,9 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createCreditAdminOperation" => "credit-admin-operation",
         "createCreditHold" => "credit-hold-request",
         "estimateProjectResourceCost" => "resource-cost-estimate-request",
+        "estimateProjectBuildCost" => "build-cost-estimate-request",
+        "admitBuildCost" => "build-cost-admission-request",
+        "observeBuildCost" => "observe-build-cost-request",
         "createEstimatedCreditHold" => "estimated-credit-hold-request",
         "resolveCreditHold" => "credit-hold-resolution-request",
         "createResourceRate" => "http/create-resource-rate-request",
@@ -1822,6 +1849,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listProjectCreditHolds" => contract_ref("credit-hold-page"),
         "getProjectCredits" => contract_ref("credit-account"),
         "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
+        "estimateProjectBuildCost" => contract_ref("build-cost-estimate"),
+        "getProjectBuildCost" | "getBuildCost" | "admitBuildCost" | "observeBuildCost" => {
+            contract_ref("build-cost-record")
+        }
         "createEstimatedCreditHold" => contract_ref("estimated-credit-hold"),
         "listProjectCreditLedger" => contract_ref("credit-ledger-page"),
         "createCreditAdminOperation" => {

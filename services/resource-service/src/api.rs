@@ -36,6 +36,7 @@ use std::sync::Arc;
 use crate::ApprovalPolicy;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 
+mod build_costing;
 mod costing;
 mod credits;
 
@@ -59,6 +60,7 @@ pub struct ResourceApiState {
     access_service_client_id: Option<String>,
     environment_service_client_id: Option<String>,
     task_service_client_ids: Option<BTreeSet<String>>,
+    build_service_client_id: Option<String>,
 }
 
 impl ResourceApiState {
@@ -70,7 +72,15 @@ impl ResourceApiState {
             access_service_client_id: None,
             environment_service_client_id: None,
             task_service_client_ids: None,
+            build_service_client_id: None,
         }
+    }
+
+    /// Restricts build funding and observations to the configured Agent client.
+    #[must_use]
+    pub fn with_build_service_client_id(mut self, client_id: Option<String>) -> Self {
+        self.build_service_client_id = client_id;
+        self
     }
 
     /// Installs the JWKS-backed verifier used only by internal service routes.
@@ -112,6 +122,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
     let public = Router::new()
         .merge(credits::public_routes())
         .merge(costing::public_routes())
+        .merge(build_costing::public_routes())
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests", get(list_requests))
         .route(
@@ -175,6 +186,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
     let internal = Router::new()
         .merge(credits::internal_routes())
         .merge(costing::internal_routes())
+        .merge(build_costing::internal_routes())
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
             "/internal/v1/task-resources/{task_run_id}/request",
