@@ -5,7 +5,7 @@
 )]
 
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use agent_service::api::{AgentApiState, CONTROL_PERMISSION, router};
 use agent_service::build_store::PgBuildStore;
@@ -33,6 +33,8 @@ const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 // The production importer admits one import per process before it distinguishes OCI and VM
 // archives. Keep fixture jobs serial within this integration binary as well, so an unrelated
 // import cannot leave a terminal-state assertion waiting behind the shared admission gate.
+static TELEMETRY: OnceLock<()> = OnceLock::new();
+
 static IMPORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Verified OCI layout archive plus the identity the importer must derive from it.
@@ -250,7 +252,7 @@ async fn spawn_api(
         generated_artifacts: GeneratedArtifactStore::new(pool.clone()),
         llm_reviews: LlmReviewStore::new(pool.clone()),
         platform_images: PgPlatformImageCatalog::new(pool.clone()),
-        platform_image_import_jobs: PlatformImageImportJobStore::new(pool),
+        platform_image_import_jobs: PlatformImageImportJobStore::new(pool.clone()),
         platform_registry: registry,
         objects: Arc::new(FakeObjects::new(staged)),
     });
@@ -273,6 +275,7 @@ async fn spawn_api(
         url: format!("http://{address}"),
         server,
         worker,
+        pool,
     })
 }
 
@@ -280,6 +283,7 @@ struct ImportApi {
     url: String,
     server: tokio::task::JoinHandle<()>,
     worker: PlatformImageImportWorker,
+    pool: sqlx::PgPool,
 }
 
 impl std::fmt::Display for ImportApi {
@@ -294,17 +298,10 @@ impl Drop for ImportApi {
     }
 }
 
-async fn run_import(
+async fn enqueue_import(
     api: &ImportApi,
     request: serde_json::Value,
-) -> Result<
-    (
-        InternalPlatformImageImportJobStatus,
-        Option<PlatformImageEntry>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    let _import_guard = IMPORT_TEST_LOCK.lock().await;
+) -> Result<InternalPlatformImageImportJobStatus, Box<dyn std::error::Error>> {
     let upload_id = UploadSessionId::new();
     let client = reqwest::Client::builder().no_proxy().build()?;
     let mut enqueued = client
@@ -360,47 +357,132 @@ async fn run_import(
     let initial: InternalPlatformImageImportJobStatus = serde_json::from_slice(&body)?;
     assert_eq!(initial.upload_id, upload_id);
     assert_eq!(initial.state, PlatformImageImportJobState::Queued);
+    Ok(initial)
+}
+
+async fn run_import(
+    api: &ImportApi,
+    case: &'static str,
+    request: serde_json::Value,
+) -> Result<
+    (
+        InternalPlatformImageImportJobStatus,
+        Option<PlatformImageEntry>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let started = std::time::Instant::now();
+    let _import_guard = IMPORT_TEST_LOCK.lock().await;
+    eprintln!(
+        "import case={case} phase=fixture_admission elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    let initial = enqueue_import(api, request).await?;
+    eprintln!(
+        "import case={case} phase=enqueued upload_id={} elapsed_ms={}",
+        initial.upload_id,
+        started.elapsed().as_millis()
+    );
+    wait_for_import(api, case, initial).await
+}
+
+async fn wait_for_import(
+    api: &ImportApi,
+    case: &'static str,
+    initial: InternalPlatformImageImportJobStatus,
+) -> Result<
+    (
+        InternalPlatformImageImportJobStatus,
+        Option<PlatformImageEntry>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let upload_id = initial.upload_id;
     let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(api.worker.clone().run()));
+    let started = std::time::Instant::now();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-    loop {
-        let response = client
-            .get(format!(
-                "{api}/internal/v1/platform-images/import-jobs/{upload_id}"
-            ))
-            .send()
-            .await?;
-        assert_eq!(response.status(), StatusCode::OK);
-        let status: InternalPlatformImageImportJobStatus = response.json().await?;
-        if matches!(
-            status.state,
-            PlatformImageImportJobState::Succeeded
-                | PlatformImageImportJobState::Failed
-                | PlatformImageImportJobState::Cancelled
-        ) {
-            let catalog: contracts::http::PlatformImageCatalog = client
-                .get(format!("{api}/internal/v1/platform-images"))
+    let mut last = initial;
+    let result = tokio::time::timeout_at(deadline, async {
+        loop {
+            let response = client
+                .get(format!(
+                    "{api}/internal/v1/platform-images/import-jobs/{upload_id}"
+                ))
                 .send()
-                .await?
-                .json()
                 .await?;
-            let entry = catalog
-                .entries
-                .into_iter()
-                .find(|entry| Some(entry.catalog_id) == status.catalog_id);
-            worker.abort();
-            let _ = worker.await;
-            return Ok((status, entry));
+            assert_eq!(response.status(), StatusCode::OK, "case={case}");
+            let status: InternalPlatformImageImportJobStatus = response.json().await?;
+            if status != last {
+                eprintln!(
+                    "import case={case} state={:?} revision={} elapsed_ms={}",
+                    status.state,
+                    status.revision.get(),
+                    started.elapsed().as_millis()
+                );
+            }
+            last = status;
+            if matches!(
+                last.state,
+                PlatformImageImportJobState::Succeeded
+                    | PlatformImageImportJobState::Failed
+                    | PlatformImageImportJobState::Cancelled
+            ) {
+                return Ok::<(), Box<dyn std::error::Error>>(());
+            }
+            if worker.is_finished() {
+                return Err("import worker exited before terminal state".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "import did not reach a terminal state: {status:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    })
+    .await;
+    let worker_finished = worker.is_finished();
+    if !matches!(result, Ok(Ok(()))) {
+        // Database clock decides lease validity. Never select the token or private request.
+        let facts = tokio::time::timeout(std::time::Duration::from_secs(1),
+            sqlx::query_as::<_, (bool, bool, Option<i64>, i64)>(
+                "SELECT lease_token IS NOT NULL, COALESCE(lease_expires_at>clock_timestamp(),false), \
+                 (extract(epoch FROM lease_expires_at-clock_timestamp())*1000)::bigint, \
+                 (extract(epoch FROM clock_timestamp()-updated_at)*1000)::bigint \
+                 FROM agent.platform_image_import_jobs WHERE upload_id=$1"
+            ).bind(upload_id.as_uuid()).fetch_optional(&api.pool)
+        ).await;
+        match facts {
+            Ok(Ok(facts)) => eprintln!(
+                "import case={case} lease_facts=(present,valid,remaining_ms,updated_age_ms) {facts:?}"
+            ),
+            _ => eprintln!("import case={case} lease_facts=unavailable"),
+        }
     }
+    worker.abort();
+    let _ = worker.await;
+    eprintln!(
+        "import case={case} worker_finished={worker_finished} elapsed_ms={} last={last:?}",
+        started.elapsed().as_millis()
+    );
+    assert!(
+        result.is_ok(),
+        "import did not reach a terminal state: case={case} worker_finished={worker_finished} elapsed_ms={} last={last:?}",
+        started.elapsed().as_millis()
+    );
+    result??;
+    let catalog: contracts::http::PlatformImageCatalog = client
+        .get(format!("{api}/internal/v1/platform-images"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let entry = catalog
+        .entries
+        .into_iter()
+        .find(|entry| Some(entry.catalog_id) == last.catalog_id);
+    Ok((last, entry))
 }
 
 async fn postgres() -> Result<(sqlx::PgPool, ContainerAsync<Postgres>), Box<dyn std::error::Error>>
 {
+    TELEMETRY.get_or_init(|| telemetry::init("agent-import-test").expect("safe fixture telemetry"));
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let url = format!(
         "postgres://postgres:postgres@127.0.0.1:{}/postgres",
@@ -412,6 +494,46 @@ async fn postgres() -> Result<(sqlx::PgPool, ContainerAsync<Postgres>), Box<dyn 
         .await?;
     apply_agent_migrations(&pool).await?;
     Ok((pool, container))
+}
+
+#[tokio::test]
+async fn slow_fixture_file_write_keeps_the_import_lease_alive()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _container) = postgres().await?;
+    let (registry, base) = FakeRegistry::spawn().await?;
+    let archive = disk_archive(b"disk", "disk/other.img");
+    let mut api = spawn_api(pool, Some(platform_registry(&base)?), archive.clone()).await?;
+    api.worker.lease_duration = std::time::Duration::from_secs(3);
+    api.worker.objects = Arc::new(
+        FakeObjects::new(archive.clone()).with_file_write_delay(std::time::Duration::from_secs(4)),
+    );
+    let imported = run_import(
+        &api,
+        "slow-file-misnamed",
+        vm_import_request(
+            "slow-file-disk",
+            &format!(
+                "{}/labweaver-system/vm-base:slow",
+                FakeRegistry::authority(&base)
+            ),
+            u64::try_from(archive.len())?,
+            "raw",
+            "disk/disk.img",
+            4_096,
+        ),
+    )
+    .await?;
+    assert_eq!(imported.0.state, PlatformImageImportJobState::Failed);
+    assert_eq!(
+        imported.0.diagnostic.as_deref(),
+        Some("LW_PLATFORM_IMAGE_DISK_INVALID")
+    );
+    // One claim and one terminal write: slow fixture I/O must not force lease recovery.
+    assert_eq!(imported.0.revision.get(), 3);
+    assert!(imported.1.is_none());
+    assert!(registry.blob_digests().is_empty());
+    assert!(listed_entries(&api.url).await?.is_empty());
+    Ok(())
 }
 
 #[tokio::test]
@@ -433,6 +555,7 @@ async fn import_publishes_every_blob_tags_the_reference_and_pins_the_digest()
 
     let imported = run_import(
         &api,
+        "oci-publish",
         import_request("ubuntu-24.04", &target, u64::try_from(archive.bytes.len())?),
     )
     .await?;
@@ -457,6 +580,7 @@ async fn import_publishes_every_blob_tags_the_reference_and_pins_the_digest()
 
     let duplicate = run_import(
         &api,
+        "oci-duplicate",
         import_request("ubuntu-24.04", &target, u64::try_from(archive.bytes.len())?),
     )
     .await?;
@@ -498,6 +622,7 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
     .await?;
     let mismatched = run_import(
         &api,
+        "oci-corrupted",
         import_request(
             "corrupted",
             &format!("{host}/labweaver-system/admin-import:24.04"),
@@ -517,6 +642,7 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
     .await?;
     let malformed = run_import(
         &api,
+        "oci-malformed",
         import_request(
             "malformed",
             &format!("{host}/labweaver-system/admin-import:24.04"),
@@ -537,6 +663,7 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
     .await?;
     let foreign = run_import(
         &api,
+        "oci-foreign",
         import_request(
             "foreign",
             "quay.io/labweaver-system/admin-import:24.04",
@@ -580,6 +707,7 @@ async fn import_requires_a_configured_platform_registry() -> Result<(), Box<dyn 
 
     let refused = run_import(
         &api,
+        "registry-unconfigured",
         import_request(
             "ubuntu-24.04",
             &format!("{host}/labweaver-system/admin-import:24.04"),
@@ -627,6 +755,7 @@ async fn vm_disk_import_wraps_the_disk_publishes_it_and_pins_the_reviewed_identi
 
     let imported = run_import(
         &api,
+        "vm-publish",
         vm_import_request(
             "fedora-41-qcow2",
             &target,
@@ -682,6 +811,7 @@ async fn vm_disk_import_fails_closed_when_the_disk_exceeds_the_declared_capacity
 
     let oversized = run_import(
         &api,
+        "vm-oversized",
         vm_import_request(
             "oversized-disk",
             &format!("{host}/labweaver-system/vm-base:oversized"),
@@ -708,6 +838,7 @@ async fn vm_disk_import_fails_closed_when_the_disk_exceeds_the_declared_capacity
     .await?;
     let empty = run_import(
         &empty_api,
+        "vm-empty",
         vm_import_request(
             "empty-disk",
             &format!("{host}/labweaver-system/vm-base:empty"),
@@ -748,6 +879,7 @@ async fn vm_disk_import_rejects_an_archive_that_is_not_the_declared_disk()
 
     let misnamed = run_import(
         &api,
+        "vm-misnamed",
         vm_import_request(
             "misnamed-disk",
             &format!("{host}/labweaver-system/vm-base:misnamed"),
@@ -771,7 +903,7 @@ async fn vm_disk_import_rejects_an_archive_that_is_not_the_declared_disk()
         4_096,
     );
     partial["capacityBytes"] = serde_json::Value::Null;
-    let partial = run_import(&api, partial).await?;
+    let partial = run_import(&api, "vm-partial", partial).await?;
     assert_eq!(partial.0.state, PlatformImageImportJobState::Failed);
     let partial = serde_json::json!({"diagnosticCode": partial.0.diagnostic});
     assert_eq!(partial["diagnosticCode"], "LW_PLATFORM_IMAGE_DISK_INVALID");
@@ -788,6 +920,7 @@ async fn vm_disk_import_rejects_an_archive_that_is_not_the_declared_disk()
     .await?;
     let extra = run_import(
         &additional_api,
+        "vm-extra",
         vm_import_request(
             "extra-entry",
             &format!("{host}/labweaver-system/vm-base:extra"),
@@ -832,7 +965,7 @@ async fn container_registrations_never_carry_a_disk_descriptor()
         4_096,
     );
     container_with_disk["kind"] = serde_json::Value::String("container".to_owned());
-    let container_with_disk = run_import(&api, container_with_disk).await?;
+    let container_with_disk = run_import(&api, "container-with-disk", container_with_disk).await?;
     assert_eq!(
         container_with_disk.0.state,
         PlatformImageImportJobState::Failed
@@ -846,6 +979,7 @@ async fn container_registrations_never_carry_a_disk_descriptor()
 
     let zero_capacity = run_import(
         &api,
+        "vm-zero-capacity",
         vm_import_request(
             "zero-capacity",
             &format!("{host}/labweaver-system/vm-base:zero"),
