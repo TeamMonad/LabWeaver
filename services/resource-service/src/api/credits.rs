@@ -5,6 +5,7 @@ use super::{
     StatusCode, authorize, get, header, post, require_admin, required_header,
 };
 use crate::credits::{CreditError, PgCreditStore};
+use axum::extract::rejection::JsonRejection;
 use contracts::resource::credits::{
     CreditAccount, CreditAdminOperation, CreditHold, CreditHoldRequest,
     CreditHoldResolutionRequest, CreditLedgerEntry, CreditLedgerPage,
@@ -70,9 +71,10 @@ async fn admin(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     headers: HeaderMap,
-    Json(input): Json<CreditAdminOperation>,
+    input: Result<Json<CreditAdminOperation>, JsonRejection>,
 ) -> Result<Json<Vec<CreditLedgerEntry>>, CreditApiError> {
     require_admin(&principal).map_err(|_| CreditError::Denied)?;
+    let Json(input) = input.map_err(|_| CreditError::Invalid)?;
     let key = required_header(&headers, "idempotency-key").map_err(|_| CreditError::Invalid)?;
     Ok(Json(
         PgCreditStore::new(state.store.pool())
@@ -96,9 +98,10 @@ async fn hold(
     State(state): State<ResourceApiState>,
     Extension(identity): Extension<auth::ServiceIdentity>,
     headers: HeaderMap,
-    Json(input): Json<CreditHoldRequest>,
+    input: Result<Json<CreditHoldRequest>, JsonRejection>,
 ) -> Result<Json<CreditHold>, CreditApiError> {
     owner(&state, &identity)?;
+    let Json(input) = input.map_err(|_| CreditError::Invalid)?;
     let request = state
         .store
         .load(input.request_id)
@@ -132,9 +135,10 @@ async fn resolve(
     Extension(identity): Extension<auth::ServiceIdentity>,
     headers: HeaderMap,
     Path(hold_id): Path<Uuid>,
-    Json(input): Json<CreditHoldResolutionRequest>,
+    input: Result<Json<CreditHoldResolutionRequest>, JsonRejection>,
 ) -> Result<Json<CreditHold>, CreditApiError> {
     owner(&state, &identity)?;
+    let Json(input) = input.map_err(|_| CreditError::Invalid)?;
     let key = required_header(&headers, "idempotency-key").map_err(|_| CreditError::Invalid)?;
     Ok(Json(
         PgCreditStore::new(state.store.pool())
