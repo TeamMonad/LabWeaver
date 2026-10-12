@@ -45,6 +45,18 @@ WORKLOADS_FILE = (
 RESOURCE_MANIFEST = (
     Path(__file__).resolve().parents[1] / "deploy/config/resource-bundle-manifest.json"
 )
+ENVIRONMENT_EXECUTOR_SHARED = (
+    "LABWEAVER_SERVICE_OIDC_ISSUER",
+    "LABWEAVER_SERVICE_OIDC_CA",
+    "LABWEAVER_SERVICE_CLIENT_ID",
+    "LABWEAVER_SERVICE_CLIENT_SECRET_FILE",
+    "LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS",
+    "LABWEAVER_RESOURCE_USAGE_BASE_URI",
+    "LABWEAVER_RESOURCE_USAGE_CA_PATH",
+    "LABWEAVER_RESOURCE_USAGE_AUDIENCE",
+    "LABWEAVER_RESOURCE_USAGE_SCOPES",
+    "LABWEAVER_RESOURCE_USAGE_TIMEOUT_MILLISECONDS",
+)
 RESOURCE_RESERVED = {
     "resource_application_namespace",
     "resource_application_release_name",
@@ -466,7 +478,12 @@ def _workload_inputs(
         if type(configuration.get("enabled")) is not bool:
             raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
         if configuration["enabled"]:
-            if set(defaults.get("env", {})) - set(env) or set(
+            inherited = (
+                set(ENVIRONMENT_EXECUTOR_SHARED)
+                if name in {"container-executor", "kubevirt-executor"}
+                else set()
+            )
+            if set(defaults.get("env", {})) - set(env) - inherited or set(
                 defaults.get("secretEnv", {})
             ) - set(secret_env):
                 raise BundleError("LW_BUNDLE_WORKLOAD_INPUT_MISSING")
@@ -524,6 +541,177 @@ def _settings(model: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
     if document["revision"] != model["revision"]:
         raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
     return dict(document, configurationMode=mode)
+
+
+def _environment_executor_bindings(
+    model: dict[str, Any], files: dict[str, bytes], manifest: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, bytes], dict[str, Any]]:
+    """Bind existing executor startup inputs to the Environment owner's source."""
+    application = model["application"]
+    inputs = _workload_inputs(application, manifest)
+    defaults = _document(WORKLOADS_FILE.read_bytes())["workloads"]
+    overrides = application["helmValues"].get("workloads", {})
+    executors = [
+        name
+        for name in ("container-executor", "kubevirt-executor")
+        if overrides.get(name, {}).get("enabled", defaults[name]["enabled"])
+    ]
+    if not executors:
+        return inputs, {}, {}
+    if not overrides.get("environment-service", {}).get(
+        "enabled", defaults["environment-service"]["enabled"]
+    ):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_OWNER_REQUIRED")
+    owner = inputs["environment-service"]
+    owner_secret = defaults["environment-service"]["secret"]
+    source_secrets = application["secrets"]
+    authority_path = "/etc/labweaver/environment-authority/"
+    required_scopes = {
+        "resource.usage.record",
+        "resource.environment.resolve",
+        "resource.environment.release",
+    }
+    if not required_scopes <= set(
+        owner["env"]["LABWEAVER_RESOURCE_USAGE_SCOPES"].split()
+    ):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID")
+    references = {
+        "database-url": owner["secretEnv"]["LABWEAVER_DATABASE_URL"],
+        "nats-server": owner["secretEnv"]["LABWEAVER_NATS_SERVER"],
+    }
+    for variable, key in (
+        ("LABWEAVER_SERVICE_OIDC_CA", "oidc-ca.pem"),
+        ("LABWEAVER_SERVICE_CLIENT_SECRET_FILE", "service-client-secret"),
+        ("LABWEAVER_RESOURCE_USAGE_CA_PATH", "mtls-ca.pem"),
+        ("LABWEAVER_NATS_CA_PATH", "nats-ca.pem"),
+    ):
+        if owner["env"][variable] != "/etc/labweaver/secrets/" + key:
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID")
+        references[key] = {"secret": owner_secret, "key": key}
+    endpoint_ref = references["nats-server"]
+    try:
+        endpoint = (
+            files[source_secrets[endpoint_ref["secret"]][endpoint_ref["key"]]]
+            .decode()
+            .strip()
+        )
+    except UnicodeError as error:
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID") from error
+    if not endpoint.startswith("tls://") or any(c.isspace() for c in endpoint):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID")
+    projected: dict[str, list[dict[str, str]]] = {}
+    for target, reference in references.items():
+        projected.setdefault(reference["secret"], []).append(
+            {"key": reference["key"], "path": target}
+        )
+    authority = {
+        "secretSources": [
+            {"name": name, "items": items} for name, items in sorted(projected.items())
+        ]
+    }
+    providers = _document(
+        files[application["configMaps"]["environment-service-config"]["providers.json"]]
+    )
+    if not isinstance(providers, list) or any(
+        not isinstance(p, dict) for p in providers
+    ):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_EXECUTOR_INVALID")
+    configs = {}
+    for name in executors:
+        source = inputs[name]
+        if {"LABWEAVER_DATABASE_URL", "LABWEAVER_NATS_SERVER"} & (
+            set(source["env"]) | set(source["secretEnv"])
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        env = dict(source["env"])
+        for variable in ENVIRONMENT_EXECUTOR_SHARED:
+            if variable in source["secretEnv"] or (
+                variable in env and env[variable] != owner["env"][variable]
+            ):
+                raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+            env[variable] = owner["env"][variable]
+        for variable, key in (
+            ("LABWEAVER_SERVICE_OIDC_CA", "oidc-ca.pem"),
+            ("LABWEAVER_SERVICE_CLIENT_SECRET_FILE", "service-client-secret"),
+            ("LABWEAVER_RESOURCE_USAGE_CA_PATH", "mtls-ca.pem"),
+        ):
+            env[variable] = authority_path + key
+        inputs[name] = {"env": env, "secretEnv": dict(source["secretEnv"])}
+        executor_secrets = source_secrets[defaults[name]["secret"]]
+        for key in ("database-url", "postgres-ca.pem", "nats-ca.pem"):
+            reference = references.get(key, {"secret": owner_secret, "key": key})
+            if (
+                executor_secrets[key]
+                != source_secrets[reference["secret"]][reference["key"]]
+            ):
+                raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        config_ref = application["configMaps"][defaults[name]["configMap"]][
+            "config.yaml"
+        ]
+        config = _document(files[config_ref])
+        if not isinstance(config, dict) or not isinstance(config.get("nats"), dict):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_EXECUTOR_INVALID")
+        nats = dict(config["nats"])
+        kind, subject_field = (
+            ("container", "containerRequestSubject")
+            if name == "container-executor"
+            else ("kubevirt", "kubevirtRequestSubject")
+        )
+        subjects = {
+            p.get("subject") for p in providers if p.get("providerKind") == kind
+        }
+        if subjects != {nats.get(subject_field)} or not all(
+            isinstance(s, str) and s and not any(c.isspace() for c in s)
+            for s in subjects
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        if config.get("databaseUrlFile") not in (
+            "/etc/labweaver/secrets/database-url",
+            authority_path + "database-url",
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        if not (
+            (nats.get("server") == endpoint and "serverFile" not in nats)
+            or (
+                nats.get("serverFile") == authority_path + "nats-server"
+                and "server" not in nats
+            )
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        for field, key in (
+            ("caFile", "nats-ca.pem"),
+            ("clientCertificateFile", "nats-client.crt"),
+            ("clientPrivateKeyFile", "nats-client.key"),
+            ("credentialsFile", "nats.creds"),
+        ):
+            if nats.get(field) != "/etc/labweaver/secrets/" + key:
+                raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        nats.pop("server", None)
+        nats["serverFile"] = authority_path + "nats-server"
+        nats["caFile"] = authority_path + "nats-ca.pem"
+        configs[config_ref] = yaml.safe_dump(
+            dict(config, databaseUrlFile=authority_path + "database-url", nats=nats)
+        ).encode()
+    if "resource" in model:
+        resource_env = model["resource"]["workloadInputs"]["resource-service"]["env"]
+        client = owner["env"]["LABWEAVER_SERVICE_CLIENT_ID"]
+        if (
+            resource_env.get("LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID") != client
+            or client
+            not in resource_env.get("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS", "").split(
+                ","
+            )
+            or resource_env.get("LABWEAVER_SERVICE_AUDIENCE")
+            != owner["env"]["LABWEAVER_RESOURCE_USAGE_AUDIENCE"]
+            or resource_env.get("LABWEAVER_SERVICE_OIDC_ISSUER")
+            != owner["env"]["LABWEAVER_SERVICE_OIDC_ISSUER"]
+            or resource_env.get("LABWEAVER_SERVICE_OIDC_CA")
+            != "/etc/labweaver/secrets/oidc-ca.pem"
+            or model["resource"]["secrets"]["resource-service-secrets"]["oidc-ca.pem"]
+            != source_secrets[owner_secret]["oidc-ca.pem"]
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+    return inputs, configs, authority
 
 
 def _resource_model(
@@ -679,6 +867,7 @@ def load_bundle(
         "images",
         "workloadInputs",
         "managedControlConfiguration",
+        "environmentExecutorAuthority",
     } & set(application["helmValues"]):
         raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
     for key in application["ansibleVariables"]:
@@ -708,6 +897,7 @@ def load_bundle(
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _settings(model, files)
     _workload_inputs(application, manifest)
+    _environment_executor_bindings(model, files, manifest)
     lock = _document(files[versions["lockFile"]])
     package = _document(files[versions["packageFile"]])
     if (
@@ -793,6 +983,9 @@ def derive_bundle(
     _no_symlink_ancestors(output.absolute())
     output.mkdir(mode=0o700)
     manifest = objects._load_manifest(manifest_path)
+    workload_inputs, executor_configs, executor_authority = (
+        _environment_executor_bindings(model, files, manifest)
+    )
     manifest["namespace"] = model["target"]["namespace"]
     manifest_output = output / "object-manifest.json"
     _write(manifest_output, json.dumps(manifest, sort_keys=True).encode())
@@ -800,7 +993,10 @@ def derive_bundle(
     for group, directory in (("configMaps", "configmaps"), ("secrets", "secrets")):
         for name, bindings in application[group].items():
             for key, ref in bindings.items():
-                _write(inputs / directory / name / key, files[ref])
+                _write(
+                    inputs / directory / name / key,
+                    executor_configs.get(ref, files[ref]),
+                )
     payload = objects.render_bundle(manifest_output, inputs)
     object_output = output / "application.yaml"
     _write(object_output, payload)
@@ -808,7 +1004,9 @@ def derive_bundle(
     shutil.rmtree(inputs)
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     values = dict(application["helmValues"])
-    values["workloadInputs"] = _workload_inputs(application, manifest)
+    values["workloadInputs"] = workload_inputs
+    if executor_authority:
+        values["environmentExecutorAuthority"] = executor_authority
     package = _document(files[model["versions"]["packageFile"]])
     values["images"] = {
         image["component"].replace("-", "_"): image["reference"]
