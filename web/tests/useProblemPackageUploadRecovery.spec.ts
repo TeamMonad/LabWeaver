@@ -75,10 +75,21 @@ const ok = (data: unknown) => ({ data, error: undefined }) as never
 const problem = (status: number, diagnosticCode: string) => ({ data: undefined, error: { status, diagnosticCode, detail: diagnosticCode, retryable: true } }) as never
 const lost = () => ({ data: undefined, error: { message: 'Network Error' } }) as never
 
-function makeUpload(scope = 'test-scope') {
+function makeUpload(scope = 'test-scope', policyRevision = ref<number | undefined>(1)) {
   const scopeRunner = effectScope()
-  const upload = scopeRunner.run(() => useProjectProblemPackageUpload(ref('project-1'), ref(1), ref(null), ref('finite'), { recoveryScope: scope }))!
+  const upload = scopeRunner.run(() => useProjectProblemPackageUpload(ref('project-1'), policyRevision, ref(null), ref('finite'), { recoveryScope: scope }))!
   return { upload, stop: () => scopeRunner.stop() }
+}
+
+function manyFilesSession(count: number) {
+  const names = Array.from({ length: count }, (_, index) => `f${index}.txt`)
+  return {
+    names,
+    session: session({
+      files: names.map((path) => ({ path, sizeBytes: path.length, mediaType: 'text/plain' })),
+      uploadTargets: names.map((path) => ({ path, uploadUrl: `https://s3/${path}`, requiredHeaders: {} })),
+    }),
+  }
 }
 
 function headersOf(mockFn: unknown, call = 0) {
@@ -267,5 +278,114 @@ describe('problem package upload recovery (#197)', () => {
     expect(upload.state.kind).toBe('cancelled')
     expect(completeProjectProblemPackageUpload).not.toHaveBeenCalled()
     stop()
+  })
+
+  it('retry after a failed cancel continues the cancel and never resumes the upload', async () => {
+    const { upload, stop } = makeUpload()
+    upload.addFiles([file('a.txt'), file('b.txt')])
+    putPlan.set('https://s3/b', 'hold')
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValue(ok(session()))
+    void upload.createSession()
+    await flushPromises()
+
+    vi.mocked(getProjectProblemPackageUpload).mockResolvedValue(ok(session({ revision: 4, uploadedPaths: ['a.txt'] })))
+    vi.mocked(cancelProjectProblemPackageUpload)
+      .mockResolvedValueOnce(lost())
+      .mockResolvedValueOnce(ok(session({ state: 'cancelled', revision: 5 })))
+    await upload.cancel()
+    expect(upload.state.kind).toBe('error')
+    putUrls.length = 0
+
+    await upload.retry() // the banner's generic retry
+    await flushPromises()
+    const calls = vi.mocked(cancelProjectProblemPackageUpload).mock.calls
+    expect(calls).toHaveLength(2)
+    expect(headersOf(cancelProjectProblemPackageUpload, 1)['Idempotency-Key']).toBe(headersOf(cancelProjectProblemPackageUpload, 0)['Idempotency-Key'])
+    expect(putUrls).toEqual([])
+    expect(completeProjectProblemPackageUpload).not.toHaveBeenCalled()
+    expect(upload.state.kind).toBe('cancelled')
+    stop()
+  })
+
+  it('a refresh after a failed cancel continues the cancel, not the upload', async () => {
+    const first = makeUpload()
+    first.upload.addFiles([file('a.txt'), file('b.txt')])
+    putPlan.set('https://s3/b', 'hold')
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValue(ok(session()))
+    void first.upload.createSession()
+    await flushPromises()
+    vi.mocked(getProjectProblemPackageUpload).mockResolvedValue(ok(session({ revision: 4, uploadedPaths: ['a.txt'] })))
+    vi.mocked(cancelProjectProblemPackageUpload).mockResolvedValueOnce(problem(503, 'LW_CONTROL_UNAVAILABLE'))
+    await first.upload.cancel()
+    const firstKey = headersOf(cancelProjectProblemPackageUpload, 0)['Idempotency-Key']
+    first.stop()
+
+    vi.mocked(cancelProjectProblemPackageUpload).mockResolvedValueOnce(ok(session({ state: 'cancelled', revision: 5 })))
+    putUrls.length = 0
+    const second = makeUpload()
+    await flushPromises()
+    expect(headersOf(cancelProjectProblemPackageUpload, 1)['Idempotency-Key']).toBe(firstKey)
+    expect(second.upload.state.kind).toBe('cancelled')
+    expect(second.upload.state.kind).not.toBe('needs-files')
+    expect(putUrls).toEqual([])
+    expect(completeProjectProblemPackageUpload).not.toHaveBeenCalled()
+    second.stop()
+  })
+
+  it('sends at most three PUTs at a time and a cancel stops the queued files', async () => {
+    const { upload, stop } = makeUpload()
+    const { names, session: many } = manyFilesSession(10)
+    for (const name of names) putPlan.set(`https://s3/${name}`, 'hold')
+    upload.addFiles(names.map((name) => file(name)))
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValue(ok(many))
+    void upload.createSession()
+    await flushPromises()
+    expect(putUrls).toHaveLength(3)
+
+    vi.mocked(getProjectProblemPackageUpload).mockResolvedValue(ok({ ...many, revision: 3 }))
+    vi.mocked(cancelProjectProblemPackageUpload).mockResolvedValue(ok({ ...many, state: 'cancelled', revision: 4 }))
+    await upload.cancel()
+    await flushPromises()
+    expect(aborted).toHaveLength(3)
+    expect(putUrls).toHaveLength(3)
+    expect(upload.state.kind).toBe('cancelled')
+    stop()
+  })
+
+  it('replays the frozen create request after a lost response even if the policy revision changed', async () => {
+    const revision = ref<number | undefined>(1)
+    const { upload, stop } = makeUpload('test-scope', revision)
+    upload.addFiles([file('a.txt'), file('b.txt')])
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValueOnce(lost())
+    await upload.createSession()
+    revision.value = 2
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValueOnce(ok(session()))
+    vi.mocked(completeProjectProblemPackageUpload).mockResolvedValue(ok(pkg))
+    await upload.retry()
+    await flushPromises()
+    const calls = vi.mocked(createProjectProblemPackageUpload).mock.calls as unknown as [{ headers: Record<string, string>; body: unknown }][]
+    expect(calls).toHaveLength(2)
+    expect(calls[1][0].headers['Idempotency-Key']).toBe(calls[0][0].headers['Idempotency-Key'])
+    expect(calls[1][0].body).toEqual(calls[0][0].body)
+    expect(calls[1][0].body).toMatchObject({ retentionPolicyRevision: 1 })
+    expect(upload.state.kind).toBe('done')
+    stop()
+  })
+
+  it('a refresh after a lost create replays the frozen request, then asks for the files', async () => {
+    const first = makeUpload()
+    first.upload.addFiles([file('a.txt'), file('b.txt')])
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValueOnce(lost())
+    await first.upload.createSession()
+    first.stop()
+
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValueOnce(ok(session()))
+    const second = makeUpload('test-scope', ref(7))
+    await flushPromises()
+    const calls = vi.mocked(createProjectProblemPackageUpload).mock.calls as unknown as [{ headers: Record<string, string>; body: unknown }][]
+    expect(calls[1][0].headers['Idempotency-Key']).toBe(calls[0][0].headers['Idempotency-Key'])
+    expect(calls[1][0].body).toEqual(calls[0][0].body)
+    expect(second.upload.state).toEqual({ kind: 'needs-files', missing: ['a.txt', 'b.txt'] })
+    second.stop()
   })
 })

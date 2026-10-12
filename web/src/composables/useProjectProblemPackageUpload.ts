@@ -50,7 +50,22 @@ type UploadIntent = {
   completeKey?: string
   completeRevision?: number
   cancelKey?: string
+  /** The user asked to cancel; retry and refresh continue the cancel, never the upload. */
+  cancelRequested?: boolean
+  /** The first create request, frozen so a lost response replays exactly the same body. */
+  createBody?: CreateUploadBody
 }
+
+type CreateUploadBody = {
+  projectId: string
+  courseId?: string
+  files: { path: string; sizeBytes: number; mediaType: string }[]
+  retentionPolicyRevision: number
+  retentionChoice: ProblemPackageRetentionChoice
+}
+
+/** Same bound as platform image part uploads; the limit is not raised. */
+const MATERIAL_UPLOAD_MAX_CONCURRENCY = 3
 
 const UPLOAD_INTENT_STORAGE_PREFIX = 'labweaver:problem-package-upload:'
 
@@ -343,22 +358,36 @@ export function useProjectProblemPackageUpload(
       await reconcile(intent.uploadId, generation, id)
       return
     }
-    if (!intent || intent.projectId !== id || intent.fingerprint !== fingerprint || intent.uploadId) {
-      writeIntent({ projectId: id, fingerprint, createKey: idempotencyKey() })
+    if (!intent || intent.projectId !== id || intent.fingerprint !== fingerprint || intent.uploadId || !intent.createBody) {
+      writeIntent({
+        projectId: id,
+        fingerprint,
+        createKey: idempotencyKey(),
+        createBody: {
+          projectId: id,
+          ...(courseId.value ? { courseId: courseId.value } : {}),
+          files: files.value.map((file) => ({ path: file.path, sizeBytes: file.sizeBytes, mediaType: file.mediaType })),
+          retentionPolicyRevision: revision,
+          retentionChoice: retentionChoice.value,
+        },
+      })
     }
-    const createKey = intent!.createKey
+    await sendCreate(generation, id)
+  }
 
+  /**
+   * Send the recorded create request. The body is the one frozen with the key,
+   * so a replay after a lost response stays identical even if the policy
+   * revision, course or retention choice changed in the meantime.
+   */
+  async function sendCreate(generation: number, id: string) {
+    const recorded = intent
+    if (!recorded?.createBody) return
     state.value = { kind: 'creating' }
     const result = await createProjectProblemPackageUpload({
       path: { projectId: id },
-      headers: { 'Idempotency-Key': createKey },
-      body: {
-        projectId: id,
-        ...(courseId.value ? { courseId: courseId.value } : {}),
-        files: files.value.map((file) => ({ path: file.path, sizeBytes: file.sizeBytes, mediaType: file.mediaType })),
-        retentionPolicyRevision: revision,
-        retentionChoice: retentionChoice.value,
-      },
+      headers: { 'Idempotency-Key': recorded.createKey },
+      body: recorded.createBody,
     })
     if (!isCurrent(generation, id)) return
     if (result.error) {
@@ -405,6 +434,11 @@ export function useProjectProblemPackageUpload(
       state.value = terminal
       return
     }
+    if (intent?.cancelRequested) {
+      // The user's cancel stands: never resume PUTs or completion.
+      await sendCancel(upload, generation, id)
+      return
+    }
     if (upload.state === 'completing') {
       // Recover the original completion request with the server's key and revision.
       if (upload.completionIdempotencyKey && upload.completionExpectedRevision != null) {
@@ -435,28 +469,40 @@ export function useProjectProblemPackageUpload(
     state.value = { kind: 'uploading' }
     const uploaded = new Set(uploadSession.uploadedPaths)
     let preconditionFailed = false
-    await Promise.all(uploadSession.uploadTargets.map(async (target) => {
+    const batch = new AbortController()
+    transfers.add(batch)
+    const queue = uploadSession.uploadTargets.filter((target) => {
       const file = files.value.find((entry) => entry.path === target.path)
-      if (!file || file.status === 'done' || uploaded.has(target.path)) return
-      file.status = 'uploading'
-      file.error = undefined
-      const controller = new AbortController()
-      transfers.add(controller)
-      try {
-        await putFileWithProgress(file.file, target.uploadUrl, target.requiredHeaders, (progress) => { file.progress = progress }, controller.signal)
-        file.status = 'done'
-      } catch (error) {
-        if (controller.signal.aborted) {
-          file.status = 'pending'
-          return
+      return Boolean(file) && file!.status !== 'done' && !uploaded.has(target.path)
+    })
+    const worker = async () => {
+      // Queued files are taken one at a time, so a cancel stops them from being sent.
+      while (!batch.signal.aborted) {
+        const target = queue.shift()
+        if (!target) return
+        const file = files.value.find((entry) => entry.path === target.path)
+        if (!file) continue
+        file.status = 'uploading'
+        file.error = undefined
+        try {
+          await putFileWithProgress(file.file, target.uploadUrl, target.requiredHeaders, (progress) => { file.progress = progress }, batch.signal)
+          file.status = 'done'
+        } catch (error) {
+          if (batch.signal.aborted) {
+            file.status = 'pending'
+            return
+          }
+          if (isPreconditionFailed(error)) preconditionFailed = true
+          file.status = 'error'
+          file.error = error instanceof Error ? error.message : String(error)
         }
-        if (isPreconditionFailed(error)) preconditionFailed = true
-        file.status = 'error'
-        file.error = error instanceof Error ? error.message : String(error)
-      } finally {
-        transfers.delete(controller)
       }
-    }))
+    }
+    try {
+      await Promise.all(Array.from({ length: Math.min(MATERIAL_UPLOAD_MAX_CONCURRENCY, queue.length) }, () => worker()))
+    } finally {
+      transfers.delete(batch)
+    }
 
     const afterTransfers = state.value as PackageUploadState
     if (!isCurrent(generation, id) || afterTransfers.kind === 'cancelling' || afterTransfers.kind === 'cancelled') return
@@ -478,8 +524,16 @@ export function useProjectProblemPackageUpload(
   async function retry() {
     const id = projectId.value
     if (!id) return
+    if (intent?.projectId === id && intent.cancelRequested) {
+      await cancel()
+      return
+    }
     const generation = ++loadGeneration
     const uploadId = intent?.projectId === id ? intent.uploadId : undefined
+    if (!uploadId && intent?.projectId === id && intent.createBody && (files.value.length === 0 || intent.fingerprint === fingerprintOf(files.value))) {
+      await sendCreate(generation, id)
+      return
+    }
     if (uploadId && intent?.fingerprint === fingerprintOf(files.value)) {
       await reconcile(uploadId, generation, id)
       return
@@ -549,26 +603,31 @@ export function useProjectProblemPackageUpload(
       return
     }
     const generation = ++loadGeneration
-    if (!intent?.cancelKey) updateIntent({ cancelKey: idempotencyKey() })
-    const cancelKey = intent?.cancelKey ?? idempotencyKey()
+    // Record the cancel before any request so a failure, retry or refresh keeps it.
+    updateIntent({ cancelRequested: true, ...(intent?.cancelKey ? {} : { cancelKey: idempotencyKey() }) })
     state.value = { kind: 'cancelling' }
     const latest = await getProjectProblemPackageUpload({ path: { projectId: id, uploadId } })
     if (!isCurrent(generation, id)) return
     if (latest.error) {
-      state.value = problemState(latest.error, 'UPLOAD_CANCEL_FAILED', '暂时无法读取上传会话，取消未提交。')
+      state.value = problemState(latest.error, 'UPLOAD_CANCEL_FAILED', '暂时无法读取上传会话，取消尚未完成。重试会继续取消。')
       return
     }
-    if (latest.data.state !== 'pending' && latest.data.state !== 'completing') {
-      await continueSession(latest.data, generation, id)
-      return
-    }
+    session.value = latest.data
+    await continueSession(latest.data, generation, id)
+  }
+
+  async function sendCancel(upload: ProblemPackageUploadSessionSchema, generation: number, id: string) {
+    if (!intent?.cancelKey) updateIntent({ cancelKey: idempotencyKey() })
+    const cancelKey = intent?.cancelKey ?? idempotencyKey()
+    abortTransfers()
+    state.value = { kind: 'cancelling' }
     const result = await cancelProjectProblemPackageUpload({
-      path: { projectId: id, uploadId },
-      headers: { 'Idempotency-Key': cancelKey, 'If-Match': ifMatch(latest.data.revision) },
+      path: { projectId: id, uploadId: upload.id },
+      headers: { 'Idempotency-Key': cancelKey, 'If-Match': ifMatch(upload.revision) },
     })
     if (!isCurrent(generation, id)) return
     if (result.error) {
-      state.value = problemState(result.error, 'UPLOAD_CANCEL_FAILED', '取消上传失败。重试会沿用同一个取消请求。')
+      state.value = problemState(result.error, 'UPLOAD_CANCEL_FAILED', '取消上传失败。重试会沿用同一个取消请求，不会继续上传。')
       return
     }
     session.value = null
@@ -587,8 +646,13 @@ export function useProjectProblemPackageUpload(
     const recorded = readIntent(id)
     if (!recorded) return
     intent = recorded
-    if (!recorded.uploadId) return
     const generation = ++loadGeneration
+    if (!recorded.uploadId) {
+      // The create response was lost before the refresh: replay the frozen request.
+      if (recorded.createBody && !recorded.cancelRequested) await sendCreate(generation, id)
+      else writeIntent(null)
+      return
+    }
     await reconcile(recorded.uploadId, generation, id)
   }
 
