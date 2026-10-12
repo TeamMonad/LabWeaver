@@ -1,6 +1,6 @@
 # 加密应用 Bundle
 
-本入口将 [Control 管理设置](../contracts/platform-configuration.md)、应用与 Resource profile 输入、Secret、版本和说明放入同一个加密目录。导入继续使用现有管理员条件更新 API。首装设置可以离线准备，不制造已保存版本。运行权限消费者和基础设施安装仍需接入。#203 保持开放。
+本入口将 [Control 管理设置](../contracts/platform-configuration.md)、应用与 Resource profile 输入、Secret、版本和说明放入同一个加密目录。导入继续使用现有管理员条件更新 API。首装设置可以离线准备，不制造已保存版本。运行权限消费者和基础设施安装仍需接入。
 
 ## 配置归属
 
@@ -148,6 +148,21 @@ inventory 的 `file` 引用只接受 `secrets/` 文件。密码类值必须使�
 `vaultPasswordFile` 只供仍需读取既有 Vault 输入的消费者使用。未指定时，执行环境不继承其他 Vault 密码文件；xtask 不查找 `.vault-password`。本 profile 的静态 inventory 使用已经解密的引用值，不再需要第二份 Vault 仓库。
 
 `identitySecretFile` 使用原 identity 角色的 bootstrap YAML。工具派生摘要和本地 locator 标记，角色在受限控制器目录读取 `0600` 文件，并继续使用现有字段校验。无需把该 locator 预先复制到路由器。未指定时，identity playbook 因缺少 locator 明确失败。其旧非 Bundle 调用者继续使用原 root locator。
+
+Harbor 和 ACME 公网入口也从同一目录读取 locator。将现有 inventory 变量设为文件引用：
+
+```yaml
+all:
+  vars:
+    harbor_secret_locator_path: {file: secrets/infrastructure.env}
+    public_ingress_cloudflare_token_locator: {file: secrets/infrastructure.env}
+```
+
+两个变量可以引用同一文件，也可以分别引用本目录中的文件。Harbor 要求 `HARBOR_ADMIN_PASSWORD`、`HARBOR_DATABASE_PASSWORD`、`HARBOR_REDIS_PASSWORD` 各出现一次。ACME 要求配置的 token key 出现一次，默认 key 为 `CLOUDFLARE_API_TOKEN`。文件只在受限控制器上读取，不需要预先复制到远端 root 目录。使用 selfsigned 时，公网入口不读取 ACME token。
+
+Bundle 派生 controller 标记、临时目录、SHA-256，以及 Harbor 的 `harbor_secret_locator_revision`。不要在 inventory 中再手填这些字段或使用远端 locator 字符串。角色要求普通 `0600` 文件，先核对摘要，读取后再核对实际字节，并使用 `no_log`。缺失引用不会补读角色的远端默认路径。旧非 Bundle 调用者仍使用原来源。
+
+轮换凭据时只修改引用文件，然后验证并重新加密归档。两个消费者的文件绑定及 Harbor revision 从新字节派生；不用手改多份配置。新的密文需要重新登记，登记仍不表示部署已获准或 applied 已更新。
 
 解密执行提供 `LABWEAVER_BUNDLE_INVENTORY_FILE`、`ANSIBLE_INVENTORY` 和仓库的 `ANSIBLE_CONFIG`。有 Vault 密码时提供 `LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE` 与 `ANSIBLE_VAULT_PASSWORD_FILE`；有身份文件时提供 `LABWEAVER_IDENTITY_SECRET_LOCATOR`。Ansible 本地临时文件及 locator 读取临时目录位于受限运行目录，不依赖控制器主目录。执行环境清除外部日志路径覆盖。所有路径仅在同步消费者运行期间有效。
 
@@ -360,8 +375,10 @@ Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob
 
 此入口验证控制器恢复、配置挂载和隔离 Job。六服务空环境安装、真实身份签发、数据库迁移、入口证书、镜像 Registry 与浏览器流程仍需要专门的隔离安装窗口和获准依赖。现有 foundation/identity/Harbor 角色含固定 namespace 或共享对象，不能直接套用到该测试 namespace。不要将此 Job 成功记录为完整安装或用户旅程通过。
 
-## 当前未完成范围
+## 执行与观察边界
 
-管理版本、离线首装请求、Resource profile 和静态基础设施 inventory/凭据引用已进入同一加密目录。旧 PKI/NATS 签发 workspace、Harbor/公网入口的远端 root locator 和实际安装步骤仍需逐项整合；这些入口不会在本地恢复时自动执行。7天/30天/24h/1h/60秒的服务消费者、管理界面的本分支集成与真实后端浏览器流程、实际执行观察器仍需完成。本切片没有落实 #207 的实际运行授权或执行位置。隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。
+管理版本、离线首装请求、Resource profile、静态 inventory，以及 identity/Harbor/公网入口 locator 使用同一加密目录。PKI/NATS 签发 workspace 和实际安装步骤仍有独立输入，恢复不会自动执行它们。管理配置的保留、提醒、抢占、运行及 builder 策略尚未由全部服务消费。
 
-剩余范围仍属于 #203 和明确的下游消费者。公共契约已由父线程协调，生成 SDK 从 `crates/contracts` 产生。不要用本地加密或状态测试替代实际授权、执行位置和前后端验收。
+命令退出成功只说明消费者命令完成。投影文件存在或 Kubernetes rollout 就绪，也不能证明这些设置已经由服务采用。当前没有各消费者的活动配置 revision/hash 读回接口，也没有将现有部署步骤接入 Control apply 回报的执行观察器。只有独立核对原 desired、实际活动配置和原密文来源后，执行者才能报告 succeeded。缺少观察事实时保留待核对结果，不抄请求摘要作成功回执。
+
+隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。本入口没有落实运行策略的实际对象授权或执行位置。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。

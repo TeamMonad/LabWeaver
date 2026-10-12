@@ -1,6 +1,9 @@
 ---
 harbor_chart_archive: /var/lib/labweaver/bundle/harbor-1.19.1.tgz
 harbor_dnsmasq_enabled: true
+harbor_secret_locator_controller: false
+harbor_secret_locator_sha256: ""
+harbor_secret_locator_controller_tmp: ""
 harbor_component_resources:
   nginx: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
   portal: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }

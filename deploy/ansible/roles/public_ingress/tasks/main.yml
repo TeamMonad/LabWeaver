@@ -43,27 +43,8 @@
         | rejectattr('paths') | rejectattr('service') | list | length == 0
     fail_msg: PUBLIC_INGRESS_ROUTE_INVALID
 
-- name: Read the Cloudflare API token from the protected locator
-  ansible.builtin.slurp:
-    src: "{{ public_ingress_cloudflare_token_locator }}"
-  register: public_ingress_cloudflare_locator
-  no_log: true
-  when: public_ingress_tls_mode == 'acme'
-
-- name: Extract the Cloudflare API token
-  ansible.builtin.set_fact:
-    public_ingress_cloudflare_token: >-
-      {{ (public_ingress_cloudflare_locator.content | b64decode)
-         | regex_findall('(?m)^' ~ public_ingress_cloudflare_token_key ~ '=(.+)$') | first | default('') }}
-  no_log: true
-  when: public_ingress_tls_mode == 'acme'
-
-- name: Refuse to continue without a Cloudflare API token
-  ansible.builtin.assert:
-    that:
-      - public_ingress_cloudflare_token | default('') | length > 0
-    fail_msg: PUBLIC_INGRESS_CLOUDFLARE_TOKEN_MISSING
-  no_log: true
+- name: Load the ACME credential from the configured source
+  ansible.builtin.include_tasks: secret-locator.yml
   when: public_ingress_tls_mode == 'acme'
 
 - name: Publish the Cloudflare API token for the ACME DNS-01 solver
