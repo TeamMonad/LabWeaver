@@ -17,11 +17,16 @@ def require(condition, reason):
     if not condition:
         raise ValueError('STOP: ' + reason)
 
-def render(command, binding, facts, receipt, expected):
+def render(command, binding, facts, receipt, expected, namespace):
     for field in ('parentApproved', 'admittedCommandExportVerified', 'environmentBindingExportVerified',
                   'isolatedDatabaseVerified', 'noOutboxDispatcherVerified', 'existingSecretVerified',
-                  'existingServiceAccountVerified', 'existingNetworkEgressVerified', 'quotaHeadroomVerified'):
+                  'existingServiceAccountVerified', 'existingNetworkEgressVerified', 'quotaHeadroomVerified',
+                  'existingNamespaceVerified', 'existingPvcVerified'):
         require(facts.get(field) is True, field + ' is required')
+    require(isinstance(namespace, str) and len(namespace) <= 63 and
+            re.fullmatch(r'lw-bundle-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?', namespace),
+            'use the approved existing test namespace')
+    require(facts.get('existingNamespace') == namespace, 'namespace differs from reviewed facts')
     require(isinstance(facts.get('databaseNameForReview'), str) and facts['databaseNameForReview'] not in
             ('', 'labweaver', 'postgres', 'template0', 'template1'), 'name the reviewed isolated test database')
     run = facts['runId']
@@ -42,8 +47,8 @@ def render(command, binding, facts, receipt, expected):
         require(request[field] == facts[field], field + ' differs from reviewed admitted facts')
     require(not request['traceId'].startswith('LOCAL_PARSE_ONLY'), 'synthetic parse command cannot run')
     require(binding['environment']['runtimeKind'] == 'container', 'runtime kind is not container')
-    namespace = binding['source']['namespace']
-    require(namespace == 'lw-env-' + binding['environment']['environmentId'], 'not the bound Work namespace')
+    require(binding['source']['namespace'] == namespace,
+            'authoritative source binding is outside the approved test namespace; do not rewrite it')
     require(binding['source']['persistentVolumeClaim'] == 'workspace', 'not the bound workspace PVC')
     source_hash = hashlib.sha256(json.dumps(binding['environment'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     require(command['source'] == {'kind': 'pvc', 'workspaceRoot': '/workspace', 'sourceIdentity': source_hash},
@@ -99,7 +104,7 @@ def render(command, binding, facts, receipt, expected):
                    {'name': 'SSL_CERT_FILE', 'value': '/etc/labweaver/secrets/minio-ca.pem'}],
            'terminationMessagePolicy': 'File', 'securityContext': {'allowPrivilegeEscalation': False,
            'readOnlyRootFilesystem': True, 'capabilities': {'drop': ['ALL']}},
-           'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '1Gi'}},
+           'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}},
            'volumeMounts': mounts}], 'volumes': volumes}}}}
     return {'apiVersion': 'v1', 'kind': 'List', 'items': [cm, job]}
 
@@ -107,9 +112,10 @@ def main():
     p = argparse.ArgumentParser()
     for name in ('command', 'binding', 'facts', 'receipt', 'expected', 'output'):
         p.add_argument('--' + name, type=pathlib.Path, required=True)
+    p.add_argument('--namespace', required=True, help='existing approved test namespace; never created by this script')
     a = p.parse_args()
     require(not a.output.exists(), 'output exists')
-    plan = render(read(a.command), read(a.binding), read(a.facts), read(a.receipt), read(a.expected))
+    plan = render(read(a.command), read(a.binding), read(a.facts), read(a.receipt), read(a.expected), a.namespace)
     a.output.write_text(json.dumps(plan, indent=2) + '\n')
     print('PLAN_WRITTEN_NOT_APPLIED ' + str(a.output))
 

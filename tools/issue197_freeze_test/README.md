@@ -1,279 +1,194 @@
-# Issue 197 N100 freeze test support
+# Issue 197 bounded freeze test support
 
-This bundle prepares a bounded worker test. It does not apply cluster resources.
-PR240 candidate is `f6e16444ddfaefc3b63c058a40a42393201d253a`.
-Its source tree is `148584b29e44b3e31d6ff08865938b118ac388ac`.
-The parent reported deployed revision `9b5c21f6`, which does not contain this candidate.
+This directory prepares test inputs and a reviewable plan. It applies no cluster resources.
+The existing N100 validation thread owns real tests.
+Use only the parent's selected, existing test namespace. Do not use a business namespace.
+Supply the namespace locally. This public bundle contains no real cluster locator or credential.
 
-The parent verified three Ready Kubernetes 1.35.6 nodes, KubeVirt 1.8.4, and CDI 1.65.0.
-The parent also verified the demo NFS PVC and a VM dry run without GPU allocation.
-Reuse those results. This bundle does not repeat those experiments.
+## Fetch and preserve the source candidate
 
-## Fetch support and preserve the source candidate
-
-Fetch the original `codex/197-upload-content-identity` branch through the existing authorized Git connection.
-Checkout the support commit given in the PR240 handoff.
+Fetch `codex/197-upload-content-identity` through the existing authorized Git connection.
+Checkout the support commit in the PR240 handoff.
+Use `tools/issue197_freeze_test` from that checkout.
 The support commit is a delivery change. It is not the image source candidate.
-The build script still defaults to the complete frozen `f6e16444ddfaefc3b63c058a40a42393201d253a` commit.
-Do not build the support branch HEAD as the tested candidate.
 
-From the repository root, check the frozen source tree:
+The frozen source is `f6e16444ddfaefc3b63c058a40a42393201d253a`.
+Its tree is `148584b29e44b3e31d6ff08865938b118ac388ac`.
+`candidate.json` records the existing Containerfile and immutable base pins.
+It records no built OCI digest. Do not build branch HEAD as the source candidate.
+
+From the repository root:
 
 ```sh
 git rev-parse f6e16444ddfaefc3b63c058a40a42393201d253a^{tree}
+python3 -m unittest discover -s tools/issue197_freeze_test -p 'test_*.py' -v
 ```
 
-The result must equal `148584b29e44b3e31d6ff08865938b118ac388ac`.
-Then enter `tools/issue197_freeze_test` for the preparation commands below.
-No script fetches credentials, pushes assets, deploys a cluster, or imports a node image.
+The first result must equal the frozen tree.
+The scripts need Python 3.11 or newer and `jsonschema` from `requirements.txt`.
+They do not install dependencies automatically.
+They read the existing versioned repository schemas and check their candidate hashes.
+No schema copy, binary, image archive, or environment credential is supplied.
 
-## Stop conditions
+## Source and authority gates
 
-Candidate OCI digest, admitted test identity, and a real Work binding remain required.
-An isolated Evaluation database must have no active outbox dispatcher.
-The worker publishes a frozen event into that database's outbox.
-A shared database could let existing consumers start an evaluation run.
-Do not mount a shared database credential into this test.
+The worker needs an admitted command and an authoritative Environment source binding.
+Export those only through the existing authorized producer and binding interface.
+Do not invent an actor, Project, Environment, AgentRun, submission, retention, or source identity.
+Do not remove fields to force an older producer to match the candidate contract.
 
-The standalone `labweaver-demo` PVC is not an Environment Work binding.
-The Environment service must return a Container binding for the reviewed test environment.
-That binding names `lw-env-<environmentId>` and the `workspace` PVC.
-Do not replace its IDs, namespace, PVC, source identity, or admitted manifest.
-Stop if the deployed producer's command differs from the candidate contract.
-Do not remove unknown fields to force compatibility with `9b5c21f6`.
+The current frozen Container binding derives its namespace as `lw-env-<environmentId>`.
+The implementation is in `services/environment-service/src/freeze_binding.rs` and
+`services/evaluation-service/src/coordinator.rs`.
+That rule conflicts with the separately selected test namespace.
+`render_worker.py` refuses this mismatch. The current full Container chain is therefore blocked.
+Do not rewrite an exported binding or use a copied fixture as evidence of the original Work source.
+PVC references are namespace-local. An existing source PVC must be in the selected namespace.
+A separately reviewed authoritative source solution is required. This bundle does not change it.
 
-No worker image digest has been fabricated.
-The cloud preparation does not build or publish a complete OCI image.
-The image remains unavailable until the controlled build and node import complete.
+Complete a local copy of `facts.example.json` only after the parent reviews the missing prerequisites.
+All approval flags start false, and `existingNamespace` starts null.
+Set that field to the exact existing namespace selected by the parent.
+The required CLI namespace must match both reviewed facts and the authoritative source binding.
+Only the dedicated `lw-bundle-` namespace family is accepted.
+These flags are operator attestations. The script cannot certify permissions or connectivity.
+The example object endpoint uses the reserved `.invalid` domain. It is not a usable target.
 
-## Payload and files
+## Bounded resources and missing approvals
 
-The scripts need Python 3.11 or newer and the existing `jsonschema` package.
-This bundle does not install software on N100 or a cluster node.
-Confirm the approved tool environment before you run the scripts.
+Each plan contains one ConfigMap and one Job. There is no namespace setup or deletion.
+Run at most one worker Pod at a time. A, replay A, and B need at most three Jobs and ConfigMaps.
+Each Pod requests 100m CPU and 128Mi memory and has limits of one CPU and 512Mi memory.
+It has a 900-second deadline and no automatic retry.
+The parent-reported namespace ceiling is one CPU and 512Mi. Verify free quota before apply.
+Memory use at this limit has not been tested on N100. Record OOM or quota rejection as failure.
+Do not increase the ceiling to make the test pass.
 
-`candidate.json` records the exact source, Containerfile, compiler, and runtime base pins.
-The scripts read the existing repository schemas and check their candidate hashes.
-`fixtures/` contains two synthetic workspace variants and their expected byte hashes.
-Both variants contain three files and 62 source bytes.
-Only `src/main.c` changes from `return 1` to `return 2`.
-The file size stays equal. `empty.txt` also tests an empty file.
-The manifest selects only this run's three paths. It has no LLM-readable input.
+The Pod has no GPU, host device, host network, privileged mode, or mounted ServiceAccount token.
+It uses UID/GID 65532, RuntimeDefault seccomp, a read-only root filesystem, and dropped capabilities.
+It mounts the existing authoritative source PVC read only at `/workspace`.
+Existing source read access must work without changing ownership or permissions.
+The renderer creates no Namespace, PVC, Secret, ServiceAccount, RBAC, or NetworkPolicy.
+It changes no business workload. It does not read credential values.
 
-The examples contain no credentials and no usable run identity.
-All approval flags start false. No example can render an executable plan.
-Authority flags are operator attestations. The script cannot certify Kubernetes or database permissions.
+Give the parent the following exact differences before real execution:
 
-## Exact image build
+| Prerequisite | Required bounded scope; namespace setup alone does not authorize it |
+| --- | --- |
+| Source binding | Resolve the namespace conflict without editing the frozen candidate or exported source identity. |
+| Existing source | Verify the named source PVC and UID/GID 65532 read access in the selected namespace. No new PVC or permission change is supplied. |
+| Existing account | Verify a selected-namespace ServiceAccount and existing operator rights for the named test Job and ConfigMap. No new RBAC is supplied. |
+| Existing Secret | Five existing file keys: database URL, object access key, object secret key, object CA and database CA. No value export, Secret copy, or creation is authorized. |
+| DNS egress | If needed, only the reviewed resolver on UDP and TCP 53, scoped to the test Pod labels. The worker requires no ingress. |
+| Database egress | Only the reviewed isolated database endpoint and configured TLS TCP port, normally 5432. A deny-all policy does not permit this. |
+| Object egress | Only the reviewed existing object endpoint and configured HTTPS TCP port. Verify test-prefix PUT, HEAD, version GET and retention access. Do not create a bucket or open all destinations. |
+| Database isolation | Existing candidate schema and normal runtime access, with no active outbox dispatcher. Shared consumers can start evaluation work from a frozen event. |
+| Exact image | Approved local OCI build, actual manifest digest and chosen-node import. No image is built or imported by preparation. |
+| Admission and quota | Verify restricted admission and remaining quota. A dry run does not prove connectivity or source provenance. |
+| VM/SFTP | Not supported by this PVC renderer. No guest, certificate, SFTP egress or new VM resource is authorized. |
 
-Use an authorized checkout that contains the candidate commit.
-Do not build from the deployed `9b5c21f6` checkout.
-Use the fixed builder and runtime digests in `candidate.json`.
-The source epoch is `1791791504`. The component is `evaluation-service`.
-The target is `runtime`, not an agent or LLM target.
-Use Buildx v0.35.0 and the existing builder with the pinned BuildKit image.
-The repository CI pins `moby/buildkit@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a`.
-The exporter preserves the CI timestamp rewrite and OCI media types.
-Do not replace an unavailable base or builder with a mutable tag.
+Use existing read-only operator tools to verify prerequisites. Do not print Secret values.
+Keep actual endpoint, namespace, identity and credential references in locally reviewed inputs.
+Do not change deny-all rules, grant roles, create Secrets, or import images from this bundle.
 
-1. Run the source check without a build.
+## Exact image preparation
 
-   ```sh
-   python3 build_candidate.py --repo /path/to/LabWeaver --output /reviewed/output/lw197-evaluation.oci
-   ```
+Enter `tools/issue197_freeze_test` for the commands below.
+Use a checkout that contains the frozen source commit.
+Use the fixed Buildx, BuildKit, compiler and runtime pins recorded in the repository and `candidate.json`.
+Do not replace a missing pin with a mutable tag.
 
-2. Review the printed tree, source ref, command, and output path.
-3. After build approval, repeat the command with `--build`.
-4. Review the OCI manifest digest and revision label in its receipt.
-5. After node-import approval, import that archive through the existing container runtime authority.
-6. Read the chosen node's CRI image metadata.
-7. Confirm the exact repository digest and `linux/amd64` platform before you mark the import verified.
+```sh
+python3 build_candidate.py --repo /path/to/LabWeaver --output /reviewed/output/lw197-evaluation.oci
+```
 
-The local image name is `localhost/labweaver-197/evaluation-service:f6e16444`.
-No script pushes to a registry or creates an external asset target.
-The Pod uses the receipt's manifest digest and `imagePullPolicy: Never`.
-An image config ID is not a registry or OCI manifest digest.
-Stop if the node cannot resolve the exact digest reference.
+This is a plan only. Review its source, tree, command and output path.
+Only after separate build approval, repeat with `--build`.
+The component is `evaluation-service`, the target is `runtime`, and the platform is `linux/amd64`.
+The source epoch is `1791791504`. No registry push is performed.
+An equivalent local source ref is accepted only if its complete tree equals the frozen tree.
+The target revision remains the frozen candidate. N100 uses the full frozen commit by default.
 
-An equivalent source ref is allowed only when its complete tree equals the reviewed tree.
-Record that source ref. The candidate label and epoch still refer to the reviewed commit.
-This rule can check an authorized local equivalent tree. N100 uses the frozen public candidate by default.
+Review the generated OCI receipt. A config ID is not a manifest digest.
+Only after separate node-import approval, use existing runtime authority to import the archive.
+Verify the exact digest on the chosen node before marking the receipt imported.
+`imagePullPolicy: Never` performs no registry download. A missing digest reference is a stop condition.
 
-## Existing permissions and facts
+## Synthetic selection and run plan
 
-| Authority | Required existing scope | Current evidence |
-| --- | --- | --- |
-| N100 operator | Read nodes, named PVC, namespace quota, Jobs and Pod status | Parent verified cluster and demo storage. Target Work permissions remain unverified. |
-| Test actor | Own the test Project and approved Work. Permit `submission:freeze` for that environment. | No cluster test actor or admitted run was supplied. |
-| Evaluation caller | Existing `labweaver-evaluation` service identity and `evaluation.environment.freeze` permission | Use existing identity. Do not export tokens or add service roles. |
-| Worker ServiceAccount | Existing account in the bound Work namespace | Must exist. The Pod does not mount its token or call Kubernetes. |
-| Database | Existing runtime access to the isolated Evaluation schema and its candidate migrations | Must be confirmed. No active dispatcher can share that database. |
-| Object store | Existing locked bucket. Allow test-prefix PUT, HEAD, version GET and retention verification | Must be confirmed. Do not create a bucket or change IAM with this bundle. |
-| Network | Existing DNS, PostgreSQL and MinIO HTTPS egress for the exact test Pod labels | Must be confirmed. No NetworkPolicy is supplied. |
-| Node image import | Existing authority to import the local OCI archive on the chosen node | Requires parent approval. Do not change node configuration. |
+The two fixture variants contain three files and 62 source bytes.
+Only `src/main.c` changes from `return 1` to `return 2`; its size stays equal.
+`empty.txt` also tests an empty file.
+The manifest selects those exact paths, without symlink following or LLM-readable input.
+It does not increase service limits.
 
-The existing runtime role needs normal read/write access to `submission_freeze_requests`,
-`submission_freeze_attempts`, `frozen_submissions`, and `outbox_events` in the isolated Evaluation database.
-Use existing grants. Do not grant new rights or run baseline migrations against a shared database.
-If a test database is absent, ask the parent to approve a separate provisioning plan first.
+After the source conflict and all prerequisites have been resolved and approved:
 
-Use existing read-only tools to check these facts. Do not read or print Secret values.
-For Kubernetes permissions, use `kubectl auth can-i` as the existing operator.
-Do not use impersonation, create RBAC, or alter security settings.
-A server dry run checks admission. It does not prove runtime connectivity or source binding.
-
-For the exact bound namespace, check existing `create` permission on Jobs and ConfigMaps.
-Also check `get` on Jobs, Pods, PVCs, ServiceAccounts and ResourceQuotas.
-Check `list` on Pods and `get` on `pods/log` for observations.
-Cleanup needs existing `delete` permission on the recorded test Jobs and ConfigMaps.
-Permission does not replace the parent's approval of this specific operation.
-
-## Actions that need approval
-
-The parent must approve the rendered names, namespace, existing Secret reference, and data scope.
-The plan creates one ConfigMap and one Job for each phase.
-Run at most one worker Pod at a time.
-Phase A, replay A, and phase B need at most three Jobs and three ConfigMaps.
-Each Pod requests 100m CPU and 128Mi memory. Its limits are one CPU and 1Gi memory.
-Its deadline is 900 seconds. Its retry count is zero.
-It requests no GPU, host device, host network, or privileged access.
-It mounts the existing Work PVC read only at `/workspace`.
-It uses UID/GID 65532, RuntimeDefault seccomp, and a read-only root filesystem.
-
-The plan creates no Namespace, PVC, ServiceAccount, RBAC, Secret, or NetworkPolicy.
-It changes none of the original 14 Pods or their GPU allocations.
-The selected namespace must already have sufficient quota and source read permissions.
-Stop on a missing account, Secret, image, quota, or network permission.
-Do not raise limits or change existing policies to make the test pass.
-
-The test actor also needs approval to copy the three synthetic files into the owned Work.
-Write only the `lw197-n100-20261012/` directory in that Work workspace.
-Do not modify other paths or permissions. Do not use an init container with root access.
-If no approved Work exists, prepare a separate API-based Work creation plan for the parent.
-
-## Input preparation
-
-1. Export `binding.json` through the authorized Environment freeze-binding API.
-2. Export `admitted-command.json` from the authorized candidate freeze coordinator.
-3. Use the approved synthetic Evaluation manifest selection for the three fixture paths.
-4. Review actor, Project, environment, AgentRun, submission, retention, and idempotency identities.
-5. Complete `facts.example.json` with reviewed facts. Rename the file `facts.json`.
-6. Complete the image receipt after build and node import.
-7. Copy only `fixtures/workspace-a/lw197-n100-20261012/` into the owned Work workspace.
-
-The request manifest name and bounds can come from the approved Evaluation projection.
-The renderer preserves them. It requires the three exact test paths and no LLM input.
-Do not submit the local synthetic parse example as a cluster identity.
-Worker-only execution does not replace public acceptance, authorization, or coordinator validation.
-
-## Run plan and observations
-
-1. Render the plan without cluster access.
+1. Review the real binding, admitted command, retention snapshot and local facts.
+2. Copy only the three known fixture paths into the owned test source. Do not change other paths.
+3. Render locally. Set `LW197_TEST_NAMESPACE` to the exact existing namespace selected by the parent.
 
    ```sh
    python3 render_worker.py --command admitted-command.json --binding binding.json \
-     --facts facts.json --receipt image-receipt.json --expected fixtures/expected-files.json --output plan-a.json
+     --facts facts.json --receipt image-receipt.json --expected fixtures/expected-files.json \
+     --namespace "$LW197_TEST_NAMESPACE" --output plan-a.json
    ```
 
-2. Give the parent the plan and reviewed inputs before any apply operation.
-3. Use existing operator permission for a server dry run in the bound namespace.
-4. After approval, create only the named test ConfigMap and Job.
-5. Record Pod image ID, admitted digest, node, exit status, logs, and resource UIDs.
-6. Read the isolated database result with `evidence.sql` and an existing authorized database tool.
-7. Export only the synthetic FrozenSubmission and its exact object version.
-8. Verify the result with `verify_frozen.py` for phase A.
+4. Review the complete plan before a server dry run or apply. Use existing operator authority.
+5. After specific approval, create only the named test ConfigMap and Job in the selected namespace.
+6. Record admitted digest, Pod image ID, node, exit status, logs and resource UIDs.
+7. Use `evidence.sql` with an existing authorized tool to export only synthetic test results.
+8. Export the exact immutable object version and verify the actual archive bytes.
 
-The program is `/usr/local/bin/labweaver-service --mode freeze-worker`.
-It reads `LABWEAVER_EVALUATION_CONFIG_FILE` and `LABWEAVER_FREEZE_COMMAND_FILE`.
-The rendered ConfigMap supplies JSON, which the existing YAML reader accepts.
-Mounted Secret files supply existing credentials and the CA. The bundle contains none.
-The Secret must also provide `postgres-ca.pem` for the existing strict database URL.
-Keep its `sslrootcert` file reference. Do not disable database TLS verification.
+The worker uses the existing `--mode freeze-worker` entry point.
+Its mounted command and config are JSON; the existing YAML reader accepts JSON.
+Existing Secret files provide credentials and CA certificates. Keep strict TLS verification.
 
-For exported phase A evidence, run:
+For phase A:
 
 ```sh
 python3 verify_frozen.py --submission result-a.json --archive frozen-a.json \
   --expected fixtures/expected-files.json --phase a
 ```
 
-Keep the completed phase A contract and exact object version.
-After phase A completes, replace only the owned test `src/main.c` with variant B.
-Reuse the complete original command, including retention, IDs and idempotency key, for replay A.
-The durable result and object version must remain exactly phase A.
-Do not create a fresh retention snapshot for a replay.
+Keep that result and exact object version. After completion, replace only the test `src/main.c` with B.
+Replay the complete original command, including IDs, retention and idempotency key.
+The replay must return the exact phase A result without another object or publication.
 
 ```sh
 python3 verify_frozen.py --submission replay-a.json --archive frozen-a.json \
   --expected fixtures/expected-files.json --phase a --compare result-a.json --replay
 ```
 
-For phase B, obtain a new admitted submission and idempotency key from the authorized producer.
-Use the same synthetic selection and the current real source binding.
+For B, obtain a new admitted submission and key from the authorized producer.
 The new result must have equal file sizes and different content hashes.
-The phase A object version must still return its original bytes.
+The original version must still return A's bytes.
 
 ```sh
 python3 verify_frozen.py --submission result-b.json --archive frozen-b.json \
   --expected fixtures/expected-files.json --phase b --compare result-a.json
 ```
 
-The existing worker has no deterministic pause between preflight and collection.
-This bundle does not claim a live between-stage rewrite rejection test.
-The existing local Collector test covers that behavior. A live timing race is not a deterministic pass.
+The worker has no deterministic pause between preflight and collection.
+This bundle does not claim a live between-stage rewrite test. Existing Collector tests cover that case.
+Worker-only checks do not replace public authorization, acceptance or coordinator validation.
 
-## Expected writes and cleanup
+## Evidence and cleanup boundary
 
-Two new successful freezes write two isolated requests, attempts, submissions, and outbox events.
-Replay A returns its existing result. It must not create a second frozen object or publication.
-The object keys stay under `frozen-submissions/<run-id>/<submission-id>/attempt-<n>.json`.
-The existing locked bucket retains each exact version under the admitted retention policy.
-The normal coordinator example uses 90 days. Do not shorten a real admitted policy for cleanup.
+The local support tests use only synthetic files and in-memory plans.
+They check schema pins, byte hashes, equal-size edits, authority refusal, namespace mismatch,
+bounded resources, archive corruption and fixture overwrite refusal.
+They perform no image build, cluster call, credential access, database connection or freeze.
+The full Container chain, VM guest and SFTP path remain unexecuted by this preparation.
 
-No cleanup script runs automatically.
-After evidence export and parent approval, remove only recorded test Jobs and ConfigMaps by name and UID.
-Check the test-run label and namespace before each delete.
-Keep the PVC, namespace, database facts, retained object versions, and imported image for review.
-An owner can later remove the three known synthetic files after byte and path checks.
-Stop if that directory contains unexpected files or a symlink.
+No cleanup runs automatically.
+After evidence export and separate approval, remove only the recorded test Job and ConfigMap names and UIDs.
+Check namespace and test labels first. Keep source, database facts, retained versions and image for review.
 Do not delete a namespace, PVC, bucket, shared database, or non-test object.
-Do not bypass Object Lock, prune node images, truncate tables, or reset shared data.
+Do not bypass Object Lock, prune images, truncate tables, or reset shared data.
+Only an approved owner can later remove the three verified synthetic files.
 
-## VM and SFTP boundary
-
-A VM dry run does not provide a running guest or SFTP Collector binding.
-The parent must supply an approved test VM, guest IP, source root, host-key identity, and short-lived Collector certificate.
-Use the existing Environment binding and coordinator to provide those values.
-Do not invent an SSH username, key, principal, or source hash.
-This PVC renderer rejects VM bindings. No VM/SFTP execution has occurred in this preparation.
-The full cluster freeze chain remains unexecuted until candidate deployment and real run binding exist.
-
-## Checks on test support
-
-Run these checks from the repository root:
-
-```sh
-python3 -m unittest discover -s tools/issue197_freeze_test -p 'test_*.py' -v
-python3 tools/issue197_freeze_test/build_candidate.py --repo . --output /reviewed/output/lw197-evaluation.oci
-```
-
-The tests use synthetic files and in-memory plans. They do not build images or call a cluster.
-The original cloud preparation also compiled the equivalent candidate source offline.
-Its Worker parsed a synthetic command and stopped at a noncredential file boundary.
-It did not connect to a database or object store and did not execute a freeze.
-The debug executable is not a deployment image and is not committed.
-
-The exact OCI image still needs build, digest validation, and authorized node import.
-No image archive, candidate deployment, VM guest, or SFTP freeze has run in this preparation.
-
-## Existing entry points
-
-This directory is test support, not a second freeze implementation.
-It uses `services/evaluation-service/src/worker.rs` and `containers/Containerfile.rust`.
-It reads the existing versioned schemas. It does not duplicate or edit them.
-Existing Collector and PostgreSQL tests retain core freeze behavior coverage.
-`tools/user_acceptance.py` covers a larger Browser-based acceptance journey.
-It is not the bounded N100 command-line preparation described here.
-
-`SubmissionFrozenConsumer.process_next` can reserve an admitted evaluation run after a frozen event.
-The isolated database and absent dispatcher prevent these test facts from entering that active consumer path.
+This directory reuses `services/evaluation-service/src/worker.rs` and `containers/Containerfile.rust`.
+It does not duplicate schemas or implement another freeze path.
+Existing Collector and PostgreSQL tests retain core behavior coverage.
+`tools/user_acceptance.py` covers a broader Browser-based journey and is not this bounded preparation.
