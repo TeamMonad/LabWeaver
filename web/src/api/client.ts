@@ -158,6 +158,17 @@ function attachResponseInterceptor(instance: AxiosInstance): void {
   )
 }
 
+/** Shared bearer resolver for Axios-bound REST and generated SSE (fetch). */
+function resolveBearerAuth(accessToken: AccessTokenProvider): () => Promise<string> {
+  return async () => {
+    const token = await accessToken()
+    if (!token) {
+      throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+    }
+    return token
+  }
+}
+
 /** The only supported Public SDK initialization path for browser consumers. */
 export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Client {
   const timeout = options.timeoutMilliseconds ?? 30_000
@@ -178,10 +189,12 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
 
   // Axios interceptors cover REST; generated SSE uses fetch via createSseClient
   // and only picks up Authorization through the generated `auth` resolver.
+  // That resolver must reject like the Axios interceptor — returning undefined
+  // lets generated SSE issue an unauthenticated fetch.
   const authentication = options.authentication
   const auth =
     authentication.mode === 'bearer'
-      ? async () => authentication.accessToken()
+      ? resolveBearerAuth(authentication.accessToken)
       : undefined
 
   return createClient({
@@ -229,9 +242,7 @@ export async function initializeSdkClient(): Promise<void> {
     baseURL: '',
     auth:
       API_AUTH_MODE === 'bearer'
-        ? async () => {
-            return getOidcAccessToken()
-          }
+        ? resolveBearerAuth(getOidcAccessToken)
         : // BFF mode relies on the session cookie; same-origin fetch sends it.
           undefined,
   })

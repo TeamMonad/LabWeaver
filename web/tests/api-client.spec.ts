@@ -79,6 +79,24 @@ describe('createLabWeaverApiClient', () => {
     expect(adapter.mock.calls[0][0].headers['X-CSRF-Token']).toBe('csrf-token')
   })
 
+
+  it('rejects SSE auth before fetch when bearer token is unavailable', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = makeClient('/', { mode: 'bearer', accessToken: async () => undefined })
+
+    await expect(
+      client.sse.get({
+        url: '/api/v1/projects/01900000-0000-7000-8000-000000000010/events',
+        security: [{ scheme: 'bearer', type: 'http' }],
+      }),
+    ).rejects.toMatchObject({
+      name: 'LabWeaverApiError',
+      diagnosticCode: 'LW_SDK_AUTH_TOKEN_UNAVAILABLE',
+    })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   it('rejects a contract-prefixed API base URL', () => {
     expect(() => makeClient('/api/v1', { mode: 'bearer', accessToken: async () => 'token' })).toThrowError(
       'Public API base URL must identify the origin, not repeat the /api/v1 contract prefix.',
