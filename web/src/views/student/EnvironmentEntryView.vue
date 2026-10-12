@@ -1044,6 +1044,7 @@ import { onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
+import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
 import { useProjects } from '@/composables/useProjects'
@@ -1152,6 +1153,7 @@ const breadcrumbLabel = computed(() => props.teacherMode
   : isWorkConnection.value ? 'Work 项目环境' : '课程实验环境')
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
 const lifecycle = useEnvironmentLifecycle(projectId, courseId)
+const availableActions = useProjectAvailableActions(projectId)
 
 interface LifecycleTarget {
   environmentId: string
@@ -1809,7 +1811,8 @@ function isTerminalEnvironment(data: EnvironmentInstanceSchema): boolean {
 }
 
 function canStart(data: EnvironmentInstanceSchema) {
-  return !isTerminalEnvironment(data)
+  return availableActions.canStart.value
+    && !isTerminalEnvironment(data)
     && !hasActiveLifecycleOperation(data)
     && data.desiredState !== 'deleted'
     && data.desiredState !== 'running'
@@ -1818,7 +1821,8 @@ function canStart(data: EnvironmentInstanceSchema) {
 }
 
 function canStop(data: EnvironmentInstanceSchema) {
-  return !isTerminalEnvironment(data)
+  return availableActions.canStop.value
+    && !isTerminalEnvironment(data)
     && !hasActiveLifecycleOperation(data)
     && data.desiredState !== 'deleted'
     && data.desiredState !== 'stopped'
@@ -1827,7 +1831,9 @@ function canStop(data: EnvironmentInstanceSchema) {
 }
 
 function canRestart(data: EnvironmentInstanceSchema) {
-  return !isTerminalEnvironment(data)
+  return availableActions.canStart.value
+    && availableActions.canStop.value
+    && !isTerminalEnvironment(data)
     && !hasActiveLifecycleOperation(data)
     && data.desiredState !== 'deleted'
     && (data.observedState === 'ready' || data.observedState === 'stopped' || data.observedState === 'failed')
