@@ -83,9 +83,9 @@ describe('CandidateApprovalView (审核与发布)', () => {
     await tabs[1].trigger('mousedown', { button: 0 })
     await flushPromises()
     const text = wrapper.text()
-    expect(text).toContain('必须以非 root 用户运行')
+    expect(text).toContain('普通用户（不能使用 root）')
     expect(text).toContain('只能访问平台允许的地址')
-    expect(wrapper.get('[data-testid="permission-gap"]').text()).toContain('还没有特权模式、capability 列表和管理员允许范围')
+    expect(wrapper.get('[data-testid="permission-gap"]').text()).toContain('特权模式（privileged）是否开启')
 
     await wrapper.findAll('[role="tab"]')[2].trigger('mousedown', { button: 0 })
     await flushPromises()

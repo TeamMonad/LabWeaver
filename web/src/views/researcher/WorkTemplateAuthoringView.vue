@@ -225,8 +225,10 @@
             </div>
           </details>
 
-          <details class="candidate-details" open>
-            <summary>查看完整环境规格</summary>
+          <RuntimePermissions class="candidate-permissions" :spec="data.candidate.spec" title="运行权限" />
+
+          <details class="candidate-details">
+            <summary>查看完整环境规格（JSON）</summary>
             <pre>{{ formatCandidateSpec(data.candidate.spec) }}</pre>
           </details>
 
@@ -259,7 +261,7 @@
 
           <label class="authorization-field candidate-confirmation">
             <input v-model="candidateReviewAcknowledged" data-testid="work-template-candidate-confirmation" type="checkbox" />
-            <span>我已查看完整环境规格、运行时产物、构建状态和安全约束，并确认这个候选用于当前 Work 项目。</span>
+            <span>我已查看运行权限、运行时产物和构建状态，并确认这个候选用于当前 Work 项目。</span>
           </label>
 
           <form v-if="!approvedCandidate" class="approval-form" data-testid="work-template-candidate-approval-form" @submit.prevent="approveCandidate">
@@ -346,6 +348,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import RuntimePermissions from '@/components/review/RuntimePermissions.vue'
 import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
@@ -1059,4 +1062,5 @@ onUnmounted(() => {
 .release-withdrawn { color: var(--md-sys-color-error); font: var(--md-sys-label-medium); }
 .release-withdrawal-note { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.5; }
 @media (max-width: 680px) { .file-row, .track-row { grid-template-columns: 1fr auto; } .file-size, .file-status { justify-self: start; } .section-heading { flex-direction: column; } .section-heading--compact { flex-direction: row; } }
+.candidate-permissions { margin-top: 16px; padding: 16px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
 </style>

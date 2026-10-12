@@ -377,6 +377,16 @@ describe('WorkTemplateAuthoringView', () => {
     wrapper.unmount()
   })
 
+  it('shows readable runtime permissions before the raw spec', async () => {
+    const wrapper = await mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="runtime-permissions"]').exists()).toBe(true))
+    const candidate = wrapper.get('[data-testid="work-template-candidate"]')
+    expect(candidate.get('[data-testid="runtime-permissions"]').text()).toContain('运行身份与文件系统')
+    expect(candidate.get('[data-testid="permission-gap"]').text()).toContain('特权模式')
+    expect(candidate.get('details.candidate-details').attributes('open')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('keeps the candidate review context after an approval failure', async () => {
     vi.mocked(appendProjectEnvironmentCandidateDecision).mockResolvedValue({
       data: undefined as never,

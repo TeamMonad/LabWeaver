@@ -139,3 +139,34 @@ export const reviewPackage = {
     { path: 'hidden/tests/spacing.py', object: { artifactId: 'a4', mediaType: 'text/x-python', objectVersion: 'v1', sha256: 'sha256:04', sizeBytes: 3100 } },
   ],
 } as unknown as ProblemPackageSchema
+
+/** Work template authoring: one generated Work environment candidate. */
+export const workRunId = 'run-work-template'
+export const workRun = {
+  ...reviewRun,
+  id: workRunId,
+  courseId: null,
+  revision: 3,
+  state: 'awaiting_approval',
+  purpose: { kind: 'authoring', environmentClass: 'work' },
+  tracks: [{ kind: 'environment', candidateId: 'candidate-env-work', attempts: [{ number: 1, state: 'succeeded', usage, usageObserved: true }] }],
+} as unknown as AgentRunSchema
+
+export const workCandidateView = {
+  ...environmentCandidateView,
+  candidate: {
+    ...environmentCandidateView.candidate,
+    id: 'candidate-env-work',
+    runId: workRunId,
+    courseId: null,
+    spec: {
+      ...environmentCandidateView.candidate.spec,
+      class: 'work',
+      name: '材料模拟 Work · Python + LAMMPS',
+      entries: [{ name: 'jupyter', protocol: 'https', servicePort: 8888 }, { name: 'ssh', protocol: 'ssh', servicePort: 22 }],
+      network: { mode: 'allow_all' },
+      resources: { cpuMillicores: 4000, memoryBytes: 16 * GIB, storageBytes: 50 * GIB, gpu: { class: 'nvidia-l4', count: 1 } },
+      security: { privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', rootFilesystemPolicy: 'mutable_required', securityProfileBinding: 'restricted-v1', userPolicy: 'non_root_required' },
+    },
+  },
+} as unknown as EnvironmentCandidateViewSchema

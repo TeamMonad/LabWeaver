@@ -1,5 +1,5 @@
 import { activeScene, fixtureProjectId } from './scenes'
-import { agentRunHistory, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
+import { agentRunHistory, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId, workCandidateView, workRun, workRunId } from './authoring'
 import type {
   AccessGrantSchema,
   AgentRunHistoryPageSchema,
@@ -493,22 +493,24 @@ export async function listOrganizationUsers(_options?: FixtureOptions): Promise<
 
 export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<FixtureResult<AgentRunHistoryPageSchema>> {
   if (activeScene.value.id === 'teacher-review-empty') return fixtureResponse({ page: 1, pageSize: 20, hasMore: false, items: [] })
-  if (authoringScene()) return fixtureResponse(agentRunHistory)
+  if (authoringScene() || activeScene.value.id === 'work-template-review') return fixtureResponse(agentRunHistory)
   return unsupportedResponse('项目 AgentRun 历史')
 }
 
 export async function getProjectAgentRun(options?: FixtureOptions) {
   if (authoringScene() && options?.path?.runId === reviewRunId) return fixtureResponse(reviewRun)
+  if (activeScene.value.id === 'work-template-review' && options?.path?.runId === workRunId) return fixtureResponse(workRun)
   return unsupportedResponse('读取项目任务')
 }
 export async function getProjectEnvironmentCandidate(_options?: FixtureOptions) {
+  if (activeScene.value.id === 'work-template-review') return fixtureResponse(workCandidateView)
   return authoringScene() ? fixtureResponse(environmentCandidateView) : unsupportedResponse('读取环境候选')
 }
 export async function getProjectEvaluationCandidate(_options?: FixtureOptions) {
   return authoringScene() ? fixtureResponse(evaluationCandidateView) : unsupportedResponse('读取评测候选')
 }
 export async function getProjectProblemPackage(_options?: FixtureOptions) {
-  return authoringScene() ? fixtureResponse(reviewPackage) : unsupportedResponse('读取材料包')
+  return authoringScene() || activeScene.value.id === 'work-template-review' ? fixtureResponse(reviewPackage) : unsupportedResponse('读取材料包')
 }
 export async function getProjectAuthoringApproval() { return unsupportedResponse('读取实验包批准') }
 export async function completeProjectAuthoringApproval() { return unsupportedResponse('提交实验包批准') }
