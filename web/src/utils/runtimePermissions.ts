@@ -39,7 +39,16 @@ function runAsUserRow(runAsUser: number | null | undefined): PermissionRow {
 function rootFilesystemRow(security: EnvironmentSecurity, container: boolean): PermissionRow {
   const policy = security.rootFilesystemPolicy ?? 'mutable_required'
   if (policy === 'read_only_required') {
-    return { label: '系统目录', value: '只读，只能写工作目录', tone: 'restricted' }
+    return {
+      label: '系统目录',
+      value: container
+        ? '只读根文件系统（可写工作目录与独立 /tmp）'
+        : '只读根文件系统',
+      hint: container
+        ? '只读根不表示只能写工作目录；容器仍可写工作目录与独立 /tmp 挂载。'
+        : undefined,
+      tone: 'restricted',
+    }
   }
   return {
     label: '系统目录',
@@ -49,11 +58,24 @@ function rootFilesystemRow(security: EnvironmentSecurity, container: boolean): P
   }
 }
 
-function escalationRow(security: EnvironmentSecurity): PermissionRow {
+function escalationRow(security: EnvironmentSecurity, container: boolean): PermissionRow {
   const policy = security.privilegeEscalationPolicy ?? 'deny'
-  return policy === 'deny'
-    ? { label: '提升权限', value: '禁止（不能通过 sudo 等方式获得更高权限）', tone: 'restricted' }
-    : { label: '提升权限', value: '允许', tone: 'open' }
+  if (policy === 'deny') {
+    return container
+      ? {
+          label: '提升权限',
+          value: '禁止（容器 no_new_privs）',
+          hint: '禁止通过 setuid / file capabilities 获得额外权限；不等于“不能 sudo”的通用保证。',
+          tone: 'restricted',
+        }
+      : {
+          label: '提升权限',
+          value: '声明 deny（容器字段语义）',
+          hint: '虚拟机 guest 账户与提权由 guest OS 自身配置限制，不能由该容器字段保证“不能 sudo”；guest root 也不等于 launcher/host privileged。',
+          tone: 'restricted',
+        }
+  }
+  return { label: '提升权限', value: '允许', tone: 'open' }
 }
 
 function privilegedRow(security: EnvironmentSecurity): PermissionRow {
@@ -62,7 +84,7 @@ function privilegedRow(security: EnvironmentSecurity): PermissionRow {
     ? {
         label: '特权模式',
         value: '已声明 privileged',
-        hint: '实际 privileged / 更广内核能力仍由平台拒绝，除非已验证执行位置；nodeSelector 不构成充分证明。',
+        hint: '本版本尚未开放实际特权执行。执行位置 / taint / receipt 不构成例外放行；nodeSelector 亦不构成已验证隔离。',
         tone: 'open',
       }
     : { label: '特权模式', value: '关闭（默认）', tone: 'restricted' }
@@ -70,8 +92,16 @@ function privilegedRow(security: EnvironmentSecurity): PermissionRow {
 
 function capabilitiesRow(security: EnvironmentSecurity): PermissionRow {
   const caps = security.capabilities ?? []
+  const privileged = security.privileged ?? false
   if (caps.length === 0) {
-    return { label: 'Capabilities', value: '无额外能力（默认 drop ALL）', tone: 'restricted' }
+    return privileged
+      ? {
+          label: 'Capabilities',
+          value: '特权模式声明包含全部能力（本版本拒绝执行）',
+          hint: '契约要求 privileged 时 add 列表必须为空；当前执行器仍拒绝实际特权执行。',
+          tone: 'open',
+        }
+      : { label: 'Capabilities', value: '无额外能力（默认 drop ALL）', tone: 'restricted' }
   }
   return {
     label: 'Capabilities',
@@ -105,7 +135,7 @@ export function runtimePermissionGroups(spec: EnvironmentSpec): PermissionGroup[
   const identity: PermissionRow[] = [
     runAsUserRow(security.runAsUser),
     rootFilesystemRow(security, container),
-    escalationRow(security),
+    escalationRow(security, container),
     privilegedRow(security),
     capabilitiesRow(security),
     seccompRow(security),
