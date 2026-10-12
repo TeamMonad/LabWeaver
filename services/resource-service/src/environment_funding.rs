@@ -199,14 +199,7 @@ pub(crate) async fn fund_window(
         if covered != from.get() || lease.expires_at != Some(from) {
             return Err(ResourceStoreError::ScopeConflict);
         }
-        let prior:String=sqlx::query_scalar("SELECT COALESCE(sum((estimate->'total'->>'amount')::numeric*1000000),0)::numeric(38,0)::text FROM resource.environment_credit_windows WHERE lease_id=$1")
-            .bind(lease.id.as_uuid()).fetch_one(&mut **tx).await?;
-        let required = prior
-            .parse::<i128>()
-            .map_err(|_| ResourceStoreError::NumericOverflow)?
-            .checked_add(estimate.total.amount.scaled())
-            .ok_or(ResourceStoreError::NumericOverflow)?;
-        let required = FixedDecimal::from_scaled(required)?;
+        let required = cumulative_funding_amount(tx, lease.id, &estimate).await?;
         crate::credits::extend_environment_hold(tx, owner, previous.try_get("hold_id")?, &required)
             .await?
     };
@@ -215,6 +208,76 @@ pub(crate) async fn fund_window(
     }
     sqlx::query("INSERT INTO resource.environment_credit_windows(lease_id,lease_revision,request_id,claim_id,approval_id,hold_id,covered_from,covered_until,estimate) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)").bind(lease.id.as_uuid()).bind(i64::try_from(next_revision.get()).map_err(|_|ResourceStoreError::NumericOverflow)?).bind(request.id.as_uuid()).bind(claim.id.as_uuid()).bind(approval.id.as_uuid()).bind(hold.id).bind(from.get()).bind(until.get()).bind(serde_json::to_value(estimate)?).execute(&mut **tx).await?;
     Ok(())
+}
+
+/// Aggregate exact quantities from immutable rate snapshots before the shared rounding step.
+/// Summing rounded delta amounts could reserve zero for two halves of one charge unit.
+async fn cumulative_funding_amount(
+    tx: &mut Transaction<'_, Postgres>,
+    lease: LeaseId,
+    latest: &contracts::resource::costing::ResourceCostEstimate,
+) -> Result<FixedDecimal, ResourceStoreError> {
+    use contracts::resource::{Money, ResourceChargeLine};
+    use std::collections::{BTreeMap, btree_map::Entry};
+    let rows=sqlx::query("SELECT line-'quantity'-'amount' AS dimensions,sum((line->>'quantity')::numeric)::text AS quantity FROM resource.environment_credit_windows w CROSS JOIN LATERAL jsonb_array_elements(w.estimate->'lines') line WHERE w.lease_id=$1 GROUP BY line-'quantity'-'amount'")
+        .bind(lease.as_uuid()).fetch_all(&mut **tx).await?;
+    let mut snapshots = Vec::with_capacity(rows.len() + latest.lines.len());
+    for row in rows {
+        let mut dimensions: serde_json::Value = row.try_get("dimensions")?;
+        let quantity = row
+            .try_get::<String, _>("quantity")?
+            .parse::<u64>()
+            .map_err(|_| ResourceStoreError::NumericOverflow)?;
+        let fields = dimensions.as_object_mut().ok_or(ResourceStoreError::Wire)?;
+        fields.insert("quantity".into(), serde_json::json!(quantity));
+        fields.insert(
+            "amount".into(),
+            serde_json::to_value(Money {
+                currency: "CREDITS".into(),
+                amount: FixedDecimal::zero(),
+            })?,
+        );
+        snapshots.push(serde_json::from_value::<ResourceChargeLine>(dimensions)?);
+    }
+    snapshots.extend(latest.lines.iter().cloned());
+    let mut lines = BTreeMap::<String, ResourceChargeLine>::new();
+    for line in snapshots {
+        if line.unit_price.currency != "CREDITS" {
+            return Err(ResourceStoreError::RateCurrencyConflict);
+        }
+        match lines.entry(line.rate_id.to_string()) {
+            Entry::Vacant(slot) => {
+                slot.insert(line);
+            }
+            Entry::Occupied(mut slot) => {
+                let original = slot.get_mut();
+                if original.rate_revision != line.rate_revision
+                    || original.unit != line.unit
+                    || original.unit_quantity != line.unit_quantity
+                    || original.quantity_divisor != line.quantity_divisor
+                    || original.unit_price != line.unit_price
+                {
+                    return Err(ResourceStoreError::UsageConflict);
+                }
+                original.quantity = original
+                    .quantity
+                    .checked_add(line.quantity)
+                    .ok_or(ResourceStoreError::NumericOverflow)?;
+            }
+        }
+    }
+    let total = lines.values().try_fold(0_i128, |total, line| {
+        let amount = contracts::resource::rounded_scaled_amount(
+            line.unit_price.amount.scaled(),
+            line.quantity,
+            line.unit_quantity,
+            line.quantity_divisor,
+        )?;
+        total
+            .checked_add(amount)
+            .ok_or(ResourceStoreError::NumericOverflow)
+    })?;
+    Ok(FixedDecimal::from_scaled(total)?)
 }
 
 impl PgResourceStore {
