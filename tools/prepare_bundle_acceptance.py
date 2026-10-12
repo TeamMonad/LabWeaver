@@ -88,7 +88,8 @@ def prepare(namespace: str, output: Path) -> dict[str, Any]:
                     "requests.ephemeral-storage": "128Mi",
                     "limits.ephemeral-storage": "256Mi",
                     "count/jobs.batch": "1",
-                    "count/configmaps": "1",
+                    # One fixture map plus the controller-published kube-root-ca.crt.
+                    "count/configmaps": "2",
                     "count/secrets": "0",
                     "persistentvolumeclaims": "0",
                 }
