@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 mod loaded;
+mod projected;
 pub use loaded::LoadedConfiguration;
+pub use projected::prepare_projected_configuration;
 
 type Result<T> = std::result::Result<T, ConfigurationError>;
 
@@ -361,6 +363,13 @@ pub async fn report(
         let desired: PlatformConfigurationVersion =
             serde_json::from_value(value).map_err(|_| ConfigurationError::Persistence)?;
         if !loaded.is_some_and(|loaded| loaded.matches(&desired, &apply.encrypted_bundle_sha256))
+            || !loaded.is_some_and(|loaded| {
+                loaded.replicas_match(
+                    request.control_replica_observations.as_ref(),
+                    apply.requested_at,
+                    now,
+                )
+            })
             || request.observed_configuration_sha256.as_deref()
                 != Some(desired.configuration_sha256.as_str())
             || request.observed_encrypted_bundle_sha256.as_deref()
@@ -374,6 +383,7 @@ pub async fn report(
         state.applied_bundle_sha256 = Some(apply.encrypted_bundle_sha256.clone());
     } else if request.observed_configuration_sha256.is_some()
         || request.observed_encrypted_bundle_sha256.is_some()
+        || request.control_replica_observations.is_some()
     {
         return Err(ConfigurationError::Invalid);
     }

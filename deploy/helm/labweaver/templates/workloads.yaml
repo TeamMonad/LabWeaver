@@ -2,6 +2,7 @@
 {{- range $name, $configuration := .Values.workloads }}
 {{- if $configuration.enabled }}
 {{- $input := $configuration }}
+{{- $managedControl := and (eq $name "control-service") $root.Values.managedControlConfiguration }}
 {{- if $root.Values.workloadInputs }}
 {{- if not (hasKey $root.Values.workloadInputs $name) }}
 {{- fail (printf "workloadInputs.%s is required" $name) }}
@@ -38,6 +39,9 @@ spec:
         {{- include "labweaver.labels" $root | nindent 8 }}
       annotations:
         labweaver.io/configuration-bundle-sha256: {{ include "labweaver.configurationBundleSha256" $root | quote }}
+        {{- if $managedControl }}
+        checksum/control-loaded-configuration: {{ include "labweaver.controlManagedChecksum" $root | quote }}
+        {{- end }}
       {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
         checksum/object-store-proxy: {{ printf "%s\n%s\n%s\n%s" $root.Values.objectStoreRoute.caCertificate $root.Values.objectStoreRoute.backendHostname $root.Values.objectStoreRoute.pathPrefix $root.Values.objectStoreRoute.serviceName | sha256sum | quote }}
       {{- end }}
@@ -63,6 +67,28 @@ spec:
         fsGroup: {{ ternary 0 (default 65532 $configuration.runAsUser) (default false $configuration.gateway) }}
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile: {type: RuntimeDefault}
+      {{- if $managedControl }}
+      initContainers:
+        - name: prepare-managed-configuration
+          image: {{ include "labweaver.image" (dict "key" $imageKey "value" $image) | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["--prepare-managed-configuration"]
+          env:
+            - {name: LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_DIR, value: /etc/labweaver/managed-input}
+            - {name: LABWEAVER_PLATFORM_CONFIGURATION_RUNTIME_DIR, value: /run/labweaver/managed-configuration}
+            - {name: LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_SHA256, value: {{ include "labweaver.controlManagedChecksum" $root | quote }}}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi, ephemeral-storage: 4Mi}
+            limits: {cpu: 100m, memory: 64Mi, ephemeral-storage: 8Mi}
+          volumeMounts:
+            - {name: managed-input, mountPath: /etc/labweaver/managed-input, readOnly: true}
+            - {name: managed-runtime, mountPath: /run/labweaver/managed-configuration}
+      {{- end }}
       containers:
         - name: {{ $name }}
           image: {{ include "labweaver.image" (dict "key" $imageKey "value" $image) | quote }}
@@ -76,6 +102,21 @@ spec:
           {{- end }}
           {{- if or $input.env $input.secretEnv (eq $name "kubevirt-executor") }}
           env:
+            {{- if $managedControl }}
+            {{- range $reserved := list "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE" "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE" "LABWEAVER_CONTROL_POD_NAME" "LABWEAVER_CONTROL_POD_NAMESPACE" "LABWEAVER_CONTROL_POD_UID" }}
+            {{- if or (hasKey $input.env $reserved) (hasKey $input.secretEnv $reserved) }}
+            {{- fail (printf "managed Control owns %s" $reserved) }}
+            {{- end }}
+            {{- end }}
+            - {name: LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE, value: /run/labweaver/managed-configuration/current/platform-configuration.json}
+            - {name: LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE, value: /run/labweaver/managed-configuration/current/platform-configuration-source.json}
+            - name: LABWEAVER_CONTROL_POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: LABWEAVER_CONTROL_POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: LABWEAVER_CONTROL_POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+            {{- end }}
             {{- if eq $name "kubevirt-executor" }}
             - name: LABWEAVER_EXECUTOR_POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
@@ -144,6 +185,9 @@ spec:
           resources:
             {{- toYaml (default $root.Values.resources $configuration.resources) | nindent 12 }}
           volumeMounts:
+            {{- if $managedControl }}
+            - {name: managed-runtime, mountPath: /run/labweaver/managed-configuration, readOnly: true}
+            {{- end }}
             {{- if $configuration.configMap }}
             - {name: config, mountPath: /etc/labweaver/config, readOnly: true}
             {{- end }}
@@ -161,6 +205,17 @@ spec:
             - {name: object-store-nginx, mountPath: /etc/nginx/labweaver-conf.d, readOnly: true}
             {{- end }}
       volumes:
+        {{- if $managedControl }}
+        - name: managed-input
+          configMap:
+            name: {{ include "labweaver.controlManagedConfigMap" $root }}
+            defaultMode: 0444
+            items:
+              - {key: platform-configuration.json, path: platform-configuration.json}
+              - {key: platform-configuration-source.json, path: platform-configuration-source.json}
+        - name: managed-runtime
+          emptyDir: {sizeLimit: 8Mi}
+        {{- end }}
         {{- if $configuration.configMap }}
         - name: config
           configMap: {name: {{ $configuration.configMap }}}

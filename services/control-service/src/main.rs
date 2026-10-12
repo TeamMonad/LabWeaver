@@ -72,6 +72,23 @@ struct NatsFileConfig {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), StartupError> {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments == [std::ffi::OsString::from("--prepare-managed-configuration")] {
+        control_service::platform_configuration::prepare_projected_configuration(
+            std::path::Path::new(&required_env(
+                "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_DIR",
+            )?),
+            std::path::Path::new(&required_env(
+                "LABWEAVER_PLATFORM_CONFIGURATION_RUNTIME_DIR",
+            )?),
+            &required_env("LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_SHA256")?,
+        )
+        .map_err(|_| StartupError::Configuration)?;
+        return Ok(());
+    }
+    if !arguments.is_empty() {
+        return Err(StartupError::Configuration);
+    }
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
@@ -316,12 +333,27 @@ fn load_platform_configuration()
         std::env::var_os("LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE"),
     ) {
         (Some(version), Some(source)) => {
-            control_service::platform_configuration::LoadedConfiguration::load(
+            let loaded = control_service::platform_configuration::LoadedConfiguration::load(
                 std::path::Path::new(&version),
                 std::path::Path::new(&source),
             )
-            .map(Some)
-            .map_err(|_| StartupError::Configuration)
+            .map_err(|_| StartupError::Configuration)?;
+            match (
+                std::env::var("LABWEAVER_CONTROL_POD_NAME"),
+                std::env::var("LABWEAVER_CONTROL_POD_NAMESPACE"),
+                std::env::var("LABWEAVER_CONTROL_POD_UID"),
+            ) {
+                (Ok(name), Ok(namespace), Ok(uid)) => loaded
+                    .on_replica(&name, &namespace, &uid)
+                    .map(Some)
+                    .map_err(|_| StartupError::Configuration),
+                (
+                    Err(std::env::VarError::NotPresent),
+                    Err(std::env::VarError::NotPresent),
+                    Err(std::env::VarError::NotPresent),
+                ) if !loaded.requires_replica_identity() => Ok(Some(loaded)),
+                _ => Err(StartupError::Configuration),
+            }
         }
         (None, None) => Ok(None),
         _ => Err(StartupError::Configuration),

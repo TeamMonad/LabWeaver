@@ -58,6 +58,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::platform_configuration::PlatformConfigurationBundle
     );
     document!(
+        "schemas/contracts/v1/control-configuration-replica-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationReplicaObservation
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-deployment-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationDeploymentObservation
+    );
+    document!(
         "schemas/contracts/v1/http/register-platform-configuration-bundle-request.schema.json",
         crate::platform_configuration::RegisterPlatformConfigurationBundleRequest
     );
@@ -1076,6 +1084,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             operation.operation_id,
             "getPlatformConfigurationVersion"
                 | "getPlatformConfigurationBundle"
+                | "getLoadedPlatformConfiguration"
                 | "registerPlatformConfigurationBundle"
         ) {
             for parameter in &mut parameters {
@@ -1248,6 +1257,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
                 "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
                 "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+                "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+                "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
                 "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
                 "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
                 "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
@@ -1776,6 +1787,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
         "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
         "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
+        "getLoadedPlatformConfiguration" => {
+            contract_ref("control-configuration-replica-observation")
+        }
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")

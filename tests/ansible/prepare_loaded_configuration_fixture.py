@@ -12,12 +12,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--control-replicas", type=int, default=1)
     arguments = parser.parse_args()
     fixture = fixtures.DeploymentBundleTests(methodName="runTest")
     fixture.setUp()
     try:
         version = json.loads(arguments.version.read_bytes())
         fixture.model["revision"] = version["revision"]
+        fixture.model["application"]["helmValues"]["workloads"] = {
+            "control-service": {"replicas": arguments.control_replicas}
+        }
         fixtures.write(
             fixture.root / fixture.model["configurationFile"],
             json.dumps(version).encode(),
