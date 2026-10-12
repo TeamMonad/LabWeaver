@@ -3,6 +3,9 @@
 The portable application Bundle uses one `config/bundle.yaml` model and encrypts its
 complete directory with age. See [the encrypted Bundle procedure](../../docs/deployment/encrypted-bundle.md)
 for validation, file references, derived inputs, recovery and the current scope.
+The archive includes a Control managed version. Its settings import uses the existing
+conditional administrator update. The Bundle also supplies the complete workload
+environment map. Helm reads that map without filling values from the legacy environment.
 Do not edit the derived ConfigMap/Secret, Helm values or Ansible vars.
 
 The layout below is the existing object renderer's input contract. The encrypted

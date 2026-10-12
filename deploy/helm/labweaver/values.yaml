@@ -46,6 +46,11 @@ sshGatewayService:
   loadBalancerIP: ""
   sharedIPKey: ""
 
+# An encrypted Bundle supplies this complete map. Its environment inputs replace
+# the legacy workload environment below. Layout, probes and resource limits remain
+# in workloads. Do not edit a generated Bundle values file.
+workloadInputs: {}
+
 workloads:
   control-service:
     enabled: true

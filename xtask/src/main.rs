@@ -8,6 +8,7 @@ use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+mod bundle_configuration;
 mod integration;
 mod platform_images;
 
@@ -48,6 +49,8 @@ enum Command {
     /// Prepare the deterministic, offline image build inputs without building images.
     PackagePrepare,
     PackageValidate(PackageValidateArgs),
+    /// Validate one Control-owned configuration version from stdin. Output contains no secrets.
+    BundleConfiguration,
     #[command(subcommand)]
     Contracts(ContractsCommand),
 }
@@ -156,6 +159,9 @@ enum ContractsCommand {
 
 #[derive(Debug)]
 enum AppError {
+    BundleConfiguration {
+        code: &'static str,
+    },
     ExternalCommand {
         role: &'static str,
         code: Option<i32>,
@@ -195,6 +201,7 @@ enum AppError {
 impl AppError {
     const fn diagnostic_code(&self) -> &'static str {
         match self {
+            Self::BundleConfiguration { code } => code,
             Self::ExternalCommand { .. } => "XTASK_EXTERNAL_COMMAND_FAILED",
             Self::InfrastructureRequired { .. } => "XTASK_INFRASTRUCTURE_REQUIRED",
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
@@ -212,6 +219,7 @@ impl AppError {
 impl Display for AppError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::BundleConfiguration { code } => formatter.write_str(code),
             Self::ExternalCommand { role, code, detail } => {
                 write!(
                     formatter,
@@ -269,6 +277,7 @@ fn main() -> ExitCode {
 )]
 fn run(cli: Cli) -> Result<(), AppError> {
     match cli.command {
+        Command::BundleConfiguration => bundle_configuration::run(),
         Command::Format => run_cargo("format", ["fmt", "--all", "--", "--check"]),
         Command::Lint => run_cargo(
             "lint",
