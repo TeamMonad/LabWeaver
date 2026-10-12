@@ -614,6 +614,7 @@ def seal_bundle(
 ) -> dict[str, Any]:
     """Encrypt the entire validated portable directory. Never replace an existing archive."""
     model, files = load_bundle(root, manifest_path)
+    version = json.loads(files[model["configurationFile"]])
     if not recipients or any(
         not re.fullmatch(r"age1[0-9a-z]+", recipient) for recipient in recipients
     ):
@@ -660,12 +661,21 @@ def seal_bundle(
                 )
                 encrypted.flush()
                 os.fsync(encrypted.fileno())
+            ciphertext_digest = hashlib.sha256()
+            with pending.open("rb") as ciphertext:
+                while chunk := ciphertext.read(1024 * 1024):
+                    ciphertext_digest.update(chunk)
             os.link(pending, output)
         except FileExistsError as error:
             raise BundleError("LW_BUNDLE_OUTPUT_EXISTS") from error
         finally:
             pending.unlink(missing_ok=True)
-    return {"revision": model["revision"], "files": len(files)}
+    return {
+        "revision": model["revision"],
+        "files": len(files),
+        "managedConfigurationSha256": version["configurationSha256"],
+        "encryptedBundleSha256": ciphertext_digest.hexdigest(),
+    }
 
 
 def _extract(archive_path: Path, destination: Path) -> None:
