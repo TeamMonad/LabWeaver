@@ -587,14 +587,20 @@ pub(super) async fn forward_evaluation(
             "projects",
             project,
             "me",
-            "evaluation-results",
+            kind @ ("evaluation-results" | "evaluation-tasks"),
             rest @ ..,
         ] = segments.as_slice()
         {
             let project_id = project
                 .parse()
                 .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-            let operation = if rest.is_empty() {
+            let operation = if *kind == "evaluation-tasks" {
+                if rest.first() == Some(&"submissions") {
+                    "getOwnProjectEvaluationTaskForSubmission"
+                } else {
+                    "getOwnProjectEvaluationTaskProgress"
+                }
+            } else if rest.is_empty() {
                 "listOwnProjectEvaluationResults"
             } else {
                 "getOwnProjectEvaluationResult"
@@ -1911,7 +1917,18 @@ fn valid_evaluation_path(path: &str) -> bool {
                     "projects",
                     _,
                     "me",
-                    "evaluation-results",
+                    "evaluation-tasks",
+                    "submissions",
+                    _
+                ]
+                | [
+                    "",
+                    "api",
+                    "v1",
+                    "projects",
+                    _,
+                    "me",
+                    "evaluation-tasks" | "evaluation-results",
                     _
                 ]
         ))
@@ -2171,6 +2188,18 @@ mod tests {
 
     #[test]
     fn evaluation_paths_are_exact_and_injection_safe() {
+        assert!(valid_evaluation_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/me/evaluation-tasks/01900000-0000-7000-8000-000000000003"
+        ));
+        assert!(!valid_evaluation_path(
+            "/api/v1/projects/p/me/evaluation-tasks"
+        ));
+        assert!(!valid_evaluation_path(
+            "/api/v1/projects/p/me/evaluation-tasks/r/cancel"
+        ));
+        assert!(!valid_evaluation_path(
+            "/api/v1/projects/p/me/evaluation-tasks/.."
+        ));
         assert!(valid_evaluation_path(
             "/api/v1/environments/01900000-0000-7000-8000-000000000001/freeze"
         ));

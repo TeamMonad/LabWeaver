@@ -14,7 +14,7 @@ use std::{
 
 use auth::ServiceTokenClient;
 
-use contracts::authoring::{AgentRun, AgentRunHistoryPage, AgentTrackKind};
+use contracts::authoring::{AgentRun, AgentRunHistoryPage, AgentRunTaskProgress, AgentTrackKind};
 use contracts::environment::{
     EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
 };
@@ -208,6 +208,25 @@ impl AgentClient {
                 self.config
                     .endpoint(&format!("internal/v1/agent-runs/{run_id}"))?,
             ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Reads the Agent-owned bounded history projection for one project.
+    pub async fn task_progress(
+        &self,
+        run_id: AgentRunId,
+        query: &PageQuery,
+    ) -> Result<AgentRunTaskProgress, DownstreamError> {
+        send_json(
+            self.client
+                .get(
+                    self.config
+                        .endpoint(&format!("internal/v1/agent-runs/{run_id}/task-progress"))?,
+                )
+                .query(query),
             &self.service_token_client,
             self.token_target,
         )

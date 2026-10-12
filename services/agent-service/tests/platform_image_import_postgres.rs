@@ -245,6 +245,7 @@ async fn spawn_api(
     staged: Vec<u8>,
 ) -> Result<ImportApi, Box<dyn std::error::Error>> {
     let state = Arc::new(AgentApiState {
+        resource: None,
         store: PostgresAgentRunStore::new(pool.clone()),
         build_store: PgBuildStore::new(pool.clone()),
         generated_artifacts: GeneratedArtifactStore::new(pool.clone()),
