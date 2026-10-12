@@ -36,6 +36,8 @@ use std::sync::Arc;
 use crate::ApprovalPolicy;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 
+mod credits;
+
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 
 /// User identity extracted from an Access-signed resource delegation.
@@ -107,6 +109,7 @@ impl ResourceApiState {
 )]
 pub fn resource_api_router(state: ResourceApiState) -> Router {
     let public = Router::new()
+        .merge(credits::public_routes())
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests", get(list_requests))
         .route(
@@ -168,6 +171,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .layer(Extension(state.service_verifier.clone()))
         .layer(Extension(state.access_service_client_id.clone()));
     let internal = Router::new()
+        .merge(credits::internal_routes())
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
             "/internal/v1/task-resources/{task_run_id}/request",
@@ -1358,6 +1362,12 @@ async fn internal_service_auth(
 }
 
 fn internal_route_permission(path: &str) -> Option<&'static str> {
+    if path == "/internal/v1/credits/holds" {
+        return Some("resource.credits.hold");
+    }
+    if path.starts_with("/internal/v1/credits/holds/") && path.ends_with("/resolve") {
+        return Some("resource.credits.resolve");
+    }
     if path == "/internal/v1/resource/usage" {
         return Some("resource.usage.record");
     }

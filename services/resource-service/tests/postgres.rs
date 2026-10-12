@@ -3950,6 +3950,11 @@ async fn migrated_pool()
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0016_project_credits.sql"
+    ))
+    .execute(&pool)
+    .await?;
     Ok((container, pool))
 }
 
@@ -4561,4 +4566,343 @@ fn public_project_list_request(
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header("x-labweaver-resource-delegation", delegation)
         .body(Body::empty())?)
+}
+
+#[tokio::test]
+async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::credits::{CreditAdminOperation, CreditHoldRequest};
+    use resource_service::credits::PgCreditStore;
+    let (_container, pool) = migrated_pool().await?;
+    let resource = PgResourceStore::new(pool.clone());
+    let credits = PgCreditStore::new(pool.clone());
+    let project = ProjectId::new();
+    let actor = ActorId::new();
+    let now = resource.current_time().await?;
+    credits
+        .admin(
+            "bridge-grant",
+            actor,
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Grant {
+                project_id: project,
+                amount: FixedDecimal::parse("10.000000")?,
+                reason: "synthetic allowance".into(),
+            },
+        )
+        .await?;
+    let (request, lease) =
+        create_active_request(&resource, now, project, actor, "credit-metered-work").await?;
+    let _hold = credits
+        .hold(
+            "bridge-hold",
+            RESOURCE_ENVIRONMENT_CLIENT_ID,
+            &CreditHoldRequest {
+                project_id: project,
+                request_id: request.id,
+                business_key: "metered-usage".into(),
+                amount: FixedDecimal::parse("4.000000")?,
+            },
+        )
+        .await?;
+    resource
+        .create_rate(
+            "bridge-rate",
+            &CreateResourceRateRequest {
+                unit: ResourceBillingUnit::CpuMillicoreSecond,
+                unit_quantity: 1,
+                gpu_class: None,
+                gpu_mode: None,
+                unit_price: Money {
+                    currency: "CREDITS".into(),
+                    amount: FixedDecimal::parse("1.000000")?,
+                },
+                effective_from: now,
+                effective_until: None,
+            },
+        )
+        .await?;
+    let end = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(10))?;
+    let usage = resource
+        .record_usage(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease.id),
+                },
+                source_event_id: EventId::new(),
+                measured_from: now,
+                measured_until: end,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        cpu_millicore_seconds: 2,
+                        memory_byte_seconds: 0,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            end,
+        )
+        .await?;
+    let charge = resource
+        .settle_usage(usage.id)
+        .await?
+        .ok_or("charge missing")?;
+    assert_eq!(charge.total.amount.as_str(), "2.000000");
+    resource.settle_usage(usage.id).await?;
+    assert_eq!(credits.account(project).await?.balance.as_str(), "8.000000");
+    assert_eq!(
+        credits.account(project).await?.reserved.as_str(),
+        "2.000000"
+    );
+    let unknown_end = UtcTimestamp::from_utc(end.get() + time::Duration::seconds(10))?;
+    resource
+        .record_usage(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease.id),
+                },
+                source_event_id: EventId::new(),
+                measured_from: end,
+                measured_until: unknown_end,
+                measurement: UsageMeasurement::Unknown {
+                    reason: "final interval is missing".into(),
+                },
+            },
+            unknown_end,
+        )
+        .await?;
+    let expiring = resource
+        .revoke_lease(
+            "bridge-revoke",
+            lease.id,
+            lease.revision,
+            "synthetic cleanup".into(),
+            actor,
+            "bridge-trace",
+        )
+        .await?;
+    // Marking expiring does not release funds before provider cleanup.
+    assert_eq!(
+        credits.account(project).await?.reserved.as_str(),
+        "2.000000"
+    );
+    let cleanup = resource
+        .next_lease_cleanup(actor)
+        .await?
+        .ok_or("cleanup missing")?;
+    let releasing = resource
+        .mark_capacity_releasing(cleanup.claim.id, cleanup.claim.revision)
+        .await?;
+    resource
+        .complete_capacity_release(
+            cleanup.claim.id,
+            releasing.revision,
+            expiring.id,
+            expiring.revision,
+            actor,
+            "bridge-cleaned",
+        )
+        .await?;
+    let account = credits.account(project).await?;
+    assert_eq!(account.reserved.as_str(), "0.000000");
+    assert_eq!(account.unknown_count, 1);
+    assert!(credits.holds(project, 1, 25, 0).await?.items[0].measurement_unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn credits_http_requires_signed_admin_and_exact_workload_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::credits::{CreditAdminOperation, CreditHold, CreditHoldRequest};
+    let (_container, pool) = migrated_pool().await?;
+    let authority =
+        spawn_resource_auth_authority(resource_signing_material("credits-auth")?).await?;
+    let verifier = build_resource_verifier(&authority.issuer).await?;
+    let store = PgResourceStore::new(pool.clone());
+    let key = [7_u8; 32];
+    let actor = ActorId::new();
+    let project = ProjectId::new();
+    let now = store.current_time().await?;
+    let (request, _lease) =
+        create_active_request(&store, now, project, actor, "credits-http-work").await?;
+    let state = resource_service::api::ResourceApiState::new(store)
+        .with_service_verifier(Arc::new(verifier))
+        .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
+        .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.into())
+        .with_task_service_client_ids(
+            [
+                RESOURCE_EVALUATION_CLIENT_ID.into(),
+                RESOURCE_AGENT_CLIENT_ID.into(),
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let router = resource_service::api::with_delegation(
+        resource_service::api::resource_api_router(state),
+        Arc::new(key.to_vec()),
+    );
+    let access = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ACCESS_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.api.invoke", "resource.credits.hold"],
+    )?;
+    let timestamp = time::OffsetDateTime::now_utc();
+    let mut session = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: actor.as_uuid(),
+        roles: vec![PlatformRole::Student],
+        authorization_revision: 1,
+        expires_at: timestamp + time::Duration::minutes(5),
+        idle_expires_at: timestamp + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-credits-csrf".into()),
+    };
+    let member = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let grant = serde_json::to_value(CreditAdminOperation::Grant {
+        project_id: project,
+        amount: FixedDecimal::parse("5.000000")?,
+        reason: "synthetic grant".into(),
+    })?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            Some(&member),
+            "/api/v1/resource/credits/operations",
+            &grant,
+            "http-member-grant",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    session.roles = vec![PlatformRole::PlatformAdmin];
+    let admin = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            Some(&admin),
+            "/api/v1/resource/credits/operations",
+            &grant,
+            "http-admin-grant",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let hold = serde_json::to_value(CreditHoldRequest {
+        project_id: project,
+        request_id: request.id,
+        business_key: "http-cost".into(),
+        amount: FixedDecimal::parse("3.000000")?,
+    })?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            None,
+            "/internal/v1/credits/holds",
+            &hold,
+            "http-gateway-hold",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let missing = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ENVIRONMENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.usage.record"],
+    )?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &missing,
+            None,
+            "/internal/v1/credits/holds",
+            &hold,
+            "http-missing-scope",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let env = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ENVIRONMENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.hold", "resource.credits.resolve"],
+    )?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            "/internal/v1/credits/holds",
+            &hold,
+            "http-owner-hold",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: CreditHold =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+    let other = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_AGENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.resolve"],
+    )?;
+    let path = format!("/internal/v1/credits/holds/{}/resolve", saved.id);
+    let release = json!({"action":"release","reason":"cleanup confirmed"});
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &other,
+            None,
+            &path,
+            &release,
+            "http-other-owner",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = router
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            &path,
+            &release,
+            "http-owner-release",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        resource_service::credits::PgCreditStore::new(pool)
+            .account(project)
+            .await?
+            .available
+            .as_str(),
+        "5.000000"
+    );
+    Ok(())
+}
+fn credit_http_request(
+    token: &str,
+    delegation: Option<&str>,
+    path: &str,
+    body: &Value,
+    key: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", key);
+    if let Some(delegation) = delegation {
+        request = request.header("x-labweaver-resource-delegation", delegation);
+    }
+    Ok(request.body(Body::from(serde_json::to_vec(body)?))?)
 }

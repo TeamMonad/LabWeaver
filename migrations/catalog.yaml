@@ -224,3 +224,6 @@ domains:
       - id: 14
         file: resource/0014_environment_resource_reservation_lifecycle.sql
         sha256: 703cda466c331b5751b90c671dd74c4d04e324d9a3510acf48b6150e3c8796e5
+      - id: 16
+        file: resource/0016_project_credits.sql
+        sha256: a08012d2e5a69f898f617d758432f55fba327bb22a898c7b6acdedcd39e9e758

@@ -1040,3 +1040,5 @@ mod tests {
         Ok(())
     }
 }
+/// Project Credits account and immutable ledger contracts.
+pub mod credits;
