@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "PlatformConfigurationApplyStage": {
+      "enum": [
+        "requested",
+        "validating",
+        "applying",
+        "verifying",
+        "succeeded",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "PlatformConfigurationFailureReason": {
+      "description": "Bounded failure categories. Executor log content is never an API payload.",
+      "enum": [
+        "configuration_invalid",
+        "dependency_unavailable",
+        "execution_failed",
+        "verification_failed",
+        "external_result_unknown",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "PlatformConfigurationNextStep": {
+      "description": "Readable next step, without executor logs or credential content.",
+      "enum": [
+        "execute_approved_deployment",
+        "wait_for_executor",
+        "fix_configuration_and_retry",
+        "reconcile_external_result",
+        "none"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "desiredRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "encryptedBundleSha256": {
+      "type": "string"
+    },
+    "executorClientId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "failedStage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformConfigurationApplyStage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "failureReason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformConfigurationFailureReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "nextStep": {
+      "$ref": "#/$defs/PlatformConfigurationNextStep"
+    },
+    "previousApplyId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OperationId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Follow this link to read prior attempts after reconnecting or retrying."
+    },
+    "requestedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "requestedBy": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "stage": {
+      "$ref": "#/$defs/PlatformConfigurationApplyStage"
+    },
+    "updatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "id",
+    "revision",
+    "desiredRevision",
+    "encryptedBundleSha256",
+    "stage",
+    "nextStep",
+    "requestedBy",
+    "requestedAt",
+    "updatedAt"
+  ],
+  "title": "PlatformConfigurationApply",
+  "type": "object"
+}

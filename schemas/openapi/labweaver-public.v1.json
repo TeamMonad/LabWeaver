@@ -1810,6 +1810,577 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/admin/platform-configuration": {
+      "get": {
+        "description": "Permission: platform_configuration:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfiguration",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getPlatformConfiguration",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "platform_configuration:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "patch": {
+        "description": "Permission: platform_configuration:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "updatePlatformConfiguration",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/update-platform-configuration-request.schema.json"
+              }
+            },
+            "application/yaml": {
+              "schema": {
+                "$ref": "../contracts/v1/http/update-platform-configuration-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "updatePlatformConfiguration",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "platform_configuration:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/admin/platform-configuration/applies": {
+      "post": {
+        "description": "Permission: platform_configuration:apply. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "applyPlatformConfiguration",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/apply-platform-configuration-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "applyPlatformConfiguration",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "platform_configuration:apply",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/admin/platform-configuration/applies/{applyId}": {
+      "get": {
+        "description": "Permission: platform_configuration:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfigurationApply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "applyId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-apply.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getPlatformConfigurationApply",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "platform_configuration:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/admin/platform-configuration/versions/{revision}": {
+      "get": {
+        "description": "Permission: platform_configuration:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfigurationVersion",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-version.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getPlatformConfigurationVersion",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "platform_configuration:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/auth/csrf": {
       "get": {
         "operationId": "issueCsrfToken",
