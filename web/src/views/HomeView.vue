@@ -93,6 +93,10 @@
               </ul>
             </template>
           </AsyncStateView>
+          <p v-if="inProgress.environmentsTruncated" class="section-note">
+            只显示前 50 个运行中的环境。
+            <RouterLink :to="{ path: '/researcher/environments', query: { projectId: project.id } }">查看全部 Work 环境</RouterLink>
+          </p>
         </section>
 
         <section
@@ -124,6 +128,9 @@
               </ul>
             </template>
           </AsyncStateView>
+          <p v-if="inProgress.agentRunsTruncated" class="section-note">
+            只检查了最近 50 个任务，更早的未完成任务可能没有列出。
+          </p>
         </section>
 
         <section
@@ -382,6 +389,15 @@ const routeReason = computed(() => {
 .item-attention {
   color: var(--md-sys-color-on-surface);
   font: var(--md-sys-body-medium);
+}
+
+.section-note {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.section-note a {
+  color: var(--md-sys-color-primary);
 }
 
 .empty-state {

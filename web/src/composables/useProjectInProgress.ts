@@ -34,12 +34,16 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
   const environments = ref<InProgressSection<EnvironmentSummary>>({ kind: 'idle' })
   const agentRuns = ref<InProgressSection<AgentRunHistoryItem>>({ kind: 'idle' })
   const resourceRequests = ref<InProgressSection<ResourceRequestSchema>>({ kind: 'idle' })
+  /** The server has more rows than the first page read here; the section says so instead of implying completeness. */
+  const environmentsTruncated = ref(false)
+  const agentRunsTruncated = ref(false)
   const loadedAt = ref<Date | null>(null)
   const loading = ref(false)
   let generation = 0
 
   async function loadEnvironments(id: string, current: number) {
     environments.value = { kind: 'loading', message: '加载运行中的环境…' }
+    environmentsTruncated.value = false
     const result = await listEnvironments({ query: { projectId: id, desiredState: 'running', limit: 50 } })
     if (current !== generation) return
     if (result.error) {
@@ -48,12 +52,14 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
         : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_ENVIRONMENTS_LOAD_FAILED', '加载运行中的环境失败。') }
       return
     }
+    environmentsTruncated.value = Boolean(result.data.nextCursor)
     const items = result.data.items.filter((item) => item.projectId === id && item.observedState !== 'deleted')
     environments.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 
   async function loadAgentRuns(id: string, current: number) {
     agentRuns.value = { kind: 'loading', message: '加载未完成的任务…' }
+    agentRunsTruncated.value = false
     const result = await listProjectAgentRuns({ path: { projectId: id }, query: { page: 1, pageSize: 50 } })
     if (current !== generation) return
     if (result.error) {
@@ -62,6 +68,7 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
         : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_AGENT_RUNS_LOAD_FAILED', '加载未完成的任务失败。') }
       return
     }
+    agentRunsTruncated.value = result.data.hasMore
     const items = result.data.items.filter((item) => item.projectId === id && isOpenAgentRun(item))
     agentRuns.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
@@ -118,5 +125,5 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
   })
 
-  return reactive({ environments, agentRuns, resourceRequests, loadedAt, loading, load })
+  return reactive({ environments, agentRuns, resourceRequests, environmentsTruncated, agentRunsTruncated, loadedAt, loading, load })
 }
