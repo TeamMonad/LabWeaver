@@ -122,6 +122,32 @@ impl Fixture {
     async fn start_for_client(task_client_id: &str) -> TestResult<Self> {
         let (postgres, pool) = migrated_pool().await?;
         let store = PgResourceStore::new(pool.clone());
+        let price_from = store.current_time().await?;
+        for unit in [
+            ResourceBillingUnit::CpuMillicoreSecond,
+            ResourceBillingUnit::MemoryByteSecond,
+            ResourceBillingUnit::StorageByteSecond,
+        ] {
+            store
+                .create_rate(
+                    &uuid::Uuid::new_v4().to_string(),
+                    &contracts::http::CreateResourceRateRequest {
+                        builder_binding: None,
+                        unit,
+                        unit_quantity: 1,
+                        gpu_class: None,
+                        gpu_mode: None,
+                        unit_price: Money {
+                            currency: "CREDITS".into(),
+                            amount: FixedDecimal::zero(),
+                        },
+                        effective_from: price_from,
+                        effective_until: None,
+                    },
+                )
+                .await?;
+        }
+
         let authority = spawn_resource_auth_authority_for_client(
             resource_signing_material("task-lifecycle")?,
             task_client_id,

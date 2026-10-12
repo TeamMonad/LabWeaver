@@ -778,22 +778,19 @@ impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
         envelope: ContainerExecutorRequestEnvelope,
     ) -> Result<ContainerExecutorResponseEnvelope, ContainerExecutorFenceError> {
         validate_container_executor_request(&envelope)?;
-        let runtime_gate = if container_executor_plan(&envelope.request)
-            .resources
-            .iter()
-            .any(|resource| {
-                matches!(
-                    resource.kind.as_str(),
-                    "Deployment" | "PersistentVolumeClaim"
-                )
-            })
-            && matches!(
-                envelope.fence.action,
-                ReconcileAction::Provision
-                    | ReconcileAction::Start
-                    | ReconcileAction::Restart
-                    | ReconcileAction::Reset
-            ) {
+        let runtime_gate = if match &envelope.request {
+            ContainerExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+            ContainerExecutorRequest::Scale { replicas, .. } => *replicas > 0,
+            ContainerExecutorRequest::Restart { .. } => true,
+            ContainerExecutorRequest::Observe { .. }
+            | ContainerExecutorRequest::DeleteNamespace { .. } => false,
+        } && matches!(
+            envelope.fence.action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
             crate::runtime_admission::executor_authorization(
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),

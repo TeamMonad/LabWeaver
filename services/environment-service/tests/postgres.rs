@@ -1541,18 +1541,18 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         &unknown_storage.measurement,
         UsageMeasurement::Unknown { .. }
     ));
-    let storage_tail = deliveries
+    assert_eq!(unknown_storage.measured_until, delete_event_time);
+    let historical = deliveries
         .iter()
-        .find(|request| {
-            request.kind == ResourceUsageKind::Storage
-                && request.measured_from == unknown_storage.measured_until
-        })
-        .ok_or("unknown storage tail after rejected restart missing")?;
-    assert_eq!(storage_tail.measured_until, delete_event_time);
-    assert!(
+        .find(|request| request.source_event_id == source_event_id)
+        .ok_or("migrated historical delivery missing")?;
+    assert_eq!(historical, &decoded);
+    assert_eq!(
         deliveries
             .iter()
-            .all(|request| matches!(&request.measurement, UsageMeasurement::Unknown { .. }))
+            .filter(|request| matches!(&request.measurement, UsageMeasurement::Unknown { .. }))
+            .count(),
+        2
     );
     Ok(())
 }
@@ -2444,6 +2444,33 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         .create("kubevirt-replay-authority", &authority)
         .await?;
     let instance = executor_instance();
+    for action in [ReconcileAction::Start, ReconcileAction::Restart] {
+        let denied = FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(pool.clone()),
+            CountingKubeVirtExecutor {
+                calls: calls.clone(),
+                observed_at,
+            },
+            instance.clone(),
+        )
+        .execute(kubevirt_executor_envelope(
+            plan.clone(),
+            operation_id,
+            1,
+            1,
+            action,
+            deadline,
+        )?)
+        .await;
+        assert!(matches!(
+            denied,
+            Err(KubeVirtExecutorFenceError::RuntimeAdmission(
+                environment_service::RuntimeAdmissionError::Unavailable
+            ))
+        ));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
     for _ in 0..2 {
         FencedKubeVirtExecutor::new(
             PgKubeVirtExecutorFenceStore::new(pool.clone()),
@@ -2540,6 +2567,8 @@ fn kubevirt_executor_envelope(
 ) -> Result<KubeVirtExecutorRequestEnvelope, Box<dyn std::error::Error>> {
     let request = match action {
         ReconcileAction::Provision => KubeVirtExecutorRequest::Apply { plan },
+        ReconcileAction::Start => KubeVirtExecutorRequest::Start { plan },
+        ReconcileAction::Restart => KubeVirtExecutorRequest::Restart { plan },
         ReconcileAction::Cleanup => KubeVirtExecutorRequest::DeleteNamespace {
             plan: KubeVirtCleanupPlan {
                 environment_id: plan.environment_id,

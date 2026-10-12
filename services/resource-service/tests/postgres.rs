@@ -810,39 +810,79 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         stale_ack,
         Err(resource_service::store::ResourceStoreError::CapacityClaimStateConflict)
     ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET created_at=clock_timestamp() - interval '1 hour',
-             valid_until=clock_timestamp() - interval '1 minute'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
-    let expired_ack = store
-        .acknowledge_funded_task_resource(
-            task_run_id,
-            &contracts::http::AcknowledgeTaskResourceRequest {
-                expected_claim_revision: claimed.claim_revision,
-                expected_lease_revision: claimed.lease_revision,
-                execution_namespace: "labweaver-evaluation-runs".into(),
-            },
-            "synthetic-task-owner",
-            "trace-task-expired-ack",
+    // Expiry belongs to its own normally-created attempt: the funded source
+    // releases an expired approval permanently, so it must never be restored to
+    // admit the successful task below.
+    let expired_task_id = TaskRunId::new();
+    let mut expired_request = request.clone();
+    expired_request.id = ResourceRequestId::new();
+    expired_request.request_key = "task-expired-original".into();
+    expired_request.target = ResourceTarget::Task {
+        task_run_id: expired_task_id,
+    };
+    store
+        .create_task(
+            "expired-task-create",
+            &expired_request,
+            30_000,
+            "expired-task-create",
         )
-        .await;
+        .await?;
+    let mut expired_approval = approval.clone();
+    expired_approval.id = ResourceApprovalId::new();
+    expired_approval.request_id = expired_request.id;
+    let mut expired_allocation = allocation.clone();
+    expired_allocation.claim.id = CapacityClaimId::new();
+    expired_allocation.claim.request_id = expired_request.id;
+    expired_allocation.claim.approval_id = expired_approval.id;
+    expired_allocation.lease_id = LeaseId::new();
+    store
+        .approve(
+            "expired-task-approve",
+            expired_request.id,
+            &expired_approval,
+            &expired_allocation,
+            ApprovalPolicy {
+                min_duration_seconds: 60,
+                max_duration_seconds: 3600,
+            },
+            "expired-task-approve",
+        )
+        .await?;
+    let expired_claimed = store
+        .claim_task_resource(expired_task_id, "expired-task-claim")
+        .await?;
+    sqlx::query("UPDATE resource.resource_approvals SET created_at=clock_timestamp()-interval '1 hour',valid_until=clock_timestamp()-interval '1 minute' WHERE approval_id=$1")
+        .bind(expired_approval.id.as_uuid()).execute(&pool).await?;
     assert!(matches!(
-        expired_ack,
-        Err(resource_service::store::ResourceStoreError::ApprovalInvalid)
+        store
+            .acknowledge_funded_task_resource(
+                expired_task_id,
+                &contracts::http::AcknowledgeTaskResourceRequest {
+                    expected_claim_revision: expired_claimed.claim_revision,
+                    expected_lease_revision: expired_claimed.lease_revision,
+                    execution_namespace: "labweaver-evaluation-runs".into(),
+                },
+                "synthetic-task-owner",
+                "trace-task-expired-ack"
+            )
+            .await,
+        Err(ResourceStoreError::CapacityClaimStateConflict)
     ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET valid_until=clock_timestamp() + interval '1 hour'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
+    let expired = store.load_task_resource(expired_task_id).await?;
+    assert_eq!(expired.request.state, ResourceRequestState::Expired);
+    assert_eq!(
+        expired.claim.state,
+        contracts::resource::CapacityClaimState::Released
+    );
+    assert!(expired.cleanup_confirmed);
+    let expired_holds: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource.credit_holds WHERE request_id=$1")
+            .bind(expired_request.id.as_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(expired_holds, 0);
+
     let acknowledged = store
         .acknowledge_funded_task_resource(
             task_run_id,

@@ -1315,9 +1315,8 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         envelope: &KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
         let runtime_gate = if match &envelope.request {
-            KubeVirtExecutorRequest::Apply { plan }
-            | KubeVirtExecutorRequest::Start { plan }
-            | KubeVirtExecutorRequest::Restart { plan } => !plan.resources.is_empty(),
+            KubeVirtExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+            KubeVirtExecutorRequest::Start { .. } | KubeVirtExecutorRequest::Restart { .. } => true,
             _ => false,
         } && matches!(
             envelope.fence.action,
