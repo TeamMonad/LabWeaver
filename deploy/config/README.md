@@ -6,6 +6,9 @@ for validation, file references, derived inputs, recovery and the current scope.
 The archive includes a Control managed version. Its settings import uses the existing
 conditional administrator update. The Bundle also supplies the complete workload
 environment map. Helm reads that map without filling values from the legacy environment.
+First installs can prepare an unsaved zero-revision request with `settings-init`.
+The optional Resource profile uses the same archive and version lock, while keeping
+its existing renderer, independent Helm release, and unchanged capacity inputs.
 Do not edit the derived ConfigMap/Secret, Helm values or Ansible vars.
 
 The layout below is the existing object renderer's input contract. The encrypted

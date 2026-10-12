@@ -2,7 +2,9 @@
 
 use std::io::{Read, Write};
 
-use contracts::platform_configuration::PlatformConfigurationVersion;
+use contracts::platform_configuration::{
+    PlatformConfigurationDesired, PlatformConfigurationVersion, UpdatePlatformConfigurationRequest,
+};
 use persistence_sqlx::Sha256Digest;
 
 use crate::AppError;
@@ -34,15 +36,48 @@ pub fn validate(payload: &[u8]) -> Result<PlatformConfigurationVersion, AppError
     Ok(version)
 }
 
-pub fn run() -> Result<(), AppError> {
+pub fn validate_initial(payload: &[u8]) -> Result<UpdatePlatformConfigurationRequest, AppError> {
+    if payload.is_empty() || payload.len() as u64 > MAX_BYTES {
+        return Err(invalid("LW_BUNDLE_CONFIGURATION_LIMIT"));
+    }
+    let request: UpdatePlatformConfigurationRequest = contracts::parse_strict_json(payload)
+        .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_INVALID"))?;
+    if request.expected_revision != 0 {
+        return Err(invalid("LW_BUNDLE_INITIAL_REVISION_INVALID"));
+    }
+    request
+        .configuration
+        .validate()
+        .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_INVALID"))?;
+    Ok(request)
+}
+
+pub fn run(initial: bool, defaults: bool) -> Result<(), AppError> {
     let mut payload = Vec::new();
-    std::io::stdin()
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut payload)
-        .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_IO_FAILED"))?;
-    let version = validate(&payload)?;
+    if !defaults {
+        std::io::stdin()
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut payload)
+            .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_IO_FAILED"))?;
+    }
+    let document = if initial || defaults {
+        let request = if defaults {
+            UpdatePlatformConfigurationRequest {
+                expected_revision: 0,
+                configuration: PlatformConfigurationDesired::default(),
+            }
+        } else {
+            validate_initial(&payload)?
+        };
+        let digest = Sha256Digest::of_canonical(&request.configuration)
+            .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_INVALID"))?;
+        serde_json::json!({"request":request, "configurationSha256":digest.to_string()})
+    } else {
+        serde_json::to_value(validate(&payload)?)
+            .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_INVALID"))?
+    };
     let mut output = std::io::stdout().lock();
-    serde_json::to_writer(&mut output, &version)
+    serde_json::to_writer(&mut output, &document)
         .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_IO_FAILED"))?;
     output
         .write_all(b"\n")
@@ -105,5 +140,27 @@ mod tests {
         assert!(validate(&serde_json::to_vec(&value).unwrap()).is_err());
         assert!(validate(br#"{"revision":1,"revision":2}"#).is_err());
         assert!(validate(&vec![b' '; MAX_BYTES as usize + 1]).is_err());
+    }
+
+    #[test]
+    fn first_install_uses_only_an_unsaved_zero_revision_request() {
+        let request = UpdatePlatformConfigurationRequest {
+            expected_revision: 0,
+            configuration: PlatformConfigurationDesired::default(),
+        };
+        let payload = serde_json::to_vec(&request).unwrap();
+        assert_eq!(validate_initial(&payload).unwrap(), request);
+        let mut wrong = serde_json::to_value(&request).unwrap();
+        wrong["expectedRevision"] = json!(1);
+        assert_eq!(
+            validate_initial(&serde_json::to_vec(&wrong).unwrap())
+                .unwrap_err()
+                .diagnostic_code(),
+            "LW_BUNDLE_INITIAL_REVISION_INVALID"
+        );
+        wrong["expectedRevision"] = json!(0);
+        wrong["applied"] = json!({"revision":1});
+        assert!(validate_initial(&serde_json::to_vec(&wrong).unwrap()).is_err());
+        assert!(validate_initial(&serde_json::to_vec(&version()).unwrap()).is_err());
     }
 }
