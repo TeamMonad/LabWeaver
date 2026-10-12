@@ -1476,13 +1476,23 @@ fn utc_timestamp(value: OffsetDateTime) -> Result<UtcTimestamp, ApiError> {
 }
 
 fn cookie_session_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
-    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
-    cookie.split(';').find_map(|part| {
-        let (name, value) = part.trim().split_once('=')?;
-        (name == state.deployment.browser.session_cookie_name)
-            .then(|| Uuid::parse_str(value).ok())
-            .flatten()
-    })
+    let mut session_id = None;
+    // HTTP/2 can split cookie pairs across fields. Never choose a principal
+    // from only the first field or from ambiguous duplicate session cookies.
+    for cookie in headers.get_all(header::COOKIE) {
+        for part in cookie.to_str().ok()?.split(';') {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if name == state.deployment.browser.session_cookie_name {
+                if session_id.is_some() {
+                    return None;
+                }
+                session_id = Some(Uuid::parse_str(value).ok()?);
+            }
+        }
+    }
+    session_id
 }
 
 fn session_cookie(
