@@ -22,6 +22,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         };
     }
     document!(
+        "schemas/contracts/v1/runtime-authorization-binding.schema.json",
+        crate::runtime_authorization::RuntimeAuthorizationBinding
+    );
+    document!(
         "schemas/contracts/v1/problem-package.schema.json",
         crate::authoring::ProblemPackage
     );
@@ -1902,6 +1906,12 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "getResourceRuntimeAuthorization" => contract_ref("runtime-authorization-binding"),
+        "createProjectMembershipInvitation"
+        | "createCourseMembershipInvitation"
+        | "getMembershipInvitation"
+        | "acceptMembershipInvitation"
+        | "revokeMembershipInvitation" => contract_ref("membership-invitation"),
         "getPlatformConfiguration"
         | "updatePlatformConfiguration"
         | "applyPlatformConfiguration"

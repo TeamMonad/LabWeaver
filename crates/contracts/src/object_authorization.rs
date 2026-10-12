@@ -106,7 +106,8 @@ pub struct AvailableObjectActions {
 pub fn project_operation_action(operation: &str) -> Option<ObjectAction> {
     use ObjectAction::{Browse, ConfigureAgent, Edit, ManageMembers, ViewCosts};
     match operation {
-        "listEnvironments"
+        "getResourceRuntimeAuthorization"
+        | "listEnvironments"
         | "getProject"
         | "streamProjectEvents"
         | "listProjectMemberships"

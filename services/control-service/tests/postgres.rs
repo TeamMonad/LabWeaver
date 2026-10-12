@@ -51,6 +51,8 @@ use uuid::Uuid;
 
 #[path = "cases/membership_governance.rs"]
 mod membership_governance_cases;
+#[path = "cases/runtime_authorization.rs"]
+mod runtime_authorization_cases;
 mod support;
 use support::apply_domain_migrations;
 
@@ -1422,11 +1424,15 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         reason: "teacher approved the complete package".to_owned(),
     };
     let approval_key = IdempotencyKey::parse("authoring-approval-complete")?;
+    runtime_authorization_cases::assert_assistant_cannot_approve(
+        &service, &pool, project_id, &request, now,
+    )
+    .await?;
     let approval = service
         .complete_authoring_approval(
             project_id,
             &request,
-            owner,
+            &verified_teacher_fixture(&pool, owner, course_id, now).await?,
             &approval_key,
             now,
             "trace-authoring-approval",
@@ -1454,7 +1460,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         .complete_authoring_approval(
             project_id,
             &request,
-            owner,
+            &verified_teacher_fixture(&pool, owner, course_id, now).await?,
             &approval_key,
             now,
             "trace-authoring-approval",
@@ -1469,7 +1475,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             .complete_authoring_approval(
                 project_id,
                 &changed_request,
-                owner,
+                &verified_teacher_fixture(&pool, owner, course_id, now).await?,
                 &approval_key,
                 now,
                 "trace-authoring-approval",
@@ -1567,6 +1573,17 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         "system-facts evaluations must not project a workspace submission manifest"
     );
 
+    Box::pin(
+        runtime_authorization_cases::assert_bindings_after_publication(
+            &pool,
+            &service,
+            &approval,
+            &environment,
+            &environment_release,
+            now,
+        ),
+    )
+    .await?;
     let ready_query = AuthoringPublicationAdmissionQuery {
         evaluation_release_id: evaluation_release.id,
         ..admission_query
@@ -1794,7 +1811,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
         .complete_authoring_approval(
             project_id,
             &request,
-            owner,
+            &verified_teacher_fixture(&pool, owner, course_id, now).await?,
             &IdempotencyKey::parse("vm-base-accept")?,
             now,
             "trace-vm-base-accept",
@@ -1837,7 +1854,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
                     .complete_authoring_approval(
                         project_id,
                         &request,
-                        owner,
+                        &verified_teacher_fixture(&pool, owner, course_id, now).await?,
                         &IdempotencyKey::parse(&format!("vm-base-reject-{index}"))?,
                         now,
                         "trace-vm-base-reject",
@@ -1862,7 +1879,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
             .complete_authoring_approval(
                 project_id,
                 &unknown_id,
-                owner,
+                &verified_teacher_fixture(&pool, owner, course_id, now).await?,
                 &IdempotencyKey::parse("vm-base-reject-identity")?,
                 now,
                 "trace-vm-base-reject",
@@ -2086,7 +2103,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
             .complete_authoring_approval(
                 project_id,
                 &missing_runner,
-                owner,
+                &verified_teacher_fixture(&pool, owner, course_id, now).await?,
                 &IdempotencyKey::parse("runner-approval-missing")?,
                 now,
                 "trace-runner-approval-missing",
@@ -2106,7 +2123,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
             .complete_authoring_approval(
                 project_id,
                 &mismatched_runner,
-                owner,
+                &verified_teacher_fixture(&pool, owner, course_id, now).await?,
                 &IdempotencyKey::parse("runner-approval-mismatch")?,
                 now,
                 "trace-runner-approval-mismatch",
@@ -2120,7 +2137,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
         .complete_authoring_approval(
             project_id,
             &request,
-            owner,
+            &verified_teacher_fixture(&pool, owner, course_id, now).await?,
             &IdempotencyKey::parse("runner-approval")?,
             now,
             "trace-runner-approval",
@@ -2196,6 +2213,7 @@ async fn authoring_publication_failure_is_durable_and_not_admissible()
     let course_id = CourseId::new();
     let actor_id = ActorId::new();
     let approval = AuthoringApproval {
+        teacher_scope: None,
         id: ApprovalId::new(),
         project_id,
         course_id: Some(course_id),
@@ -4238,4 +4256,19 @@ async fn object_actions_use_control_truth_and_revoke_real_idle_sse()
     logout_server.abort();
     server.abort();
     Ok(())
+}
+
+// Synthetic verified identity and its real Control instructor fact for approval fixtures.
+async fn verified_teacher_fixture(
+    pool: &sqlx::PgPool,
+    actor_id: ActorId,
+    course_id: CourseId,
+    now: UtcTimestamp,
+) -> Result<contracts::AuthenticatedActor, Box<dyn std::error::Error>> {
+    sqlx::query("INSERT INTO control.course_memberships (course_id,actor_id,role,object_role,state,revision) VALUES ($1,$2,'teacher','instructor','active',1) ON CONFLICT (course_id,actor_id) DO NOTHING").bind(course_id.as_uuid()).bind(actor_id.as_uuid()).execute(pool).await?;
+    Ok(contracts::AuthenticatedActor {
+        actor_id,
+        roles: vec![contracts::PlatformRole::Teacher],
+        expires_at: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
+    })
 }

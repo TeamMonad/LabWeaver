@@ -18,7 +18,7 @@ Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、A
 
 ## 课程职责与邀请
 
-Control 保存课程的 `objectRole`。`instructor` 可管理该课程的成员和邀请。`teaching_assistant` 可浏览该课程名单。`participant` 不能浏览名单。新职责不改变 OIDC 角色，也不扩大既有教学内容权限。最终批准入口的教师范围接线仍须验证，不能仅凭职责字段声称叠加身份已被拒绝。
+Control 保存课程的 `objectRole`。`instructor` 可管理该课程的成员和邀请。`teaching_assistant` 可浏览该课程名单。`participant` 不能浏览名单。新职责不改变 OIDC 角色，也不扩大既有教学内容权限。完整实验批准还要求操作者具有已验证的 Teacher 身份及该课程当前有效的 instructor 成员记录。助教即使同时具有 Teacher、Student 或 PlatformAdmin 身份也不能替代该课程教师。无课程候选仍要求已验证的 Teacher 身份。
 
 1. 用精确校园用户名创建项目或课程成员邀请。
 2. 指定 `expiresAt`，明确接受截止时间。
@@ -66,11 +66,27 @@ Access 在目录解析前检查管理权限。Control 再检查目标本人、�
 
 ## 数据库切换
 
-Control 的 `0016_object_authorization.sql` 建立唯一成员表。`0017_membership_governance.sql` 保存课程职责和成员邀请。每个账号在同一课程只保存一条成员事实。旧重复角色记录会阻止迁移，不能静默丢弃。Control `0014` 属于材料上传，`0015` 属于平台配置。组合 catalog 时保留三个有序条目。
+Control 的 `0016_object_authorization.sql` 建立唯一成员表。`0017_membership_governance.sql` 保存课程职责和成员邀请。每个账号在同一课程只保存一条成员事实。旧重复角色记录会阻止迁移，不能静默丢弃。Control `0014` 属于材料上传，`0015` 属于平台配置，`0019` 提供现有配置、发布和批准的只读投影。组合 catalog 时保留全部有序条目。
 
-本次使用 Sprint5 已确认的无旧接口兼容规则。Access 旧成员表的创建和写入路径已移除。Access `0006` 只提供当前会话 hash、actor 和期限。Access `0007` 将 Control 的账号读取限定为 actor_id、username、display_name 和 disabled_at。Control 无法通过这些读取获取原始会话 Cookie、加密 CSRF、Token、sid 或 issuer subject。非空旧数据库的 catalog 身份不匹配时必须停止。普通应用启动不能清空、复制或静默修复旧成员数据。
+本次使用 Sprint5 已确认的无旧接口兼容规则。Access 旧成员表的创建和写入路径已移除。Access `0006` 只提供当前会话 hash、actor、期限和已验证的平台角色。Access `0007` 将 Control 的账号读取限定为 actor_id、username、display_name 和 disabled_at。Resource 仅获得账号状态列、当前会话安全投影及 Control 授权投影的读取权限。Control 和 Resource 无法通过这些读取获取原始会话 Cookie、加密 CSRF、Token、sid 或 issuer subject。非空旧数据库的 catalog 身份不匹配时必须停止。普通应用启动不能清空、复制或静默修复旧成员数据。
 
 当前验证使用新建的合成 PostgreSQL。生产切换需要维护者批准的操作窗口。本代码变更没有执行生产迁移、数据清空或真实账号授权。
+
+## 运行准入与批准绑定
+
+平台运行策略使用 #203 的唯一配置类型。仅 `appliedState=verified` 且存在 applied 快照时允许新准入。保存 desired 草稿不改变有效策略。开始应用后状态变为 unverified，历史 applied 快照不能证明当前外部状态。创建、启动、重启、重置和重试入口在 Access 检查该状态。不确定应用时仍允许停止和恢复入口，不自动停止现有实例。
+
+Control 在现有完整 `AuthoringApproval` 中保存实际课程教师及其成员 revision。批准同时绑定实验包、环境、评测候选的精确 revision 与镜像产物。发布继承这份批准，不另建发布批准。Resource 按真实 release ID 和版本读取 Control 保存的 `EnvironmentSpec`，重新计算规范化 SHA-256；请求方不能提交替代哈希。候选的 `policyRevision` 属于 LLM 策略，不能代替平台运行配置版本。
+
+Resource 在现有 `ResourceApproval` 内保存 `runtimeAuthorization`。它绑定请求 ID、代次、付款项目、实际课程、目标 release、配置身份、运行权限及已验证 applied 的 revision 和哈希。审批事务在写入 claim、lease 和 Outbox 前重新检查。幂等摘要包含这份绑定。商业审批没有该字段时不授予运行权限。
+
+项目预授权只匹配相同项目。课程预授权只适用于该课程已获完整教师批准的 Experiment。付款项目仍检查请求者的当前项目动作，课程仍检查当前成员。无关课程、任务或他人的 Work 不能借用这份批准。平台允许清单始终是上限，教师批准不能扩大它。
+
+当前 `EnvironmentSpec` 只声明 NonRootRequired 和禁止提权。运行授权因此只包含空 capabilities 和非特权基线；不会把预授权清单的最大权限复制给实例。#207 扩展同一安全声明并接入执行消费者后，需更新本模块的穷尽投影。额外 capabilities、privileged 执行和超范围审批尚不能据此开放。
+
+`GET /api/v1/resource-requests/{requestId}/runtime-authorization` 通过现有 Access 服务鉴权及用户范围返回当前有效绑定，使用 `Cache-Control: no-store`。它重新读取当前请求、未过期的原 ResourceApproval、当前成员、Control 配置和已验证策略。请求换代、配置换版、发布撤回或范围失效会拒绝读取。已验证 applied 版本变更使旧绑定返回 `LW_RUNTIME_POLICY_CHANGED`，需要按新版本重新判定。desired 草稿不使旧绑定失效。响应不能替代 #207 在实际创建和实例换代时的检查。
+
+未验证策略或授权输入不可用返回 503。无实际教师批准、成员范围不符或超出平台允许范围返回 403。旧绑定或配置不匹配返回 409。停止与恢复仍检查对象动作；恢复过程若创建新实例，#207 必须重新检查新准入。
 
 ## 交付边界
 

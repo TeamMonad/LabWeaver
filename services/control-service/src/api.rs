@@ -1516,7 +1516,7 @@ async fn complete_project_authoring_approval(
         .complete_authoring_approval(
             project_id,
             &request,
-            decision.actor.actor_id,
+            &decision.actor,
             &idempotency(&headers)?,
             now()?,
             &trace_id(&headers),
@@ -2829,7 +2829,8 @@ impl From<ControlError> for ApiError {
             ControlError::InvitationExpired
             | ControlError::SseCursorExpired
             | ControlError::PlatformImageUploadExpired => StatusCode::GONE,
-            ControlError::InvitationDenied
+            ControlError::TeacherApprovalDenied
+            | ControlError::InvitationDenied
             | ControlError::CourseGovernanceDenied
             | ControlError::CourseMismatch
             | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,

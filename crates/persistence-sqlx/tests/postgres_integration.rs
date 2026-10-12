@@ -213,6 +213,27 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         "Control does not gain access to session secrets or raw bearer cookies"
     );
     assert!(sqlx::query_scalar::<_, bool>("SELECT has_table_privilege('lw_control_runtime','access.current_authorization_sessions','SELECT')").fetch_one(access).await?);
+    let resource = &runtime_pools[&Domain::Resource];
+    for query in [
+        "SELECT actor_id,disabled_at FROM access.actors",
+        "SELECT platform_roles,expires_at FROM access.current_authorization_sessions",
+        "SELECT contract FROM control.runtime_authorization_policy",
+        "SELECT release_contract,candidate_contract FROM control.runtime_authorization_configurations",
+    ] {
+        sqlx::query(query).fetch_all(resource).await?;
+    }
+    for query in [
+        "SELECT username,issuer,subject_sha256 FROM access.actors",
+        "SELECT * FROM access.bff_sessions",
+        "UPDATE control.project_memberships SET object_role='owner'",
+        "UPDATE control.platform_configuration_state SET contract='{}'::jsonb",
+        "UPDATE control.runtime_authorization_policy SET contract='{}'::jsonb",
+    ] {
+        assert!(
+            sqlx::query(query).execute(resource).await.is_err(),
+            "Resource runtime must not acquire identity secrets or Control write authority: {query}"
+        );
+    }
     let memberships = load_membership_snapshot(access, local_actor.actor_id).await?;
     assert_eq!(memberships.course_memberships.len(), 1);
     assert_eq!(memberships.project_memberships.len(), 1);

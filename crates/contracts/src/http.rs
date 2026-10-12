@@ -2425,6 +2425,47 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         PLATFORM_ADMIN,
         Global
+        Service
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-requests/{requestId}/runtime-authorization",
+        "getResourceRuntimeAuthorization",
+        "runtime_authorization:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/member-invitations",
+        "listProjectMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/member-invitations",
+        "listCourseMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
         ALL_ROLES,
         Course
     ),

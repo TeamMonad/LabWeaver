@@ -23,6 +23,7 @@ pub mod credits;
 pub mod messaging;
 pub mod outbox;
 pub mod process;
+pub mod runtime_authorization;
 pub mod store;
 
 pub use process::{ResourceProcessRuntime, ResourceProcessRuntimeError};
@@ -567,6 +568,7 @@ mod tests {
 
     fn approval(request_id: ResourceRequestId, resources: WorkloadResources) -> ResourceApproval {
         ResourceApproval {
+            runtime_authorization: None,
             id: ResourceApprovalId::new(),
             request_id,
             request_revision: Revision::new(1).unwrap_or_else(|_| unreachable!()),

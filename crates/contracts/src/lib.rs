@@ -32,6 +32,7 @@ pub mod membership_governance;
 pub mod object_authorization;
 pub mod project;
 pub mod resource;
+pub mod runtime_authorization;
 pub mod schema;
 pub mod submission;
 pub mod supply_chain;

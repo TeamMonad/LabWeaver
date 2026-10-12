@@ -269,6 +269,9 @@ impl ResourceRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceApproval {
+    /// Server-derived runtime identity and applied policy binding. Capacity approval alone is insufficient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<crate::runtime_authorization::RuntimeAuthorizationBinding>,
     pub id: ResourceApprovalId,
     pub request_id: ResourceRequestId,
     pub request_revision: Revision,
