@@ -1,6 +1,7 @@
 //! Real Keycloak, HTTPS cookie stores, and `PostgreSQL` through the production BFF router.
 
 use std::time::Duration as StdDuration;
+use std::{path::Path, process::Stdio};
 
 use scraper::{Html, Selector};
 use testcontainers::{
@@ -9,6 +10,63 @@ use testcontainers::{
 };
 
 use super::*;
+
+#[tokio::test]
+#[ignore = "requires installed Playwright Chromium, Node, Docker, real Keycloak and PostgreSQL"]
+async fn chromium_oidc_navigation_enforces_browser_binding_and_session_lifecycle()
+-> Result<(), Box<dyn Error>> {
+    let fixture = real_oidc_fixture("localhost").await?;
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/oidc_browser.mjs");
+    let mut child = tokio::process::Command::new("node")
+        .arg(script)
+        .arg(&fixture.base)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(child.stdout.take().ok_or("missing browser stdout")?).lines();
+    let mut completed = false;
+    while let Some(line) = lines.next_line().await? {
+        let message: Value = serde_json::from_str(&line)?;
+        match message["op"].as_str() {
+            Some("expire") => {
+                let hash = message["stateSha256"]
+                    .as_str()
+                    .ok_or("missing state hash")?;
+                assert!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+                let updated = sqlx::query("UPDATE access.oidc_transactions SET created_at=now()-interval '10 minutes',expires_at=now()-interval '1 second' WHERE state_sha256=$1 AND consumed_at IS NULL")
+                    .bind(hash).execute(&fixture.app.pool).await?.rows_affected();
+                assert_eq!(updated, 1);
+                child
+                    .stdin
+                    .as_mut()
+                    .ok_or("missing browser stdin")?
+                    .write_all(b"{\"ok\":true}\n")
+                    .await?;
+            }
+            Some("complete") => {
+                completed = true;
+                println!("Chromium OIDC navigation passed: {message}");
+            }
+            _ => return Err("unexpected browser probe message".into()),
+        }
+    }
+    assert!(child.wait().await?.success(), "Chromium OIDC probe failed");
+    assert!(completed, "browser probe never completed its assertions");
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM access.bff_sessions")
+        .fetch_one(&fixture.app.pool)
+        .await?;
+    assert_eq!(sessions, 2, "wrong browser or replay created a session");
+    let transactions: i64 = sqlx::query_scalar("SELECT count(*) FROM access.oidc_transactions")
+        .fetch_one(&fixture.app.pool)
+        .await?;
+    assert_eq!(
+        transactions, 3,
+        "invalid return target created a transaction"
+    );
+    Ok(())
+}
 
 async fn provider_callback(
     client: &reqwest::Client,
@@ -73,18 +131,33 @@ fn browser_client(ca: &str, provider_ca: &str) -> Result<reqwest::Client, reqwes
         .build()
 }
 
-#[tokio::test]
-#[ignore = "starts disposable real Keycloak and PostgreSQL; run explicitly for OIDC integration"]
+struct OidcFixture {
+    _tasks: Tasks,
+    app: Arc<AppState>,
+    base: String,
+    callback_uri: String,
+    portal_ca: String,
+    provider_ca: String,
+    _keycloak: testcontainers::ContainerAsync<GenericImage>,
+    _postgres: testcontainers::ContainerAsync<Postgres>,
+}
+
+async fn navigation_destination() -> axum::response::Html<&'static str> {
+    axum::response::Html(
+        "<!doctype html><html lang=\"en\"><head><title>OIDC navigation probe</title></head><body><main><h1>OIDC navigation probe</h1><p>This test landing page contains no product UI or business state.</p></main></body></html>",
+    )
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "one real OIDC journey protects browser binding and session lifecycle"
+    reason = "reuse real OIDC infrastructure for protocol and browser engine tests"
 )]
-async fn real_keycloak_binds_two_browsers_and_preserves_tabs_replay_expiry_and_logout()
--> Result<(), Box<dyn Error>> {
+async fn real_oidc_fixture(portal_host: &str) -> Result<OidcFixture, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let base = format!("https://{}", listener.local_addr()?);
+    let base = format!("https://{portal_host}:{}", listener.local_addr()?.port());
     let callback_uri = format!("{base}/auth/callback");
-    let browser_tls = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])?;
+    let browser_tls =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned(), "localhost".to_owned()])?;
     let portal_ca = browser_tls.cert.pem();
     let browser_server = http_transport::server_config(
         portal_ca.as_bytes(),
@@ -174,10 +247,44 @@ async fn real_keycloak_binds_two_browsers_and_preserves_tabs_replay_expiry_and_l
         .await?,
     );
     let app = Arc::new(app);
-    let router = browser_router(app.clone());
+    let router = browser_router(app.clone())
+        .route("/", get(navigation_destination))
+        .route("/oidc-probe", get(navigation_destination))
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }));
     tasks.0.push(tokio::spawn(async move {
         let _ = http_transport::serve_tls(listener, router, browser_server).await;
     }));
+    Ok(OidcFixture {
+        _tasks: tasks,
+        app,
+        base,
+        callback_uri,
+        portal_ca,
+        provider_ca,
+        _keycloak: keycloak,
+        _postgres: postgres,
+    })
+}
+
+#[tokio::test]
+#[ignore = "starts disposable real Keycloak and PostgreSQL; run explicitly for OIDC integration"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real OIDC journey protects browser binding and session lifecycle"
+)]
+async fn real_keycloak_binds_two_browsers_and_preserves_tabs_replay_expiry_and_logout()
+-> Result<(), Box<dyn Error>> {
+    let fixture = real_oidc_fixture("127.0.0.1").await?;
+    let OidcFixture {
+        app,
+        base,
+        callback_uri,
+        portal_ca,
+        provider_ca,
+        _tasks,
+        _keycloak,
+        _postgres,
+    } = fixture;
     let browser_a = browser_client(&portal_ca, &provider_ca)?;
     let browser_b = browser_client(&portal_ca, &provider_ca)?;
     let mut callbacks = Vec::new();
