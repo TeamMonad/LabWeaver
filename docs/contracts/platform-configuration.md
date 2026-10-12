@@ -135,4 +135,14 @@ Grok 可将版本 API 的完整 JSON 交给获准导出操作。归档选择使�
 
 首装可用 Bundle 的 `settings-init` 准备未保存配置。它复用本接口的初始模板与完整请求，expectedRevision 为0，不制造作者或配置历史。真实管理员首次提交后，Control 才创建 desired 版本。已有配置时必须比较当前值，不能把首装流程用于覆盖或重置。
 
-尚未完成的范围：管理界面与真实后端浏览器验证、旧PKI/NATS签发workspace及远端locator归并、实际部署观察器、默认值消费者，以及 #207 运行授权与执行边界。#203 保持开放。
+## 本地浏览器集成验证
+
+仓库提供生成 SDK 到真实 Control HTTP 路由和临时 PostgreSQL 的目标测试。它使用现有签名服务鉴权 fixture，仅在外部 issuer 和 Access 授权决策边界使用合成依赖。浏览器上传实际 age 密文 `File`，检查摘要、版本冲突、幂等回放、权限拒绝、应用请求及失败历史。测试不执行部署，不覆盖 Access 会话/CSRF 或管理员页面。
+
+1. 安装 Rust、Node 22、Web 的锁定依赖、age 1.3.2 和可用的 Docker。
+2. 在 `web` 目录运行 `pnpm exec playwright install chromium`。已有 Chromium 时，可通过 `LABWEAVER_TEST_CHROMIUM` 指定可执行文件。
+3. 在仓库根目录运行 `cargo test -p control-service --test platform_configuration browser_sdk_registers_real_ciphertext_and_reads_durable_failure --locked -- --ignored --exact --test-threads=1`。
+
+测试在 loopback 随机端口启动 Control 与 Vite，不连接共享集群。临时目录保存合成身份、密文和浏览器输入，并在测试结束时清理。测试只回报有界诊断，不输出 Token、私钥或请求正文。Playwright CI 单独运行此目标；普通 Rust 测试将其标为 ignored，不能将 ignored 计作通过。
+
+尚未完成的范围：管理员页面与真实 Access/Control 的浏览器验证、旧PKI/NATS签发workspace及远端locator归并、实际部署观察器、默认值消费者，以及 #207 运行授权与执行边界。#203 保持开放。
