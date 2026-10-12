@@ -77,7 +77,21 @@ impl OwnerResolver {
                 EnvironmentStoreError::EnvironmentNotFound => OwnerResolverError::ScopeMismatch,
                 other => OwnerResolverError::Unavailable(other),
             })?;
-        authorize_endpoint_eligibility(&instance, request, authority_now)
+        let mut eligibility = authorize_endpoint_eligibility(&instance, request, authority_now)?;
+        if instance.runtime_kind == RuntimeKind::Container {
+            let placement = crate::ContainerPlacement::load(
+                &self.store.pool(),
+                instance.id,
+                instance.project_id,
+            )
+            .await
+            .map_err(|_| OwnerResolverError::EnvironmentUnavailable)?;
+            eligibility.runtime_target = Some(contracts::environment::ContainerServiceTarget {
+                namespace: placement.namespace.clone(),
+                service_name: placement.resource_name("runtime"),
+            });
+        }
+        Ok(eligibility)
     }
 
     pub async fn resolve_console_eligibility(
@@ -181,6 +195,7 @@ fn authorize_console_instance(
     }
     if instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.observed_generation != instance.generation
         || instance
             .eligibility_expires_at
             .is_some_and(|deadline| deadline <= now)
@@ -207,6 +222,7 @@ pub fn authorize_owner_resolution(
     }
     if instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.observed_generation != instance.generation
         || instance
             .eligibility_expires_at
             .is_some_and(|deadline| deadline <= now)
@@ -254,6 +270,7 @@ pub fn authorize_endpoint_eligibility(
     }
     if instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.observed_generation != instance.generation
         || instance
             .eligibility_expires_at
             .is_some_and(|deadline| deadline <= now)
@@ -283,6 +300,7 @@ pub fn authorize_endpoint_eligibility(
         eligibility_expires_at: instance.eligibility_expires_at,
         lease_fence: resource_lease_fence(instance, now),
         endpoints,
+        runtime_target: None,
     })
 }
 

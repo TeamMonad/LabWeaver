@@ -10,6 +10,7 @@ extern crate self as environment_service;
 
 mod api;
 mod cdi_import;
+mod container_placement;
 mod container_provider;
 mod freeze_binding;
 mod kubevirt_console_executor;
@@ -36,6 +37,9 @@ pub use api::{EnvironmentApiState, environment_api_router, with_service_auth};
 pub use cdi_import::{
     BASE_DISK_IMPORT_TIMEOUT, BaseDiskRef, CdiImportClient, CdiImportError, KubeVirtBaseDiskImport,
     KubernetesCdiImportClient, ensure_base_disk,
+};
+pub use container_placement::{
+    ContainerNamespaceProfile, ContainerPlacement, ContainerPlacementError,
 };
 pub use container_provider::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,

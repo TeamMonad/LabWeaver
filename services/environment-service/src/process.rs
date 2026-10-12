@@ -113,7 +113,7 @@ impl EnvironmentProcessRuntime {
             );
             EnvironmentProcessRuntimeError::WorkAdmission
         })?;
-        let work_backend = KubernetesWorkExecutionBackend::from_default()
+        let work_backend = KubernetesWorkExecutionBackend::from_default(pool.clone())
             .await
             .map_err(|error| {
                 tracing::error!(
@@ -218,6 +218,10 @@ impl EnvironmentProcessRuntime {
                                 .as_deref()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                         )?,
+                    )?
+                    .with_namespace_profile(
+                        crate::ContainerNamespaceProfile::from_env()
+                            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
                     )?;
                     registry.register(Arc::new(provider))?;
                 }

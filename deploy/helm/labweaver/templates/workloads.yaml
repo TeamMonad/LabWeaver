@@ -33,6 +33,10 @@
 {{- end }}
 {{- $input = dict "env" $env "secretEnv" $secretEnv }}
 {{- end }}
+{{- $containerPlacement := and (or (eq $name "environment-service") (eq $name "container-executor")) (not (empty $root.Values.containerPlacementProfileConfigMap)) }}
+{{- if and $containerPlacement (hasKey (default dict $input.env) "LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE") }}
+{{- fail "containerPlacementProfileConfigMap owns LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE; remove the workload override" }}
+{{- end }}
 {{- $imageKey := required (printf "workloads.%s.imageKey is required" $name) $configuration.imageKey }}
 {{- $image := index $root.Values.images $imageKey }}
 ---
@@ -153,6 +157,10 @@ spec:
             - name: LABWEAVER_CONTROL_POD_UID
               valueFrom: {fieldRef: {fieldPath: metadata.uid}}
             {{- end }}
+            {{- if $containerPlacement }}
+            - name: LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE
+              value: /etc/labweaver/container-placement/profile.json
+            {{- end }}
             {{- if eq $name "kubevirt-executor" }}
             - name: LABWEAVER_EXECUTOR_POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
@@ -231,6 +239,9 @@ spec:
             {{- if $managedControl }}
             - {name: managed-runtime, mountPath: /run/labweaver/managed-configuration, readOnly: true}
             {{- end }}
+            {{- if $containerPlacement }}
+            - {name: container-placement, mountPath: /etc/labweaver/container-placement, readOnly: true}
+            {{- end }}
             {{- if $configuration.configMap }}
             - {name: config, mountPath: /etc/labweaver/config, readOnly: true}
             {{- end }}
@@ -270,6 +281,12 @@ spec:
               - {key: platform-configuration-source.json, path: platform-configuration-source.json}
         - name: managed-runtime
           emptyDir: {sizeLimit: 8Mi}
+        {{- end }}
+        {{- if $containerPlacement }}
+        - name: container-placement
+          configMap:
+            name: {{ $root.Values.containerPlacementProfileConfigMap | quote }}
+            items: [{key: profile.json, path: profile.json}]
         {{- end }}
         {{- if $configuration.configMap }}
         - name: config
