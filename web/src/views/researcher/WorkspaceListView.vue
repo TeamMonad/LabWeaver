@@ -209,7 +209,7 @@
             <div class="section-heading section-heading--compact">
               <div>
                 <h4 id="work-heading">Work 环境</h4>
-                <p>查看这个项目中的工作环境，或为项目申请新的 Work 资源。</p>
+                <p>查看这个项目中的工作环境，或手工选择模板新建 Work。</p>
               </div>
               <div class="section-actions">
                 <button
@@ -224,7 +224,7 @@
                 <RouterLink
                   v-if="selectedProject.state === 'active'"
                   class="filled-button small"
-                  :to="{ path: '/researcher/resources', query: { projectId: selectedProjectId } }"
+                  :to="{ path: '/researcher/environments', query: { projectId: selectedProjectId } }"
                 >
                   <SvgIcon name="add" size="sm" aria-hidden="true" />
                   新建 Work
@@ -232,11 +232,11 @@
               </div>
             </div>
             <AsyncStateView
+              v-if="workResources.requests.kind !== 'empty'"
               :state="workResources.requests"
               loading-text="加载项目环境资源申请…"
               @retry="workResources.load"
             >
-              <template #empty />
               <template #success>
                 <p
                   v-for="request in failedEnvironmentResourceRequests"

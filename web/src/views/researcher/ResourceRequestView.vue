@@ -75,11 +75,11 @@
               <option value="">选择用于绑定的版本</option>
               <option v-if="selectedReleaseKey && !selectedRelease" :value="selectedReleaseKey">先前选择的版本（当前不可用）</option>
               <option v-for="release in releaseOptions" :key="releaseKey(release.id, release.version)" :value="releaseKey(release.id, release.version)">
-                {{ release.label }} · {{ release.runtimeKind }}
+                {{ release.label }}
               </option>
             </select>
             <small v-if="releaseSelectionMessage" class="field-note">{{ releaseSelectionMessage }}</small>
-            <small v-else-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布版本。请联系课程教师发布模板，或先生成 Work 模板。</small>
+            <small v-else-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布模板。请联系课程教师或管理员发布模板；配置了项目 AI 设置时，也可以生成 Work 模板。</small>
             <div v-if="options.releases.kind === 'empty'" class="release-empty-next-step">
               <RouterLink v-if="canPublishEnvironmentTemplates" class="text-button" :to="{ path: '/teacher/materials', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">教师发布模板</RouterLink>
               <RouterLink class="text-button" :to="{ path: '/researcher/software', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">生成 Work 模板</RouterLink>
@@ -239,6 +239,11 @@ const courseIdRef = computed(() => selectedProject.value?.courseId ?? null)
 const options = useProjectResourceOptions(projectIdRef, courseIdRef)
 
 const selectedReleaseKey = ref('')
+const routeReleaseId = computed(() => typeof route.query.releaseId === 'string' ? route.query.releaseId.trim() : '')
+const routeReleaseVersion = computed(() => {
+  const value = typeof route.query.releaseVersion === 'string' ? Number(route.query.releaseVersion) : NaN
+  return Number.isSafeInteger(value) ? value : 0
+})
 const cpuMillicores = ref(2000)
 const memoryGiB = ref(4)
 const storageGiB = ref(20)
@@ -334,9 +339,13 @@ watch(selectedProjectId, (id) => {
 watch(
   () => releaseOptions.value,
   (items) => {
-    if (options.releases.kind === 'success' && !selectedReleaseKey.value && items.length > 0) {
-      selectedReleaseKey.value = releaseKey(items[0]?.id ?? '', items[0]?.version ?? 0)
-    }
+    if (options.releases.kind !== 'success' || selectedReleaseKey.value || items.length === 0) return
+    // A template chosen on the Work page arrives as releaseId + releaseVersion;
+    // it is honoured only when that exact version is still offered.
+    const wanted = releaseKey(routeReleaseId.value, routeReleaseVersion.value)
+    const preselected = wanted ? items.find((item) => releaseKey(item.id, item.version) === wanted) : undefined
+    const first = preselected ?? items[0]
+    selectedReleaseKey.value = releaseKey(first?.id ?? '', first?.version ?? 0)
   },
   { immediate: true },
 )
