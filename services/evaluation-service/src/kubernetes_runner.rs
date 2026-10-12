@@ -3809,6 +3809,31 @@ mod probe_recovery_tests {
         status.request.diagnostic_code = Some("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned());
         cluster.install_probe(&request, &status).await?;
         cluster.state.lock().await.resource_request = Some(serde_json::to_value(&status.request)?);
+        let progress = fixture
+            .store
+            .task_progress(
+                fixture.project_id,
+                fixture.run.actor_id,
+                fixture.run.id,
+                Some(&runner.resource),
+                &contracts::http::PageQuery {
+                    page: Some(1),
+                    page_size: Some(1),
+                },
+            )
+            .await?;
+        assert_eq!(
+            progress.current[0].progress.phase,
+            contracts::execution::TaskAttemptPhase::CleanupPending
+        );
+        assert_eq!(
+            progress.current[0].progress.task_run_id,
+            Some(lease.task_run_id)
+        );
+        assert_eq!(
+            progress.current[0].progress.diagnostic_code.as_deref(),
+            Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+        );
         let completion = runner.execute(context).await?;
         assert_eq!(completion.state, EvaluationStepRunState::Failed);
         assert_eq!(

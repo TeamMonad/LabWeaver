@@ -8,6 +8,8 @@ export type AgentLlmReviewQuery = AgentLlmReviewQuerySchema;
 
 export type AgentRunHistoryPage = AgentRunHistoryPageSchema;
 
+export type AgentRunTaskProgress = AgentRunTaskProgressSchema;
+
 export type AgentWorkExecutionIntentMetadata = AgentWorkExecutionIntentMetadataSchema;
 
 export type AgentWorkExecutionIntentQuery = AgentWorkExecutionIntentQuerySchema;
@@ -41,6 +43,8 @@ export type EnvironmentWorkConfigurationTargetQuery = EnvironmentWorkConfigurati
 export type EvaluationRelease = EvaluationReleaseSchema;
 
 export type EvaluationRun = EvaluationRunSchema;
+
+export type EvaluationRunTaskProgress = EvaluationRunTaskProgressSchema;
 
 export type GeneratedArtifactRecord = GeneratedArtifactRecordSchema;
 
@@ -118,6 +122,8 @@ export type ProblemDetails = {
 };
 
 export type StudentEvaluationResult = StudentEvaluationResultSchema;
+
+export type TaskAttemptProgress = TaskAttemptProgressSchema;
 
 export type WorkConfigurationAdmissionBinding = WorkConfigurationAdmissionBindingSchema;
 
@@ -348,6 +354,97 @@ export type RuntimeKind = 'container' | 'virtual_machine';
 export type AgentRunHistoryPageSchemaUtcTimestamp = string;
 
 /**
+ * AgentRunTaskProgress
+ *
+ * Agent-owned task read model with the current attempt separate from history.
+ */
+export type AgentRunTaskProgressSchema = {
+    current: Array<AgentTrackTaskProgress>;
+    hasMore: boolean;
+    history: Array<AgentTrackTaskProgress>;
+    page: number;
+    pageSize: number;
+    projectId: AgentRunTaskProgressSchemaProjectId;
+    revision: AgentRunTaskProgressSchemaRevision;
+    runId: AgentRunTaskProgressSchemaAgentRunId;
+    state: AgentRunTaskProgressSchemaAgentRunState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type AgentRunTaskProgressSchemaAgentRunId = string;
+
+/**
+ * Aggregate AgentRun state derived from both tracks.
+ */
+export type AgentRunTaskProgressSchemaAgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled';
+
+/**
+ * Independent Agent track.
+ */
+export type AgentTrackKind = 'environment' | 'evaluation' | 'work_configuration';
+
+/**
+ * An Agent track's business identity and its actual execution progress.
+ */
+export type AgentTrackTaskProgress = {
+    progress: AgentRunTaskProgressSchemaTaskAttemptProgress;
+    track: AgentTrackKind;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type AgentRunTaskProgressSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestId = string;
+
+/**
+ * Request lifecycle owned by Resource Service.
+ */
+export type ResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AgentRunTaskProgressSchemaRevision = number;
+
+/**
+ * Display phase derived from an owner's attempt and Resource facts.
+ * This projection has no independent transitions or persistent authority.
+ */
+export type TaskAttemptPhase = 'queued' | 'preparing' | 'waiting_resource_approval' | 'allocating' | 'executing' | 'awaiting_review' | 'cleanup_pending' | 'succeeded' | 'failed' | 'cancelled' | 'blocked';
+
+/**
+ * Payload-free read projection of one real attempt.
+ */
+export type AgentRunTaskProgressSchemaTaskAttemptProgress = {
+    /**
+     * Native attempt number. Evaluation uses zero until the step is first claimed.
+     */
+    attempt: number;
+    diagnosticCode?: string | null;
+    executionGeneration?: number | null;
+    /**
+     * Existing operation IDs appropriate to the phase, without granting authorization.
+     */
+    nextSteps: Array<string>;
+    phase: TaskAttemptPhase;
+    resourceRequestId?: ResourceRequestId | null;
+    resourceState?: ResourceRequestState | null;
+    taskRunId?: TaskRunId | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `TaskRunId`.
+ */
+export type TaskRunId = string;
+
+/**
  * AgentRun
  *
  * One idempotent, auditable dual-candidate Agent run.
@@ -433,13 +530,13 @@ export type AgentRunSchemaAgentRunState = 'requested' | 'running' | 'partially_s
 export type AgentTrack = {
     attempts: Array<AgentAttempt>;
     candidateId?: CandidateId | null;
-    kind: AgentTrackKind;
+    kind: AgentRunSchemaAgentTrackKind;
 };
 
 /**
  * Independent Agent track.
  */
-export type AgentTrackKind = 'environment' | 'evaluation' | 'work_configuration';
+export type AgentRunSchemaAgentTrackKind = 'environment' | 'evaluation' | 'work_configuration';
 
 /**
  * Strongly typed UUIDv7 identifier for `ArtifactId`.
@@ -1630,7 +1727,7 @@ export type EnvironmentLeaseAuthorization = {
      * The Resource request that owns this lease. Environment meters use this
      * identity when delivering usage back to Resource.
      */
-    resourceRequestId: ResourceRequestId;
+    resourceRequestId: EnvironmentInstanceSchemaResourceRequestId;
 };
 
 /**
@@ -1750,7 +1847,7 @@ export type EnvironmentInstanceSchemaReleaseId = string;
 /**
  * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
  */
-export type ResourceRequestId = string;
+export type EnvironmentInstanceSchemaResourceRequestId = string;
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -2275,6 +2372,97 @@ export type TestGroup = {
 export type EvaluationReleaseSchemaUtcTimestamp = string;
 
 /**
+ * EvaluationRunTaskProgress
+ *
+ * Read-only current attempts and bounded history. No grading inputs or scores are included.
+ */
+export type EvaluationRunTaskProgressSchema = {
+    current: Array<EvaluationStepTaskProgress>;
+    hasMore: boolean;
+    history: Array<EvaluationStepTaskProgress>;
+    page: number;
+    pageSize: number;
+    projectId: EvaluationRunTaskProgressSchemaProjectId;
+    revision: EvaluationRunTaskProgressSchemaRevision;
+    runId: EvaluationRunId;
+    state: EvaluationRunState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationRunId`.
+ */
+export type EvaluationRunId = string;
+
+/**
+ * Public run lifecycle.
+ */
+export type EvaluationRunState = 'queued' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.
+ */
+export type EvaluationStepRunId = string;
+
+/**
+ * A step identity and the progress of its real attempt, without private step contents.
+ */
+export type EvaluationStepTaskProgress = {
+    progress: EvaluationRunTaskProgressSchemaTaskAttemptProgress;
+    stepRunId: EvaluationStepRunId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type EvaluationRunTaskProgressSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type EvaluationRunTaskProgressSchemaResourceRequestId = string;
+
+/**
+ * Request lifecycle owned by Resource Service.
+ */
+export type EvaluationRunTaskProgressSchemaResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EvaluationRunTaskProgressSchemaRevision = number;
+
+/**
+ * Display phase derived from an owner's attempt and Resource facts.
+ * This projection has no independent transitions or persistent authority.
+ */
+export type EvaluationRunTaskProgressSchemaTaskAttemptPhase = 'queued' | 'preparing' | 'waiting_resource_approval' | 'allocating' | 'executing' | 'awaiting_review' | 'cleanup_pending' | 'succeeded' | 'failed' | 'cancelled' | 'blocked';
+
+/**
+ * Payload-free read projection of one real attempt.
+ */
+export type EvaluationRunTaskProgressSchemaTaskAttemptProgress = {
+    /**
+     * Native attempt number. Evaluation uses zero until the step is first claimed.
+     */
+    attempt: number;
+    diagnosticCode?: string | null;
+    executionGeneration?: number | null;
+    /**
+     * Existing operation IDs appropriate to the phase, without granting authorization.
+     */
+    nextSteps: Array<string>;
+    phase: EvaluationRunTaskProgressSchemaTaskAttemptPhase;
+    resourceRequestId?: EvaluationRunTaskProgressSchemaResourceRequestId | null;
+    resourceState?: EvaluationRunTaskProgressSchemaResourceRequestState | null;
+    taskRunId?: EvaluationRunTaskProgressSchemaTaskRunId | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `TaskRunId`.
+ */
+export type EvaluationRunTaskProgressSchemaTaskRunId = string;
+
+/**
  * EvaluationRun
  *
  * PostgreSQL-authoritative state for one evaluation run.
@@ -2289,7 +2477,7 @@ export type EvaluationRunSchema = {
     createdAt: EvaluationRunSchemaUtcTimestamp;
     diagnosticCode?: EvaluationRunSchemaDiagnosticCode | null;
     frozenSubmissionId: FrozenSubmissionId;
-    id: EvaluationRunId;
+    id: EvaluationRunSchemaEvaluationRunId;
     identity: EvaluationRunIdentity;
     maxScore: number;
     projectId: EvaluationRunSchemaProjectId;
@@ -2297,7 +2485,7 @@ export type EvaluationRunSchema = {
     releaseRevision: EvaluationRunSchemaRevision;
     revision: EvaluationRunSchemaRevision;
     schemaVersion: string;
-    state: EvaluationRunState;
+    state: EvaluationRunSchemaEvaluationRunState;
     steps: Array<EvaluationStepRun>;
     updatedAt: EvaluationRunSchemaUtcTimestamp;
 };
@@ -2328,7 +2516,7 @@ export type EvaluationRunSchemaEvaluationReleaseId = string;
 /**
  * Strongly typed UUIDv7 identifier for `EvaluationRunId`.
  */
-export type EvaluationRunId = string;
+export type EvaluationRunSchemaEvaluationRunId = string;
 
 /**
  * Immutable run identity joining release, frozen submission and trace evidence.
@@ -2341,7 +2529,7 @@ export type EvaluationRunIdentity = {
 /**
  * Public run lifecycle.
  */
-export type EvaluationRunState = 'queued' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
+export type EvaluationRunSchemaEvaluationRunState = 'queued' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
 
 /**
  * Immutable build and deployment identity that must match every run using the release.
@@ -2378,7 +2566,7 @@ export type EvaluationStepRun = {
     dependsOn: Array<string>;
     diagnosticCode?: EvaluationRunSchemaDiagnosticCode | null;
     failurePolicy: EvaluationStepFailurePolicy;
-    id: EvaluationStepRunId;
+    id: EvaluationRunSchemaEvaluationStepRunId;
     maxScore: number;
     position: number;
     /**
@@ -2389,7 +2577,7 @@ export type EvaluationStepRun = {
     review?: GoalReview | null;
     revision: EvaluationRunSchemaRevision;
     role: EvaluationStepRole;
-    runId: EvaluationRunId;
+    runId: EvaluationRunSchemaEvaluationRunId;
     startedAt?: EvaluationRunSchemaUtcTimestamp | null;
     state: EvaluationStepRunState;
     stepId: string;
@@ -2398,7 +2586,7 @@ export type EvaluationStepRun = {
 /**
  * Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.
  */
-export type EvaluationStepRunId = string;
+export type EvaluationRunSchemaEvaluationStepRunId = string;
 
 /**
  * Public step lifecycle.
@@ -3787,13 +3975,13 @@ export type ResourceTarget = {
     releaseVersion: number;
 } | {
     kind: 'task';
-    taskRunId: TaskRunId;
+    taskRunId: CreateResourceRequestSchemaTaskRunId;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `TaskRunId`.
  */
-export type TaskRunId = string;
+export type CreateResourceRequestSchemaTaskRunId = string;
 
 /**
  * Requested or approved workload resources, independent of Kubernetes quantity syntax.
@@ -9998,7 +10186,7 @@ export type ResourceRequestSchema = {
     requestedResources: ResourceRequestSchemaWorkloadResources;
     requesterId: ResourceRequestSchemaActorId;
     revision: ResourceRequestSchemaRevision;
-    state: ResourceRequestState;
+    state: ResourceRequestSchemaResourceRequestState;
     target: ResourceRequestSchemaResourceTarget;
     updatedAt: ResourceRequestSchemaUtcTimestamp;
 };
@@ -10044,7 +10232,7 @@ export type ResourceRequestSchemaResourceRequestId = string;
 /**
  * Request lifecycle owned by Resource Service.
  */
-export type ResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+export type ResourceRequestSchemaResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
 
 /**
  * Immutable identity of a Resource request's target.
@@ -10389,6 +10577,49 @@ export type StudentEvaluationStepResult = {
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type StudentEvaluationResultSchemaUtcTimestamp = string;
+
+/**
+ * TaskAttemptProgress
+ *
+ * Payload-free read projection of one real attempt.
+ */
+export type TaskAttemptProgressSchema = {
+    /**
+     * Native attempt number. Evaluation uses zero until the step is first claimed.
+     */
+    attempt: number;
+    diagnosticCode?: string | null;
+    executionGeneration?: number | null;
+    /**
+     * Existing operation IDs appropriate to the phase, without granting authorization.
+     */
+    nextSteps: Array<string>;
+    phase: TaskAttemptProgressSchemaTaskAttemptPhase;
+    resourceRequestId?: TaskAttemptProgressSchemaResourceRequestId | null;
+    resourceState?: TaskAttemptProgressSchemaResourceRequestState | null;
+    taskRunId?: TaskAttemptProgressSchemaTaskRunId | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type TaskAttemptProgressSchemaResourceRequestId = string;
+
+/**
+ * Request lifecycle owned by Resource Service.
+ */
+export type TaskAttemptProgressSchemaResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+
+/**
+ * Display phase derived from an owner's attempt and Resource facts.
+ * This projection has no independent transitions or persistent authority.
+ */
+export type TaskAttemptProgressSchemaTaskAttemptPhase = 'queued' | 'preparing' | 'waiting_resource_approval' | 'allocating' | 'executing' | 'awaiting_review' | 'cleanup_pending' | 'succeeded' | 'failed' | 'cancelled' | 'blocked';
+
+/**
+ * Strongly typed UUIDv7 identifier for `TaskRunId`.
+ */
+export type TaskAttemptProgressSchemaTaskRunId = string;
 
 export type GetAccessGrantData = {
     body?: never;
@@ -13753,6 +13984,77 @@ export type CancelProjectAgentRunResponses = {
 
 export type CancelProjectAgentRunResponse = CancelProjectAgentRunResponses[keyof CancelProjectAgentRunResponses];
 
+export type GetProjectAgentTaskProgressData = {
+    body?: never;
+    path: {
+        projectId: string;
+        runId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}/task-progress';
+};
+
+export type GetProjectAgentTaskProgressErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectAgentTaskProgressError = GetProjectAgentTaskProgressErrors[keyof GetProjectAgentTaskProgressErrors];
+
+export type GetProjectAgentTaskProgressResponses = {
+    /**
+     * Successful response
+     */
+    200: AgentRunTaskProgressSchema;
+};
+
+export type GetProjectAgentTaskProgressResponse = GetProjectAgentTaskProgressResponses[keyof GetProjectAgentTaskProgressResponses];
+
 export type RetryProjectAgentRunTrackData = {
     body?: never;
     headers: {
@@ -15496,6 +15798,148 @@ export type GetOwnProjectEvaluationResultResponses = {
 };
 
 export type GetOwnProjectEvaluationResultResponse = GetOwnProjectEvaluationResultResponses[keyof GetOwnProjectEvaluationResultResponses];
+
+export type GetOwnProjectEvaluationTaskForSubmissionData = {
+    body?: never;
+    path: {
+        projectId: string;
+        submissionId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/me/evaluation-tasks/submissions/{submissionId}';
+};
+
+export type GetOwnProjectEvaluationTaskForSubmissionErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetOwnProjectEvaluationTaskForSubmissionError = GetOwnProjectEvaluationTaskForSubmissionErrors[keyof GetOwnProjectEvaluationTaskForSubmissionErrors];
+
+export type GetOwnProjectEvaluationTaskForSubmissionResponses = {
+    /**
+     * Successful response
+     */
+    200: EvaluationRunTaskProgressSchema;
+};
+
+export type GetOwnProjectEvaluationTaskForSubmissionResponse = GetOwnProjectEvaluationTaskForSubmissionResponses[keyof GetOwnProjectEvaluationTaskForSubmissionResponses];
+
+export type GetOwnProjectEvaluationTaskProgressData = {
+    body?: never;
+    path: {
+        projectId: string;
+        runId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/me/evaluation-tasks/{runId}';
+};
+
+export type GetOwnProjectEvaluationTaskProgressErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetOwnProjectEvaluationTaskProgressError = GetOwnProjectEvaluationTaskProgressErrors[keyof GetOwnProjectEvaluationTaskProgressErrors];
+
+export type GetOwnProjectEvaluationTaskProgressResponses = {
+    /**
+     * Successful response
+     */
+    200: EvaluationRunTaskProgressSchema;
+};
+
+export type GetOwnProjectEvaluationTaskProgressResponse = GetOwnProjectEvaluationTaskProgressResponses[keyof GetOwnProjectEvaluationTaskProgressResponses];
 
 export type ListProjectMembershipsData = {
     body?: never;

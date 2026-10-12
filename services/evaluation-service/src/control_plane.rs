@@ -318,6 +318,9 @@ pub struct PgEvaluationControlStore {
 }
 
 impl PgEvaluationControlStore {
+    pub(crate) const fn pool(&self) -> &PgPool {
+        &self.pool
+    }
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }

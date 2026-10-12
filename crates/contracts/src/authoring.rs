@@ -914,6 +914,29 @@ pub struct AgentRunHistoryPage {
     pub has_more: bool,
 }
 
+/// Agent-owned task read model with the current attempt separate from history.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunTaskProgress {
+    pub run_id: AgentRunId,
+    pub project_id: ProjectId,
+    pub revision: Revision,
+    pub state: AgentRunState,
+    pub current: Vec<AgentTrackTaskProgress>,
+    pub history: Vec<AgentTrackTaskProgress>,
+    pub page: u32,
+    pub page_size: u16,
+    pub has_more: bool,
+}
+
+/// An Agent track's business identity and its actual execution progress.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentTrackTaskProgress {
+    pub track: AgentTrackKind,
+    pub progress: crate::execution::TaskAttemptProgress,
+}
+
 impl AgentRun {
     /// Validates the exact purpose-specific track shape and monotonically numbered attempts.
     pub fn validate(&self) -> Result<(), AuthoringError> {

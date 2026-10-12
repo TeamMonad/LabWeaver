@@ -51,6 +51,7 @@ const WORKER_PERMISSION: &str = "evaluation.step.complete";
 
 #[derive(Clone)]
 pub struct EvaluationApiState {
+    resource: Option<task_execution::resource::ResourceClient>,
     commands: PgFreezeCommandStore,
     submissions: PgFreezeStore,
     control: PgEvaluationControlStore,
@@ -66,11 +67,21 @@ impl EvaluationApiState {
         authoring_admission: Arc<AuthoringAdmissionClient>,
     ) -> Self {
         Self {
+            resource: None,
             commands,
             submissions,
             control,
             authoring_admission,
         }
+    }
+
+    #[must_use]
+    pub fn with_resource_client(
+        mut self,
+        resource: task_execution::resource::ResourceClient,
+    ) -> Self {
+        self.resource = Some(resource);
+        self
     }
 }
 
@@ -91,6 +102,14 @@ pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
         .route(
             "/api/v1/projects/{project_id}/me/evaluation-results/{run_id}",
             get(get_student_result),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/me/evaluation-tasks/{run_id}",
+            get(get_student_task_progress),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/me/evaluation-tasks/submissions/{submission_id}",
+            get(get_student_submission_task_progress),
         )
         .route(
             "/internal/v1/evaluation-releases",
@@ -335,6 +354,75 @@ async fn list_student_results(
         trace_id = %trace_id()?,
     );
     Ok(Json(page))
+}
+
+async fn get_student_submission_task_progress(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
+    Path((project_id, submission_id)): Path<(contracts::ProjectId, FrozenSubmissionId)>,
+    Query(query): Query<contracts::http::PageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, EvaluationApiError> {
+    require_access(principal)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    require_project_header(&headers, project_id)?;
+    let progress = state
+        .control
+        .task_progress_for_submission(
+            project_id,
+            actor_id,
+            submission_id,
+            state.resource.as_ref(),
+            &query,
+        )
+        .await
+        .map_err(task_progress_error)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(progress),
+    )
+        .into_response())
+}
+
+fn task_progress_error(
+    error: crate::task_progress::EvaluationTaskProgressError,
+) -> EvaluationApiError {
+    match error {
+        crate::task_progress::EvaluationTaskProgressError::Store(error) => {
+            EvaluationApiError::Control(error)
+        }
+        error => EvaluationApiError::TaskProgress(error),
+    }
+}
+
+async fn get_student_task_progress(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
+    Path((project_id, run_id)): Path<(contracts::ProjectId, EvaluationRunId)>,
+    Query(query): Query<contracts::http::PageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, EvaluationApiError> {
+    require_access(principal)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    require_project_header(&headers, project_id)?;
+    let progress = state
+        .control
+        .task_progress(
+            project_id,
+            actor_id,
+            run_id,
+            state.resource.as_ref(),
+            &query,
+        )
+        .await
+        .map_err(task_progress_error)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(progress),
+    )
+        .into_response())
 }
 
 async fn get_student_result(
@@ -704,6 +792,8 @@ fn if_match(headers: &HeaderMap) -> Result<Revision, EvaluationApiError> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvaluationApiError {
+    #[error(transparent)]
+    TaskProgress(crate::task_progress::EvaluationTaskProgressError),
     #[error("LW_HTTP_REQUEST_CONTEXT_MISSING")]
     CorrelationContextMissing,
     #[error("LW_EVALUATION_GATEWAY_DENIED")]
@@ -741,6 +831,13 @@ impl IntoResponse for EvaluationApiError {
             _ => self.to_string(),
         };
         let status = match &self {
+            Self::TaskProgress(crate::task_progress::EvaluationTaskProgressError::PageInvalid) => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::TaskProgress(
+                crate::task_progress::EvaluationTaskProgressError::IdentityMismatch
+                | crate::task_progress::EvaluationTaskProgressError::Changed,
+            ) => StatusCode::CONFLICT,
             Self::CallerDenied
             | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied)
             | Self::Control(EvaluationControlStoreError::CourseMismatch) => StatusCode::FORBIDDEN,
