@@ -622,7 +622,7 @@ fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ResourceCli
 
 use contracts::{
     ActorId, CourseId, ProjectId,
-    resource::{CapacityClaimState, ResourceLeaseState, ResourceRequestState, WorkloadResources},
+    resource::{ResourceRequestState, WorkloadResources},
 };
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
@@ -779,11 +779,27 @@ impl TaskResourceLifecycle {
                 ResourceRequestState::Reviewing => {
                     let now = Instant::now();
                     if now >= deadline {
-                        self.cancel_or_release_request(
-                            "evaluation resource approval deadline exceeded",
-                        )
-                        .await?;
-                        return Err(TaskResourceError::ResourceApprovalTimeout);
+                        // Timeout only wins if this exact Reviewing revision is
+                        // cancelled. Approval may have committed since the read;
+                        // a conflict must re-read and continue the same attempt,
+                        // never release an approval and label it a timeout.
+                        let mutation = ResourceRequestMutation {
+                            expected_revision: request.revision,
+                            reason: "task resource approval deadline exceeded".to_owned(),
+                        };
+                        let key = format!("{}-approval-timeout", self.request_key);
+                        match self
+                            .client
+                            .cancel_task_resource(self.task_run_id, &mutation, &key)
+                            .await
+                        {
+                            Ok(cancelled) if cancelled.state == ResourceRequestState::Cancelled => {
+                                return Err(TaskResourceError::ResourceApprovalTimeout);
+                            }
+                            Ok(_) => return Err(TaskResourceError::ResponseInvalid),
+                            Err(ResourceClientError::Conflict) => continue,
+                            Err(error) => return Err(error.into()),
+                        }
                     }
                     tokio::select! {
                         () = cancellation.cancelled() => {
@@ -795,14 +811,9 @@ impl TaskResourceLifecycle {
                     }
                 }
                 ResourceRequestState::Allocating | ResourceRequestState::Active => {
-                    let status = tokio::select! {
-                        result = self.client.claim_task_resource(self.task_run_id) => result?,
-                        () = cancellation.cancelled() => {
-                            self.cancel_or_release_request("evaluation step lease cancelled before resource claim")
-                                .await?;
-                            return Err(TaskResourceError::Cancelled);
-                        }
-                    };
+                    // Settle the bounded claim POST before cancellation cleanup.
+                    // Dropping it can let a later commit race the release fence.
+                    let status = self.client.claim_task_resource(self.task_run_id).await?;
                     if cancellation.is_cancelled() {
                         self.release(&status).await?;
                         return Err(TaskResourceError::Cancelled);
@@ -908,17 +919,9 @@ impl TaskResourceLifecycle {
         {
             return Err(TaskResourceError::IdentityMismatch);
         }
-        // A worker can crash after Resource commits the handoff and before the
-        // Evaluation execution checkpoint is written.  Reconcile that durable
-        // state instead of attempting the one-way Allocating -> Active
-        // transition a second time.
-        if status.execution_namespace.as_deref() == Some(execution_namespace)
-            && status.request.state == ResourceRequestState::Active
-            && status.claim.state == CapacityClaimState::HandedOff
-            && status.lease.state == ResourceLeaseState::Active
-        {
-            return Ok(status.clone());
-        }
+        // Resource revalidates even an Active snapshot: expiry or release may
+        // have won since the read. Its idempotent handoff returns the same
+        // valid reservation after a crash without extending the lease.
         let request = AcknowledgeTaskResourceRequest {
             expected_claim_revision: status.claim_revision,
             expected_lease_revision: status.lease_revision,

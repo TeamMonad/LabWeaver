@@ -57,6 +57,9 @@ use resource_service::store::{PendingAllocation, PgResourceStore, ResourceStoreE
 use testcontainers::GenericImage;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 
+#[path = "support/task_lifecycle.rs"]
+mod task_lifecycle;
+
 #[tokio::test]
 async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_invariants()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -816,6 +819,32 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     assert_eq!(acknowledged.lease_revision, acknowledged.lease.revision);
     assert!(!acknowledged.cleanup_confirmed);
     assert_eq!(store.load_task_resource(task_run_id).await?, acknowledged);
+    // A committed handoff whose HTTP response was lost must replay the same
+    // namespace and lease without extending its window or advancing revisions.
+    assert_eq!(
+        store
+            .acknowledge_task_resource(
+                task_run_id,
+                claimed.claim_revision,
+                claimed.lease_revision,
+                "labweaver-evaluation-runs",
+                "trace-task-ack-response-lost",
+            )
+            .await?,
+        acknowledged
+    );
+    assert!(matches!(
+        store
+            .acknowledge_task_resource(
+                task_run_id,
+                claimed.claim_revision,
+                claimed.lease_revision,
+                "another-namespace",
+                "trace-task-ack-wrong-namespace",
+            )
+            .await,
+        Err(ResourceStoreError::CapacityClaimStateConflict)
+    ));
     let lease_window = acknowledged
         .lease
         .expires_at
@@ -864,6 +893,40 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     assert_eq!(released.lease_revision, released.lease.revision);
     assert!(released.cleanup_confirmed);
     assert_eq!(store.load_task_resource(task_run_id).await?, released);
+    assert_eq!(
+        store
+            .release_task_resource(
+                task_run_id,
+                acknowledged.claim_revision,
+                acknowledged.lease_revision,
+                "trace-task-release-response-lost",
+            )
+            .await?,
+        released
+    );
+    assert!(matches!(
+        store
+            .release_task_resource(
+                task_run_id,
+                claimed.claim_revision,
+                claimed.lease_revision,
+                "trace-task-release-stale-worker",
+            )
+            .await,
+        Err(ResourceStoreError::CapacityClaimStateConflict)
+    ));
+    assert!(matches!(
+        store
+            .retry(
+                "task-resource-retry-old-identity",
+                request.id,
+                released.request.revision,
+                owner_id,
+                "trace-task-retry-old-identity",
+            )
+            .await,
+        Err(ResourceStoreError::Lifecycle(LifecycleError::StateConflict))
+    ));
     Ok(())
 }
 
@@ -4348,6 +4411,7 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
 struct ResourceOidcState {
     issuer: String,
     jwk: Value,
+    task_token: String,
 }
 
 struct ResourceAuthAuthority {
@@ -4397,12 +4461,26 @@ async fn build_resource_verifier(
 async fn spawn_resource_auth_authority(
     material: ResourceSigningMaterial,
 ) -> Result<ResourceAuthAuthority, Box<dyn std::error::Error>> {
+    spawn_resource_auth_authority_for_client(material, RESOURCE_EVALUATION_CLIENT_ID).await
+}
+
+async fn spawn_resource_auth_authority_for_client(
+    material: ResourceSigningMaterial,
+    task_client_id: &str,
+) -> Result<ResourceAuthAuthority, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let issuer = format!("http://localhost:{}/realms/test", address.port());
     let state = ResourceOidcState {
         issuer: issuer.clone(),
         jwk: material.jwk.clone(),
+        task_token: signed_resource_token(
+            &material,
+            &issuer,
+            task_client_id,
+            RESOURCE_AUTH_AUDIENCE,
+            task_execution::resource::required_scopes_for_diagnostics(),
+        )?,
     };
     let router = Router::new()
         .route(
@@ -4410,6 +4488,10 @@ async fn spawn_resource_auth_authority(
             get(resource_oidc_discovery),
         )
         .route("/realms/test/jwks", get(resource_oidc_jwks))
+        .route(
+            "/realms/test/token",
+            axum::routing::post(resource_oidc_token),
+        )
         .with_state(state);
     let (shutdown, shutdown_signal) = oneshot::channel();
     let task = tokio::spawn(async move {
@@ -4444,6 +4526,10 @@ async fn resource_oidc_discovery(State(state): State<ResourceOidcState>) -> Json
 
 async fn resource_oidc_jwks(State(state): State<ResourceOidcState>) -> Json<Value> {
     Json(json!({"keys": [state.jwk]}))
+}
+
+async fn resource_oidc_token(State(state): State<ResourceOidcState>) -> Json<Value> {
+    Json(json!({"access_token": state.task_token, "token_type": "Bearer", "expires_in": 300}))
 }
 
 fn resource_signing_material(

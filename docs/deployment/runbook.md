@@ -342,6 +342,7 @@ runner 会把口令、认证状态和 Playwright 临时输出放在临时目录�
 | --- | --- | --- |
 | HTTPS 或登录回调失败 | 公共 Gateway、Certificate、Keycloak redirect 和浏览器证书 | 修正 ingress/identity 配置后重新部署；不关闭证书检查 |
 | 模型任务失败 | bundle 中 base URL/model、Ollama Service、Agent 任务状态和诊断 | 区分模型、任务执行、资源和平台问题；本轮验收只对明确失败任务人工重试一次 |
+| 任务等待资源或审批超时 | 原任务尝试、Resource 申请状态、claim/lease 和 revision | 先刷新原任务；批准后仍失败时区分交接或执行失败。响应丢失恢复同一次尝试，不另建申请。真正超时或取消后的批准不能复活旧尝试；新尝试须等旧资源清理确认。参见资源占用与费用说明中的内部任务接口 |
 | 资源一直等待 | Resource UI 的申请、active lease、容量观测 TTL 和 provider binding | 不把未知容量当作零，不创建重复申请 |
 | 容器/VM 未就绪 | Environment 状态、provider、Pod/VMI、PVC/DataVolume 和 release | 等待原对象或按页面取消；不手工创建第二个环境 |
 | 评测失败 | Evaluation run、OJ runtime 配置、收据和用户提交版本 | 保留确定性错误和反馈；不以固定分数或 Mock 替代 |

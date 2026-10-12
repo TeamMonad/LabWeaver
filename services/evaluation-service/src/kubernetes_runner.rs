@@ -410,27 +410,24 @@ impl KubernetesEvaluationRunner {
             }
             Err(error) => return Err(map_task_resource(error, "claim")),
         };
-        let mut resource_status = tokio::select! {
-            result = lifecycle.acknowledge(&claimed, &self.configuration.runner_namespace) => {
-                result.map_err(|error| map_task_resource(error, "ack"))?
-            }
-            () = context.cancellation.cancelled() => {
-                if context.lease_lost.is_cancelled() {
-                    return Err(ExecutionError::LeaseLost);
-                }
-                lifecycle
-                    .cancel("evaluation step lease cancelled before resource handoff")
-                    .await
-                    .map_err(|error| map_task_resource(error, "cancel"))?;
-                if self.run_is_cancelling(context.lease.run_id).await? {
-                    return TerminalResult::Cancelled.into_completion();
-                }
-                return Err(ExecutionError::LeaseLost);
-            }
-        };
+        self.control
+            .load_execution_checkpoint(&context.lease)
+            .await
+            .map_err(ExecutionError::Control)?;
+        // Settle the bounded handoff before user cancellation releases it.
+        // Racing cancellation against this POST can commit Active after cleanup
+        // already read Provisioning. Same-attempt recovery replays a lost reply.
+        let mut resource_status = lifecycle
+            .acknowledge(&claimed, &self.configuration.runner_namespace)
+            .await
+            .map_err(|error| map_task_resource(error, "ack"))?;
         if context.lease_lost.is_cancelled() {
             return Err(ExecutionError::LeaseLost);
         }
+        self.control
+            .load_execution_checkpoint(&context.lease)
+            .await
+            .map_err(ExecutionError::Control)?;
         if context.cancellation.is_cancelled()
             || self.run_is_cancelling(context.lease.run_id).await?
         {
@@ -2261,7 +2258,12 @@ impl EvaluationAttemptRunner for KubernetesEvaluationRunner {
         &self,
         context: EvaluationAttemptContext,
     ) -> Result<EvaluationStepCompletion, ExecutionError> {
-        Box::pin(self.execute_attempt(context)).await
+        let lease_lost = context.lease_lost.clone();
+        tokio::select! {
+            biased;
+            () = lease_lost.cancelled() => Err(ExecutionError::LeaseLost),
+            result = Box::pin(self.execute_attempt(context)) => result,
+        }
     }
 }
 
@@ -3180,6 +3182,7 @@ mod probe_recovery_tests {
         pods: Option<Value>,
         resource_request: Option<Value>,
         resource_status: Option<Value>,
+        cancel_on_ack: Option<tokio_util::sync::CancellationToken>,
         environment_binding_status: Option<StatusCode>,
         deleted: BTreeSet<String>,
         calls: Vec<(Method, String)>,
@@ -3326,6 +3329,84 @@ mod probe_recovery_tests {
         actor_id: ActorId,
         release: contracts::evaluation::EvaluationRelease,
         run: EvaluationRun,
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_handoff_settles_then_releases_without_submitting_job()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("handoff-cancel-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("step was not claimable")?;
+        let context = context(&fixture, &lease)?;
+        let status = resource_status(&lease, &fixture, false)?;
+        {
+            let mut state = cluster.state.lock().await;
+            state.resource_request = Some(serde_json::to_value(&status.request)?);
+            state.resource_status = Some(serde_json::to_value(&status)?);
+            state.cancel_on_ack = Some(context.cancellation.clone());
+        }
+        let completion = runner.execute(context).await;
+        let calls = cluster.calls().await;
+        let completion = completion.map_err(|error| format!("{error:?}; calls: {calls:?}"))?;
+        assert_eq!(completion.state, EvaluationStepRunState::Cancelled);
+        assert!(completion.cleanup_verified);
+        let calls = cluster.calls().await;
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::POST && path.ends_with("/ack"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::POST && path.ends_with("/release"))
+                .count(),
+            1
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(_, path)| !path.starts_with("/api/") && !path.starts_with("/apis/"))
+        );
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lost_lease_never_cancels_or_releases_same_attempt_resource()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("lost-lease-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("step was not claimable")?;
+        let context = context(&fixture, &lease)?;
+        context.cancellation.cancel();
+        context.lease_lost.cancel();
+        assert!(matches!(
+            runner.execute(context).await,
+            Err(crate::ExecutionError::LeaseLost)
+        ));
+        assert!(
+            cluster.calls().await.is_empty(),
+            "a stale owner cannot perform Resource or workload mutations"
+        );
+        cluster.stop().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -4056,6 +4137,11 @@ mod probe_recovery_tests {
                 );
             }
             if method == Method::POST && matches!(segments.last(), Some(&("claim" | "ack"))) {
+                if segments.last() == Some(&"ack")
+                    && let Some(cancellation) = state.cancel_on_ack.take()
+                {
+                    cancellation.cancel();
+                }
                 return state.resource_status.clone().map_or_else(
                     || StatusCode::NOT_FOUND.into_response(),
                     |status| (StatusCode::OK, Json(status)).into_response(),
