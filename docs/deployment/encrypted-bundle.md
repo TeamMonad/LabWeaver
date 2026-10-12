@@ -342,7 +342,9 @@ python tests/ansible/prepare_bundle_acceptance_fixture.py \
 
 该入口需要前述 age、Python 依赖和 xtask。清单包含一个 Namespace、ResourceQuota、NetworkPolicy、ConfigMap 和 Job。Namespace 使用 restricted Pod Security；Pod 默认拒绝网络、禁用服务账户 token、非 root、drop ALL、只读根文件系统。没有 PVC、hostPath、hostNetwork、GPU、Secret 或集群角色。Job 读取已恢复且经过类型校验的配置，核对挂载后的实际字节摘要。成功输出 `BUNDLE_RESTORE_SMOKE_OK`。
 
-执行端需要一个全新 namespace 名称、Linux amd64 节点、锁定 BusyBox 镜像的拉取能力和已有 CNI NetworkPolicy 支持。Pod 请求50m CPU、64Mi 内存、16Mi 临时存储，上限250m CPU、128Mi 内存、64Mi 临时存储；namespace 配额限制2个 Pod、1个 Job、1个 ConfigMap、0个 Secret/PVC。整个 namespace 的 CPU/内存上限分别为1核和512Mi。无需新增长期凭据或扩大平台服务权限。
+执行端需要一个全新 namespace 名称、Linux amd64 节点、锁定 BusyBox 镜像的拉取能力和已有 CNI NetworkPolicy 支持。Pod 请求50m CPU、64Mi 内存、16Mi 临时存储，上限250m CPU、128Mi 内存、64Mi 临时存储；namespace 配额限制2个 Pod、1个 Job、2个 ConfigMap、0个 Secret/PVC。ConfigMap 配额包含控制器自动发布的 kube-root-ca.crt 和一个 fixture 配置对象。整个 namespace 的 CPU/内存上限分别为1核和512Mi。无需新增长期凭据或扩大平台服务权限。
+
+Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/controller/certificates/rootcacertpublisher/publisher.go) 会为 namespace 创建 kube-root-ca.crt；禁用 Pod token 自动挂载不会关闭该控制器。该测试配额预留这一系统对象，避免创建顺序导致配置对象被拒绝。
 
 单独获准的集群验证线程先核对已有负载、上下文和 namespace 未存在，再使用 `kubectl create -f` 创建清单；不要用 apply 覆盖已有对象。读取 Job 终态和上述日志标记，记录实际调度、镜像拉取、Pod Security 与清理结果。失败或部分创建时保留错误和已创建对象清单，由执行端只清理本次拥有的对象。本工具不创建或删除远端资源。
 
