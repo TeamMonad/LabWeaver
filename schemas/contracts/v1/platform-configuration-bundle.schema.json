@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An administrator's registration of received ciphertext, not deployment approval.",
+  "properties": {
+    "configurationSha256": {
+      "description": "Administrator-declared binding to the immutable settings snapshot.",
+      "type": "string"
+    },
+    "desiredRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "encryptedBundleSha256": {
+      "description": "Computed by Control from actual uploaded ciphertext bytes.",
+      "type": "string"
+    },
+    "encryptedBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "registeredAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "registeredAtRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "registeredBy": {
+      "$ref": "#/$defs/ActorId"
+    }
+  },
+  "required": [
+    "registeredAtRevision",
+    "desiredRevision",
+    "configurationSha256",
+    "encryptedBundleSha256",
+    "encryptedBytes",
+    "registeredBy",
+    "registeredAt"
+  ],
+  "title": "PlatformConfigurationBundle",
+  "type": "object"
+}

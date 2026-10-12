@@ -3241,7 +3241,6 @@ export type AgentWorkExecutionIntentQuerySchemaProjectId = string;
  */
 export type ApplyPlatformConfigurationRequestSchema = {
     desiredRevision: ApplyPlatformConfigurationRequestSchemaRevision;
-    encryptedBundleSha256: string;
     expectedRevision: number;
 };
 
@@ -10083,6 +10082,42 @@ export type PlatformConfigurationApplySchemaRevision = number;
 export type PlatformConfigurationApplySchemaUtcTimestamp = string;
 
 /**
+ * PlatformConfigurationBundle
+ *
+ * An administrator's registration of received ciphertext, not deployment approval.
+ */
+export type PlatformConfigurationBundleSchema = {
+    /**
+     * Administrator-declared binding to the immutable settings snapshot.
+     */
+    configurationSha256: string;
+    desiredRevision: PlatformConfigurationBundleSchemaRevision;
+    /**
+     * Computed by Control from actual uploaded ciphertext bytes.
+     */
+    encryptedBundleSha256: string;
+    encryptedBytes: number;
+    registeredAt: PlatformConfigurationBundleSchemaUtcTimestamp;
+    registeredAtRevision: PlatformConfigurationBundleSchemaRevision;
+    registeredBy: PlatformConfigurationBundleSchemaActorId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type PlatformConfigurationBundleSchemaActorId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type PlatformConfigurationBundleSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformConfigurationBundleSchemaUtcTimestamp = string;
+
+/**
  * PlatformConfigurationStatus
  *
  * Applied means last fully verified configuration. A failed apply can leave external state unknown.
@@ -10096,6 +10131,10 @@ export type PlatformConfigurationStatusSchema = {
     desired?: PlatformConfigurationVersion | null;
     impact: PlatformConfigurationImpact;
     latestApply?: PlatformConfigurationApply | null;
+    /**
+     * Current desired's last registered artifact. Registration alone never applies it.
+     */
+    registeredBundle?: PlatformConfigurationBundle | null;
     /**
      * Aggregate fence, including apply updates. Zero is the unconfigured state.
      */
@@ -10158,6 +10197,25 @@ export type PlatformConfigurationApply = {
 };
 
 export type PlatformConfigurationStatusSchemaPlatformConfigurationApplyStage = 'requested' | 'validating' | 'applying' | 'verifying' | 'succeeded' | 'failed';
+
+/**
+ * An administrator's registration of received ciphertext, not deployment approval.
+ */
+export type PlatformConfigurationBundle = {
+    /**
+     * Administrator-declared binding to the immutable settings snapshot.
+     */
+    configurationSha256: string;
+    desiredRevision: PlatformConfigurationStatusSchemaRevision;
+    /**
+     * Computed by Control from actual uploaded ciphertext bytes.
+     */
+    encryptedBundleSha256: string;
+    encryptedBytes: number;
+    registeredAt: PlatformConfigurationStatusSchemaUtcTimestamp;
+    registeredAtRevision: PlatformConfigurationStatusSchemaRevision;
+    registeredBy: PlatformConfigurationStatusSchemaActorId;
+};
 
 /**
  * The one managed settings document. It contains no credential values or secret locators.
@@ -12876,6 +12934,157 @@ export type GetPlatformConfigurationVersionResponses = {
 };
 
 export type GetPlatformConfigurationVersionResponse = GetPlatformConfigurationVersionResponses[keyof GetPlatformConfigurationVersionResponses];
+
+export type GetPlatformConfigurationBundleData = {
+    body?: never;
+    path: {
+        revision: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/platform-configuration/versions/{revision}/bundle';
+};
+
+export type GetPlatformConfigurationBundleErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetPlatformConfigurationBundleError = GetPlatformConfigurationBundleErrors[keyof GetPlatformConfigurationBundleErrors];
+
+export type GetPlatformConfigurationBundleResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformConfigurationBundleSchema;
+};
+
+export type GetPlatformConfigurationBundleResponse = GetPlatformConfigurationBundleResponses[keyof GetPlatformConfigurationBundleResponses];
+
+export type RegisterPlatformConfigurationBundleData = {
+    body: Blob | File;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        revision: number;
+    };
+    query: {
+        expectedRevision: number;
+        configurationSha256: string;
+    };
+    url: '/api/v1/admin/platform-configuration/versions/{revision}/bundle';
+};
+
+export type RegisterPlatformConfigurationBundleErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    413: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    415: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RegisterPlatformConfigurationBundleError = RegisterPlatformConfigurationBundleErrors[keyof RegisterPlatformConfigurationBundleErrors];
+
+export type RegisterPlatformConfigurationBundleResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformConfigurationStatusSchema;
+};
+
+export type RegisterPlatformConfigurationBundleResponse = RegisterPlatformConfigurationBundleResponses[keyof RegisterPlatformConfigurationBundleResponses];
 
 export type IssueCsrfTokenData = {
     body?: never;

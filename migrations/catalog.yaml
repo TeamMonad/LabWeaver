@@ -55,6 +55,9 @@ domains:
       - id: 17
         file: control/0017_membership_governance.sql
         sha256: 372889f419e80a01ef634d0175474ded486dd630e1cf0b150c11b461a8715218
+      - id: 18
+        file: control/0018_platform_configuration_bundles.sql
+        sha256: 8a303e68bb54033d4477561b87e900ca545cf0a14d0a630e5b98228a8fcdfde8
       - id: 19
         file: control/0019_runtime_authorization_reads.sql
         sha256: 9d8a06ba7f3baf03b41b1317688b423c68cdf5a9362b0a8405258024fdf918d3

@@ -5,7 +5,8 @@ use contracts::platform_configuration::{
     ApplyPlatformConfigurationRequest, PlatformConfigurationApplyStage as Stage,
     PlatformConfigurationDesired, PlatformConfigurationFailureReason as Failure,
     PlatformConfigurationNextStep as Next, PlatformConfigurationStatus,
-    ReportPlatformConfigurationApplyRequest, UpdatePlatformConfigurationRequest,
+    RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
+    UpdatePlatformConfigurationRequest,
 };
 use contracts::{ActorId, OperationId, Revision, UtcTimestamp};
 use control_service::platform_configuration::{self as configuration, ConfigurationError};
@@ -63,6 +64,7 @@ async fn begin(
     state: &PlatformConfigurationStatus,
     value: &str,
 ) -> TestResult<PlatformConfigurationStatus> {
+    let state = register(pool, state, &format!("{value}-bundle")).await?;
     Ok(configuration::request_apply(
         pool,
         ActorId::new(),
@@ -73,12 +75,309 @@ async fn begin(
                 .as_ref()
                 .ok_or("no desired snapshot")?
                 .revision,
-            encrypted_bundle_sha256: "a".repeat(64),
         },
         &key(value)?,
         now()?,
     )
     .await?)
+}
+
+fn ciphertext() -> TestResult<Vec<u8>> {
+    let directory = tempfile::tempdir()?;
+    let identity = directory.path().join("synthetic-identity");
+    let plaintext = directory.path().join("synthetic-plaintext");
+    let archive = directory.path().join("synthetic.age");
+    let generate = std::process::Command::new("age-keygen")
+        .arg("-o")
+        .arg(&identity)
+        .output()?;
+    if !generate.status.success() {
+        return Err("synthetic age key generation failed".into());
+    }
+    let recipient = std::process::Command::new("age-keygen")
+        .arg("-y")
+        .arg(&identity)
+        .output()?;
+    if !recipient.status.success() {
+        return Err("synthetic age recipient failed".into());
+    }
+    std::fs::write(&plaintext, b"synthetic-only-configuration-and-secret")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&plaintext, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let encrypted = std::process::Command::new("age")
+        .arg("-r")
+        .arg(String::from_utf8(recipient.stdout)?.trim())
+        .arg("-o")
+        .arg(&archive)
+        .arg(&plaintext)
+        .output()?;
+    if !encrypted.status.success() {
+        return Err("synthetic age encryption failed".into());
+    }
+    Ok(std::fs::read(archive)?)
+}
+
+async fn register(
+    pool: &PgPool,
+    state: &PlatformConfigurationStatus,
+    value: &str,
+) -> TestResult<PlatformConfigurationStatus> {
+    let desired = state.desired.as_ref().ok_or("no desired")?;
+    let cipher = ciphertext()?;
+    Ok(configuration::register_bundle(
+        pool,
+        ActorId::new(),
+        desired.revision,
+        &RegisterPlatformConfigurationBundleRequest {
+            expected_revision: state.revision,
+            configuration_sha256: desired.configuration_sha256.clone(),
+        },
+        configuration::BundleCiphertext {
+            digest: persistence_sqlx::Sha256Digest::of_bytes(&cipher),
+            bytes: cipher.len() as u64,
+        },
+        &key(value)?,
+        now()?,
+    )
+    .await?)
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one PostgreSQL journey checks registration races and in-flight binding isolation"
+)]
+async fn bundle_registration_is_fenced_replayable_and_preserves_inflight_binding() -> TestResult {
+    let (_container, pool) = database().await?;
+    let state = edit(
+        &pool,
+        0,
+        PlatformConfigurationDesired::default(),
+        "bundle-settings",
+    )
+    .await?;
+    let desired = state.desired.as_ref().ok_or("no desired")?.clone();
+    let actor = ActorId::new();
+    let unregistered = ApplyPlatformConfigurationRequest {
+        expected_revision: state.revision,
+        desired_revision: desired.revision,
+    };
+    assert!(matches!(
+        configuration::request_apply(
+            &pool,
+            actor,
+            &unregistered,
+            &key("unregistered-apply")?,
+            now()?
+        )
+        .await,
+        Err(ConfigurationError::BundleRequired)
+    ));
+    assert_eq!(configuration::get(&pool).await?, state);
+    assert!(matches!(
+        configuration::get_bundle(&pool, desired.revision).await,
+        Err(ConfigurationError::NotFound)
+    ));
+    let first_cipher = ciphertext()?;
+    let second_cipher = ciphertext()?;
+    let facts = |cipher: &[u8]| configuration::BundleCiphertext {
+        digest: persistence_sqlx::Sha256Digest::of_bytes(cipher),
+        bytes: cipher.len() as u64,
+    };
+    let request = RegisterPlatformConfigurationBundleRequest {
+        expected_revision: state.revision,
+        configuration_sha256: desired.configuration_sha256.clone(),
+    };
+    let mut wrong = request.clone();
+    wrong.configuration_sha256 = "b".repeat(64);
+    assert!(matches!(
+        configuration::register_bundle(
+            &pool,
+            actor,
+            desired.revision,
+            &wrong,
+            facts(&first_cipher),
+            &key("wrong-settings-binding")?,
+            now()?
+        )
+        .await,
+        Err(ConfigurationError::RevisionConflict)
+    ));
+    assert!(matches!(
+        configuration::register_bundle(
+            &pool,
+            actor,
+            Revision::new(999)?,
+            &request,
+            facts(&first_cipher),
+            &key("wrong-revision-binding")?,
+            now()?
+        )
+        .await,
+        Err(ConfigurationError::RevisionConflict)
+    ));
+    let first_key = key("bundle-concurrent-first")?;
+    let second_key = key("bundle-concurrent-second")?;
+    let time = now()?;
+    let (first, second) = tokio::join!(
+        configuration::register_bundle(
+            &pool,
+            actor,
+            desired.revision,
+            &request,
+            facts(&first_cipher),
+            &first_key,
+            time
+        ),
+        configuration::register_bundle(
+            &pool,
+            actor,
+            desired.revision,
+            &request,
+            facts(&second_cipher),
+            &second_key,
+            time
+        ),
+    );
+    let (state, winning_key, winning_cipher, other_cipher) = match (first, second) {
+        (Ok(state), Err(ConfigurationError::RevisionConflict)) => {
+            (state, first_key, &first_cipher, &second_cipher)
+        }
+        (Err(ConfigurationError::RevisionConflict), Ok(state)) => {
+            (state, second_key, &second_cipher, &first_cipher)
+        }
+        _ => return Err("unexpected registration race outcome".into()),
+    };
+    assert!(state.applied.is_none());
+    assert!(state.latest_apply.is_none());
+    let replay = configuration::register_bundle(
+        &pool,
+        actor,
+        desired.revision,
+        &request,
+        facts(winning_cipher),
+        &winning_key,
+        time,
+    )
+    .await?;
+    assert_eq!(replay, state);
+    assert!(matches!(
+        configuration::register_bundle(
+            &pool,
+            actor,
+            desired.revision,
+            &request,
+            facts(other_cipher),
+            &winning_key,
+            time
+        )
+        .await,
+        Err(ConfigurationError::IdempotencyConflict)
+    ));
+    let registered = configuration::get_bundle(&pool, desired.revision).await?;
+    assert_eq!(
+        registered.encrypted_bundle_sha256,
+        persistence_sqlx::Sha256Digest::of_bytes(winning_cipher).to_string()
+    );
+    assert_eq!(registered.registered_by, actor);
+    let apply = configuration::request_apply(
+        &pool,
+        actor,
+        &ApplyPlatformConfigurationRequest {
+            expected_revision: state.revision,
+            desired_revision: desired.revision,
+        },
+        &key("registered-apply")?,
+        time,
+    )
+    .await?;
+    let old_digest = apply
+        .latest_apply
+        .as_ref()
+        .ok_or("no apply")?
+        .encrypted_bundle_sha256
+        .clone();
+    let state = configuration::register_bundle(
+        &pool,
+        actor,
+        desired.revision,
+        &RegisterPlatformConfigurationBundleRequest {
+            expected_revision: apply.revision,
+            configuration_sha256: desired.configuration_sha256.clone(),
+        },
+        facts(other_cipher),
+        &key("register-during-apply")?,
+        time,
+    )
+    .await?;
+    assert_eq!(
+        state
+            .latest_apply
+            .as_ref()
+            .ok_or("no apply")?
+            .encrypted_bundle_sha256,
+        old_digest
+    );
+    assert_ne!(
+        state
+            .registered_bundle
+            .as_ref()
+            .ok_or("no registration")?
+            .encrypted_bundle_sha256,
+        old_digest
+    );
+    let state = edit(
+        &pool,
+        state.revision,
+        desired.configuration,
+        "new-settings-clear-registration",
+    )
+    .await?;
+    assert!(state.registered_bundle.is_none());
+    let mut state = state;
+    for (index, stage) in [
+        Stage::Validating,
+        Stage::Applying,
+        Stage::Verifying,
+        Stage::Succeeded,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        state = progress(
+            &pool,
+            &state,
+            stage,
+            &format!("registered-old-apply-{index}"),
+        )
+        .await?;
+    }
+    assert_eq!(state.applied_bundle_sha256, Some(old_digest));
+    assert_eq!(
+        state.applied.as_ref().ok_or("no applied")?.revision,
+        desired.revision
+    );
+    let current = state.desired.as_ref().ok_or("no desired")?;
+    assert_ne!(current.revision, desired.revision);
+    assert!(matches!(
+        configuration::get_bundle(&pool, current.revision).await,
+        Err(ConfigurationError::NotFound)
+    ));
+    assert_eq!(
+        configuration::get_bundle(&pool, desired.revision)
+            .await?
+            .encrypted_bundle_sha256,
+        persistence_sqlx::Sha256Digest::of_bytes(other_cipher).to_string()
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM control.platform_configuration_bundles")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(count, 2);
+    Ok(())
 }
 
 async fn progress(
@@ -244,7 +543,13 @@ async fn applying_requires_ordered_matching_observations_and_one_executor() -> T
         Revision::new(1)?
     );
     assert_eq!(state.applied_at, Some(now()?));
-    assert_eq!(state.applied_bundle_sha256, Some("a".repeat(64)));
+    assert_eq!(
+        state.applied_bundle_sha256.as_ref(),
+        state
+            .latest_apply
+            .as_ref()
+            .map(|apply| &apply.encrypted_bundle_sha256)
+    );
     assert!(!state.impact.runtime_policy_changed);
     Ok(())
 }
@@ -588,10 +893,99 @@ async fn http_json_yaml_share_revision_and_only_signed_executor_can_report() -> 
             .contains("synthetic-secret-do-not-echo")
     );
 
+    let desired = state.desired.as_ref().ok_or("no desired")?;
+    let cipher = ciphertext()?;
+    let registration_uri = format!(
+        "{root}/versions/{}/bundle?expectedRevision={}&configurationSha256={}",
+        desired.revision.get(),
+        state.revision,
+        desired.configuration_sha256
+    );
+    for (actor, body, expected_status, operation) in [
+        (
+            fixture.other_actor,
+            cipher.clone(),
+            StatusCode::FORBIDDEN,
+            "http-register-non-admin",
+        ),
+        (
+            fixture.admin,
+            b"synthetic-secret-not-ciphertext".to_vec(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "http-register-plaintext",
+        ),
+    ] {
+        let denied = fixture
+            .router
+            .clone()
+            .oneshot(request(
+                "POST",
+                &registration_uri,
+                actor,
+                body,
+                "application/octet-stream",
+                state.revision,
+                operation,
+            )?)
+            .await?;
+        assert_eq!(denied.status(), expected_status);
+        assert!(
+            !String::from_utf8(to_bytes(denied.into_body(), 1024 * 1024).await?.to_vec())?
+                .contains("synthetic-secret-not-ciphertext")
+        );
+    }
+    let registered = fixture
+        .router
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!(
+                "{root}/versions/{}/bundle?expectedRevision={}&configurationSha256={}",
+                desired.revision.get(),
+                state.revision,
+                desired.configuration_sha256
+            ),
+            fixture.admin,
+            cipher.clone(),
+            "application/octet-stream",
+            state.revision,
+            "http-register-bundle",
+        )?)
+        .await?;
+    assert_eq!(registered.status(), StatusCode::OK);
+    let state: PlatformConfigurationStatus =
+        serde_json::from_slice(&to_bytes(registered.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(
+        state
+            .registered_bundle
+            .as_ref()
+            .ok_or("no registered bundle")?
+            .encrypted_bundle_sha256,
+        persistence_sqlx::Sha256Digest::of_bytes(&cipher).to_string()
+    );
+    let queried = fixture
+        .router
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("{root}/versions/{}/bundle", desired.revision.get()),
+            fixture.admin,
+            Vec::new(),
+            "application/json",
+            state.revision,
+            "http-read-bundle",
+        )?)
+        .await?;
+    assert_eq!(queried.status(), StatusCode::OK);
+    let binding: contracts::platform_configuration::PlatformConfigurationBundle =
+        serde_json::from_slice(&to_bytes(queried.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(
+        binding,
+        state.registered_bundle.clone().ok_or("no registration")?
+    );
     let apply = ApplyPlatformConfigurationRequest {
         expected_revision: state.revision,
         desired_revision: state.desired.as_ref().ok_or("no desired")?.revision,
-        encrypted_bundle_sha256: "a".repeat(64),
     };
     let accepted = fixture
         .router

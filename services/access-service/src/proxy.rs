@@ -13,11 +13,11 @@ use auth::{
 };
 use axum::{
     body::{Body, Bytes, to_bytes},
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{HeaderMap, Method, Uri, header},
     response::Response,
 };
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Certificate, Client, Url};
 use serde_json::Value;
 use sqlx::Row;
@@ -67,10 +67,61 @@ struct ForwardRequest {
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: ForwardBody,
     valid_path: fn(&str) -> bool,
     scope: Option<EvaluationScope>,
     gateway: GatewayAuthority,
+}
+
+enum ForwardBody {
+    Buffered(Bytes),
+    Bundle(Body),
+}
+
+/// Used only by the exact new Bundle route; other requests retain their existing budget.
+pub(super) async fn forward_control_bundle(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (parts, body) = request.into_parts();
+    forward(
+        &state,
+        &state.control_proxy,
+        ForwardRequest {
+            method: parts.method,
+            uri: parts.uri,
+            headers: parts.headers,
+            body: ForwardBody::Bundle(body),
+            valid_path: valid_bundle_path,
+            scope: None,
+            gateway: GatewayAuthority::Control,
+        },
+    )
+    .await
+}
+
+fn bounded_bundle_body(body: Body) -> reqwest::Body {
+    let stream = body.into_data_stream().scan(0_u64, |size, chunk| {
+        let result = chunk
+            .map_err(|_| io::Error::other("LW_AUTH_CONTROL_REQUEST_FAILED"))
+            .and_then(|chunk| {
+                *size = size
+                    .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        io::Error::other("LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE")
+                    })?;
+                if *size
+                    > contracts::platform_configuration::PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES
+                {
+                    return Err(io::Error::other(
+                        "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+                    ));
+                }
+                Ok(chunk)
+            });
+        std::future::ready(Some(result))
+    });
+    reqwest::Body::wrap_stream(stream)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,7 +372,7 @@ pub(super) async fn forward_control(
             method,
             uri,
             headers,
-            body,
+            body: ForwardBody::Buffered(body),
             valid_path: valid_control_path,
             scope: None,
             gateway: GatewayAuthority::Control,
@@ -412,7 +463,7 @@ pub(super) async fn authorize_project_membership_governance(
             method: Method::GET,
             uri,
             headers: headers.clone(),
-            body: Bytes::new(),
+            body: ForwardBody::Buffered(Bytes::new()),
             valid_path: valid_control_path,
             scope: None,
             gateway: GatewayAuthority::Control,
@@ -556,7 +607,7 @@ pub(super) async fn forward_environment(
             method,
             uri,
             headers,
-            body,
+            body: ForwardBody::Buffered(body),
             valid_path: valid_environment_path,
             scope: None,
             gateway: GatewayAuthority::Environment,
@@ -659,7 +710,7 @@ pub(super) async fn forward_evaluation(
             method,
             uri,
             headers,
-            body,
+            body: ForwardBody::Buffered(body),
             valid_path: valid_evaluation_path,
             scope,
             gateway: GatewayAuthority::Evaluation,
@@ -1555,7 +1606,7 @@ async fn forward(
     if !valid_path(path) {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_PATH_REJECTED"));
     }
-    if body.len() > proxy.max_request_bytes {
+    if matches!(&body, ForwardBody::Buffered(bytes) if bytes.len() > proxy.max_request_bytes) {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_REQUEST_TOO_LARGE"));
     }
     let session = authenticated_session(state, &headers).await?;
@@ -1566,6 +1617,16 @@ async fn forward(
             .and_then(|value| value.to_str().ok());
         auth::verify_csrf_token(&session.csrf_token, supplied).map_err(ApiError::from)?;
     }
+
+    let body = match body {
+        ForwardBody::Buffered(bytes) => reqwest::Body::from(bytes),
+        ForwardBody::Bundle(body) => {
+            if method != Method::POST || !valid_bundle_path(path) {
+                return Err(ApiError::bad_request("LW_AUTH_CONTROL_PATH_REJECTED"));
+            }
+            bounded_bundle_body(body)
+        }
+    };
 
     let mut upstream = proxy.base_uri.clone();
     upstream.set_path(path);
@@ -1946,6 +2007,9 @@ fn valid_platform_configuration_path(path: &str) -> bool {
     if !safe_path(path) {
         return false;
     }
+    if valid_bundle_path(path) {
+        return true;
+    }
     match path.split('/').collect::<Vec<_>>().as_slice() {
         ["", "api", "v1", "admin", "platform-configuration"]
         | [
@@ -1978,6 +2042,27 @@ fn valid_platform_configuration_path(path: &str) -> bool {
             "applies",
             id,
         ] => id.parse::<contracts::OperationId>().is_ok(),
+        _ => false,
+    }
+}
+
+fn valid_bundle_path(path: &str) -> bool {
+    if !safe_path(path) {
+        return false;
+    }
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "versions",
+            revision,
+            "bundle",
+        ] => revision
+            .parse::<u64>()
+            .is_ok_and(|revision| (1..=i64::MAX.unsigned_abs()).contains(&revision)),
         _ => false,
     }
 }
@@ -2242,6 +2327,7 @@ mod tests {
         assert!(valid_control_path(root));
         assert!(valid_control_path(&format!("{root}/applies")));
         assert!(valid_control_path(&format!("{root}/versions/1")));
+        assert!(valid_control_path(&format!("{root}/versions/1/bundle")));
         assert!(valid_control_path(&format!(
             "{root}/applies/{}",
             contracts::OperationId::new()
@@ -2249,6 +2335,9 @@ mod tests {
         for invalid in [
             format!("{root}/versions/0"),
             format!("{root}/versions/nope"),
+            format!("{root}/versions/0/bundle"),
+            format!("{root}/versions/1/bundle/extra"),
+            format!("{root}/versions/1/bundle%2fsecret"),
             format!("{root}/applies/not-an-id"),
             format!("{root}/applies/../secret"),
             format!("{root}/applies%2fsecret"),
@@ -2256,6 +2345,22 @@ mod tests {
         ] {
             assert!(!valid_control_path(&invalid));
         }
+    }
+
+    #[tokio::test]
+    async fn bundle_proxy_stream_preserves_bytes_and_enforces_its_upload_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::body::{Body, Bytes, to_bytes};
+        use std::io;
+        let original = Bytes::from_static(b"synthetic-ciphertext-bytes");
+        let body = super::bounded_bundle_body(Body::from(original.clone()));
+        assert_eq!(to_bytes(Body::new(body), 1024).await?, original);
+        let stream = futures_util::stream::iter(
+            (0..71).map(|_| Ok::<_, io::Error>(Bytes::from(vec![0_u8; 1024 * 1024]))),
+        );
+        let body = super::bounded_bundle_body(Body::from_stream(stream));
+        assert!(to_bytes(Body::new(body), 80 * 1024 * 1024).await.is_err());
+        Ok(())
     }
 
     #[test]

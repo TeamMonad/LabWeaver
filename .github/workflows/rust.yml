@@ -43,6 +43,12 @@ jobs:
       - name: Install Web contract dependencies
         working-directory: ./web
         run: pnpm install --frozen-lockfile
+      - name: Install pinned age for synthetic Bundle HTTP and persistence tests
+        run: |
+          curl --fail --location --retry 3 -o /tmp/age.tar.gz https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
+          echo 'cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  /tmp/age.tar.gz' | sha256sum --check
+          tar -xzf /tmp/age.tar.gz -C /tmp age/age age/age-keygen
+          echo /tmp/age >> "$GITHUB_PATH"
       - name: Prepare the pinned MinIO integration-test image
         shell: bash
         run: |

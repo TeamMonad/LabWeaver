@@ -144,6 +144,7 @@ identity_service_realm_role_assignments: # noqa: var-naming[no-role-prefix]
   - caller: labweaver-access
     roles: [query-users, view-users]
 identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256 # noqa: var-naming[no-role-prefix]
+identity_secret_locator_controller: false # noqa: var-naming[no-role-prefix]
 identity_storage_class: local-path # noqa: var-naming[no-role-prefix]
 identity_postgres_storage: 20Gi # noqa: var-naming[no-role-prefix]
 identity_keycloak_replicas: 2 # noqa: var-naming[no-role-prefix]

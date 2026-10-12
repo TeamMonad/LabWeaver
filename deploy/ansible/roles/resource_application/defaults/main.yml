@@ -1,5 +1,7 @@
 ---
 resource_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
+resource_application_vars_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_VARS_FILE') }}"
+resource_application_versions_lock_file: "{{ playbook_dir }}/../../versions.lock.yml"
 resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
 resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE') }}"
 resource_application_access_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_ACCESS_SEED_FILE') }}"

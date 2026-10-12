@@ -327,6 +327,10 @@ fn admin_browser_router() -> Router<Arc<AppState>> {
             get(proxy::forward_control),
         )
         .route(
+            "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+            get(proxy::forward_control).post(proxy::forward_control_bundle),
+        )
+        .route(
             "/api/v1/admin/platform-configuration/applies",
             post(proxy::forward_control),
         )
