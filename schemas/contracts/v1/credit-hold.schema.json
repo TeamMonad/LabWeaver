@@ -40,6 +40,16 @@
     "createdAt": {
       "$ref": "#/$defs/UtcTimestamp"
     },
+    "expiredUnknownAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "id": {
       "format": "uuid",
       "type": "string"
@@ -59,6 +69,16 @@
         "null"
       ]
     },
+    "reconciliationDueAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "remaining": {
       "$ref": "#/$defs/FixedDecimal"
     },
@@ -67,6 +87,16 @@
     },
     "state": {
       "$ref": "#/$defs/CreditHoldState"
+    },
+    "unknownSince": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [

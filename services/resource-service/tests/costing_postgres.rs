@@ -555,6 +555,14 @@ async fn task_execution_ack_funds_upper_bound_atomically_and_keeps_failures_unst
         .acknowledge_funded_task_resource(task, &ack, "evaluation", "funded-task")
         .await?;
     assert_eq!(active.request.state, ResourceRequestState::Active);
+    assert!(matches!(
+        store
+            .acknowledge_funded_task_resource(task, &ack, "agent", "other-owner-replay")
+            .await,
+        Err(ResourceStoreError::Credits(
+            resource_service::credits::CreditError::Denied
+        ))
+    ));
     assert_eq!(credits.account(project).await?.reserved, amount("3.000000"));
     let (other, other_ack) = pending_task(&store, project).await?;
     let second = store

@@ -46,6 +46,10 @@
         "quantityDivisor": {
           "default": 1,
           "description": "Divide every quantity by this value to obtain the named base unit.\n1000 preserves millisecond observations without changing per-second prices.",
+          "enum": [
+            1,
+            1000
+          ],
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

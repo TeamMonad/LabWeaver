@@ -45,6 +45,12 @@ pub struct CreditHold {
     pub measurement_unknown: bool,
     pub reason: Option<String>,
     pub created_at: UtcTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_since: Option<UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation_due_at: Option<UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expired_unknown_at: Option<UtcTimestamp>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

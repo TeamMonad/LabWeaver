@@ -230,3 +230,6 @@ domains:
       - id: 17
         file: resource/0017_cost_estimates.sql
         sha256: 3b75defcbf48f5cfb58ae9bb88231ad83d39304a228977a31d32f61d751e215c
+      - id: 18
+        file: resource/0018_unknown_usage_deadline.sql
+        sha256: d68bca4b08afd1d1fb3d5ce07a7f72221a290eab4988f30ed261b8759d4bccd0

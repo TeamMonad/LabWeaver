@@ -12,6 +12,16 @@
         "createdAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
+        "expiredUnknownAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "id": {
           "format": "uuid",
           "type": "string"
@@ -31,6 +41,16 @@
             "null"
           ]
         },
+        "reconciliationDueAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "remaining": {
           "$ref": "#/$defs/FixedDecimal"
         },
@@ -39,6 +59,16 @@
         },
         "state": {
           "$ref": "#/$defs/CreditHoldState"
+        },
+        "unknownSince": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -138,6 +168,10 @@
         },
         "quantityDivisor": {
           "default": 1,
+          "enum": [
+            1,
+            1000
+          ],
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

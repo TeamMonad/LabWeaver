@@ -643,6 +643,7 @@ pub struct ResourceUsageQuantities {
     /// Divide every quantity by this value to obtain the named base unit.
     /// 1000 preserves millisecond observations without changing per-second prices.
     #[serde(default = "whole_quantity")]
+    #[schemars(extend("enum" = [1, 1000]))]
     pub quantity_divisor: u64,
     pub cpu_millicore_seconds: u64,
     pub memory_byte_seconds: u64,
@@ -660,6 +661,11 @@ pub enum UsageMeasurement {
 
 impl UsageMeasurement {
     pub fn validate(&self) -> Result<(), ResourceError> {
+        if let Self::Known { quantities } = self
+            && !matches!(quantities.quantity_divisor, 1 | 1000)
+        {
+            return Err(ResourceError::InvalidUsage);
+        }
         if let Self::Unknown { reason } = self
             && (reason.trim().is_empty() || reason.len() > 500)
         {
@@ -800,6 +806,7 @@ pub struct ResourceUsagePage {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceChargeLine {
     #[serde(default = "whole_quantity")]
+    #[schemars(extend("enum" = [1, 1000]))]
     pub quantity_divisor: u64,
     pub rate_id: RateId,
     pub rate_revision: Revision,
@@ -1010,6 +1017,22 @@ mod tests {
         WorkloadResources,
     };
     use crate::Revision;
+
+    #[test]
+    fn measurements_reject_noncanonical_divisors_before_arithmetic() {
+        for divisor in [0, 2, 999, 1001, u64::MAX] {
+            let measurement = super::UsageMeasurement::Known {
+                quantities: super::ResourceUsageQuantities {
+                    quantity_divisor: divisor,
+                    cpu_millicore_seconds: 1,
+                    memory_byte_seconds: 1,
+                    storage_byte_seconds: 0,
+                    gpu_unit_seconds: 0,
+                },
+            };
+            assert_eq!(measurement.validate(), Err(ResourceError::InvalidUsage));
+        }
+    }
 
     #[test]
     fn resources_reject_zero_and_non_catalogued_gpu_syntax() {

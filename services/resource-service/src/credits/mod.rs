@@ -287,6 +287,9 @@ fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
         },
         reason: row.try_get("reason")?,
         measurement_unknown: row.try_get("measurement_unknown")?,
+        unknown_since: optional_time(row, "unknown_since")?,
+        reconciliation_due_at: optional_time(row, "reconciliation_due_at")?,
+        expired_unknown_at: optional_time(row, "expired_unknown_at")?,
         created_at: UtcTimestamp::from_utc(row.try_get("created_at")?)
             .map_err(|_| CreditError::Invalid)?,
     })
@@ -552,14 +555,41 @@ async fn resolve_in_transaction(
     if hold.owner_client_id != owner {
         return Err(CreditError::Denied);
     }
-    let (debit, released, absorbed, kind, reason) = hold_movement(&mut hold, input)?;
+    if matches!(input, CreditHoldResolutionRequest::Settle { .. }) {
+        let current = now(tx).await?;
+        expire_hold(tx, &mut hold, current).await?;
+    }
+    if matches!(input, CreditHoldResolutionRequest::Unknown { .. }) && hold.unknown_since.is_none()
+    {
+        let first = now(tx).await?;
+        hold.unknown_since = Some(first);
+        hold.reconciliation_due_at = Some(
+            UtcTimestamp::from_utc(
+                first.get()
+                    + time::Duration::seconds(i64::from(
+                        contracts::resource::costing::UNKNOWN_USAGE_RECONCILIATION_SECONDS,
+                    )),
+            )
+            .map_err(|_| CreditError::Invalid)?,
+        );
+    }
+    apply_resolution(tx, &mut hold, input).await?;
+    Ok(hold)
+}
+
+async fn apply_resolution(
+    tx: &mut Tx<'_>,
+    hold: &mut CreditHold,
+    input: &CreditHoldResolutionRequest,
+) -> Result<(), CreditError> {
+    let (debit, released, absorbed, kind, reason) = hold_movement(hold, input)?;
     hold.reason = Some(reason.clone());
-    sqlx::query("UPDATE resource.credit_holds SET remaining=$2::text::numeric,state=$3,reason=$4,measurement_unknown=$5 WHERE hold_id=$1").bind(hold.id).bind(hold.remaining.scaled().to_string()).bind(state_name(hold.state)).bind(&reason).bind(hold.measurement_unknown).execute(&mut **tx).await?;
+    sqlx::query("UPDATE resource.credit_holds SET remaining=$2::text::numeric,state=$3,reason=$4,measurement_unknown=$5,unknown_since=$6,reconciliation_due_at=$7,expired_unknown_at=$8 WHERE hold_id=$1").bind(hold.id).bind(hold.remaining.scaled().to_string()).bind(state_name(hold.state)).bind(&reason).bind(hold.measurement_unknown).bind(hold.unknown_since.map(UtcTimestamp::get)).bind(hold.reconciliation_due_at.map(UtcTimestamp::get)).bind(hold.expired_unknown_at.map(UtcTimestamp::get)).execute(&mut **tx).await?;
     let op = Uuid::now_v7();
     let now = now(tx).await?;
     let mut e = entry(
         op,
-        Some(project_id),
+        Some(hold.project_id),
         -debit,
         -released,
         debit,
@@ -572,17 +602,17 @@ async fn resolve_in_transaction(
         e.source_event_id = Some(*event_id);
     }
     e.reason = reason.clone();
-    e.owner_client_id = Some(owner.into());
+    e.owner_client_id = Some(hold.owner_client_id.clone());
     apply(tx, &e).await?;
     if debit > 0 {
         let mut counterpart = entry(op, None, debit, 0, 0, 0, kind, now)?;
         counterpart.hold_id = Some(hold.id);
         counterpart.source_event_id = e.source_event_id;
         counterpart.reason = reason;
-        counterpart.owner_client_id = Some(owner.into());
+        counterpart.owner_client_id = Some(hold.owner_client_id.clone());
         apply(tx, &counterpart).await?;
     }
-    Ok(hold)
+    Ok(())
 }
 
 fn hold_movement(
@@ -778,6 +808,9 @@ pub(crate) async fn hold_in_transaction(
         measurement_unknown: false,
         reason: None,
         created_at: now(tx).await?,
+        unknown_since: None,
+        reconciliation_due_at: None,
+        expired_unknown_at: None,
     };
     sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6::text::numeric,$6::text::numeric,'pending',$7)").bind(hold.id).bind(project).bind(input.request_id.as_uuid()).bind(&input.business_key).bind(owner).bind(input.amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut **tx).await?;
     let mut e = entry(
@@ -832,4 +865,99 @@ pub(crate) async fn require_funded_in_transaction(
         return Err(CreditError::Insufficient);
     }
     Ok(())
+}
+
+fn optional_time(
+    row: &sqlx::postgres::PgRow,
+    name: &str,
+) -> Result<Option<UtcTimestamp>, CreditError> {
+    row.try_get::<Option<time::OffsetDateTime>, _>(name)?
+        .map(UtcTimestamp::from_utc)
+        .transpose()
+        .map_err(|_| CreditError::Invalid)
+}
+
+async fn expire_hold(
+    tx: &mut Tx<'_>,
+    hold: &mut CreditHold,
+    cutoff: UtcTimestamp,
+) -> Result<bool, CreditError> {
+    if !hold.measurement_unknown
+        || hold.expired_unknown_at.is_some()
+        || hold.reconciliation_due_at.is_none_or(|due| due > cutoff)
+    {
+        return Ok(false);
+    }
+    hold.expired_unknown_at = Some(cutoff);
+    if matches!(
+        hold.state,
+        CreditHoldState::Pending | CreditHoldState::Unknown
+    ) {
+        apply_resolution(
+            tx,
+            hold,
+            &CreditHoldResolutionRequest::Release {
+                reason:
+                    "one-hour unknown reconciliation deadline reached; late cost is platform cost"
+                        .into(),
+            },
+        )
+        .await?;
+    } else {
+        sqlx::query("UPDATE resource.credit_holds SET expired_unknown_at=$2 WHERE hold_id=$1 AND expired_unknown_at IS NULL").bind(hold.id).bind(cutoff.get()).execute(&mut **tx).await?;
+    }
+    Ok(true)
+}
+impl PgCreditStore {
+    /// The maintenance loop uses the `PostgreSQL` clock as its observation cutoff.
+    pub async fn expire_unknown_once(&self) -> Result<u64, CreditError> {
+        let mut tx = self.pool.begin().await?;
+        let cutoff = now(&mut tx).await?;
+        tx.commit().await?;
+        self.expire_unknown_at(cutoff).await
+    }
+    /// Applies one bounded batch at a trusted maintenance clock observation.
+    pub async fn expire_unknown_at(&self, cutoff: UtcTimestamp) -> Result<u64, CreditError> {
+        let candidates=sqlx::query("SELECT hold_id FROM resource.credit_holds WHERE measurement_unknown AND expired_unknown_at IS NULL AND reconciliation_due_at<=$1 ORDER BY project_id,hold_id LIMIT 100").bind(cutoff.get()).fetch_all(&self.pool).await?;
+        let mut expired = 0;
+        for candidate in candidates {
+            let id: Uuid = candidate.try_get("hold_id")?;
+            let mut tx = self.pool.begin().await?;
+            let project: Uuid =
+                sqlx::query_scalar("SELECT project_id FROM resource.credit_holds WHERE hold_id=$1")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            lock_account(
+                &mut tx,
+                project
+                    .to_string()
+                    .parse()
+                    .map_err(|_| CreditError::Invalid)?,
+            )
+            .await?;
+            let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE hold_id=$1 FOR UPDATE").bind(id).fetch_one(&mut *tx).await?;
+            let mut hold = decode_hold(&row)?;
+            if expire_hold(&mut tx, &mut hold, cutoff).await? {
+                expired += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok(expired)
+    }
+}
+
+/// A replayed handoff retains the identity that funded the original request.
+pub(crate) async fn check_request_hold_owner(
+    tx: &mut Tx<'_>,
+    request: contracts::ResourceRequestId,
+    owner: &str,
+    require_paid: bool,
+) -> Result<(), CreditError> {
+    let existing:Option<String>=sqlx::query_scalar("SELECT owner_client_id FROM resource.credit_holds WHERE request_id=$1 AND business_key='metered-usage'").bind(request.as_uuid()).fetch_optional(&mut **tx).await?;
+    match existing {
+        Some(existing) if existing != owner => Err(CreditError::Denied),
+        None if require_paid => Err(CreditError::Insufficient),
+        _ => Ok(()),
+    }
 }
