@@ -648,6 +648,30 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     let (_container, pool) = migrated_pool().await?;
     let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
+    for unit in [
+        ResourceBillingUnit::CpuMillicoreSecond,
+        ResourceBillingUnit::MemoryByteSecond,
+        ResourceBillingUnit::StorageByteSecond,
+    ] {
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    unit,
+                    unit_quantity: 1,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::zero(),
+                    },
+                    effective_from: now,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+
     let owner_id = ActorId::new();
     let project_id = ProjectId::new();
     let task_run_id = TaskRunId::new();
@@ -750,11 +774,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     assert!(!claimed.cleanup_confirmed);
 
     let stale_ack = store
-        .acknowledge_task_resource(
+        .acknowledge_funded_task_resource(
             task_run_id,
-            Revision::new(1)?,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
+            &contracts::http::AcknowledgeTaskResourceRequest {
+                expected_claim_revision: Revision::new(1)?,
+                expected_lease_revision: claimed.lease_revision,
+                execution_namespace: "labweaver-evaluation-runs".into(),
+            },
+            "synthetic-task-owner",
             "trace-task-stale-ack",
         )
         .await;
@@ -772,11 +799,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     .execute(&pool)
     .await?;
     let expired_ack = store
-        .acknowledge_task_resource(
+        .acknowledge_funded_task_resource(
             task_run_id,
-            claimed.claim_revision,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
+            &contracts::http::AcknowledgeTaskResourceRequest {
+                expected_claim_revision: claimed.claim_revision,
+                expected_lease_revision: claimed.lease_revision,
+                execution_namespace: "labweaver-evaluation-runs".into(),
+            },
+            "synthetic-task-owner",
             "trace-task-expired-ack",
         )
         .await;
@@ -793,11 +823,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     .execute(&pool)
     .await?;
     let acknowledged = store
-        .acknowledge_task_resource(
+        .acknowledge_funded_task_resource(
             task_run_id,
-            claimed.claim_revision,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
+            &contracts::http::AcknowledgeTaskResourceRequest {
+                expected_claim_revision: claimed.claim_revision,
+                expected_lease_revision: claimed.lease_revision,
+                execution_namespace: "labweaver-evaluation-runs".into(),
+            },
+            "synthetic-task-owner",
             "trace-task-ack",
         )
         .await?;
@@ -1679,6 +1712,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
                 measured_until: usage_end,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 1,
                         memory_byte_seconds: 1,
                         storage_byte_seconds: 0,
@@ -1792,6 +1826,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
                 measured_until: suspended_usage_end,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 0,
                         memory_byte_seconds: 0,
                         storage_byte_seconds: 1,
@@ -2106,6 +2141,16 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     );
     assert!(reservation_contract["allocation"].is_null());
 
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0016_project_credits.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0017_cost_estimates.sql"
+    ))
+    .execute(&pool)
+    .await?;
     let store = PgResourceStore::new(pool.clone());
     let resolve_request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
@@ -2142,6 +2187,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     let usage_start = store.current_time().await?;
     let usage_end = UtcTimestamp::from_utc(usage_start.get() + time::Duration::seconds(1))?;
     let compute_quantities = ResourceUsageQuantities {
+        quantity_divisor: 1,
         cpu_millicore_seconds: u64::from(approved_resources.cpu_millicores),
         memory_byte_seconds: approved_resources.memory_bytes,
         storage_byte_seconds: 0,
@@ -2325,6 +2371,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         measured_until: storage_end,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 0,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: approved_resources.storage_bytes,
@@ -2593,6 +2640,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         measured_until: boundary,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 10,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -2628,6 +2676,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         measured_until: end,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 5,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -2655,6 +2704,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         measured_until: end,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 10,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -2747,6 +2797,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         )?,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 0,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 7,
@@ -2975,6 +3026,7 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
                 measured_until: usage_until,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 0,
                         memory_byte_seconds: 2,
                         storage_byte_seconds: 0,
@@ -3045,6 +3097,7 @@ async fn concurrent_usage_and_lease_revoke_keep_foreign_key_lock_order()
         measured_until,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 1,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -3145,6 +3198,7 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
                 measured_until,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 0,
                         memory_byte_seconds: 2,
                         storage_byte_seconds: 0,
@@ -3237,6 +3291,7 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
                 measured_until,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 1,
                         memory_byte_seconds: 0,
                         storage_byte_seconds: 0,
@@ -3955,6 +4010,11 @@ async fn migrated_pool()
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0017_cost_estimates.sql"
+    ))
+    .execute(&pool)
+    .await?;
     Ok((container, pool))
 }
 
@@ -4636,6 +4696,7 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
                 measured_until: end,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 2,
                         memory_byte_seconds: 0,
                         storage_byte_seconds: 0,
@@ -4928,4 +4989,171 @@ fn credit_http_request(
         request = request.header("x-labweaver-resource-delegation", delegation);
     }
     Ok(request.body(Body::from(serde_json::to_vec(body)?))?)
+}
+
+#[tokio::test]
+async fn estimated_cost_http_uses_signed_user_preview_and_exact_service_scope()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::costing::{EstimatedCreditHoldRequest, ResourceCostEstimateRequest};
+    use contracts::resource::credits::CreditAdminOperation;
+    let (_container, pool) = migrated_pool().await?;
+    let authority =
+        spawn_resource_auth_authority(resource_signing_material("estimate-auth")?).await?;
+    let verifier = build_resource_verifier(&authority.issuer).await?;
+    let store = PgResourceStore::new(pool.clone());
+    let project = ProjectId::new();
+    let actor = ActorId::new();
+    let now = store.current_time().await?;
+    let (request, _lease) =
+        create_active_request(&store, now, project, actor, "estimate-http-work").await?;
+    for unit in [
+        ResourceBillingUnit::CpuMillicoreSecond,
+        ResourceBillingUnit::MemoryByteSecond,
+        ResourceBillingUnit::StorageByteSecond,
+    ] {
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    unit,
+                    unit_quantity: 1,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::parse("1.000000")?,
+                    },
+                    effective_from: now,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    let from = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
+    let until = UtcTimestamp::from_utc(
+        from.get() + time::Duration::seconds(i64::try_from(request.requested_duration_seconds)?),
+    )?;
+    let input = ResourceCostEstimateRequest {
+        resources: request.requested_resources.clone(),
+        compute_from: from,
+        compute_until: until,
+        storage_from: from,
+        storage_until: until,
+    };
+    let quote = store.estimate_cost(project, &input).await?;
+    resource_service::credits::PgCreditStore::new(pool.clone())
+        .admin(
+            "http-estimate-grant",
+            actor,
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Grant {
+                project_id: project,
+                amount: quote.total.amount.clone(),
+                reason: "synthetic estimate allowance".into(),
+            },
+        )
+        .await?;
+    let key = [9_u8; 32];
+    let state = resource_service::api::ResourceApiState::new(store)
+        .with_service_verifier(Arc::new(verifier))
+        .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
+        .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.into())
+        .with_task_service_client_ids(
+            [
+                RESOURCE_AGENT_CLIENT_ID.into(),
+                RESOURCE_EVALUATION_CLIENT_ID.into(),
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let router = resource_service::api::with_delegation(
+        resource_service::api::resource_api_router(state),
+        Arc::new(key.to_vec()),
+    );
+    let access = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ACCESS_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.api.invoke", "resource.credits.hold"],
+    )?;
+    let env = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ENVIRONMENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.hold"],
+    )?;
+    let agent = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_AGENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.hold"],
+    )?;
+    let timestamp = time::OffsetDateTime::now_utc();
+    let session = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: actor.as_uuid(),
+        roles: vec![PlatformRole::Student],
+        authorization_revision: 1,
+        expires_at: timestamp + time::Duration::minutes(5),
+        idle_expires_at: timestamp + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-estimate-csrf".into()),
+    };
+    let delegation = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let preview_path = format!("/api/v1/projects/{project}/resource-cost-estimate");
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            Some(&delegation),
+            &preview_path,
+            &serde_json::to_value(&input)?,
+            "preview",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: contracts::resource::costing::ResourceCostEstimate =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(preview, quote);
+    let body = serde_json::to_value(EstimatedCreditHoldRequest {
+        request_id: request.id,
+        expected_estimate: preview,
+    })?;
+    for (token, expected) in [
+        (&access, StatusCode::FORBIDDEN),
+        (&agent, StatusCode::FORBIDDEN),
+        (&env, StatusCode::OK),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(credit_http_request(
+                token,
+                None,
+                "/internal/v1/credits/estimated-holds",
+                &body,
+                "estimated-http-hold",
+            )?)
+            .await?;
+        assert_eq!(response.status(), expected);
+    }
+    let malformed = router
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            "/internal/v1/credits/estimated-holds",
+            &json!({"amount":"1.000000"}),
+            "bad-estimate",
+        )?)
+        .await?;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        malformed
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json")
+    );
+    Ok(())
 }

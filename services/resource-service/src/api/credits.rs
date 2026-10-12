@@ -82,7 +82,10 @@ async fn admin(
             .await?,
     ))
 }
-fn owner(state: &ResourceApiState, identity: &auth::ServiceIdentity) -> Result<(), CreditError> {
+pub(super) fn owner(
+    state: &ResourceApiState,
+    identity: &auth::ServiceIdentity,
+) -> Result<(), CreditError> {
     if state.environment_service_client_id.as_deref() == Some(identity.client_id.as_str())
         || state
             .task_service_client_ids

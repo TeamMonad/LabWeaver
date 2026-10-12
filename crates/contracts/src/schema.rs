@@ -288,6 +288,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::credits::CreditAdminOperation
     );
     document!(
+        "schemas/contracts/v1/resource-cost-estimate-request.schema.json",
+        crate::resource::costing::ResourceCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-cost-estimate.schema.json",
+        crate::resource::costing::ResourceCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold-request.schema.json",
+        crate::resource::costing::EstimatedCreditHoldRequest
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold.schema.json",
+        crate::resource::costing::EstimatedCreditHold
+    );
+    document!(
         "schemas/contracts/v1/credit-hold-request.schema.json",
         crate::resource::credits::CreditHoldRequest
     );
@@ -1663,6 +1679,8 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
         "createCreditAdminOperation" => "credit-admin-operation",
         "createCreditHold" => "credit-hold-request",
+        "estimateProjectResourceCost" => "resource-cost-estimate-request",
+        "createEstimatedCreditHold" => "estimated-credit-hold-request",
         "resolveCreditHold" => "credit-hold-resolution-request",
         "createResourceRate" => "http/create-resource-rate-request",
         "endResourceRate" => "http/end-resource-rate-request",
@@ -1803,6 +1821,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
         "listProjectCreditHolds" => contract_ref("credit-hold-page"),
         "getProjectCredits" => contract_ref("credit-account"),
+        "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
+        "createEstimatedCreditHold" => contract_ref("estimated-credit-hold"),
         "listProjectCreditLedger" => contract_ref("credit-ledger-page"),
         "createCreditAdminOperation" => {
             json!({"type":"array","items":contract_ref("credit-ledger-entry")})

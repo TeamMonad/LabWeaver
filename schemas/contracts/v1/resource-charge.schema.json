@@ -65,6 +65,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "quantityDivisor": {
+          "default": 1,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "rateId": {
           "$ref": "#/$defs/RateId"
         },

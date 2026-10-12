@@ -227,3 +227,6 @@ domains:
       - id: 16
         file: resource/0016_project_credits.sql
         sha256: a08012d2e5a69f898f617d758432f55fba327bb22a898c7b6acdedcd39e9e758
+      - id: 17
+        file: resource/0017_cost_estimates.sql
+        sha256: 3b75defcbf48f5cfb58ae9bb88231ad83d39304a228977a31d32f61d751e215c
