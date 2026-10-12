@@ -1108,3 +1108,4 @@ pub mod credits;
 
 /// Builder-time estimates and immutable observations.
 pub mod build_costing;
+pub mod environment_funding;

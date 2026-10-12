@@ -1828,6 +1828,100 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/internal/v1/environment-credit-grants/{leaseId}": {
+      "get": {
+        "description": "Permission: resource.environment.resolve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getEnvironmentCreditGrant",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "leaseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/environment-credit-grant.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.environment.resolve"
+            ]
+          }
+        ],
+        "summary": "getEnvironmentCreditGrant",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.environment.resolve",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": false,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/internal/v1/environment-releases/{releaseId}/admission": {
       "get": {
         "description": "Permission: control.authoring.read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",

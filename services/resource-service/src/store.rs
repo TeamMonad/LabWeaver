@@ -224,6 +224,7 @@ pub struct PgResourceStore {
     pool: PgPool,
     cursor_signing_key_current: Arc<Vec<u8>>,
     cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
+    environment_credit_owner: Option<String>,
 }
 
 struct UsageAuthority<'a> {
@@ -381,6 +382,7 @@ impl PgResourceStore {
             pool,
             cursor_signing_key_current: Arc::new(b"labweaver-test-cursor-key".to_vec()),
             cursor_signing_key_previous: None,
+            environment_credit_owner: None,
         }
     }
 
@@ -389,6 +391,21 @@ impl PgResourceStore {
         self.cursor_signing_key_current = Arc::new(current);
         self.cursor_signing_key_previous = previous.map(Arc::new);
         self
+    }
+
+    /// Configures the actual Environment service identity that consumes the original funds.
+    #[must_use]
+    pub fn with_environment_credit_owner(mut self, owner: String) -> Self {
+        self.environment_credit_owner = Some(owner);
+        self
+    }
+    pub(crate) fn environment_credit_owner(&self) -> Result<&str, ResourceStoreError> {
+        self.environment_credit_owner
+            .as_deref()
+            .filter(|v| {
+                !v.is_empty() && v.len() <= 128 && !v.bytes().any(|c| c.is_ascii_whitespace())
+            })
+            .ok_or(ResourceStoreError::ScopeConflict)
     }
 
     pub(crate) fn pool(&self) -> PgPool {
@@ -3578,6 +3595,7 @@ impl PgResourceStore {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
+        crate::costing::rate_lock(&mut transaction).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at))
             .map_err(|_| ResourceStoreError::Wire)?;
@@ -3606,6 +3624,20 @@ impl PgResourceStore {
                             == Some("LW_RESOURCE_TASK_LEASE_EXPIRED"))
                 {
                     return Err(ResourceStoreError::TaskLeaseExpired);
+                }
+                if matches!(request.target, ResourceTarget::Environment { .. }) {
+                    let from = lease.expires_at.ok_or(ResourceStoreError::ScopeConflict)?;
+                    crate::environment_funding::fund_window(
+                        &mut transaction,
+                        &request,
+                        &lease,
+                        next.revision,
+                        self.environment_credit_owner()?,
+                        from,
+                        expires_at,
+                        false,
+                    )
+                    .await?;
                 }
                 update_lease(&mut transaction, &lease, &next).await?;
                 enqueue_lease_event(
@@ -3721,11 +3753,45 @@ impl PgResourceStore {
         trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
         validate_trace(trace_id)?;
+        let owner = self.environment_credit_owner()?;
         let mut transaction = self.pool.begin().await?;
+        crate::costing::rate_lock(&mut transaction).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
+        if lease.state == ResourceLeaseState::Active
+            && lease.revision.get()
+                == expected_revision
+                    .get()
+                    .checked_add(1)
+                    .ok_or(ResourceStoreError::NumericOverflow)?
+            && lease.active_from == Some(active_from)
+            && lease.expires_at == Some(expires_at)
+            && request.state == ResourceRequestState::Active
+        {
+            let hold: uuid::Uuid = sqlx::query_scalar("SELECT hold_id FROM resource.environment_credit_windows WHERE lease_id=$1 AND lease_revision=$2").bind(lease.id.as_uuid()).bind(i64::try_from(lease.revision.get()).map_err(|_|ResourceStoreError::NumericOverflow)?).fetch_one(&mut *transaction).await?;
+            crate::credits::require_funded_in_transaction(
+                &mut transaction,
+                owner,
+                hold,
+                &contracts::resource::FixedDecimal::zero(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(lease);
+        }
         let next =
             ResourceLifecycle::activate_lease(&lease, expected_revision, active_from, expires_at)?;
+        crate::environment_funding::fund_window(
+            &mut transaction,
+            &request,
+            &lease,
+            next.revision,
+            owner,
+            active_from,
+            expires_at,
+            true,
+        )
+        .await?;
         let next_request = ResourceLifecycle::activate(&request, request.revision, active_from)?;
         update_lease(&mut transaction, &lease, &next).await?;
         update_request(&mut transaction, &request, &next_request).await?;

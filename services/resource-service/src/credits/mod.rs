@@ -1105,3 +1105,86 @@ pub(crate) async fn check_request_hold_owner(
         _ => Ok(()),
     }
 }
+
+/// Funds the cumulative approved intervals, reusing any original excess preauthorization.
+/// The native lease revision and immutable window identity fence replays before this entry.
+pub(crate) async fn extend_environment_hold(
+    tx: &mut Tx<'_>,
+    owner: &str,
+    id: Uuid,
+    required_total: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    if required_total.scaled() < 0 || required_total.scaled().unsigned_abs() >= 10_u128.pow(38) {
+        return Err(CreditError::Invalid);
+    }
+    let project: Uuid =
+        sqlx::query_scalar("SELECT project_id FROM resource.credit_holds WHERE hold_id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    let project_id = project
+        .to_string()
+        .parse()
+        .map_err(|_| CreditError::Invalid)?;
+    lock_account(tx, project_id).await?;
+    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE hold_id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
+    let mut hold = decode_hold(&row)?;
+    if hold.owner_client_id != owner {
+        return Err(CreditError::Denied);
+    }
+    if hold.state != CreditHoldState::Pending
+        || hold.measurement_unknown
+        || hold.expired_unknown_at.is_some()
+    {
+        return Err(CreditError::Insufficient);
+    }
+    let amount = decimal(
+        required_total
+            .scaled()
+            .saturating_sub(hold.amount.scaled())
+            .max(0),
+    )?;
+    let available: String = sqlx::query_scalar(
+        "SELECT (balance-reserved)::text FROM resource.credit_accounts WHERE project_id=$1",
+    )
+    .bind(project)
+    .fetch_one(&mut **tx)
+    .await?;
+    if available
+        .parse::<i128>()
+        .map_err(|_| CreditError::Invalid)?
+        < amount.scaled()
+    {
+        return Err(CreditError::Insufficient);
+    }
+    hold.amount = decimal(
+        hold.amount
+            .scaled()
+            .checked_add(amount.scaled())
+            .ok_or(CreditError::Invalid)?,
+    )?;
+    hold.remaining = decimal(
+        hold.remaining
+            .scaled()
+            .checked_add(amount.scaled())
+            .ok_or(CreditError::Invalid)?,
+    )?;
+    sqlx::query("UPDATE resource.credit_holds SET amount=$2::text::numeric,remaining=$3::text::numeric WHERE hold_id=$1").bind(id).bind(hold.amount.scaled().to_string()).bind(hold.remaining.scaled().to_string()).execute(&mut **tx).await?;
+    if amount.scaled() > 0 {
+        let mut movement = entry(
+            Uuid::now_v7(),
+            Some(project_id),
+            0,
+            amount.scaled(),
+            0,
+            0,
+            "hold",
+            now(tx).await?,
+        )?;
+        movement.hold_id = Some(id);
+        movement.owner_client_id = Some(owner.into());
+        movement.reason = "approved Environment additional interval".into();
+        apply(tx, &movement).await?;
+    }
+    Ok(hold)
+}

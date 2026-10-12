@@ -592,3 +592,5 @@ mod tests {
 
 /// Resource-owned build accounting, reused by the bounded Agent transaction coordinator.
 pub mod build_costing;
+
+pub mod environment_funding;

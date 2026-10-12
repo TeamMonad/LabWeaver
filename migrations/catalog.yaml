@@ -258,5 +258,19 @@ domains:
         file: resource/0016_project_credits.sql
         sha256: 442e27c0dc2cfa7d554440fbfca6b94a6f0997cc23b2273edcb2bc46e73e4571
       - id: 17
+<<<<<<< HEAD
         file: resource/0017_project_request_pagination_indexes.sql
         sha256: 1f8ddb9c627110cdc8aaa754b9a2d72c13d60a10134d41eefaa8dc45a0a4eb02
+=======
+        file: resource/0017_cost_estimates.sql
+        sha256: 3b75defcbf48f5cfb58ae9bb88231ad83d39304a228977a31d32f61d751e215c
+      - id: 18
+        file: resource/0018_unknown_usage_deadline.sql
+        sha256: d68bca4b08afd1d1fb3d5ce07a7f72221a290eab4988f30ed261b8759d4bccd0
+      - id: 19
+        file: resource/0019_build_metering.sql
+        sha256: 3429e29240d69fae733faf7a7e87810039a421145b8d8f357efab85939410012
+      - id: 20
+        file: resource/0020_environment_funding.sql
+        sha256: 3889f72ee93635cfc8b030d55840625a799124e2307519352862d9b9102fdf3d
+>>>>>>> 4b72172c (feat(resource): fund original environment leases and renewals)

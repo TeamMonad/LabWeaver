@@ -388,6 +388,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::build_costing::BuildCostEstimate
     );
     document!(
+        "schemas/contracts/v1/environment-credit-grant.schema.json",
+        crate::resource::environment_funding::EnvironmentCreditGrant
+    );
+    document!(
         "schemas/contracts/v1/build-cost-record.schema.json",
         crate::resource::build_costing::BuildCostRecord
     );
@@ -2348,6 +2352,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listProjectCreditHolds" => contract_ref("credit-hold-page"),
         "getProjectCredits" => contract_ref("credit-account"),
         "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
+        "getEnvironmentCreditGrant" => contract_ref("environment-credit-grant"),
         "claimBuildCostReconciliations" => {
             json!({"type":"array","items":contract_ref("build-cost-reconciliation")})
         }

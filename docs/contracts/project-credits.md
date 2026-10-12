@@ -146,3 +146,18 @@ Dockerfile 构建使用 `build_second`，费率还必须指定真实 `builderBin
 实际费用取唯一且身份匹配的 BuildKit history 的起止时间，以毫秒分子、`quantityDivisor=1000` 计算，跨版本按边界分段，和估价共用精确计价函数。缺失边界或低于当前毫秒精度的区间保留待核实状态和观察到的原时间，不补零。已知时间遇到缺失历史费率时保留时间事实，费用继续待核实；管理员补齐覆盖后按原事实重试。
 
 丢失执行响应后只查询原 stage，不能重放 Solve。未知事实首次出现后一小时释放剩余预占，重试不延长；迟到的已知费用和超过预占的尾部由平台承担。原构建费用可在清理或新 attempt 后查询和结算，查询不能恢复工作流或发布镜像。Resource 到期维护不依赖 NATS Outbox；Agent 每轮最多读取 25 条到期原 grant，服务端为同条查询保留一分钟间隔。未知记录和费用待核实状态在资金释放后仍保留。
+
+
+## 原 Environment lease 的资金覆盖
+
+Resource 的容量 shell 就绪后，激活 Environment lease 前读取原 lease.claimId → claim.approvalId。批准规格、原项目、实际 GPU 目录分配与已配置 Environment 服务身份用于上限估价。批准的持续时间决定初次截止；截止不超过原 approval.validUntil，不采用申请草稿中的较大时长。报价、原预占、不可变价格窗口与 lease/request 激活在同一 Resource 数据库事务提交。缺价、非 CREDITS 价格、欠额或规格/owner 不符整体拒绝；不写默认运营价格。
+
+已有同一 request 的 metered-usage hold 只复用，实际剩余额度须覆盖上限。同一 request 的已有估价快照保留；不新建第二 hold、批准或 Environment reservation。显式零价仍需要有效费率及原 hold/窗口。Resource0020 保存不可变窗口，不维护第二套运行生命周期。
+
+续期仅估价 `[原 expiresAt, 新 expiresAt)`，每次新增区间不超过原 approvedDurationSeconds，新截止不超过原 approval.validUntil。原 lease 必须仍未到期。native revision、幂等键及同事务窗口写入确保重放或不同键并发不会重复追加预占；累计窗口报价先复用原 hold 已有上限，仅不足部分追加到同一个 hold；已有较大预占不会因续期重复冻结。未知、已释放或欠额的原 hold 不能续期，重试不能重新开始首次未知期限。
+
+`getEnvironmentCreditGrant` 是 GET `/internal/v1/environment-credit-grants/{leaseId}`，要求 `resource.environment.resolve` 和已配置 Environment 客户端的真实 JWT/TLS。返回 `requestId`、`leaseId/leaseRevision`、`claimId`、原 `approvalId`、实际 `hold`、`estimate` 和 `canAuthorizeExecution`。`coveredFrom/coveredUntil` 是从初次激活起的连续总区间，`estimate` 是最近一次增量窗口。Resource 校验原项目/owner/claim/approval；只有当前 Active lease、当前 revision/截止、已开始且未到期的覆盖和已知 Pending 资金可以授权新 compute。该响应是资金事实，Environment 仍须核原 runtime receipt、配置、发布版本和执行身份。
+
+资金覆盖到期后仍没有确认最终计量/释放，独立账务维护记录首次未知事实并沿用一小时核实期限。其后释放资金、保留未知用量；不能把实际时间填零，也不宣称运行对象或持久盘已经释放。迟到/尾部费用沿原 Credits 规则由平台承担。停止和实际回收不依赖新的资金授权。尚未产生资金窗口、仍 Allocating 的原申请在其确切批准到期后释放未启动预占；这仅结束资金冻结，不宣称容量 claim 已回收。
+
+`ResourceEnvironmentHandoff` 使用现有 handoff 字段和 work-handoffs、work-lease-updates、work-cleanups 路径。类别由可信不可变 ReleasePublished 的 environmentSpec.class 得到，不由 courseId 或浏览器选择；在途 Work 消费者的符号仍指向同一具体 DTO。Experiment/Work 的实际接收、创建、启动、重启、停止、租约刷新与计量接线归 Environment owner（#207）。资金 DTO 和 Resource 事务可独立验证，不代表整个 Environment 用户旅程、预付持久存储产品或真实集群验收已经完成。
