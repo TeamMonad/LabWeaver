@@ -11,6 +11,7 @@ from pathlib import Path
 
 import render_worker
 from common import SUPPORT_ROOT, pinned_schema
+TEST_NAMESPACE = 'lw-bundle-synthetic-self-test'
 
 
 class FreezeTestSupport(unittest.TestCase):
@@ -29,7 +30,7 @@ class FreezeTestSupport(unittest.TestCase):
                         'idempotencyKey': 'SYNTHETIC_SELF_TEST_ONLY', 'traceId': 'SYNTHETIC_RENDER_SELF_TEST_ONLY'}
         self.command = {'request': self.request, 'source': {'kind': 'pvc', 'workspaceRoot': '/workspace', 'sourceIdentity': digest}}
         self.binding = {'environment': env, 'agentRunId': self.request['agentRunId'], 'source': {'kind': 'container',
-                        'namespace': 'lw-env-' + self.uid(1), 'persistentVolumeClaim': 'workspace',
+                        'namespace': TEST_NAMESPACE, 'persistentVolumeClaim': 'workspace',
                         'storageClassName': 'SYNTHETIC_SELF_TEST_ONLY'}}
         self.facts = json.loads((SUPPORT_ROOT / 'facts.example.json').read_text())
         self.receipt = json.loads((SUPPORT_ROOT / 'image-receipt.example.json').read_text())
@@ -41,13 +42,34 @@ class FreezeTestSupport(unittest.TestCase):
         self.facts.update(projectId=self.request['projectId'], actorId=self.request['actorId'],
                           frozenSubmissionId=self.request['frozenSubmissionId'], nodeName='synthetic-node',
                           existingServiceAccount='synthetic-account', existingSecretName='synthetic-secret',
-                          databaseNameForReview='lw197_synthetic')
+                          databaseNameForReview='lw197_synthetic', existingNamespace=TEST_NAMESPACE)
         self.receipt.update(ociManifestDigest='sha256:' + '1' * 64,
                             imageReference='localhost/labweaver-197/evaluation-service@sha256:' + '1' * 64,
                             nodeImportVerified=True, verifiedNodes=['synthetic-node'])
 
-    def render(self):
-        return render_worker.render(self.command, self.binding, self.facts, self.receipt, self.expected)
+    def render(self, namespace=TEST_NAMESPACE):
+        return render_worker.render(self.command, self.binding, self.facts, self.receipt, self.expected, namespace)
+
+    def test_explicit_namespace_cannot_override_authoritative_binding(self):
+        self.approve_synthetic_shape()
+        with self.assertRaisesRegex(ValueError, 'approved existing test namespace'):
+            self.render('labweaver-demo')
+        self.binding['source']['namespace'] = 'lw-env-' + self.uid(1)
+        with self.assertRaisesRegex(ValueError, 'authoritative source binding'):
+            self.render()
+        self.binding['source']['namespace'] = TEST_NAMESPACE
+        self.facts['existingNamespace'] = 'another-namespace'
+        with self.assertRaisesRegex(ValueError, 'namespace differs'):
+            self.render()
+
+    def test_missing_existing_namespace_or_pvc_is_refused(self):
+        self.approve_synthetic_shape()
+        for key in ['existingNamespaceVerified', 'existingPvcVerified']:
+            with self.subTest(key=key):
+                self.facts[key] = False
+                with self.assertRaisesRegex(ValueError, key):
+                    self.render()
+                self.facts[key] = True
 
     def test_existing_schemas_are_pinned_and_fixture_hashes_match(self):
         for name in ['submission-manifest.schema.json', 'environment-freeze-binding.schema.json', 'frozen-submission.schema.json']:
@@ -86,6 +108,7 @@ class FreezeTestSupport(unittest.TestCase):
         self.approve_synthetic_shape()
         plan = self.render()
         self.assertEqual([x['kind'] for x in plan['items']], ['ConfigMap', 'Job'])
+        self.assertTrue(all(x['metadata']['namespace'] == TEST_NAMESPACE for x in plan['items']))
         pod = plan['items'][1]['spec']['template']['spec']
         self.assertFalse(pod['automountServiceAccountToken'])
         self.assertEqual(pod['containers'][0]['args'], ['--mode', 'freeze-worker'])
@@ -93,6 +116,8 @@ class FreezeTestSupport(unittest.TestCase):
         self.assertTrue(all(m['readOnly'] for m in pod['containers'][0]['volumeMounts']))
         self.assertFalse(any('gpu' in key.lower() for values in pod['containers'][0]['resources'].values() for key in values))
         self.assertEqual(len(pod['volumes'][1]['secret']['items']), 5)
+        self.assertEqual(pod['containers'][0]['resources'],
+                         {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}})
 
     def test_fixture_generation_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as temporary:
