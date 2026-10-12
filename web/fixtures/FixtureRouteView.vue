@@ -11,6 +11,7 @@ import LabListView from '@/views/teacher/LabListView.vue'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
 import ResourceRequestView from '@/views/researcher/ResourceRequestView.vue'
 import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
+import WorkEnvironmentsView from '@/views/researcher/WorkEnvironmentsView.vue'
 import ResourceApprovalView from '@/views/admin/ResourceApprovalView.vue'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
 import PlatformImageView from '@/views/admin/PlatformImageView.vue'
@@ -32,7 +33,7 @@ const routePage = computed(() => {
   if (route.path.startsWith('/student/results')) return FixtureUnsupportedRoute
   if (route.path.startsWith('/researcher/resources')) return ResourceRequestView
   if (route.path.startsWith('/researcher/workspaces')) return WorkspaceListView
-  if (route.path.startsWith('/researcher/environments')) return EnvironmentEntryView
+  if (route.path.startsWith('/researcher/environments')) return WorkEnvironmentsView
   if (route.path.startsWith('/researcher/software')) return FixtureUnsupportedRoute
   if (route.path.startsWith('/admin/resource-approval')) return ResourceApprovalView
   if (route.path.startsWith('/admin/resource-finance')) return ResourceFinanceView

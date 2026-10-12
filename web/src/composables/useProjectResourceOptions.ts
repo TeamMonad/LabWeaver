@@ -6,6 +6,8 @@ import type {
 import { apiClient } from '@/api/client'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { fetchEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
+import { formatTimestamp } from '@/utils/format'
+import { workTemplateTitle } from '@/utils/workTemplate'
 import {
   fetchProjectWorkEnvironments,
   ProjectWorkEnvironmentPaginationError,
@@ -205,7 +207,7 @@ export function useProjectResourceOptions(
           id: item.id,
           version: item.version,
           runtimeKind: item.runtimeKind,
-          label: `Release ${item.id} · v${item.version}`,
+          label: `${workTemplateTitle(item)} · 发布于 ${formatTimestamp(item.publishedAt)}`,
           source: 'control' as const,
         })),
       )

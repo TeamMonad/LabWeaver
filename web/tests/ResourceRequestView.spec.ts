@@ -106,12 +106,12 @@ function activeLease() {
   }
 }
 
-async function mountView(projectId = 'project-1') {
+async function mountView(projectId = 'project-1', extraQuery: Record<string, string> = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/researcher/resources', component: ResourceRequestView }],
   })
-  await router.push({ path: '/researcher/resources', query: { projectId } })
+  await router.push({ path: '/researcher/resources', query: { projectId, ...extraQuery } })
   await router.isReady()
   const wrapper = mount(ResourceRequestView, { global: { plugins: [router] } })
   await flushPromises()
@@ -183,7 +183,7 @@ describe('ResourceRequestView', () => {
 
     expect(wrapper.text()).toContain('CPU（m）')
     expect(wrapper.text()).toContain('1000m = 1 核心')
-    expect(wrapper.text()).toContain('当前项目没有可用的已发布版本')
+    expect(wrapper.text()).toContain('当前项目没有可用的已发布模板')
     expect(wrapper.find('a[href^="/researcher/software"]').exists()).toBe(true)
     expect(wrapper.find('a[href^="/teacher/materials"]').exists()).toBe(false)
   })
@@ -194,6 +194,26 @@ describe('ResourceRequestView', () => {
     const wrapper = await mountView()
 
     expect(wrapper.find('a[href^="/teacher/materials"]').exists()).toBe(false)
+  })
+
+  it('preselects the exact template version chosen on the Work page', async () => {
+    mocks.releases = {
+      kind: 'success',
+      data: [
+        { id: 'release-container', version: 1, runtimeKind: 'container', label: '容器模板 v1', source: 'control' },
+        { id: 'release-vm', version: 2, runtimeKind: 'virtual_machine', label: '虚拟机模板 v2', source: 'control' },
+      ],
+    }
+    const wrapper = await mountView('project-1', { releaseId: 'release-vm', releaseVersion: '2' })
+    const releaseSelect = wrapper.findAll('label').find((label) => label.text().includes('已发布版本'))!.get('select')
+    expect((releaseSelect.element as HTMLSelectElement).value).toBe('release-vm:2')
+    wrapper.unmount()
+
+    // A version that is no longer offered falls back to the first option instead of a stale one.
+    const fallback = await mountView('project-1', { releaseId: 'release-vm', releaseVersion: '1' })
+    const fallbackSelect = fallback.findAll('label').find((label) => label.text().includes('已发布版本'))!.get('select')
+    expect((fallbackSelect.element as HTMLSelectElement).value).toBe('release-container:1')
+    fallback.unmount()
   })
 
   it('only offers GPU modes supported by the selected release runtime without requiring a rate', async () => {

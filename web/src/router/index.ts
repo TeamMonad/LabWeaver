@@ -77,7 +77,7 @@ const routes: RouteRecordRaw[] = [
   // project membership and operation permissions remain server-authoritative.
   roleRoute('researcher', '/researcher', '科研工作台', () => import('@/views/ResearcherView.vue'), [
     { path: 'workspaces', component: () => import('@/views/researcher/WorkspaceListView.vue'), meta: { title: '工作空间' } },
-    { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: 'Work 环境' } },
+    { path: 'environments', component: () => import('@/views/researcher/WorkEnvironmentsView.vue'), meta: { title: 'Work 环境' } },
     { path: 'software', component: () => import('@/views/researcher/SoftwareConfigView.vue'), meta: { title: '软件配置' } },
     { path: 'ai-policy', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '项目 AI 设置' } },
     { path: 'resources', component: () => import('@/views/researcher/ResourceRequestView.vue'), meta: { title: '资源申请' } },
