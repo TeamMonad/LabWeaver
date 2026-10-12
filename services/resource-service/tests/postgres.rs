@@ -3920,10 +3920,21 @@ async fn activate_synthetic_environment(
             "synthetic-financed-activation",
         )
         .await?;
-    for rate in synthetic_rates
-        .into_iter()
-        .filter(|rate| end_fixture_rates && rate.effective_from < usage_boundary)
-    {
+    for rate in synthetic_rates.into_iter().filter(|_| end_fixture_rates) {
+        let ended_from = if rate.effective_from < usage_boundary {
+            UtcTimestamp::from_utc(usage_boundary.get() - time::Duration::milliseconds(1))?
+        } else {
+            let current = store.current_time().await?;
+            if rate.effective_from > current {
+                continue;
+            }
+            current
+        };
+        let ended_until = if ended_from < usage_boundary {
+            usage_boundary
+        } else {
+            UtcTimestamp::from_utc(ended_from.get() + time::Duration::milliseconds(1))?
+        };
         store
             .create_rate(
                 &Uuid::now_v7().to_string(),
@@ -3934,10 +3945,8 @@ async fn activate_synthetic_environment(
                     gpu_mode: rate.gpu_mode,
                     builder_binding: rate.builder_binding,
                     unit_price: rate.unit_price,
-                    effective_from: UtcTimestamp::from_utc(
-                        usage_boundary.get() - time::Duration::milliseconds(1),
-                    )?,
-                    effective_until: Some(usage_boundary),
+                    effective_from: ended_from,
+                    effective_until: Some(ended_until),
                 },
             )
             .await?;
