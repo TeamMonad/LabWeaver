@@ -47,6 +47,7 @@ pub struct TerminalExecutorServer {
 #[derive(Clone)]
 struct ExecutorState {
     client: Client,
+    pool: sqlx::PgPool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -66,6 +67,7 @@ impl TerminalExecutorServer {
         server: &TerminalExecutorServerConfig,
         kubernetes: &RuntimeExecutorConfiguration,
         verifier: Arc<ServiceTokenVerifier>,
+        pool: sqlx::PgPool,
     ) -> Result<Self, TerminalExecutorServerError> {
         let listener = tokio::net::TcpListener::bind(
             SocketAddr::from_str(&server.bind_addr)
@@ -78,6 +80,7 @@ impl TerminalExecutorServer {
         )?;
         let state = ExecutorState {
             client: explicit_kube_client(kubernetes)?,
+            pool,
         };
         let router = Router::new()
             .route("/internal/v1/container-terminal", get(upgrade))
@@ -186,14 +189,36 @@ async fn execute(state: ExecutorState, mut socket: WebSocket) -> Result<(), &'st
         .validate()
         .map_err(|_| "LW_CONTAINER_CONSOLE_SPEC_INVALID")?;
     valid_size(request.cols, request.rows)?;
-    let namespace = format!("lw-env-{}", request.environment_id);
+    let placement =
+        crate::ContainerPlacement::load(&state.pool, request.environment_id, request.project_id)
+            .await
+            .map_err(|_| "LW_CONTAINER_CONSOLE_PLACEMENT_INVALID")?;
+    let namespace = placement.namespace.clone();
+    if let Some(uid) = placement.namespace_uid {
+        let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(state.client.clone());
+        let observed = namespaces
+            .get(&namespace)
+            .await
+            .map_err(|_| "LW_CONTAINER_CONSOLE_PLACEMENT_INVALID")?;
+        crate::runtime_executor::verify_existing_namespace(
+            &serde_json::to_value(observed)
+                .map_err(|_| "LW_CONTAINER_CONSOLE_PLACEMENT_INVALID")?,
+            &namespace,
+            uid,
+        )
+        .map_err(|_| "LW_CONTAINER_CONSOLE_PLACEMENT_INVALID")?;
+    }
     let pods: Api<Pod> = Api::namespaced(state.client, &namespace);
     if request.release_version == 0 {
         return Err("LW_CONTAINER_CONSOLE_REQUEST_INVALID");
     }
     let mut labels = format!(
-        "app=runtime,labweaver.io/environment-id={},labweaver.io/project-id={},labweaver.io/release-id={},labweaver.io/release-version={}",
-        request.environment_id, request.project_id, request.release_id, request.release_version
+        "app={},labweaver.io/environment-id={},labweaver.io/project-id={},labweaver.io/release-id={},labweaver.io/release-version={}",
+        placement.resource_name("runtime"),
+        request.environment_id,
+        request.project_id,
+        request.release_id,
+        request.release_version
     );
     if let Some(course_id) = request.course_id {
         let _ = write!(labels, ",labweaver.io/course-id={course_id}");

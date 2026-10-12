@@ -67,9 +67,23 @@ pub struct ContainerResourcePlan {
     pub environment_id: contracts::EnvironmentId,
     pub project_id: contracts::ProjectId,
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_uid: Option<uuid::Uuid>,
     pub image: String,
     pub resources: Vec<ContainerResource>,
     pub plan_sha256: Sha256Digest,
+}
+
+impl ContainerResourcePlan {
+    #[must_use]
+    pub fn placement(&self) -> crate::ContainerPlacement {
+        crate::ContainerPlacement {
+            environment_id: self.environment_id,
+            project_id: self.project_id,
+            namespace: self.namespace.clone(),
+            namespace_uid: self.namespace_uid,
+        }
+    }
 }
 
 /// Sanitized backend observation; raw Kubernetes objects are never persisted.
@@ -493,12 +507,22 @@ pub trait ContainerExecutorBackend: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct PgContainerExecutorFenceStore {
     pool: PgPool,
+    namespace_profile: crate::ContainerNamespaceProfile,
 }
 
 impl PgContainerExecutorFenceStore {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
+        }
+    }
+
+    #[must_use]
+    pub fn with_namespace_profile(mut self, profile: crate::ContainerNamespaceProfile) -> Self {
+        self.namespace_profile = profile;
+        self
     }
 
     #[allow(
@@ -512,6 +536,31 @@ impl PgContainerExecutorFenceStore {
         validate_container_executor_request(envelope)?;
         let fence = envelope.fence.clone();
         let mut transaction = self.pool.begin().await?;
+        let plan = container_executor_plan(&envelope.request);
+        if self
+            .namespace_profile
+            .for_identity(plan.environment_id, plan.project_id)
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?
+            != plan.placement()
+        {
+            return Err(ContainerExecutorFenceError::IdentityMismatch);
+        }
+        let new_placement = plan
+            .placement()
+            .pin(&mut transaction)
+            .await
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+        if plan.namespace_uid.is_some() {
+            if new_placement && sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM environment.container_executor_fences WHERE environment_id=$1)").bind(plan.environment_id.as_uuid()).fetch_one(&mut *transaction).await? {
+                return Err(ContainerExecutorFenceError::IdentityMismatch);
+            }
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM environment.environment_instances WHERE environment_id=$1 AND project_id=$2 AND contract->>'runtimeKind'='container' AND contract->>'class'='work')",
+            ).bind(plan.environment_id.as_uuid()).bind(plan.project_id.as_uuid()).fetch_one(&mut *transaction).await?;
+            if !valid {
+                return Err(ContainerExecutorFenceError::IdentityMismatch);
+            }
+        }
         let authority_now: time::OffsetDateTime =
             sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
                 .fetch_one(&mut *transaction)
@@ -1278,6 +1327,7 @@ pub struct ContainerProvider<B, R> {
     image_pull_secret_name: String,
     workspace_storage_class_name: String,
     workspace_access_mode: ContainerWorkspaceAccessMode,
+    namespace_profile: crate::ContainerNamespaceProfile,
 }
 
 impl<B, R> ContainerProvider<B, R>
@@ -1305,7 +1355,19 @@ where
             image_pull_secret_name: configuration.image_pull_secret_name,
             workspace_storage_class_name: configuration.workspace_storage_class_name,
             workspace_access_mode: configuration.workspace_access_mode,
+            namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
         })
+    }
+
+    pub fn with_namespace_profile(
+        mut self,
+        profile: crate::ContainerNamespaceProfile,
+    ) -> Result<Self, ReleaseProjectionError> {
+        profile
+            .validate()
+            .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
+        self.namespace_profile = profile;
+        Ok(self)
     }
 
     #[allow(
@@ -1370,8 +1432,17 @@ where
             }
         }
         let image = format!("{repository}@{digest}");
-        let namespace = format!("lw-env-{}", instance.id);
-        let app_name = "runtime";
+        let placement = self
+            .namespace_profile
+            .for_instance(instance)
+            .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
+        if placement.namespace_uid.is_some()
+            && projection.environment_spec.network != NetworkPolicySpec::DenyAll
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        let namespace = placement.namespace.clone();
+        let app_name = placement.resource_name("runtime");
         let mut labels = json!({
             "app.kubernetes.io/name": "labweaver-environment",
             "labweaver.io/environment-id": instance.id.to_string(),
@@ -1555,7 +1626,7 @@ where
             resource(
                 "Deployment",
                 Some(&namespace),
-                app_name,
+                &app_name,
                 json!({
                     "apiVersion":"apps/v1","kind":"Deployment",
                     "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
@@ -1605,7 +1676,7 @@ where
             resource(
                 "Service",
                 Some(&namespace),
-                app_name,
+                &app_name,
                 json!({
                     "apiVersion":"v1","kind":"Service",
                     "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
@@ -1630,17 +1701,44 @@ where
                 })));
             }
         }
+        if placement.namespace_uid.is_some() {
+            // The deployment operator owns namespace-wide admission and network policy.
+            documents.retain(|resource| {
+                !matches!(
+                    resource.kind.as_str(),
+                    "Namespace" | "ResourceQuota" | "LimitRange" | "NetworkPolicy"
+                )
+            });
+            for document in &mut documents {
+                if document.name != app_name {
+                    document.name = placement.resource_name(&document.name);
+                }
+                document.document["metadata"]["name"] = json!(document.name);
+                if document.kind == "ServiceAccount" {
+                    document.document["imagePullSecrets"][0]["name"] =
+                        json!(placement.resource_name("registry-pull"));
+                }
+                if document.kind == "Deployment" {
+                    document.document["spec"]["template"]["spec"]["serviceAccountName"] =
+                        json!(app_name);
+                    document.document["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]
+                        ["claimName"] = json!(placement.resource_name("workspace"));
+                }
+            }
+        }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
             "releaseId": projection.release.id,
             "releaseVersion": projection.release.version,
             "image": image,
             "resources": documents,
+            "namespaceUid": placement.namespace_uid,
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
             project_id: instance.project_id,
             namespace,
+            namespace_uid: placement.namespace_uid,
             image,
             resources: documents,
             plan_sha256,
@@ -1678,17 +1776,23 @@ where
         {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        let namespace = format!("lw-env-{}", instance.id);
+        let placement = self
+            .namespace_profile
+            .for_instance(instance)
+            .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
+        let namespace = placement.namespace.clone();
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
             "projectId": instance.project_id,
             "namespace": namespace,
+            "namespaceUid": placement.namespace_uid,
             "action": "cleanup",
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
             project_id: instance.project_id,
             namespace,
+            namespace_uid: placement.namespace_uid,
             image: String::new(),
             resources: Vec::new(),
             plan_sha256,

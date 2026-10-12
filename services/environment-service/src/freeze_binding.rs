@@ -178,11 +178,20 @@ impl FreezeBindingService {
             },
         };
         let source = match instance.runtime_kind {
-            RuntimeKind::Container => EnvironmentFreezeSourceBinding::Container {
-                namespace: format!("lw-env-{}", instance.id),
-                persistent_volume_claim: "workspace".to_owned(),
-                storage_class_name: self.configuration.container_workspace_storage_class.clone(),
-            },
+            RuntimeKind::Container => {
+                let placement =
+                    crate::ContainerPlacement::load(&self.pool, instance.id, instance.project_id)
+                        .await
+                        .map_err(|_| FreezeBindingError::EnvironmentNotEligible)?;
+                EnvironmentFreezeSourceBinding::Container {
+                    namespace: placement.namespace.clone(),
+                    persistent_volume_claim: placement.resource_name("workspace"),
+                    storage_class_name: self
+                        .configuration
+                        .container_workspace_storage_class
+                        .clone(),
+                }
+            }
             RuntimeKind::VirtualMachine => {
                 self.vm_configuration()?;
                 let public_key = request
