@@ -156,3 +156,21 @@ same Resource client block and secret mounts before connected deployment validat
 Configure an explicit `CREDITS` price with `build_second`, `builderBinding` and
 `unitQuantity` before admitting builds. Existing USD compute/storage rates do not
 price this operation and are not automatically changed.
+
+### Original Environment lease funding
+
+Apply Resource migration 0020 with the verified migration catalog before starting
+Resource. It adds immutable funding windows and seeds no operating rates or
+balances. The existing LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID binds the original
+hold owner and the grant reader; service JWT/TLS and resource.environment.resolve
+remain required. Configure complete CREDITS rates and project allowances before
+activating a lease. A missing rate, insufficient funds or an expired original
+approval leaves activation uncommitted.
+
+Renewal reuses the same hold and funds only a cumulative shortfall. The accounting
+loop also handles expired financial coverage and unactivated holds whose original
+approval expired. Financial release does not confirm physical cleanup.
+The Environment owner must consume the original grant and runtime receipt before
+new compute, while continuing stop/cleanup without new funds. The #207 lifecycle
+integration and cluster validation remain separate delivery work; see
+[original lease coverage](../contracts/project-credits.md#原-environment-lease-的资金覆盖).

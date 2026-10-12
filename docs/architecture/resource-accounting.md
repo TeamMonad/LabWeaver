@@ -61,3 +61,9 @@ Outbox 与账务维护使用独立循环，仍在同一个 Resource 进程。真
 Dockerfile 构建在 BuildKit 调用前以真实 BuildRequest/attempt 预占最大构建时长。计价单位为 builder 专属 `build_second`；未执行的 CPU/内存上限不是用量。Resource 校验 Agent 的真实命令与租约，在自身事务内提交预占和执行 grant，Agent 再在本地事务核对取消与执行 fence。跨进程请求不被描述为一个远端原子事务。
 
 起止时间来自身份唯一匹配的 BuildKit history，仍使用统一版本分段、精确算术、未知期限和尾部平台承担。结果未知时只查询原操作；构建费用查询独立于会被清理或替换的工作流 fence。接口、精度和恢复边界见 [BuildKit 构建费用](../contracts/project-credits.md#buildkit-构建费用)。
+
+## 原 Environment lease 的资金事务
+
+Environment lease 激活与续期已经通过 Resource 的原 request、claim、approval 和同一 hold 提交资金覆盖。初次截止取原批准时长及 validUntil；续期累计报价先使用原额度，只追加不足部分。原 lease revision、幂等键和不可变报价窗口共同防止重复预占。覆盖到期而最终用量或释放尚未确认，资金进入首次一小时核实；未激活预占在原批准到期后结束冻结，实际容量回收仍由既有 owner 完成。
+
+ResourceEnvironmentHandoff 的用途取可信发布快照中的 class，资金查询只返回原授权与账户事实。Environment 的新 compute 入口由 #207 刷新该 grant 并核原 runtime receipt；Work/Experiment 接收与真实执行仍由同一 Environment 生命周期实现。已有教学 reservation 路径继续代表其原实现；新的 funded handoff 只消费原 claim/lease，不再次调用该独立 reservation。接口、锁顺序和剩余范围见 [项目 Credits](../contracts/project-credits.md#原-environment-lease-的资金覆盖)。
