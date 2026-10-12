@@ -24,12 +24,17 @@ use control_service::{ControlError, ControlService, platform_configuration as co
 use persistence_sqlx::{Domain, Sha256Digest};
 use resource_service::{
     ApprovalPolicy,
-    runtime_authorization::{RuntimeBindingError, resolve_binding},
+    runtime_authorization::{
+        RuntimeBindingError, current_environment_authorization, resolve_binding,
+    },
     store::{PendingAllocation, PgResourceStore},
 };
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+#[path = "runtime_authorization_lease.rs"]
+mod lease_cases;
 
 async fn progress(
     pool: &PgPool,
@@ -337,6 +342,13 @@ pub(super) async fn assert_bindings_after_publication(
         resource_service::runtime_authorization::current_authorization(pool, &allocated).await?,
         binding
     );
+    let allocated = Box::pin(lease_cases::assert_original_lease_chain(
+        pool,
+        &store,
+        &resource_approval,
+        &allocation,
+    ))
+    .await?;
     let mut obsolete_request = allocated.clone();
     obsolete_request.generation += 1;
     assert!(matches!(
@@ -354,6 +366,10 @@ pub(super) async fn assert_bindings_after_publication(
     ));
     assert!(matches!(
         resource_service::runtime_authorization::current_authorization(pool, &allocated).await,
+        Err(RuntimeBindingError::ScopeDenied)
+    ));
+    assert!(matches!(
+        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
         Err(RuntimeBindingError::ScopeDenied)
     ));
     sqlx::query("UPDATE control.course_memberships SET state='active',revision=3 WHERE course_id=$1 AND actor_id=$2")
@@ -394,6 +410,12 @@ pub(super) async fn assert_bindings_after_publication(
     );
     assert!(matches!(
         resource_service::runtime_authorization::current_authorization(pool, &allocated).await,
+        Err(RuntimeBindingError::Authorization(
+            RuntimeAuthorizationError::PolicyChanged
+        ))
+    ));
+    assert!(matches!(
+        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
         Err(RuntimeBindingError::Authorization(
             RuntimeAuthorizationError::PolicyChanged
         ))
@@ -472,8 +494,29 @@ pub(super) async fn assert_bindings_after_publication(
     );
     assert_eq!(
         store.load(request.id).await?.state,
-        ResourceRequestState::Allocating
+        ResourceRequestState::Active
     );
+    assert!(matches!(
+        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
+        Err(RuntimeBindingError::Authorization(
+            RuntimeAuthorizationError::PolicyNotVerified
+        ))
+    ));
+    let lease = store.load_lease(allocation.lease_id).await?;
+    store
+        .revoke_lease(
+            "runtime-lease-revoke",
+            lease.id,
+            lease.revision,
+            "synthetic revoke".to_owned(),
+            resource_approval.approver_id,
+            "runtime-lease-revoke",
+        )
+        .await?;
+    assert!(matches!(
+        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
+        Err(RuntimeBindingError::LeaseNotActive)
+    ));
     Ok(())
 }
 

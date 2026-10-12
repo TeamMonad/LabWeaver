@@ -42,7 +42,9 @@ pub(super) fn status(error: &crate::runtime_authorization::RuntimeBindingError) 
             RuntimeAuthorizationError::TeacherApprovalRequired
             | RuntimeAuthorizationError::OutsidePlatformRange,
         ) => StatusCode::FORBIDDEN,
-        RuntimeBindingError::Authorization(_) => StatusCode::CONFLICT,
+        RuntimeBindingError::LeaseNotActive | RuntimeBindingError::Authorization(_) => {
+            StatusCode::CONFLICT
+        }
     }
 }
 
@@ -51,6 +53,9 @@ pub(super) fn detail(error: &crate::runtime_authorization::RuntimeBindingError) 
     use contracts::runtime_authorization::RuntimeAuthorizationError;
     match error {
         RuntimeBindingError::Unavailable => "当前授权信息不可用，请稍后重试或联系管理员。",
+        RuntimeBindingError::LeaseNotActive => {
+            "资源租约尚未激活或已经失效，请等待资源分配或重新申请。"
+        }
         RuntimeBindingError::ScopeDenied => {
             "当前账号没有该项目或课程所需的权限，请联系成员管理者。"
         }
