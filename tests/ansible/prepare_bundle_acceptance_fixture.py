@@ -14,6 +14,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--create-namespace", action="store_true")
     arguments = parser.parse_args()
     fixture = fixtures.BundleInfrastructureTests(methodName="runTest")
     try:
@@ -36,7 +37,7 @@ def main() -> int:
             {"LW_BUNDLE_ROOT": str(root), "LW_BUNDLE_RENDERED_ROOT": str(rendered)},
         ):
             metadata = fixtures.acceptance.prepare(
-                arguments.namespace, arguments.output
+                arguments.namespace, arguments.output, arguments.create_namespace
             )
         source.clean_runtime()
         print(json.dumps(metadata, sort_keys=True))
