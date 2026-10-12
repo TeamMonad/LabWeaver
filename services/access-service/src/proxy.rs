@@ -2294,7 +2294,7 @@ async fn read_owned_environment(
             method: Method::GET,
             uri,
             headers: headers.clone(),
-            body: Bytes::new(),
+            body: ForwardBody::Buffered(Bytes::new()),
             valid_path: valid_environment_path,
             scope: None,
             gateway: GatewayAuthority::Environment,

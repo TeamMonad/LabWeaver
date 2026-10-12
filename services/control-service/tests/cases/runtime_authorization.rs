@@ -5,8 +5,8 @@ use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
     ApplyPlatformConfigurationRequest, LinuxCapability, PlatformConfigurationApplyStage as Stage,
     PlatformConfigurationDesired, PlatformConfigurationStatus,
-    ReportPlatformConfigurationApplyRequest, RuntimePreauthorization, RuntimePreauthorizationScope,
-    UpdatePlatformConfigurationRequest,
+    RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
+    RuntimePreauthorization, RuntimePreauthorizationScope, UpdatePlatformConfigurationRequest,
 };
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, ResourceApproval, ResourceRequest, ResourceRequestState,
@@ -59,19 +59,69 @@ async fn progress(
     .await?)
 }
 
+fn encrypted_fixture() -> TestResult<Vec<u8>> {
+    let temporary = tempfile::tempdir()?;
+    let identity = temporary.path().join("synthetic-identity");
+    let archive = temporary.path().join("synthetic.age");
+    let generated = std::process::Command::new("age-keygen")
+        .arg("-o")
+        .arg(&identity)
+        .output()?;
+    if !generated.status.success() {
+        return Err("synthetic age key generation failed".into());
+    }
+    let recipient = std::process::Command::new("age-keygen")
+        .arg("-y")
+        .arg(&identity)
+        .output()?;
+    if !recipient.status.success() {
+        return Err("synthetic recipient lookup failed".into());
+    }
+    let plaintext = temporary.path().join("synthetic-plaintext");
+    std::fs::write(&plaintext, b"synthetic-only runtime admission settings")?;
+    let encrypted = std::process::Command::new("age")
+        .arg("-r")
+        .arg(String::from_utf8(recipient.stdout)?.trim())
+        .arg("-o")
+        .arg(&archive)
+        .arg(&plaintext)
+        .output()?;
+    if !encrypted.status.success() {
+        return Err("synthetic age encryption failed".into());
+    }
+    Ok(std::fs::read(archive)?)
+}
+
 async fn begin(
     pool: &PgPool,
     state: PlatformConfigurationStatus,
     now: UtcTimestamp,
     key: &str,
 ) -> TestResult<PlatformConfigurationStatus> {
+    let desired = state.desired.as_ref().ok_or("no desired")?;
+    let cipher = encrypted_fixture()?;
+    let state = configuration::register_bundle(
+        pool,
+        ActorId::new(),
+        desired.revision,
+        &RegisterPlatformConfigurationBundleRequest {
+            expected_revision: state.revision,
+            configuration_sha256: desired.configuration_sha256.clone(),
+        },
+        configuration::BundleCiphertext {
+            digest: Sha256Digest::of_bytes(&cipher),
+            bytes: u64::try_from(cipher.len())?,
+        },
+        &IdempotencyKey::parse(&format!("{key}-registered-bundle"))?,
+        now,
+    )
+    .await?;
     Ok(configuration::request_apply(
         pool,
         ActorId::new(),
         &ApplyPlatformConfigurationRequest {
             expected_revision: state.revision,
             desired_revision: state.desired.as_ref().ok_or("no desired")?.revision,
-            encrypted_bundle_sha256: "a".repeat(64),
         },
         &IdempotencyKey::parse(key)?,
         now,
