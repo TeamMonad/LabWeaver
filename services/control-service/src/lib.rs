@@ -404,6 +404,7 @@ pub struct ControlService {
     pool: PgPool,
     objects: Arc<dyn ImmutableObjectStore>,
     config: ControlConfig,
+    loaded_platform_configuration: Option<Arc<platform_configuration::LoadedConfiguration>>,
 }
 
 enum CompletionReservation {
@@ -442,7 +443,19 @@ impl ControlService {
             pool,
             objects,
             config,
+            loaded_platform_configuration: None,
         })
+    }
+
+    /// Attaches settings actually loaded at process startup from the private Bundle inputs.
+    /// Desired edits and executor report bodies cannot replace this process snapshot.
+    #[must_use]
+    pub fn with_loaded_platform_configuration(
+        mut self,
+        loaded: platform_configuration::LoadedConfiguration,
+    ) -> Self {
+        self.loaded_platform_configuration = Some(Arc::new(loaded));
+        self
     }
 
     /// Returns the non-secret deployment-owned project AI policy defaults.

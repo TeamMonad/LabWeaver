@@ -1159,14 +1159,29 @@ def opened_bundle(
             temporary_root
         ) or identity.absolute().is_relative_to(runtime):
             raise BundleError("LW_BUNDLE_IDENTITY_MUST_BE_SEPARATE")
+        ciphertext_path = temporary_root / "source.age"
+        _write(ciphertext_path, b"")
+        encrypted_digest = hashlib.sha256()
+        encrypted_bytes = 0
+        # Hash and decrypt the same bounded snapshot, even if the input path is replaced.
+        with archive.open("rb") as source, ciphertext_path.open("wb") as captured:
+            while chunk := source.read(1024 * 1024):
+                encrypted_bytes += len(chunk)
+                if encrypted_bytes > MAX_ARCHIVE_BYTES:
+                    raise BundleError("LW_BUNDLE_ARCHIVE_INVALID")
+                encrypted_digest.update(chunk)
+                captured.write(chunk)
         archive_path = temporary_root / "source.tar"
         _write(archive_path, b"")
-        with archive_path.open("wb") as plaintext, archive.open("rb") as ciphertext:
+        with archive_path.open("wb") as plaintext, ciphertext_path.open(
+            "rb"
+        ) as ciphertext:
             _age(
                 ["--decrypt", "--identity", str(identity.absolute())],
                 stdin=ciphertext,
                 stdout=plaintext,
             )
+        ciphertext_path.unlink()
         if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
             raise BundleError("LW_BUNDLE_LIMIT_EXCEEDED")
         root = temporary_root / "bundle"
@@ -1174,6 +1189,22 @@ def opened_bundle(
         archive_path.unlink()
         output = temporary_root / "rendered"
         metadata = derive_bundle(root, output, manifest_path)
+        metadata["encryptedBundleSha256"] = encrypted_digest.hexdigest()
+        if metadata["configurationMode"] == "managed_version":
+            model, _ = load_bundle(root, manifest_path)
+            _write(
+                output / "platform-configuration-source.json",
+                json.dumps(
+                    {
+                        "apiVersion": "deploy.labweaver.io/loaded-source/v1",
+                        "desiredRevision": metadata["revision"],
+                        "configurationSha256": metadata["managedConfigurationSha256"],
+                        "encryptedBundleSha256": metadata["encryptedBundleSha256"],
+                        "installation": model["target"],
+                    },
+                    sort_keys=True,
+                ).encode(),
+            )
         yield root, output, metadata
 
 
@@ -1288,6 +1319,7 @@ def main() -> int:
                     )
                     for key in (
                         "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE",
+                        "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE",
                         "LABWEAVER_PLATFORM_CONFIGURATION_UPDATE_FILE",
                         "LABWEAVER_RESOURCE_VARS_FILE",
                         "LABWEAVER_BUNDLE_INVENTORY_FILE",
@@ -1313,6 +1345,10 @@ def main() -> int:
                     environment[setting_key] = str(
                         rendered / "platform-configuration.json"
                     )
+                    if metadata["configurationMode"] == "managed_version":
+                        environment["LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE"] = (
+                            str(rendered / "platform-configuration-source.json")
+                        )
                     if (rendered / "resource/ansible-vars.yaml").is_file():
                         environment["LABWEAVER_RESOURCE_VARS_FILE"] = str(
                             rendered / "resource/ansible-vars.yaml"

@@ -86,6 +86,12 @@ pub(super) struct HttpFixture {
 }
 impl HttpFixture {
     pub async fn new(pool: PgPool) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_loaded(pool, None).await
+    }
+    pub async fn with_loaded(
+        pool: PgPool,
+        loaded: Option<control_service::platform_configuration::LoadedConfiguration>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let admin = ActorId::new();
         let other_actor = ActorId::new();
         let (ca, leaf, key, jwk) = tls_material()?;
@@ -122,8 +128,13 @@ impl HttpFixture {
             )
             .await?,
         );
+        let control = ControlService::new(pool, Arc::new(NoObjects), config()?)?;
+        let control = match loaded {
+            Some(loaded) => control.with_loaded_platform_configuration(loaded),
+            None => control,
+        };
         let state = Arc::new(ApiState {
-            control: ControlService::new(pool, Arc::new(NoObjects), config()?)?,
+            control,
             access: AccessClient::new_authenticated(endpoint.clone(), Arc::clone(&tokens))?,
             agent: AgentClient::new_authenticated(endpoint.clone(), Arc::clone(&tokens))?,
             environment: EnvironmentClient::new_authenticated(

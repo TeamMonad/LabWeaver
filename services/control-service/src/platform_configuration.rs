@@ -15,6 +15,9 @@ use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, Sha256Dige
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+mod loaded;
+pub use loaded::LoadedConfiguration;
+
 type Result<T> = std::result::Result<T, ConfigurationError>;
 
 /// Facts calculated at the bounded streaming HTTP boundary.
@@ -292,6 +295,7 @@ pub async fn request_apply(
 /// Consumes a verified deployment-service observation. The caller must enforce its JWT permission.
 pub async fn report(
     pool: &PgPool,
+    loaded: Option<&LoadedConfiguration>,
     executor: &str,
     id: OperationId,
     request: &ReportPlatformConfigurationApplyRequest,
@@ -356,8 +360,9 @@ pub async fn report(
         .map_err(|_| ConfigurationError::Persistence)?;
         let desired: PlatformConfigurationVersion =
             serde_json::from_value(value).map_err(|_| ConfigurationError::Persistence)?;
-        if request.observed_configuration_sha256.as_deref()
-            != Some(desired.configuration_sha256.as_str())
+        if !loaded.is_some_and(|loaded| loaded.matches(&desired, &apply.encrypted_bundle_sha256))
+            || request.observed_configuration_sha256.as_deref()
+                != Some(desired.configuration_sha256.as_str())
             || request.observed_encrypted_bundle_sha256.as_deref()
                 != Some(apply.encrypted_bundle_sha256.as_str())
         {

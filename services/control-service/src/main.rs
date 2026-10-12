@@ -75,6 +75,7 @@ async fn main() -> Result<(), StartupError> {
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
+    let loaded_configuration = load_platform_configuration()?;
     let tls = http_transport::load_server_config(
         &deployment.gateway_tls.server_certificate_file,
         &deployment.gateway_tls.server_key_file,
@@ -101,7 +102,10 @@ async fn main() -> Result<(), StartupError> {
         )
         .await?,
     );
-    let service = ControlService::new(pool.clone(), objects, deployment.control)?;
+    let mut service = ControlService::new(pool.clone(), objects, deployment.control)?;
+    if let Some(loaded) = loaded_configuration {
+        service = service.with_loaded_platform_configuration(loaded);
+    }
     let access = AccessClient::new_authenticated(
         deployment.access_service,
         Arc::clone(&service_token_client),
@@ -302,6 +306,25 @@ async fn outbox_loop(
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+}
+
+fn load_platform_configuration()
+-> Result<Option<control_service::platform_configuration::LoadedConfiguration>, StartupError> {
+    match (
+        std::env::var_os("LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE"),
+        std::env::var_os("LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE"),
+    ) {
+        (Some(version), Some(source)) => {
+            control_service::platform_configuration::LoadedConfiguration::load(
+                std::path::Path::new(&version),
+                std::path::Path::new(&source),
+            )
+            .map(Some)
+            .map_err(|_| StartupError::Configuration)
+        }
+        (None, None) => Ok(None),
+        _ => Err(StartupError::Configuration),
     }
 }
 

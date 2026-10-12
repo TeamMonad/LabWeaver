@@ -346,6 +346,7 @@ async fn report(
     fence(&headers, request.expected_revision.get())?;
     let value = configuration::report(
         &state.control.pool,
+        state.control.loaded_platform_configuration.as_deref(),
         &executor.0,
         id,
         &request,
