@@ -200,7 +200,7 @@ impl ResourceProcessRuntime {
                     .map_err(ResourceProcessRuntimeError::Store)
             },
             async {
-                run_outbox(outbox, settlement_store, outbox_shutdown)
+                run_dispatch_and_accounting(outbox, settlement_store, outbox_shutdown)
                     .await
                     .map_err(ResourceProcessRuntimeError::Outbox)
             },
@@ -249,12 +249,22 @@ async fn seed_reviewed_gpu_catalog(
     Ok(())
 }
 
-async fn run_outbox(
+async fn run_dispatch_and_accounting(
     outbox: ResourceOutboxDispatcher,
     store: PgResourceStore,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), ResourceOutboxError> {
+    tokio::try_join!(
+        run_outbox(outbox, shutdown.clone()),
+        run_accounting(store, shutdown)
+    )
+    .map(|_| ())
+}
+
+async fn run_outbox(
+    outbox: ResourceOutboxDispatcher,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ResourceOutboxError> {
-    let credits = crate::credits::PgCreditStore::new(store.pool());
     let mut interval = tokio::time::interval(OUTBOX_INTERVAL);
     loop {
         tokio::select! {
@@ -278,6 +288,24 @@ async fn run_outbox(
                         safe_detail = safe_detail.as_str(),
                     );
                 }
+
+            }
+
+        }
+    }
+}
+
+async fn run_accounting(
+    store: PgResourceStore,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ResourceOutboxError> {
+    let credits = crate::credits::PgCreditStore::new(store.pool());
+    let mut interval = tokio::time::interval(OUTBOX_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            changed=shutdown.changed()=>{if changed.is_err() || *shutdown.borrow(){return Ok(());}}
+            _=interval.tick()=>{
                 if let Err(error)=credits.expire_unknown_once().await {
                     tracing::warn!(event="resource.credits.unknown_deadline_failed",diagnostic_code=%error,outcome="will_retry");
                 }
@@ -297,7 +325,6 @@ async fn run_outbox(
                     );
                 }
             }
-
         }
     }
 }
@@ -478,4 +505,177 @@ pub enum ResourceProcessRuntimeError {
     ServiceAuth(#[source] auth::ServiceAuthError),
     #[error("LW_AUTH_SERVICE_TOKEN_CLIENT_UNAVAILABLE: {0}")]
     ServiceTokenClient(#[source] auth::ServiceTokenClientError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contracts::resource::credits::{
+        CreditAdminOperation, CreditHoldRequest, CreditHoldResolutionRequest,
+    };
+    use contracts::resource::{
+        FixedDecimal, ResourceRequest, ResourceRequestState, ResourceTarget, WorkloadResources,
+    };
+    use contracts::{
+        ActorId, EnvironmentId, PlatformRole, ProjectId, ReleaseId, ResourceRequestId, Revision,
+    };
+    use futures_util::StreamExt;
+    use testcontainers::{
+        GenericImage, ImageExt,
+        core::{IntoContainerPort, WaitFor},
+        runners::AsyncRunner,
+    };
+    use testcontainers_modules::postgres::Postgres;
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the real database and broker fault scenario keeps its ordering and observable assertions together"
+    )]
+    async fn stalled_jetstream_ack_does_not_block_unknown_fund_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                postgres.get_host_port_ipv4(5432).await?
+            ))
+            .await?;
+        let mut files = std::fs::read_dir(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../migrations/resource"),
+        )?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+        files.sort();
+        let mut ddl = "CREATE SCHEMA resource;SET search_path TO resource;\n".to_owned();
+        for file in files {
+            if file.extension().is_some_and(|e| e == "sql") {
+                ddl.push_str(&std::fs::read_to_string(file)?);
+                ddl.push('\n');
+            }
+        }
+        sqlx::raw_sql(&ddl).execute(&pool).await?;
+        let store = PgResourceStore::new(pool.clone());
+        let now = store.current_time().await?;
+        let project = ProjectId::new();
+        let request = ResourceRequestId::new();
+        store
+            .create(
+                &request.to_string(),
+                &ResourceRequest {
+                    id: request,
+                    generation: 1,
+                    request_key: request.to_string(),
+                    requester_id: ActorId::new(),
+                    project_id: project,
+                    course_id: None,
+                    target: ResourceTarget::Environment {
+                        environment_id: EnvironmentId::new(),
+                        release_id: ReleaseId::new(),
+                        release_version: 1,
+                    },
+                    requested_resources: WorkloadResources {
+                        cpu_millicores: 1,
+                        memory_bytes: 1,
+                        storage_bytes: 1,
+                        gpu: None,
+                    },
+                    requested_duration_seconds: 60,
+                    state: ResourceRequestState::Reviewing,
+                    revision: Revision::new(1)?,
+                    created_at: now,
+                    updated_at: now,
+                    diagnostic_code: None,
+                },
+                "synthetic-stalled-outbox",
+            )
+            .await?;
+        let credits = crate::credits::PgCreditStore::new(pool.clone());
+        let five = FixedDecimal::parse("5.000000")?;
+        credits
+            .admin(
+                "stall-grant",
+                ActorId::new(),
+                &[PlatformRole::PlatformAdmin],
+                &CreditAdminOperation::Grant {
+                    project_id: project,
+                    amount: five.clone(),
+                    reason: "isolated stalled broker allowance".into(),
+                },
+            )
+            .await?;
+        let hold = credits
+            .hold(
+                "stall-hold",
+                "environment",
+                &CreditHoldRequest {
+                    project_id: project,
+                    request_id: request,
+                    business_key: "stalled-observation".into(),
+                    amount: five,
+                },
+            )
+            .await?;
+        credits
+            .resolve(
+                "stall-unknown",
+                "environment",
+                hold.id,
+                &CreditHoldResolutionRequest::Unknown {
+                    reason: "measurement unavailable".into(),
+                },
+            )
+            .await?;
+        sqlx::query("UPDATE resource.credit_holds SET unknown_since=date_trunc('milliseconds',clock_timestamp())-interval '1 hour 1 second',reconciliation_due_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second' WHERE hold_id=$1").bind(hold.id).execute(&pool).await?;
+        let nats = GenericImage::new("nats", "2.11.8-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .with_cmd(["-js"])
+            .start()
+            .await?;
+        let client = async_nats::connect(format!(
+            "nats://127.0.0.1:{}",
+            nats.get_host_port_ipv4(4222).await?
+        ))
+        .await?;
+        // A real core subscription receives the publish but deliberately withholds its ACK.
+        let mut messages = client
+            .subscribe(contracts::events::subjects::RESOURCE_REQUEST_SUBMITTED)
+            .await?;
+        client.flush().await?;
+        let dispatcher =
+            ResourceOutboxDispatcher::new(pool.clone(), client, std::time::Duration::from_secs(2))?;
+        let (stop, shutdown) = watch::channel(false);
+        let worker = tokio::spawn(run_dispatch_and_accounting(dispatcher, store, shutdown));
+        tokio::time::timeout(std::time::Duration::from_secs(3), messages.next())
+            .await?
+            .ok_or("publish was not delivered to the fault boundary")?;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+            loop {
+                if credits.account(project).await?.reserved == FixedDecimal::zero() {
+                    return Ok::<_, crate::credits::CreditError>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        stop.send(true)?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker).await???;
+        assert!(
+            result.is_ok(),
+            "a withheld broker ACK delayed release of an already expired unknown hold"
+        );
+        result??;
+        let published: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM resource.outbox_events WHERE published_at IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(published, 0);
+        let account = credits.account(project).await?;
+        assert_eq!(account.unknown_count, 1);
+        assert_eq!(account.spent, FixedDecimal::zero());
+        Ok(())
+    }
 }

@@ -17,12 +17,14 @@ use contracts::resource::{
     ResourceRequestState,
 };
 use contracts::{Revision, UtcTimestamp};
+mod admission;
 pub mod api;
 pub mod capacity;
 pub mod costing;
 pub mod credits;
 pub mod messaging;
 pub mod outbox;
+mod pricing;
 pub mod process;
 pub mod runtime_authorization;
 pub mod store;
