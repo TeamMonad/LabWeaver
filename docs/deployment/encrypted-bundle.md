@@ -1,12 +1,16 @@
 # 加密应用 Bundle
 
-本入口实现 #203 的应用配置与加密目录切片。[管理员配置 API](../contracts/platform-configuration.md) 已提供 revision 和应用事实管理。它与 Bundle 的完整接线、运行权限消费者和基础设施安装尚未完成。不要据此关闭 #203。
+本入口将 [Control 管理配置版本](../contracts/platform-configuration.md)、应用服务输入、Secret、版本和说明放入同一个加密目录。导入继续使用现有管理员条件更新 API。运行权限消费者、Resource 独立 profile 和基础设施安装尚未完成。#203 保持开放。
 
 ## 配置归属
 
 `tools/deployment_bundle.py` 读取一个受限目录中的 `config/bundle.yaml`。该文件引用同一目录中的服务配置、Secret、版本清单和运维说明。服务配置继续使用现有服务类型。`deploy/config/platform-bundle-manifest.json` 定义应用允许的对象和键，不保存安装值。
 
 目录中的文件是输入。运行目录中的 ConfigMap/Secret、Helm values 和 Ansible vars 是派生输出。不要编辑派生输出，也不要将其用作下一次导出的输入。多个对象需要同一凭据时，引用同一个 Secret 文件。每个服务的 NATS 身份仍使用各自的 credential。
+
+`configurationFile` 指向管理配置版本的 JSON。版本使用现有 `PlatformConfigurationVersion`。`xtask bundle-configuration` 复用 Control 的配置类型、策略校验和 canonical JSON 摘要。Python 不另写运行权限规则。该版本只携带 desired 设置与来源元数据，不携带 applied 或执行历史。
+
+`application.workloadInputs` 是本 Bundle 的完整服务环境输入。Helm 使用该 map 直接替换环境变量，不从旧环境 defaults 补值。对象、文件挂载、Probe 和资源布局仍复用现有 chart。非 Bundle 调用者暂时保留旧路径，其配置不能作为本入口的隐含输入。
 
 `93-platform-application.yml` 在载入 Bundle 派生的 vars 后读取 `platform_application_versions_lock_file`。该路径指向 Bundle 的版本锁。已有部署入口未指定该字段时，仍读取仓库的 `deploy/versions.lock.yml`。这保留现有调用者，不能证明它们已经采用加密入口。
 
@@ -16,6 +20,7 @@
 
 - 使用支持 POSIX 文件权限的 Linux 或 macOS 控制器。Windows 使用受限的 Linux 控制器或 WSL。
 - 安装 Python 和 `tools/requirements-local-dev.txt` 中固定的 PyYAML。
+- 从同一仓库版本执行 `cargo build -p xtask --locked`。默认校验入口为 `target/debug/xtask`。自定义构建目录时设置 `LABWEAVER_BUNDLE_CONFIGURATION_TOOL` 为该二进制的绝对路径。缺少校验入口时明确失败。
 - 安装官方 [age v1.3.2](https://github.com/FiloSottile/age/releases/tag/v1.3.2)。本仓库的 CI 校验 Linux amd64 归档 SHA-256 `cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10`。
 - 单独保管 age 解密身份文件。不要将它放入 Bundle 或 Bundle 运行目录。
 - 用已有签发流程准备服务凭据。不要从日志、聊天记录或已部署 Secret 反向恢复私钥。
@@ -25,6 +30,7 @@
 ```text
 .private/installation/
   config/bundle.yaml
+  config/platform-configuration.json
   config/runtime/<object-name>/<key>
   secrets/<credential-file>
   versions/lock.yaml
@@ -40,6 +46,7 @@ Bundle 目录、`.private` 目录及其内部目录必须由当前用户持有�
 | --- | --- |
 | `apiVersion` | 固定为 `deploy.labweaver.io/bundle/v1` |
 | `revision` | 1 到 9223372036854775807 的整数。该字段是导出配置版本，不代表已应用版本 |
+| `configurationFile` | `config/` 下的管理版本 JSON。其 revision 必须等于 Bundle revision，其摘要必须匹配同一 Rust 配置模型 |
 | `target.namespace` | Kubernetes DNS label |
 | `target.releaseName` | Helm release 名称，使用 Kubernetes DNS label |
 | `versions.lockFile` | `versions/` 下的文件。沿用 `schema_version: 1` 的部署版本锁 |
@@ -49,6 +56,7 @@ Bundle 目录、`.private` 目录及其内部目录必须由当前用户持有�
 | `application.secrets` | 对象名、键和 `secrets/` 下文件路径的映射 |
 | `application.helmValues` | 非秘密 Helm 输入。镜像和 `deploymentIdentity` 由工具派生 |
 | `application.ansibleVariables` | 应用角色参数。只接受 `platform_application_` 前缀 |
+| `application.workloadInputs` | chart 中每个 workload 的 `env` 和 `secretEnv`。启用的服务必须提供全部已声明必需键及所用镜像 |
 
 `configMaps` 和 `secrets` 必须完整匹配应用 manifest 的对象与键。工具拒绝缺项和额外对象。所有文件都必须被模型引用，不能把未使用的私钥顺带加入归档。两个对象可以引用同一文件。
 
@@ -74,6 +82,10 @@ application:
 `file` 引用产生受限运行目录中的绝对文件路径。`secret` 引用读取 UTF-8 文本并去掉末尾换行。工具用 Ansible `!unsafe` 标记该文本，阻止凭据中的 Jinja 表达式执行。不要将密码、Token 或私钥直接写入模型或 Helm values。
 
 工具固定派生 namespace、release 名称、版本锁路径、package 路径、对象 manifest、配置对象和 Helm values 路径。模型不能覆盖这些派生字段。Helm 镜像来自同一 package 文件，配置摘要来自实际渲染的应用对象。
+
+`env` 的值必须是字符串。Token、密码和私钥不得内联。`secretEnv` 使用 `{secret: 对象名, key: 键名}`，只能引用本 Bundle 已声明的 Secret 对象与键。同一个源文件可供多个对象使用。`helmValues` 不能再提供 `workloadInputs`，也不能覆盖 workload 的 env、secretEnv、configMap 或 secret。
+
+Resource 当前使用独立 manifest/profile。现有应用 Bundle 未携带 Resource 对象，不能只打开该 workload 并引用外部 Secret。工具会明确拒绝缺失对象。整合该 profile 后才能由同一归档部署全部六个服务。
 
 单文件上限沿用现有渲染器的 1 MiB。整个输入最多 512 个文件、64 MiB。工具不压缩 tar，避免解密后的压缩展开。加密文件上限包含有限的归档开销。超限时拆除无用输入，不要绕过校验。
 
@@ -122,6 +134,49 @@ application:
 
 现有 `.age` 文件不会被覆盖。修改配置后创建新 revision 和新文件名。该行为保护已导出的版本，但没有替代管理员 API 所需的并发 revision 条件更新。
 
+## 管理设置导出与导入
+
+导出需要可用的管理员版本读取 API。先通过表单或高级 YAML 保存 desired。对于尚无管理版本的初始安装，先使用现有安装入口启动 Control，再创建首个 desired。该切片没有自动初始化生产身份或假造配置历史。
+
+1. 用 `getPlatformConfigurationVersion` 读取 desired 版本。
+2. 将 API 返回的完整 JSON 保存为 `.private/server-version.json`，权限为 `0600`。
+3. 将验证后的版本写入本次 Bundle 目录。
+
+   ```sh
+   python tools/deployment_bundle.py settings-export \
+     --version-file .private/server-version.json \
+     --output .private/installation/config/platform-configuration.json
+   ```
+
+4. 将 `configurationFile` 指向该文件。
+5. 将 Bundle revision 设置为该版本的 revision。
+6. 用上述 `seal` 命令加密完整目录。
+
+每次准备新版本时使用新的受限目录。已有输出不会被覆盖。修改管理设置时重新取得 Control 版本，不手改其摘要或来源元数据。表单和 YAML 的更新路径仍相同。
+
+导入保留完整设置。源安装的 revision、actor、applied 和执行历史不能覆盖目标安装的事实。
+
+1. 从目标安装读取当前 aggregate revision 和 ETag。
+2. 在受限运行目录解密归档并生成更新请求。
+
+   ```sh
+   python tools/deployment_bundle.py settings-import \
+     --archive installation-r7.age \
+     --identity .private/operator-age-key.txt \
+     --expected-revision 12 \
+     --output .private/import/update.json
+   ```
+
+3. 用 `updatePlatformConfiguration` 提交该 JSON、对应 ETag 和稳定幂等键。
+4. 遇到 409 或 412 时保留草稿，重新读取并比较目标安装的新配置。
+5. 成功后读取目标安装生成的新 desired 版本。
+
+`12` 是命令示例。使用实际目标 revision。命令只生成现有条件更新请求，不发送网络请求、运行部署或写 applied。只有管理员鉴权通过的更新才改变 desired。两个安装的 revision 可以不同，相同设置的 canonical 摘要必须相同。
+
+导入失败不会覆盖已有请求文件。缺 key、错误 key、版本字段或摘要不匹配均失败，运行目录随流程结束清理。普通 stdout 仅包含 revision、计数和摘要，不输出设置或 Secret。
+
+`managedConfigurationSha256` 是管理设置的 canonical 摘要，格式为64个小写十六进制字符。它等于版本 API 的 `configurationSha256`。`applicationObjectsSha256` 是渲染对象的摘要，带 `sha256:` 前缀。执行观察使用管理设置摘要和加密文件摘要，不能把对象摘要当作管理设置摘要。
+
 ## 解密、恢复和使用
 
 1. 在新目录中验证加密文件。
@@ -143,7 +198,7 @@ application:
      -- python -c 'import os; from pathlib import Path; assert Path(os.environ["LABWEAVER_APPLICATION_VARS_FILE"]).is_file()'
    ```
 
-   消费者获得 `LW_BUNDLE_ROOT`、`LW_BUNDLE_RENDERED_ROOT` 和 `LABWEAVER_APPLICATION_VARS_FILE`。后者接入既有应用角色的 vars 入口。此示例只验证本地输入，不执行部署。
+   消费者获得 `LW_BUNDLE_ROOT`、`LW_BUNDLE_RENDERED_ROOT`、`LABWEAVER_APPLICATION_VARS_FILE` 和 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE`。后两者分别指向派生的 Ansible vars 和管理版本 JSON。此示例只验证本地输入，不执行部署。
 
 3. 等待消费者退出。
 
@@ -159,6 +214,12 @@ application:
 | `LW_BUNDLE_IDENTITY_REQUIRED` | 提供单独持有的身份文件，并检查 `0600` 权限 |
 | `LW_BUNDLE_AGE_FAILED` | 核对接收者和身份，或重新获取未损坏的加密文件。不要打印身份内容 |
 | `LW_BUNDLE_DOCUMENT_INVALID` | 检查 YAML 语法、重复键和别名 |
+| `LW_BUNDLE_CONFIGURATION_TOOL_REQUIRED` | 构建同一版本的 xtask，并提供正确二进制路径 |
+| `LW_BUNDLE_CONFIGURATION_INVALID` | 取得完整管理版本，核对 capability、执行位置和字段 |
+| `LW_BUNDLE_CONFIGURATION_DIGEST_MISMATCH` | 重新导出管理版本，不手改快照或摘要 |
+| `LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH` | 将 Bundle revision 与引用的管理版本保持一致 |
+| `LW_BUNDLE_WORKLOAD_INPUT_MISSING` | 补齐启用服务的完整环境输入 |
+| `LW_BUNDLE_WORKLOAD_OBJECT_MISSING` | 使用包含该服务对象的 profile，不引用归档外的配置 |
 | `LW_BUNDLE_INVENTORY_MISMATCH` | 补齐引用文件或删除未引用文件 |
 | `LW_BUNDLE_PERMISSIONS_INVALID` | 检查当前用户归属和目录/文件权限 |
 | `LW_BUNDLE_OUTPUT_EXISTS` | 使用新 revision 和新输出文件名 |
@@ -173,6 +234,6 @@ application:
 
 ## 当前未完成范围
 
-管理员 JSON/YAML API、desired/applied/失败阶段和策略契约已由同一 Control 配置模块提供，见[配置接口说明](../contracts/platform-configuration.md)。管理设置与本入口的整体导入/导出接线尚未完成。7天/30天/24h/1h/60秒的服务消费者、Grok 表单和实际执行观察器仍未交付。本切片没有放宽 namespace Pod Security，也没有落实 #207 的实际运行授权或执行位置。
+管理版本导出、加密携带、恢复和条件导入请求已接入现有 Control 契约。当前应用 profile 的服务环境值来自同一 Bundle。Resource 独立 profile、基础设施 inventory、旧凭据签发路径和首装初始化仍未整体归并。7天/30天/24h/1h/60秒的服务消费者、Grok 表单和实际执行观察器仍未交付。本切片没有放宽 namespace Pod Security，也没有落实 #207 的实际运行授权或执行位置。
 
 剩余范围仍属于 #203 和明确的下游消费者。公共契约已由父线程协调，生成 SDK 从 `crates/contracts` 产生。不要用本地加密或状态测试替代实际授权、执行位置和前后端验收。
