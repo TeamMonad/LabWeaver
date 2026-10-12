@@ -367,11 +367,16 @@
         "path": {
           "description": "Normalized package-relative file path.",
           "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the actual bytes of this exact immutable object version.",
+          "type": "string"
         }
       },
       "required": [
         "path",
-        "object"
+        "object",
+        "sha256"
       ],
       "type": "object"
     },

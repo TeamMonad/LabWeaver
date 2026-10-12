@@ -189,6 +189,24 @@ pub trait ImmutableObjectStore: Send + Sync {
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError>;
 
+    /// Reissues conditional upload authority without extending the session deadline.
+    async fn presign_upload_until(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let signed = self
+            .presign_upload(key, size_bytes, media_type, now)
+            .await?;
+        if signed.expires_at > expires_at {
+            return Err(ObjectStoreError::ConfigurationInvalid);
+        }
+        Ok(signed)
+    }
+
     /// Creates the fixed-size multipart upload used only for platform image archives.
     async fn create_platform_image_multipart_upload(
         &self,
@@ -1023,6 +1041,26 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         media_type: &str,
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
+        let expires_at = UtcTimestamp::from_utc(
+            now.get()
+                + time::Duration::seconds(
+                    i64::try_from(self.config.upload_ttl_seconds)
+                        .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+                ),
+        )
+        .map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+        self.presign_upload_until(key, size_bytes, media_type, now, expires_at)
+            .await
+    }
+
+    async fn presign_upload_until(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
         self.validate_key(key)?;
         if size_bytes == 0
             || size_bytes > self.config.max_object_bytes
@@ -1031,7 +1069,13 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
-        let expires = Duration::from_secs(self.config.upload_ttl_seconds);
+        let remaining = (expires_at.get() - now.get()).whole_seconds();
+        let remaining =
+            u64::try_from(remaining).map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+        if remaining == 0 || remaining > self.config.upload_ttl_seconds {
+            return Err(ObjectStoreError::ConfigurationInvalid);
+        }
+        let expires = Duration::from_secs(remaining);
         let request = self
             .client
             .put_object()
@@ -1049,12 +1093,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .headers()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        let ttl = time::Duration::seconds(
-            i64::try_from(self.config.upload_ttl_seconds)
-                .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
-        );
-        let expires_at = UtcTimestamp::from_utc(now.get() + ttl)
-            .map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
         Ok(PresignedUpload {
             url: request.uri().to_string(),
             required_headers,
@@ -1833,6 +1871,47 @@ mod tests {
         assert_eq!(streamed.sha256(), format!("{:x}", Sha256::digest(bytes)));
         drop(streamed);
         assert!(!streamed_path.exists());
+        let frozen_file = store
+            .freeze_current_file(
+                "problem-packages/course/upload/bounded-object",
+                u64::try_from(bytes.len())?,
+                "text/plain",
+            )
+            .await?;
+        assert!(!frozen_file.reference().object_version.is_empty());
+        assert_eq!(frozen_file.sha256(), format!("{:x}", Sha256::digest(bytes)));
+        assert!(matches!(
+            store
+                .freeze_current_file(key, u64::try_from(bytes.len())?, "text/plain")
+                .await,
+            Err(ObjectStoreError::ObjectIdentityMismatch)
+        ));
+        let bounded_authority = package_store
+            .presign_upload_until(
+                "problem-packages/course/upload/resumed",
+                1,
+                "text/plain",
+                "2026-07-15T08:00:20.000Z".parse()?,
+                "2026-07-15T08:01:00.000Z".parse()?,
+            )
+            .await?;
+        assert!(bounded_authority.url.contains("X-Amz-Expires=40"));
+        assert_eq!(
+            bounded_authority.expires_at,
+            "2026-07-15T08:01:00.000Z".parse()?
+        );
+        assert!(
+            package_store
+                .presign_upload_until(
+                    "problem-packages/course/upload/resumed",
+                    1,
+                    "text/plain",
+                    "2026-07-15T08:01:00.000Z".parse()?,
+                    "2026-07-15T08:01:00.000Z".parse()?,
+                )
+                .await
+                .is_err()
+        );
 
         // Platform image archives use the real S3 multipart path.  Keep one non-final part at the
         // production 64 MiB boundary so MinIO enforces the same minimum-part behavior as S3.

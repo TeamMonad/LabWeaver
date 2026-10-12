@@ -645,6 +645,7 @@ fn package(
         course_id: Some(course_id),
         revision: Revision::new(1)?,
         files: vec![contracts::authoring::PackageFile {
+            sha256: "0".repeat(64),
             path: "README.md".to_owned(),
             object: ArtifactRef {
                 artifact_id: ArtifactId::new(),

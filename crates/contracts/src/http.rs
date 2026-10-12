@@ -282,6 +282,26 @@ pub struct ProblemPackageUploadSession {
     pub files: Vec<ProblemPackageUploadFile>,
     pub upload_targets: Vec<ProblemPackageUploadTarget>,
     pub expires_at: UtcTimestamp,
+    pub state: ProblemPackageUploadState,
+    /// Paths whose objects exist with the declared size and media type. Completion hashes bytes.
+    pub uploaded_paths: Vec<String>,
+    pub completed_package: Option<crate::authoring::ProblemPackage>,
+    pub terminal_diagnostic: Option<String>,
+    /// Original completion intent. Reuse both values when recovering a completing upload.
+    pub completion_idempotency_key: Option<String>,
+    pub completion_expected_revision: Option<Revision>,
+}
+
+/// Durable material upload lifecycle. Terminal states issue no upload authorities.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemPackageUploadState {
+    Pending,
+    Completing,
+    Completed,
+    Failed,
+    Cancelled,
+    Expired,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -2428,6 +2448,34 @@ pub const OPERATIONS: &[OperationContract] = &[
         Oidc,
         IdempotentCreate,
         201,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}",
+        "getProjectProblemPackageUpload",
+        "problem_package:write",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}/cancel",
+        "cancelProjectProblemPackageUpload",
+        "problem_package:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
         false,
         true,
         ALL_ROLES,

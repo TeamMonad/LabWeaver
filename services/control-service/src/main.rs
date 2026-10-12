@@ -395,6 +395,7 @@ async fn cleanup_loop(
             .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)
             .map_err(|_| StartupError::Clock)?;
         let now = contracts::UtcTimestamp::from_utc(value).map_err(|_| StartupError::Clock)?;
+        service.reconcile_material_uploads(now).await?;
         let outcome = service.cleanup_one_object(now).await?;
         let purged = service.purge_expired_sse(now).await?;
         let cleanup = match outcome {
