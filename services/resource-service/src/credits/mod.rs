@@ -262,7 +262,7 @@ fn state_name(state: CreditHoldState) -> &'static str {
         CreditHoldState::Released => "released",
     }
 }
-fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
+pub(crate) fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
     let state: String = row.try_get("state")?;
     Ok(CreditHold {
         id: row.try_get("hold_id")?,
@@ -272,9 +272,19 @@ fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
             .parse()
             .map_err(|_| CreditError::Invalid)?,
         request_id: row
-            .try_get::<Uuid, _>("request_id")?
-            .to_string()
-            .parse()
+            .try_get::<Option<Uuid>, _>("request_id")?
+            .map(|id| id.to_string().parse())
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
+        build_request_id: row
+            .try_get::<Option<Uuid>, _>("build_request_id")?
+            .map(|id| id.to_string().parse())
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
+        build_attempt: row
+            .try_get::<Option<i32>, _>("build_attempt")?
+            .map(u32::try_from)
+            .transpose()
             .map_err(|_| CreditError::Invalid)?,
         business_key: row.try_get("business_key")?,
         owner_client_id: row.try_get("owner_client_id")?,
@@ -553,7 +563,7 @@ async fn reverse_entries(
     Ok(reversed)
 }
 
-async fn resolve_in_transaction(
+pub(crate) async fn resolve_in_transaction(
     tx: &mut Tx<'_>,
     owner: &str,
     hold_id: Uuid,
@@ -857,20 +867,85 @@ pub(crate) async fn hold_in_transaction(
     if project != input.project_id.as_uuid() {
         return Err(CreditError::Denied);
     }
-    lock_account(tx, input.project_id).await?;
-    if let Some(row)=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id=$1 AND business_key=$2").bind(input.request_id.as_uuid()).bind(&input.business_key).fetch_optional(&mut **tx).await? {
-            let existing=decode_hold(&row)?;
-            if existing.owner_client_id!=owner || existing.project_id!=input.project_id || existing.amount!=input.amount { return Err(CreditError::Conflict); }
-            complete(tx,"credits_hold",key,&existing).await?;return Ok(existing);
+    stage_target_hold(
+        tx,
+        key,
+        owner,
+        input.project_id,
+        Some(input.request_id),
+        None,
+        None,
+        &input.business_key,
+        &input.amount,
+    )
+    .await
+}
+
+/// Only the Resource build admission owner calls this after locking the real Agent command.
+pub(crate) async fn build_hold_in_transaction(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    project: ProjectId,
+    build: contracts::BuildRequestId,
+    attempt: u32,
+    amount: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    stage_target_hold(
+        tx,
+        key,
+        owner,
+        project,
+        None,
+        Some(build),
+        Some(attempt),
+        "build-metered",
+        amount,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn stage_target_hold(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    project: ProjectId,
+    request: Option<contracts::ResourceRequestId>,
+    build: Option<contracts::BuildRequestId>,
+    attempt: Option<u32>,
+    business: &str,
+    amount: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    if owner.is_empty() || amount.scaled() < 0 || amount.scaled().unsigned_abs() >= 10_u128.pow(38) {
+        return Err(CreditError::Invalid);
+    }
+    lock_account(tx, project).await?;
+    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id IS NOT DISTINCT FROM $1 AND build_request_id IS NOT DISTINCT FROM $2 AND build_attempt IS NOT DISTINCT FROM $3 AND business_key=$4")
+      .bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(business).fetch_optional(&mut **tx).await?;
+    if let Some(row) = row {
+        let existing = decode_hold(&row)?;
+        if existing.owner_client_id != owner
+            || existing.project_id != project
+            || existing.amount != *amount
+        {
+            return Err(CreditError::Conflict);
         }
+        if request.is_some() {
+            complete(tx, "credits_hold", key, &existing).await?;
+        }
+        return Ok(existing);
+    }
     let hold = CreditHold {
         id: Uuid::now_v7(),
-        project_id: input.project_id,
-        request_id: input.request_id,
-        business_key: input.business_key.clone(),
+        project_id: project,
+        request_id: request,
+        build_request_id: build,
+        build_attempt: attempt,
+        business_key: business.into(),
         owner_client_id: owner.into(),
-        amount: input.amount.clone(),
-        remaining: input.amount.clone(),
+        amount: amount.clone(),
+        remaining: amount.clone(),
         state: CreditHoldState::Pending,
         measurement_unknown: false,
         reason: None,
@@ -879,12 +954,13 @@ pub(crate) async fn hold_in_transaction(
         reconciliation_due_at: None,
         expired_unknown_at: None,
     };
-    sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6::text::numeric,$6::text::numeric,'pending',$7)").bind(hold.id).bind(project).bind(input.request_id.as_uuid()).bind(&input.business_key).bind(owner).bind(input.amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,build_request_id,build_attempt,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::numeric,$8::text::numeric,'pending',$9)")
+      .bind(hold.id).bind(project.as_uuid()).bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(business).bind(owner).bind(amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut **tx).await?;
     let mut e = entry(
         Uuid::now_v7(),
-        Some(input.project_id),
+        Some(project),
         0,
-        input.amount.scaled(),
+        amount.scaled(),
         0,
         0,
         "hold",
@@ -894,9 +970,9 @@ pub(crate) async fn hold_in_transaction(
     e.reason = "preauthorized upper bound".into();
     e.owner_client_id = Some(owner.into());
     apply(tx, &e).await?;
-    complete(tx, "credits_hold", key, &hold).await?;
-
-    tracing::info!(event="resource.credits.hold_staged",hold_id=%hold.id,project_id=%hold.project_id,owner_client_id=owner);
+    if request.is_some() {
+        complete(tx, "credits_hold", key, &hold).await?;
+    }
     Ok(hold)
 }
 

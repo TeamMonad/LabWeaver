@@ -29,6 +29,7 @@ pub(crate) async fn calculate_charge(
                 quantities.cpu_millicore_seconds,
                 None,
                 None,
+                None,
                 &mut lines,
                 &mut currency,
             )
@@ -42,6 +43,7 @@ pub(crate) async fn calculate_charge(
                 quantities.quantity_divisor,
                 ResourceBillingUnit::MemoryByteSecond,
                 quantities.memory_byte_seconds,
+                None,
                 None,
                 None,
                 &mut lines,
@@ -60,6 +62,7 @@ pub(crate) async fn calculate_charge(
                 quantities.gpu_unit_seconds,
                 Some(&allocation.class),
                 Some(allocation.mode),
+                None,
                 &mut lines,
                 &mut currency,
             )
@@ -73,6 +76,7 @@ pub(crate) async fn calculate_charge(
             quantities.quantity_divisor,
             ResourceBillingUnit::StorageByteSecond,
             quantities.storage_byte_seconds,
+            None,
             None,
             None,
             &mut lines,
@@ -121,11 +125,20 @@ pub(crate) async fn append_rate_segments(
     quantity: u64,
     gpu_class: Option<&str>,
     gpu_mode: Option<GpuAllocationMode>,
+    builder_binding: Option<&str>,
     lines: &mut Vec<ResourceChargeLine>,
     currency: &mut Option<String>,
 ) -> Result<(), ResourceStoreError> {
-    let segments =
-        select_rate_segments(transaction, unit, gpu_class, gpu_mode, from, until).await?;
+    let segments = select_rate_segments(
+        transaction,
+        unit,
+        gpu_class,
+        gpu_mode,
+        builder_binding,
+        from,
+        until,
+    )
+    .await?;
     let total_millis = (until.get() - from.get()).whole_milliseconds();
     if total_millis <= 0 {
         return Err(ResourceStoreError::NumericOverflow);
@@ -204,6 +217,7 @@ async fn select_rate_segments(
     unit: ResourceBillingUnit,
     gpu_class: Option<&str>,
     gpu_mode: Option<GpuAllocationMode>,
+    builder_binding: Option<&str>,
     from: UtcTimestamp,
     until: UtcTimestamp,
 ) -> Result<Vec<(ResourceRate, u128)>, ResourceStoreError> {
@@ -215,6 +229,7 @@ async fn select_rate_segments(
            AND gpu_mode IS NOT DISTINCT FROM $3
            AND effective_from < $4
            AND (effective_until IS NULL OR effective_until > $5)
+           AND builder_binding IS NOT DISTINCT FROM $6
          ORDER BY effective_from ASC, revision ASC, rate_id ASC",
     )
     .bind(&unit)
@@ -222,6 +237,7 @@ async fn select_rate_segments(
     .bind(gpu_mode.as_deref())
     .bind(until.get())
     .bind(from.get())
+    .bind(builder_binding)
     .fetch_all(&mut **transaction)
     .await?;
     if rows.is_empty() {

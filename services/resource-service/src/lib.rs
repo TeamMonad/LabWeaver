@@ -589,3 +589,6 @@ mod tests {
         UtcTimestamp::from_str(value).unwrap_or_else(|_| unreachable!())
     }
 }
+
+/// Resource-owned build accounting, reused by the bounded Agent transaction coordinator.
+pub mod build_costing;

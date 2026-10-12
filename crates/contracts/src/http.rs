@@ -176,6 +176,8 @@ pub struct CreateResourceRateRequest {
     pub unit_price: crate::resource::Money,
     pub effective_from: UtcTimestamp,
     pub effective_until: Option<UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_binding: Option<String>,
 }
 
 /// Closes one open immutable rate version at a future timestamp.

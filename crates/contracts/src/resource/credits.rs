@@ -38,7 +38,12 @@ pub struct CreditHold {
     #[schemars(with = "String", extend("format" = "uuid"))]
     pub id: Uuid,
     pub project_id: ProjectId,
-    pub request_id: ResourceRequestId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<ResourceRequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_request_id: Option<crate::BuildRequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_attempt: Option<u32>,
     pub business_key: String,
     pub owner_client_id: String,
     pub amount: FixedDecimal,

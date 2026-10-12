@@ -587,6 +587,7 @@ pub enum ResourceBillingUnit {
     MemoryByteSecond,
     StorageByteSecond,
     GpuUnitSecond,
+    BuildSecond,
 }
 
 /// Metering scope for one usage interval.
@@ -616,6 +617,8 @@ pub struct ResourceRate {
     pub gpu_class: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_mode: Option<GpuAllocationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_binding: Option<String>,
     pub unit_price: Money,
     pub effective_from: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -624,7 +627,11 @@ pub struct ResourceRate {
 
 impl ResourceRate {
     pub fn validate(&self) -> Result<(), ResourceError> {
-        if self.revision.get() == 0
+        if (self.unit == ResourceBillingUnit::BuildSecond) != self.builder_binding.is_some()
+            || self.builder_binding.as_ref().is_some_and(|b| {
+                b.trim().is_empty() || b.len() > 128 || b.bytes().any(|c| c.is_ascii_whitespace())
+            })
+            || self.revision.get() == 0
             || self.unit_quantity == 0
             || self
                 .effective_until
@@ -1098,3 +1105,6 @@ mod tests {
 pub mod costing;
 /// Project Credits account and immutable ledger contracts.
 pub mod credits;
+
+/// Builder-time estimates and immutable observations.
+pub mod build_costing;

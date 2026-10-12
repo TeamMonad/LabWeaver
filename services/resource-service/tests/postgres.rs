@@ -665,6 +665,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
             .create_rate(
                 &Uuid::now_v7().to_string(),
                 &CreateResourceRateRequest {
+                    builder_binding: None,
                     unit,
                     unit_quantity: 1,
                     gpu_class: None,
@@ -1739,6 +1740,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     .execute(&pool)
     .await?;
     let base_rate = |unit| CreateResourceRateRequest {
+        builder_binding: None,
         unit,
         unit_quantity: 1,
         gpu_class: None,
@@ -1766,6 +1768,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
         .create_rate(
             "environment-gpu-rate-gpu",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::GpuUnitSecond,
                 unit_quantity: 1,
                 gpu_class: Some(catalog.class.clone()),
@@ -2308,6 +2311,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         },
     };
     let rate_input = |unit, unit_quantity, amount| CreateResourceRateRequest {
+        builder_binding: None,
         unit,
         unit_quantity,
         gpu_class: None,
@@ -2719,6 +2723,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         .create_rate(
             "billing-rate-cpu-1",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -2760,6 +2765,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         .create_rate(
             "billing-rate-cpu-2",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -3012,6 +3018,7 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
         .await?;
 
     let rate_input = |unit, price| CreateResourceRateRequest {
+        builder_binding: None,
         unit,
         unit_quantity: 1,
         gpu_class: None,
@@ -3045,6 +3052,7 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
         .create_rate(
             "rate-end-replay",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::GpuUnitSecond,
                 unit_quantity: 1,
                 gpu_class: Some("replay-gpu".to_owned()),
@@ -3267,6 +3275,7 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
         .create_rate(
             "rate-concurrent-create",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::MemoryByteSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -5074,6 +5083,7 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
         .create_rate(
             "bridge-rate",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -5469,6 +5479,7 @@ async fn estimated_cost_http_uses_signed_user_preview_and_exact_service_scope()
             .create_rate(
                 &Uuid::now_v7().to_string(),
                 &CreateResourceRateRequest {
+                    builder_binding: None,
                     unit,
                     unit_quantity: 1,
                     gpu_class: None,
