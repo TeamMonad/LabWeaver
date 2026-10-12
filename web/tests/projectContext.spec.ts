@@ -93,7 +93,8 @@ describe('AppShell project context', () => {
     expect(wrapper.find('.scoped-page').exists()).toBe(false)
     expect(mounts).toBe(0)
     const recovery = wrapper.get('[data-testid="project-context-recovery"]')
-    expect(recovery.text()).toContain('当前账号不是这个项目的成员')
+    expect(recovery.text()).toContain('项目不存在或你无权访问。')
+    expect(recovery.text()).not.toContain('成员')
     expect(recovery.text()).toContain('req-ctx')
     expect(recovery.text()).toContain('切换到「项目 A」')
     expect(document.title).toContain('项目不可用')
@@ -103,7 +104,8 @@ describe('AppShell project context', () => {
     localStorage.setItem('labweaver_project_id', 'project-a')
     getProject.mockResolvedValue(problem(404, 'LW_PROJECT_NOT_FOUND'))
     const { wrapper, router } = await mountShell('/researcher/environments?projectId=project-x&environmentId=env-old')
-    expect(wrapper.text()).toContain('这个项目不存在，或已被删除。')
+    // 404 and 403 read the same: the page never asserts whether the project exists.
+    expect(wrapper.text()).toContain('项目不存在或你无权访问。')
 
     await wrapper.get('[data-testid="project-context-recovery"] .filled-button').trigger('click')
     await flushPromises()

@@ -68,10 +68,10 @@ const reason = computed(() => {
   switch (props.state.reason) {
     case 'checking':
       return '当前账号的项目列表中没有这个项目，正在向平台确认原因。'
-    case 'not-found':
-      return '这个项目不存在，或已被删除。'
-    case 'forbidden':
-      return '当前账号不是这个项目的成员，或没有查看权限。'
+    case 'not-accessible':
+      // 401/403/404 cannot tell apart "missing" from "not allowed", so the copy
+      // never claims the project exists.
+      return '项目不存在或你无权访问。'
     case 'archived-or-hidden':
       return '这个项目已归档，不能继续在这里操作。'
     default:
@@ -79,7 +79,11 @@ const reason = computed(() => {
   }
 })
 const nextStep = computed(() => {
-  if (props.state.reason === 'forbidden') return '请切换到你可以访问的项目；如需加入该项目，请联系项目 Owner 添加成员。'
+  if (props.state.reason === 'not-accessible') {
+    return props.state.fallback
+      ? '请切换到你可以访问的项目；如果你认为应该能访问这个项目，请联系项目 Owner 或管理员确认。'
+      : '你目前没有可访问的项目。如果你认为应该能访问这个项目，请联系项目 Owner 或管理员确认。'
+  }
   if (props.state.fallback) return '请切换到你可以访问的项目，或回到项目列表重新选择。'
   return '你目前没有可访问的项目。请在“项目与工作空间”创建项目，或联系项目 Owner 邀请你加入。'
 })

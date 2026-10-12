@@ -566,10 +566,11 @@ describe('EnvironmentEntryView', () => {
 
     await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
     const hint = wrapper.get('#lifecycle-action-hint').text()
-    expect(hint).toContain('计算用量已停止计量')
-    expect(hint).toContain('工作目录和磁盘仍保留并继续按存储费率核算')
-    expect(hint).toContain('GPU 预留和 Work 资源租约会保留')
-    expect(hint).toContain('删除环境并完成回收后才归还容量')
+    expect(hint).toContain('工作目录和磁盘仍保留')
+    expect(hint).toContain('继续计入存储用量，直到删除')
+    expect(hint).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
+    // No stop-impact contract yet: the hint must not promise GPU or billing outcomes.
+    expect(hint).not.toMatch(/GPU 预留(已|会)?释放|GPU 预留和 Work 资源租约会保留|已停止计量/)
 
     await wrapper.find('button[aria-label="删除"]').trigger('click')
     const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
@@ -578,7 +579,7 @@ describe('EnvironmentEntryView', () => {
     expect(dialog.props('description')).toContain('项目材料、已冻结提交和评测记录不在本环境删除范围内')
   })
 
-  it('explains that a stopped experiment releases GPU capacity for the next start', async () => {
+  it('does not claim a stopped experiment released its GPU capacity', async () => {
     mockEnvironmentInstance({
       class: 'experiment',
       desiredState: 'stopped',
@@ -589,9 +590,8 @@ describe('EnvironmentEntryView', () => {
 
     await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
     const hint = wrapper.get('#lifecycle-action-hint').text()
-    expect(hint).toContain('GPU 预留已释放')
-    expect(hint).toContain('重新启动时会重新进行 GPU 资源准入')
-    expect(hint).not.toContain('Work 资源租约会保留')
+    expect(hint).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
+    expect(hint).not.toMatch(/GPU 预留(已|会)?释放|资源租约会保留/)
   })
 
   it('keeps teacher console navigation in the teacher workbench and omits student submission controls', async () => {
@@ -1281,7 +1281,7 @@ describe('EnvironmentEntryView', () => {
     })
 
     it.each([
-      ['停止', stopEnvironment, '停止后计算用量不再计量'],
+      ['停止', stopEnvironment, '环境实际停止后，计算用量才停止计量'],
       ['重启', restartEnvironment, '重启完成前无法连接'],
     ] as const)('asks before %s and sends nothing until confirmed', async (label, sdkCall, impact) => {
       const { wrapper } = await mountAt({ environmentId: 'env-1' })
@@ -1309,11 +1309,14 @@ describe('EnvironmentEntryView', () => {
       expect(stopEnvironment).not.toHaveBeenCalled()
     })
 
-    it('explains that stopping an experiment releases the GPU reservation', async () => {
+    it('keeps stop impact conditional instead of promising GPU or billing outcomes', async () => {
       const { wrapper } = await mountAt({ environmentId: 'env-1' })
       await vi.waitFor(() => expect((wrapper.find('button[aria-label="停止"]').element as HTMLButtonElement).disabled).toBe(false))
       await wrapper.find('button[aria-label="停止"]').trigger('click')
-      expect(lifecycleDialog(wrapper).props('description')).toContain('GPU 预留会释放')
+      const description = lifecycleDialog(wrapper).props('description') as string
+      expect(description).toContain('提交停止不代表已停止计量')
+      expect(description).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
+      expect(description).not.toMatch(/GPU 预留(会|已)?释放|资源租约会保留|不再计量|存储费率/)
     })
   })
 })

@@ -1,9 +1,13 @@
 import type { ProblemDetails } from '@/generated/contracts'
+import { headerRequestId } from '@/api/requestId'
 
 export interface DiagnosticViewModel {
   code: string
   traceId?: string
-  /** Server request identifier from the RFC 9457 body; copyable for support. */
+  /**
+   * Server request identifier: the RFC 9457 body `requestId`, or else the
+   * `x-request-id` response header. Never generated in the browser.
+   */
   requestId?: string
   /** HTTP status of the failed request, when the server answered. */
   status?: number
@@ -73,7 +77,8 @@ type DiagnosticProblem = Pick<Partial<ProblemDetails>, 'requestId' | 'status' | 
 export function makeDiagnostic(code: string, message: string, retryable = false, problem?: DiagnosticProblem): DiagnosticViewModel {
   const diagnostic: DiagnosticViewModel = { code, message: readableDiagnosticMessage(code, message), retryable }
   if (!problem) return diagnostic
-  if (typeof problem.requestId === 'string' && problem.requestId) diagnostic.requestId = problem.requestId
+  const requestId = typeof problem.requestId === 'string' && problem.requestId ? problem.requestId : headerRequestId(problem)
+  if (requestId) diagnostic.requestId = requestId
   if (typeof problem.traceId === 'string' && problem.traceId) diagnostic.traceId = problem.traceId
   if (typeof problem.status === 'number') {
     diagnostic.status = problem.status
@@ -87,9 +92,16 @@ export function makeDiagnostic(code: string, message: string, retryable = false,
 export function diagnosticFromError(error: unknown, fallbackCode: string, fallbackMessage: string, fallbackRetryable = true): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
   if (problem) {
-    return makeDiagnostic(problem.diagnosticCode ?? fallbackCode, problem.detail ?? fallbackMessage, problem.retryable ?? fallbackRetryable, problem)
+    const diagnostic = makeDiagnostic(problem.diagnosticCode ?? fallbackCode, problem.detail ?? fallbackMessage, problem.retryable ?? fallbackRetryable, problem)
+    if (!diagnostic.requestId) {
+      const fromHeader = headerRequestId(error)
+      if (fromHeader) diagnostic.requestId = fromHeader
+    }
+    return diagnostic
   }
   const diagnostic = makeDiagnostic(fallbackCode, fallbackMessage, fallbackRetryable)
+  const fromHeader = headerRequestId(error)
+  if (fromHeader) diagnostic.requestId = fromHeader
   if (isTransportError(error)) diagnostic.nextStep = '无法连接平台服务。请检查网络连接后重试。'
   return diagnostic
 }
