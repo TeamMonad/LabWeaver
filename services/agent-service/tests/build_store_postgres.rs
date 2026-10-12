@@ -615,6 +615,7 @@ fn build_executor_envelope(
     }))
     .expect("executor request identity");
     BuildExecutorRequestEnvelope {
+        query_only: false,
         context: BuildProviderRequestContext {
             protocol_version: BUILD_EXECUTOR_PROTOCOL_VERSION,
             build_request_id: command.request.id,

@@ -57,6 +57,7 @@ pub struct ResourceProcessRuntime {
     task_service_client_ids: BTreeSet<String>,
     cursor_signing_key_current: Arc<Vec<u8>>,
     cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
+    build_service_client_id: Option<String>,
     capacity_worker: CapacityReconcileWorker,
     outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
@@ -123,6 +124,9 @@ impl ResourceProcessRuntime {
         let cursor_previous = optional_path(CURSOR_SIGNING_KEY_PREVIOUS_FILE)?
             .map(|path| read_secret_key(&path))
             .transpose()?;
+        let build_service_client_id = std::env::var("LABWEAVER_AGENT_SERVICE_CLIENT_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
         let store = PgResourceStore::new(pool)
             .with_cursor_signing_keys(cursor_current.clone(), cursor_previous.clone());
         seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
@@ -141,6 +145,7 @@ impl ResourceProcessRuntime {
             task_service_client_ids,
             cursor_signing_key_current: Arc::new(cursor_current),
             cursor_signing_key_previous: cursor_previous.map(Arc::new),
+            build_service_client_id,
             capacity_worker,
             outbox,
             readiness: Arc::new(AtomicBool::new(true)),
@@ -164,6 +169,8 @@ impl ResourceProcessRuntime {
                 self.cursor_signing_key_current.as_ref().clone(),
                 self.cursor_signing_key_previous.as_deref().cloned(),
             )
+            .with_task_service_client_ids(self.task_service_client_ids.clone())
+            .with_build_service_client_id(self.build_service_client_id.clone())
     }
 
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
@@ -180,6 +187,7 @@ impl ResourceProcessRuntime {
             cursor_signing_key_current: _cursor_signing_key_current,
             cursor_signing_key_previous: _cursor_signing_key_previous,
             task_service_client_ids: _task_service_client_ids,
+            build_service_client_id: _build_service_client_id,
             _shutdown_sender,
             shutdown,
         } = self;
@@ -308,6 +316,9 @@ async fn run_accounting(
             biased;
             changed=shutdown.changed()=>{if changed.is_err() || *shutdown.borrow(){return Ok(());}}
             _=interval.tick()=>{
+                if let Err(error)=store.reconcile_build_deadlines_once().await {
+                    tracing::warn!(event="resource.build_cost.deadline_failed",diagnostic_code=%error,outcome="will_retry");
+                }
                 if let Err(error)=credits.expire_unknown_once().await {
                     tracing::warn!(event="resource.credits.unknown_deadline_failed",diagnostic_code=%error,outcome="will_retry");
                 }
