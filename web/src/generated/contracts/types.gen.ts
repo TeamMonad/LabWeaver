@@ -18639,8 +18639,12 @@ export type CompleteOidcLoginData = {
     body?: never;
     path?: never;
     query: {
-        code: string;
+        code?: string;
         state: string;
+        /**
+         * Provider refusal; replaces code and consumes only a browser-bound transaction.
+         */
+        error?: string;
     };
     url: '/auth/callback';
 };
@@ -18662,12 +18666,19 @@ export type BeginOidcLoginData = {
     body?: never;
     path?: never;
     query?: {
+        /**
+         * Portal path beginning with one slash, including optional query and fragment. External URLs, network paths, backslashes and control characters are rejected. Omission uses the configured portal destination.
+         */
         return_to?: string;
     };
     url: '/auth/login';
 };
 
 export type BeginOidcLoginErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
     /**
      * RFC 9457 problem detail
      */

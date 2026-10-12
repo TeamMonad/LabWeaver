@@ -505,6 +505,16 @@ impl AuthConfig {
             post_logout_redirect_uri,
             transport_security,
         )?;
+        if redirect_uri.path() != "/auth/callback"
+            || redirect_uri.query().is_some()
+            || !redirect_uri.username().is_empty()
+            || redirect_uri.password().is_some()
+            || !post_logout_redirect_uri.username().is_empty()
+            || post_logout_redirect_uri.password().is_some()
+            || redirect_uri.origin() != post_logout_redirect_uri.origin()
+        {
+            return Err(AuthConfigError::InvalidUrl("browser redirect"));
+        }
         if client_id.trim().is_empty() || audience.trim().is_empty() {
             return Err(AuthConfigError::MissingIdentityBinding);
         }
@@ -528,6 +538,30 @@ impl AuthConfig {
             session_ttl_seconds,
             transport_security,
         })
+    }
+
+    /// Resolves a portal path against the configured browser origin.
+    /// Query and fragment are retained; external and ambiguous URL forms fail closed.
+    pub fn login_return_url(&self, return_to: Option<&str>) -> Result<Url, AuthConfigError> {
+        let Some(path) = return_to else {
+            return Ok(self.post_logout_redirect_uri.clone());
+        };
+        if path.len() > 2048
+            || !path.starts_with('/')
+            || path.starts_with("//")
+            || path.contains('\\')
+            || path.chars().any(char::is_control)
+        {
+            return Err(AuthConfigError::InvalidUrl("return-to URL"));
+        }
+        let url = self
+            .redirect_uri
+            .join(path)
+            .map_err(|_| AuthConfigError::InvalidUrl("return-to URL"))?;
+        if url.origin() != self.redirect_uri.origin() {
+            return Err(AuthConfigError::InvalidUrl("return-to URL"));
+        }
+        Ok(url)
     }
 }
 
@@ -634,6 +668,105 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{AccessAuthFile, AuthConfig, TransportSecurityMode};
+
+    fn portal_config() -> Result<AuthConfig, super::AuthConfigError> {
+        AuthConfig::new(
+            "https://issuer.example.test/realms/labweaver",
+            "web".into(),
+            "https://portal.example.test/auth/callback",
+            "https://portal.example.test/",
+            "api".into(),
+            BTreeSet::from(["https://portal.example.test".into()]),
+            900,
+        )
+    }
+
+    #[test]
+    fn login_return_target_keeps_local_path_query_and_fragment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = portal_config()?;
+        assert_eq!(
+            config.login_return_url(None)?.as_str(),
+            "https://portal.example.test/"
+        );
+        assert_eq!(
+            config
+                .login_return_url(Some("/researcher/workspaces?project=p#active"))?
+                .as_str(),
+            "https://portal.example.test/researcher/workspaces?project=p#active"
+        );
+        for invalid in [
+            "",
+            "https://attacker.invalid/",
+            "https://portal.example.test/",
+            "//attacker.invalid/",
+            "/\\attacker.invalid/",
+            " /work",
+            "/work\r\nLocation: https://attacker.invalid",
+            "javascript:alert(1)",
+            "../work",
+        ] {
+            assert!(
+                config.login_return_url(Some(invalid)).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(
+            config
+                .login_return_url(Some(&format!("/{}", "a".repeat(2048))))
+                .is_err()
+        );
+        // An encoded slash stays a path on our origin; it is never decoded into an authority.
+        assert_eq!(
+            config
+                .login_return_url(Some("/%2f%2fattacker.invalid"))?
+                .origin(),
+            config.redirect_uri.origin()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn callback_and_default_destination_are_pinned() -> Result<(), Box<dyn std::error::Error>> {
+        let valid = portal_config()?;
+        for callback in [
+            "https://portal.example.test/wrong",
+            "https://portal.example.test/auth/callback?next=x",
+            "https://portal.example.test/auth/callback#fragment",
+            "https://user:pass@portal.example.test/auth/callback",
+        ] {
+            assert!(
+                AuthConfig::new(
+                    valid.issuer.as_str(),
+                    "web".into(),
+                    callback,
+                    valid.post_logout_redirect_uri.as_str(),
+                    "api".into(),
+                    valid.allowed_origins.clone(),
+                    900
+                )
+                .is_err()
+            );
+        }
+        for destination in [
+            "https://attacker.invalid/",
+            "https://user:pass@portal.example.test/",
+        ] {
+            assert!(
+                AuthConfig::new(
+                    valid.issuer.as_str(),
+                    "web".into(),
+                    valid.redirect_uri.as_str(),
+                    destination,
+                    "api".into(),
+                    valid.allowed_origins.clone(),
+                    900
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn configuration_rejects_insecure_issuer_and_unbounded_session() {
