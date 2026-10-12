@@ -1,4 +1,14 @@
 import { reactive, ref, type Ref } from 'vue'
+import type { EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema } from '@/generated/contracts'
+import { retryEnvironment } from '@/generated/contracts'
+import { environmentOperationKindLabel, environmentStateLabel } from '@/utils/stateLabels'
+import {
+  STOPPED_IMPACT_NOTICE,
+  failedCleanup,
+  isTerminalEnvironment,
+  type ConfirmedLifecycleAction,
+  type EnvironmentLifecycleAction,
+} from '@/utils/environmentLifecycle'
 import {
   createEnvironment,
   startEnvironment,
@@ -116,4 +126,215 @@ export function useEnvironmentLifecycle(
   }
 
   return reactive({ operating, lastAccepted, create, act })
+}
+
+interface LifecycleTarget {
+  environmentId: string
+  revision: number
+  action: EnvironmentLifecycleAction
+}
+
+type InstanceState = { kind: string; data?: EnvironmentInstanceSchema }
+
+export interface EnvironmentLifecycleControlsDeps {
+  /** Current environment instance (the `useEnvironmentInstance` reactive). */
+  env: { instance: InstanceState; load: () => Promise<unknown> }
+  operations: { load: () => Promise<unknown> }
+  lifecycle: ReturnType<typeof useEnvironmentLifecycle>
+  activeOperation: Ref<EnvironmentOperationSnapshotSchema | null>
+  retryableOperation: Ref<EnvironmentOperationSnapshotSchema | null>
+}
+
+/**
+ * Page-level lifecycle controls for one environment: which actions are allowed
+ * and why, the stop/restart/delete confirmations, retry of the last action and
+ * of a failed operation. API calls go through `useEnvironmentLifecycle`.
+ */
+export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleControlsDeps) {
+  const { env, operations, lifecycle, activeOperation, retryableOperation } = deps
+  const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
+  const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
+  const retryingEnvironment = ref(false)
+  const lastLifecycleTarget = ref<LifecycleTarget | null>(null)
+  const deleteEnvironment = ref<EnvironmentInstanceSchema | null>(null)
+  const lifecycleConfirmation = ref<{ data: EnvironmentInstanceSchema; action: ConfirmedLifecycleAction } | null>(null)
+
+  function currentInstance(): EnvironmentInstanceSchema | undefined {
+    return env.instance.kind === 'success' ? env.instance.data : undefined
+  }
+
+  function hasActiveLifecycleOperation(data: EnvironmentInstanceSchema): boolean {
+    const current = data.operation.state
+    if (current === 'accepted' || current === 'running' || current === 'cancelling') return true
+    const accepted = lifecycle.lastAccepted
+    if (accepted?.environmentId === data.id && accepted.revision > data.revision) return true
+    return activeOperation.value?.environmentId === data.id
+  }
+
+  function canStart(data: EnvironmentInstanceSchema) {
+    return !isTerminalEnvironment(data)
+      && !hasActiveLifecycleOperation(data)
+      && data.desiredState !== 'deleted'
+      && data.desiredState !== 'running'
+      && data.observedState === 'stopped'
+      && !lifecycle.operating.has(`${data.id}:start`)
+  }
+
+  function canStop(data: EnvironmentInstanceSchema) {
+    return !isTerminalEnvironment(data)
+      && !hasActiveLifecycleOperation(data)
+      && data.desiredState !== 'deleted'
+      && data.desiredState !== 'stopped'
+      && data.observedState === 'ready'
+      && !lifecycle.operating.has(`${data.id}:stop`)
+  }
+
+  function canRestart(data: EnvironmentInstanceSchema) {
+    return !isTerminalEnvironment(data)
+      && !hasActiveLifecycleOperation(data)
+      && data.desiredState !== 'deleted'
+      && (data.observedState === 'ready' || data.observedState === 'stopped' || data.observedState === 'failed')
+      && !lifecycle.operating.has(`${data.id}:restart`)
+  }
+
+  function canDelete(data: EnvironmentInstanceSchema) {
+    return !isTerminalEnvironment(data)
+      && (data.desiredState !== 'deleted' || (failedCleanup(data) && !hasActiveLifecycleOperation(data)))
+      && !(hasActiveLifecycleOperation(data) && data.operation.kind === 'delete')
+      && !lifecycle.operating.has(`${data.id}:delete`)
+  }
+
+  function lifecycleActionReason(data: EnvironmentInstanceSchema, action: EnvironmentLifecycleAction): string {
+    if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
+    if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return action === 'delete'
+      ? '上次回收失败，资源释放尚未确认；重新回收会删除仍存在的工作目录和关联磁盘数据。'
+      : '环境正在等待回收，只能重试回收，不能重新启动或恢复环境。'
+    if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，请等待清理完成。'
+    if (hasActiveLifecycleOperation(data) && (action !== 'delete' || data.operation.kind === 'delete')) {
+      return `当前正在${environmentOperationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请等待操作完成。`
+    }
+    if (action === 'start' && data.desiredState === 'running') return '环境已经是运行目标状态。'
+    if (action === 'start' && data.observedState !== 'stopped') return `环境当前为${environmentStateLabel(data.observedState)}，只能在已停止状态启动。`
+    if (action === 'stop' && data.desiredState === 'stopped') return '环境已经是停止目标状态。'
+    if (action === 'stop' && data.observedState !== 'ready') return `环境当前为${environmentStateLabel(data.observedState)}，就绪后才能停止。`
+    if (action === 'restart' && !['ready', 'stopped', 'failed'].includes(data.observedState)) return '只有就绪、已停止或失败的环境才能重启。'
+    return `${action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '删除'}环境`
+  }
+
+  function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
+    if (data.observedState === 'deleted') return '此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。'
+    if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return '环境回收失败，资源释放尚未确认。请重试回收；回收完成前不能打开控制台或重新启动环境。'
+    if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
+    if (hasActiveLifecycleOperation(data)) return `当前正在${environmentOperationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
+    if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
+    if (data.observedState === 'stopped') return `环境已停止，启动后才能打开终端。工作目录和磁盘仍保留。${STOPPED_IMPACT_NOTICE}`
+    if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
+    return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
+  }
+
+  function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
+    if (failedCleanup(data)) return '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。'
+    const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
+    return `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`
+  }
+
+  async function runLifecycle(data: EnvironmentInstanceSchema, action: EnvironmentLifecycleAction) {
+    lifecycleDiagnostic.value = null
+    lastLifecycleTarget.value = { environmentId: data.id, revision: data.revision, action }
+    const result = await lifecycle.act(data.id, data.revision, action)
+    if (!result.ok) {
+      lifecycleDiagnostic.value = result.diagnostic ?? null
+      return
+    }
+    // Refresh the operations timeline immediately so the new command shows up
+    // instead of waiting for the next full page load.
+    await Promise.all([env.load(), operations.load()])
+  }
+
+  /** Stop and restart interrupt sessions and change usage, so they confirm first; start never does. */
+  function requestLifecycleConfirmation(data: EnvironmentInstanceSchema, action: ConfirmedLifecycleAction) {
+    lifecycleConfirmation.value = { data, action }
+  }
+
+  async function confirmLifecycle() {
+    const pending = lifecycleConfirmation.value
+    lifecycleConfirmation.value = null
+    if (pending) await runLifecycle(pending.data, pending.action)
+  }
+
+  async function retryFailedOperation(data: EnvironmentInstanceSchema) {
+    retryDiagnostic.value = null
+    retryingEnvironment.value = true
+    try {
+      const result = await retryEnvironment({
+        path: { environmentId: data.id },
+        headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(data.revision) },
+      })
+      if (result.error) {
+        const problem = extractProblemDetails(result.error)
+        retryDiagnostic.value = makeDiagnostic(
+          problem?.diagnosticCode ?? 'ENVIRONMENT_RETRY_FAILED',
+          problem?.detail ?? '重试失败的操作未成功',
+          problem?.retryable ?? true,
+          problem,
+        )
+        return
+      }
+      await Promise.all([env.load(), operations.load()])
+    } finally {
+      retryingEnvironment.value = false
+    }
+  }
+
+  async function retryLifecycle() {
+    const target = lastLifecycleTarget.value
+    if (!target) return
+    const instance = currentInstance()
+    if (!instance || instance.id !== target.environmentId) return
+    if (target.action === 'delete' && !canDelete(instance)) return
+    await runLifecycle(instance, target.action)
+  }
+
+  function openDelete(data: EnvironmentInstanceSchema) {
+    if (!canDelete(data)) return
+    deleteEnvironment.value = data
+  }
+
+  async function confirmDeleteEnvironment() {
+    if (!deleteEnvironment.value) return
+    const requested = deleteEnvironment.value
+    deleteEnvironment.value = null
+    const data = currentInstance()
+    if (!data || data.id !== requested.id || !canDelete(data)) return
+    await runLifecycle(data, 'delete')
+  }
+
+  function resetDiagnostics() {
+    lifecycleDiagnostic.value = null
+    retryDiagnostic.value = null
+  }
+
+  return {
+    lifecycleDiagnostic,
+    retryDiagnostic,
+    retryingEnvironment,
+    deleteEnvironment,
+    lifecycleConfirmation,
+    hasActiveLifecycleOperation,
+    canStart,
+    canStop,
+    canRestart,
+    canDelete,
+    lifecycleActionReason,
+    lifecycleActionHint,
+    failedEnvironmentMessage,
+    runLifecycle,
+    requestLifecycleConfirmation,
+    confirmLifecycle,
+    retryFailedOperation,
+    retryLifecycle,
+    openDelete,
+    confirmDeleteEnvironment,
+    resetDiagnostics,
+  }
 }
