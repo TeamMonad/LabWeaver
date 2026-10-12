@@ -300,3 +300,55 @@ test('fails closed without a bearer and distinguishes cancellation', async ({ pa
     })
   expect(networkRequests).toBe(2)
 })
+
+test('SSE rejects missing bearer before any network request', async ({ page }) => {
+  let networkRequests = 0
+  await page.route(`**/api/v1/projects/${projectId}/events**`, async (route) => {
+    networkRequests += 1
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/problem+json',
+      body: JSON.stringify({
+        type: '/problems/no-auth',
+        title: 'No auth',
+        status: 401,
+        detail: 'NO_AUTH_ERROR',
+        instance: '/requests/sse-no-auth',
+        diagnosticCode: 'NO_AUTH_ERROR',
+        requestId: 'sse-no-auth',
+        retryable: false,
+      }),
+    })
+  })
+
+  const result = await page.evaluate(async ({ projectId }) => {
+    const api = await import('/src/api/client.ts')
+    const sdk = await import('/src/generated/contracts/index.ts')
+    const client = api.createLabWeaverApiClient({
+      baseUrl: window.location.origin,
+      authentication: { mode: 'bearer', accessToken: async () => undefined },
+    })
+    try {
+      const events = await sdk.streamProjectEvents({
+        client,
+        path: { projectId },
+        query: { after: '0' },
+      })
+      // If construction incorrectly succeeds, advancing must still not be required
+      // for the failure — but count any accidental fetch via the route counter.
+      await events.stream.next()
+      return { diagnosticCode: null }
+    } catch (error) {
+      return {
+        diagnosticCode: error?.diagnosticCode ?? null,
+        name: error?.name ?? null,
+        message: typeof error?.message === 'string' ? error.message : null,
+      }
+    }
+  }, { projectId })
+
+  expect(result.diagnosticCode).toBe('LW_SDK_AUTH_TOKEN_UNAVAILABLE')
+  expect(result.name).toBe('LabWeaverApiError')
+  expect(networkRequests).toBe(0)
+})
+
