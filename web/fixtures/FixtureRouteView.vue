@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import HomeView from '@/views/HomeView.vue'
 import TeacherOverviewView from '@/views/teacher/TeacherOverviewView.vue'
 import LabListView from '@/views/teacher/LabListView.vue'
+import CandidateApprovalView from '@/views/teacher/CandidateApprovalView.vue'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
 import ResourceRequestView from '@/views/researcher/ResourceRequestView.vue'
 import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
@@ -25,7 +26,7 @@ const routePage = computed(() => {
   if (route.path.startsWith('/teacher/overview')) return TeacherOverviewView
   if (route.path.startsWith('/teacher/labs')) return LabListView
   if (route.path.startsWith('/teacher/materials')) return FixtureUnsupportedRoute
-  if (route.path.startsWith('/teacher/approvals')) return FixtureUnsupportedRoute
+  if (route.path.startsWith('/teacher/approvals')) return CandidateApprovalView
   if (route.path.startsWith('/student/environments')) return EnvironmentEntryView
   if (route.path.startsWith('/student/labs')) return FixtureUnsupportedRoute
   if (route.path.startsWith('/student/ssh-keys')) return FixtureUnsupportedRoute
