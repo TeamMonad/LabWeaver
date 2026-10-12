@@ -13,12 +13,17 @@ use contracts::supply_chain::EnvironmentTemplateRelease;
 use persistence_sqlx::Sha256Digest;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+mod environment;
+pub use environment::{CurrentEnvironmentAuthorization, current_environment_authorization};
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeBindingError {
     #[error(transparent)]
     Authorization(#[from] RuntimeAuthorizationError),
     #[error("LW_RUNTIME_SCOPE_DENIED")]
     ScopeDenied,
+    #[error("LW_RUNTIME_LEASE_NOT_ACTIVE")]
+    LeaseNotActive,
     #[error("LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE")]
     Unavailable,
 }
@@ -249,6 +254,14 @@ pub(crate) async fn validate_binding(
     request: &ResourceRequest,
     binding: &RuntimeAuthorizationBinding,
 ) -> Result<(), RuntimeBindingError> {
+    validated_policy(tx, request, binding).await.map(|_| ())
+}
+
+async fn validated_policy(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &ResourceRequest,
+    binding: &RuntimeAuthorizationBinding,
+) -> Result<contracts::platform_configuration::PlatformConfigurationVersion, RuntimeBindingError> {
     let (identity, candidate, status) = current_inputs(tx, request).await?;
     binding.validate_current(request, &identity, &status)?;
     let declared = declared_baseline_permissions(&candidate.spec, request.project_id)?;
@@ -271,7 +284,7 @@ pub(crate) async fn validate_binding(
     if binding.permissions != permissions || binding.basis != basis {
         return Err(RuntimeAuthorizationError::ConfigurationMismatch.into());
     }
-    Ok(())
+    Ok(applied.clone())
 }
 
 /// Reads the existing approval and checks its current request, expiry, Control identity and policy.
@@ -303,7 +316,7 @@ pub async fn current_authorization(
     if current != *request {
         return Err(RuntimeAuthorizationError::ConfigurationMismatch.into());
     }
-    let row=sqlx::query("SELECT contract FROM resource.resource_approvals WHERE request_id=$1 AND valid_until>clock_timestamp() ORDER BY created_at DESC,approval_id DESC LIMIT 1")
+    let row=sqlx::query("SELECT contract FROM resource.resource_approvals WHERE request_id=$1 AND revoked_at IS NULL AND valid_until>clock_timestamp() ORDER BY created_at DESC,approval_id DESC LIMIT 1")
         .bind(request.id.as_uuid()).fetch_optional(&mut *tx).await.map_err(|_|RuntimeBindingError::Unavailable)?.ok_or(RuntimeAuthorizationError::ApprovalRequired)?;
     let approval: contracts::resource::ResourceApproval = serde_json::from_value(
         row.try_get("contract")
