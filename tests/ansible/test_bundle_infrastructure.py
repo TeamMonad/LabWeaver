@@ -289,6 +289,11 @@ pathlib.Path(__import__('sys').argv[1]).write_text('ok')
             {"Namespace", "ResourceQuota", "NetworkPolicy", "ConfigMap", "Job"},
         )
         job = next(obj for obj in documents if obj["kind"] == "Job")
+        quota = next(obj for obj in documents if obj["kind"] == "ResourceQuota")
+        fixture_maps = sum(obj["kind"] == "ConfigMap" for obj in documents)
+        self.assertEqual(
+            int(quota["spec"]["hard"]["count/configmaps"]), fixture_maps + 1
+        )
         pod = job["spec"]["template"]["spec"]
         self.assertFalse(pod["automountServiceAccountToken"])
         container = pod["containers"][0]
