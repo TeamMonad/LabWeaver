@@ -491,6 +491,7 @@ async fn progress(
                 .then_some(desired.configuration_sha256),
             observed_encrypted_bundle_sha256: (phase == Stage::Succeeded)
                 .then_some(apply.encrypted_bundle_sha256.clone()),
+            control_replica_observations: None,
         },
         &key(value)?,
         now()?,
@@ -576,6 +577,7 @@ async fn applying_requires_ordered_matching_observations_and_one_executor() -> T
         failure_reason: None,
         observed_configuration_sha256: Some("b".repeat(64)),
         observed_encrypted_bundle_sha256: Some("a".repeat(64)),
+        control_replica_observations: None,
     };
     assert!(matches!(
         configuration::report(
@@ -597,6 +599,7 @@ async fn applying_requires_ordered_matching_observations_and_one_executor() -> T
         stage: Stage::Applying,
         observed_configuration_sha256: None,
         observed_encrypted_bundle_sha256: None,
+        control_replica_observations: None,
         failure_reason: None,
     };
     assert!(matches!(
@@ -1105,6 +1108,7 @@ async fn http_json_yaml_share_revision_and_only_signed_executor_can_report() -> 
         failure_reason: None,
         observed_configuration_sha256: None,
         observed_encrypted_bundle_sha256: None,
+        control_replica_observations: None,
     };
     let internal = format!("/internal/v1/platform-configuration/applies/{}", attempt.id);
     for (client, permission) in [

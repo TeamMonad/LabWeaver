@@ -155,6 +155,25 @@ pub(super) fn actual_loaded_bundle(
     ),
     Box<dyn std::error::Error>,
 > {
+    actual_loaded_bundle_replicas(version, root, 1)
+}
+
+/// Uses the same single Bundle with an explicit Control replica count.
+#[allow(
+    dead_code,
+    reason = "only replica integration targets need a non-default replica count"
+)]
+pub(super) fn actual_loaded_bundle_replicas(
+    version: &contracts::platform_configuration::PlatformConfigurationVersion,
+    root: &std::path::Path,
+    replicas: u32,
+) -> Result<
+    (
+        Vec<u8>,
+        control_service::platform_configuration::LoadedConfiguration,
+    ),
+    Box<dyn std::error::Error>,
+> {
     std::fs::create_dir_all(root.join(".private"))?;
     #[cfg(unix)]
     {
@@ -179,6 +198,8 @@ pub(super) fn actual_loaded_bundle(
         .arg(&input)
         .arg("--output")
         .arg(&output)
+        .arg("--control-replicas")
+        .arg(replicas.to_string())
         .output()?;
     if !result.status.success() {
         return Err(

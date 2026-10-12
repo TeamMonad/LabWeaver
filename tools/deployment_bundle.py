@@ -438,6 +438,14 @@ def _workload_inputs(
         "LABWEAVER_EXECUTOR_POD_NAMESPACE",
         "LABWEAVER_EXECUTOR_POD_UID",
         "LABWEAVER_EXECUTOR_CONTAINER_NAME",
+        "LABWEAVER_CONTROL_POD_NAME",
+        "LABWEAVER_CONTROL_POD_NAMESPACE",
+        "LABWEAVER_CONTROL_POD_UID",
+        "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE",
+        "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE",
+        "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_DIR",
+        "LABWEAVER_PLATFORM_CONFIGURATION_RUNTIME_DIR",
+        "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_SHA256",
     }
     result = {}
     for name, defaults in workloads.items():
@@ -666,9 +674,12 @@ def load_bundle(
         application["ansibleVariables"], dict
     ):
         raise BundleError("LW_BUNDLE_MODEL_INVALID")
-    if {"deploymentIdentity", "images", "workloadInputs"} & set(
-        application["helmValues"]
-    ):
+    if {
+        "deploymentIdentity",
+        "images",
+        "workloadInputs",
+        "managedControlConfiguration",
+    } & set(application["helmValues"]):
         raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
     for key in application["ansibleVariables"]:
         if not key.startswith("platform_application_") or key in RESERVED_VARIABLES:
@@ -686,6 +697,9 @@ def load_bundle(
         "enabled", False
     ):
         raise BundleError("LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT")
+    control_replicas = overrides.get("control-service", {}).get("replicas", 1)
+    if type(control_replicas) is not int or not 1 <= control_replicas <= 16:
+        raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
     if "resource" in model:
         _resource_model(model, files, references)
     if "infrastructure" in model:
@@ -766,7 +780,11 @@ def _resolve_values(value: Any, root: Path, files: dict[str, bytes]) -> Any:
 
 
 def derive_bundle(
-    root: Path, output: Path, manifest_path: Path = DEFAULT_MANIFEST
+    root: Path,
+    output: Path,
+    manifest_path: Path = DEFAULT_MANIFEST,
+    *,
+    _authenticated_ciphertext_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Derive application objects, Helm values and Ansible inputs from the same source."""
     model, files = load_bundle(root, manifest_path)
@@ -809,6 +827,33 @@ def derive_bundle(
             sort_keys=True,
         ).encode(),
     )
+    if (
+        _authenticated_ciphertext_sha256 is not None
+        and version["configurationMode"] == "managed_version"
+    ):
+        source = {
+            "apiVersion": "deploy.labweaver.io/loaded-source/v1",
+            "desiredRevision": model["revision"],
+            "configurationSha256": version["configurationSha256"],
+            "encryptedBundleSha256": _authenticated_ciphertext_sha256,
+            "installation": model["target"],
+            "expectedControlReplicas": application["helmValues"]
+            .get("workloads", {})
+            .get("control-service", {})
+            .get("replicas", 1),
+        }
+        source_payload = json.dumps(source, sort_keys=True).encode()
+        _write(output / "platform-configuration-source.json", source_payload)
+        if (
+            application["helmValues"]
+            .get("workloads", {})
+            .get("control-service", {})
+            .get("enabled", True)
+        ):
+            values["managedControlConfiguration"] = {
+                "versionJson": (output / "platform-configuration.json").read_text(),
+                "sourceJson": source_payload.decode(),
+            }
     values_output = output / "helm-values.yaml"
     _write(values_output, yaml.safe_dump(values, sort_keys=True).encode())
     variables = _resolve_values(application["ansibleVariables"], root, files)
@@ -1188,23 +1233,13 @@ def opened_bundle(
         _extract(archive_path, root)
         archive_path.unlink()
         output = temporary_root / "rendered"
-        metadata = derive_bundle(root, output, manifest_path)
+        metadata = derive_bundle(
+            root,
+            output,
+            manifest_path,
+            _authenticated_ciphertext_sha256=encrypted_digest.hexdigest(),
+        )
         metadata["encryptedBundleSha256"] = encrypted_digest.hexdigest()
-        if metadata["configurationMode"] == "managed_version":
-            model, _ = load_bundle(root, manifest_path)
-            _write(
-                output / "platform-configuration-source.json",
-                json.dumps(
-                    {
-                        "apiVersion": "deploy.labweaver.io/loaded-source/v1",
-                        "desiredRevision": metadata["revision"],
-                        "configurationSha256": metadata["managedConfigurationSha256"],
-                        "encryptedBundleSha256": metadata["encryptedBundleSha256"],
-                        "installation": model["target"],
-                    },
-                    sort_keys=True,
-                ).encode(),
-            )
         yield root, output, metadata
 
 

@@ -422,6 +422,36 @@ pub struct ReportPlatformConfigurationApplyRequest {
     /// Required only on success and must match the immutable desired snapshot.
     pub observed_configuration_sha256: Option<String>,
     pub observed_encrypted_bundle_sha256: Option<String>,
+    /// One bounded, fresh observation of all Control replicas. No replica lifecycle is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_replica_observations: Option<ControlConfigurationDeploymentObservation>,
+}
+
+/// Facts returned by a running Control process, rather than a reread of mounted files.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlConfigurationReplicaObservation {
+    pub pod_name: String,
+    pub pod_uid: String,
+    pub namespace: String,
+    /// Changes on process restart even if Kubernetes reuses the same Pod UID.
+    pub instance_id: String,
+    pub desired_revision: Revision,
+    pub configuration_sha256: String,
+    pub encrypted_bundle_sha256: String,
+    pub observed_at: UtcTimestamp,
+}
+
+/// An authorized executor's current Deployment roster and actual per-process readbacks.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlConfigurationDeploymentObservation {
+    pub deployment_uid: String,
+    pub deployment_generation: u64,
+    pub expected_replicas: u32,
+    pub namespace: String,
+    pub release_name: String,
+    pub replicas: Vec<ControlConfigurationReplicaObservation>,
 }
 
 #[must_use]
