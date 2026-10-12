@@ -67,7 +67,7 @@ export const environmentCandidateView = {
     model: 'claude-sonnet-4',
     createdAt: '2026-10-11T03:10:00.000Z',
     spec: {
-      apiVersion: 'labweaver.io/v1',
+      apiVersion: 'environment.labweaver.io/v1',
       kind: 'EnvironmentSpec',
       class: 'experiment',
       name: '光的干涉 · Python 数据分析实验',
@@ -100,7 +100,7 @@ export const evaluationCandidateView = {
     model: 'claude-sonnet-4',
     createdAt: '2026-10-11T03:30:00.000Z',
     spec: {
-      apiVersion: 'labweaver.io/v1',
+      apiVersion: 'evaluation.labweaver.io/v1',
       kind: 'EvaluationSpec',
       metadata: { name: 'optics-interference', version: '2026.10' },
       spec: {
@@ -110,9 +110,9 @@ export const evaluationCandidateView = {
         },
         steps: [
           { id: 'files', role: 'gate', failurePolicy: 'stop', runner: { kind: 'file_assertion', requiredFiles: ['analysis.ipynb', 'results/fringe.csv'] }, checker: { kind: 'exit_code', expected: 0 } },
-          { id: 'fringe-spacing', role: 'score', failurePolicy: 'continue', score: { max: 60 }, runner: { kind: 'program', input: 'results/fringe.csv', phase: 'test', limits: { memoryBytes: 512 * 1024 * 1024, outputBytes: 65536, wallTimeMs: 30000 }, testGroups: [{ name: '条纹间距', maxPoints: 40, source: 'hidden/tests/spacing.py' }, { name: '误差分析', maxPoints: 20, source: 'hidden/tests/error.py' }] }, checker: { kind: 'token' } },
+          { id: 'fringe-spacing', role: 'score', failurePolicy: 'continue', score: { max: 60 }, runner: { kind: 'program', input: 'results/fringe.csv', phase: 'test', limits: { memoryBytes: 512 * 1024 * 1024, outputBytes: 65536, wallTimeSeconds: 30 }, toolchainProfile: 'python-3.12', testGroups: [{ name: '条纹间距', maxPoints: 40, source: 'hidden/tests/spacing.py' }, { name: '误差分析', maxPoints: 20, source: 'hidden/tests/error.py' }] }, checker: { kind: 'token' } },
           { id: 'report', role: 'score', failurePolicy: 'continue', score: { max: 40 }, runner: { kind: 'file_assertion', requiredFiles: ['report.md'] }, checker: { kind: 'exit_code', expected: 0 } },
-          { id: 'review', role: 'advisory', failurePolicy: 'continue_advisory', runner: { kind: 'llm_review', outputMode: 'goal_assessment' } },
+          { id: 'review', role: 'advisory', failurePolicy: 'continue_advisory', runner: { kind: 'llm_review', include: ['report.md'], outputMode: 'goal_assessment' } },
         ],
         aggregation: { kind: 'deterministic_sum', maxScore: 100, gates: [{ step: 'files', requiredStatus: 'passed' }] },
         review: { forceManualWhen: [], teacherApprovalRequiredForRelease: true },
