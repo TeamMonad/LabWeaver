@@ -1,0 +1,38 @@
+{
+  "runId": "lw197-n100-20261012",
+  "phase": "a",
+  "parentApproved": false,
+  "admittedCommandExportVerified": false,
+  "environmentBindingExportVerified": false,
+  "isolatedDatabaseVerified": false,
+  "noOutboxDispatcherVerified": false,
+  "existingSecretVerified": false,
+  "existingServiceAccountVerified": false,
+  "existingNetworkEgressVerified": false,
+  "quotaHeadroomVerified": false,
+  "projectId": null,
+  "actorId": null,
+  "frozenSubmissionId": null,
+  "nodeName": null,
+  "existingServiceAccount": null,
+  "existingSecretName": null,
+  "secretKeys": {
+    "databaseUrl": "database-url",
+    "accessKey": "minio-access-key",
+    "secretKey": "minio-secret-key",
+    "ca": "minio-ca.pem",
+    "postgresCa": "postgres-ca.pem"
+  },
+  "databaseNameForReview": null,
+  "objectStore": {
+    "binding": "minio-submissions-v1",
+    "endpoint": "https://minio.labweaver-data.svc:9000/",
+    "bucket": "labweaver-frozen-submissions",
+    "region": "us-east-1",
+    "objectPrefix": "frozen-submissions/lw197-n100-20261012",
+    "uploadTtlSeconds": 300,
+    "maxObjectBytes": 100663296,
+    "forcePathStyle": true,
+    "caBundleFile": "/etc/labweaver/secrets/minio-ca.pem"
+  }
+}

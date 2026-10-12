@@ -1,0 +1,36 @@
+{
+  "a": [
+    {
+      "path": "lw197-n100-20261012/README.md",
+      "sizeBytes": 36,
+      "sha256": "6a27465e4c37db700d51c94a3f89c9b0b4b7d552c98a5fa4495c270122af2f2c"
+    },
+    {
+      "path": "lw197-n100-20261012/empty.txt",
+      "sizeBytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "lw197-n100-20261012/src/main.c",
+      "sizeBytes": 26,
+      "sha256": "238a3e7e61d7e5bc543d9d7b10b435b4174381486fa3008eed7285094b04c290"
+    }
+  ],
+  "b": [
+    {
+      "path": "lw197-n100-20261012/README.md",
+      "sizeBytes": 36,
+      "sha256": "6a27465e4c37db700d51c94a3f89c9b0b4b7d552c98a5fa4495c270122af2f2c"
+    },
+    {
+      "path": "lw197-n100-20261012/empty.txt",
+      "sizeBytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "lw197-n100-20261012/src/main.c",
+      "sizeBytes": 26,
+      "sha256": "8e44727a9f77c05ac833f456fe5473048cdfc9139cab00b8993ba8260b5ddd74"
+    }
+  ]
+}
