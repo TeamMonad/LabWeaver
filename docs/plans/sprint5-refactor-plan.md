@@ -45,6 +45,8 @@ CSV 的观察提交为 `8cedce5ed2284f241692f8fae03f87cc26f93733`，不能把扫
 | 日志 | 任务和 Agent 详细日志默认 30 天。账本、成绩和必要业务历史不随日志清理 |
 | 提醒 | 站内通知必需，邮件配置后启用。预留到期前 24 小时和 1 小时提醒，短期预留创建时提示 |
 | 默认权限 | 容器和 guest 默认 root。平台控制面、宿主权限和跨租户访问不随之开放 |
+| 容器运行权限 | 支持普通/特权容器。普通容器默认移除全部 capabilities，按授权添加。特权容器使用明确获准的专用执行边界 |
+| Agent 权限声明 | 生成环境时声明运行模式、所需 capabilities 和用途。平台按项目/课程范围授权，Environment 落实配置。构建权限仍由平台统一控制 |
 | Work 协作 | 项目成员按动作权限共享，记录个人操作，Agent 写入需协调 |
 | 应用访问 | 项目成员及明确邀请的校园账号可访问，无匿名发布 |
 | 教学 | 完整名单、助教、开放截止、迟交、重评、申诉、导出、复用和归档 |
@@ -207,11 +209,32 @@ CloudNativePG 使用所选稳定版本支持的同步持久性策略，并配置
 
 单节点故障不能丢失已确认持久化的用户数据。应用未刷盘的内存不在持久承诺内。站点灾难的 RPO/RTO 由 S5-10 根据硬件和独立备份目标确定。备份仅在同一生产 RGW 中不满足独立故障域要求。
 
-默认 root 限于容器/guest。不得扩大宿主、集群 API 或平台凭据权限。侵入隔离层的实验使用专用边界。
+默认 root 限于普通容器/guest，不自动获得特权模式、额外 capabilities、集群 API 或平台凭据。需要特权或侵入隔离层的实验按第 8.1 节申请专用执行边界。
 
 容器工作文件持久化。系统安装和 `/etc` 修改在实例替换后不承诺保留，需通过 Agent 或手工构建保存为镜像。VM 系统盘持久化。文件保留与镜像版本在 UI 和文档中明确。
 
 删除和欠费保留期间，终端、Agent、应用和后台任务都不能绕过只读。盘的保留、导出、恢复和最终清除独立于运行 namespace。只提供每 Work 独立盘及导入导出，不新增共享数据集服务。
+
+### 8.1 普通/特权容器与受控 capabilities
+
+复用 Kubernetes 的容器 `securityContext`，不新增执行后端或第二套环境生命周期。普通/特权是运行权限模式，root 用户、根文件系统可写性、提权、seccomp 和 capabilities 分别表达，并校验组合。[Kubernetes 安全上下文](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)
+
+| 模式 | 权限规则 | 执行范围 |
+| --- | --- | --- |
+| 普通容器 | `privileged: false`，默认 `capabilities.drop: [ALL]`。仅添加平台允许且属于当前授权的 capabilities | 普通 Work 和实验。网络、调试等任务按实际需求申请额外权限 |
+| 特权容器 | `privileged: true`。该模式授予全部 capabilities，不能再用添加清单声称限制其权限 | 明确获准的 DinD、设备或内核实验，使用管理员配置的专用执行边界 |
+
+平台配置普通容器的 capabilities 允许清单、项目/课程预授权范围、特权准入和执行位置。`SYS_ADMIN` 等高权限能力单独授权。未知名称、不支持的组合和超出平台允许范围的请求明确拒绝。教师批准共享实验包不能扩大管理员允许范围。
+
+Control 保存成员和对象动作权限，并绑定共享实验包的教师批准。Resource 在现有准入/审批流程保存运行权限授权。Environment 消费授权，只应用获准配置。授权绑定目标、环境配置版本和权限范围。配置增加权限必须重新判定，旧批准不能覆盖新需求。创建、启动、重启和实例替换都检查适用授权，不接受模型伪造批准状态。
+
+特权容器可突破共享宿主的多项隔离限制。专用 namespace 不能提供宿主隔离。特权执行使用不与普通租户及平台服务共用宿主的专用节点池，或在独立 VM guest 内运行。专用节点池仍须限定获准用户和任务。Environment 强制落实执行位置，缺少所需边界时拒绝启动。宿主挂载、宿主网络、设备和平台凭据不因选择特权模式而自动开放。[Kubernetes 特权容器](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/)
+
+namespace 的 Pod Security 准入与所需权限保持一致。`restricted` 不能接受任意额外 capabilities。放宽 namespace 准入时，仍由平台服务端落实允许清单、对象授权和执行位置，不能仅修改 namespace 标签。[Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
+
+用户在手工创建、模板审核和 Agent 候选中看到运行模式、所需权限、用途及批准状态。管理员在同一 Bundle 配置模型中管理策略。普通用户不必填写 Kubernetes 对象。运行权限变更需要替换或重启实例时，提前说明影响并确认。
+
+DinD 的验收覆盖获准环境中 Docker daemon、容器创建、存储及清理的实际行为。只增加 capability 字段或安装 Docker CLI 不代表支持 DinD。普通容器、受控 capabilities 和特权模式共享现有资源限额、持久盘、取消和回收语义。
 
 ## 9. Agent 与构建
 
@@ -220,6 +243,10 @@ CloudNativePG 使用所选稳定版本支持的同步持久性策略，并配置
 会话持久化消息、工具动作、批准和产物。刷新和断连恢复同一会话。普通用户从 Work 页面发起配置，外部 IDE 处理复杂文件操作，不增加完整 Web IDE。
 
 低风险动作可在预授权范围执行。重启、删除和超过成本上限的动作需事前确认。审批绑定对象、动作和当前代次。模型不能自行扩大授权。
+
+Agent 在生成 Dockerfile 和环境配置时声明运行权限：普通/特权模式、所需 capabilities，以及每项权限的用途。声明属于 `EnvironmentSpec`，与镜像和模板版本一同审核发布，不依赖镜像标签或 Dockerfile 授予权限。平台按第 8.1 节授权，Environment 在启动时落实。权限不足时返回缺项、批准入口或可处理失败，不静默换成更弱配置。
+
+构建权限与生成环境的运行权限分开。BuildKit daemon/worker 的 capabilities、提权和 entitlements 仍由平台统一配置与控制。候选申请特权运行不提高构建权限。Agent 生成的 Dockerfile 或工具调用不能自行开启 `security.insecure`、`network.host` 或修改 builder 安全配置。只有实际构建任务确有需要时，才通过独立的平台构建策略处理。运行验证使用获准的环境权限，不提高共享 builder 权限。[BuildKit 构建授权](https://docs.docker.com/reference/cli/docker/buildx/build/#allow)
 
 BuildKit、现有沙箱和任务设施继续使用。每请求 CPU/内存/临时盘/进程/出网限制必须在执行侧生效。归档优先流式或有界落盘，避免多次整包内存复制。
 
@@ -326,7 +353,7 @@ Headscale 的 OIDC、DERP 和客户端组合需按实际支持确认。不能把
 | [S5-08 #203](https://github.com/TeamMonad/LabWeaver/issues/203) | 建立单一配置真源与整体加密的部署 Bundle | 无 |
 | [S5-09 #206](https://github.com/TeamMonad/LabWeaver/issues/206) | 统一新装、采用现有集群与安全升级的部署流程 | [#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#205](https://github.com/TeamMonad/LabWeaver/issues/205) |
 | [S5-10 #205](https://github.com/TeamMonad/LabWeaver/issues/205) | 落地三节点 Rook/Ceph、CloudNativePG 和消息高可用基线 | [#203](https://github.com/TeamMonad/LabWeaver/issues/203) |
-| [S5-11 #207](https://github.com/TeamMonad/LabWeaver/issues/207) | 分离运行实例与持久盘，提供 root、回收站和导入导出 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#202](https://github.com/TeamMonad/LabWeaver/issues/202)、[#205](https://github.com/TeamMonad/LabWeaver/issues/205) |
+| [S5-11 #207](https://github.com/TeamMonad/LabWeaver/issues/207) | 分离运行实例与持久盘，支持 root、普通/特权容器、受控 capabilities、回收站和导入导出 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#202](https://github.com/TeamMonad/LabWeaver/issues/202)、[#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#205](https://github.com/TeamMonad/LabWeaver/issues/205) |
 | [S5-12 #208](https://github.com/TeamMonad/LabWeaver/issues/208) | 建立独立备份与整站恢复流程 | [#205](https://github.com/TeamMonad/LabWeaver/issues/205)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207) |
 | [S5-13 #209](https://github.com/TeamMonad/LabWeaver/issues/209) | 实现项目 Credits 账户、预占和管理员账务操作 | 无 |
 | [S5-14 #210](https://github.com/TeamMonad/LabWeaver/issues/210) | 统一计算、存储、模型与构建估价、计量和限额 | [#200](https://github.com/TeamMonad/LabWeaver/issues/200)、[#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209) |
@@ -335,25 +362,27 @@ Headscale 的 OIDC、DERP 和客户端组合需按实际支持确认。不能把
 | [S5-17 #225](https://github.com/TeamMonad/LabWeaver/issues/225) | 实现预留、可抢占、闲置借用、召回与补偿闭环 | [#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209)、[#210](https://github.com/TeamMonad/LabWeaver/issues/210)、[#212](https://github.com/TeamMonad/LabWeaver/issues/212)、[#224](https://github.com/TeamMonad/LabWeaver/issues/224) |
 | [S5-18 #213](https://github.com/TeamMonad/LabWeaver/issues/213) | 提供真实 GPU 目录与独占、MIG、时间片产品 | [#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#212](https://github.com/TeamMonad/LabWeaver/issues/212) |
 | [S5-19 #214](https://github.com/TeamMonad/LabWeaver/issues/214) | 修复 VM GPU 驱动链并只提供官方支持的 vGPU | [#206](https://github.com/TeamMonad/LabWeaver/issues/206)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#213](https://github.com/TeamMonad/LabWeaver/issues/213) |
-| [S5-20 #217](https://github.com/TeamMonad/LabWeaver/issues/217) | 将 Agent 生成改为可恢复的持续协作会话 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#200](https://github.com/TeamMonad/LabWeaver/issues/200)、[#201](https://github.com/TeamMonad/LabWeaver/issues/201)、[#210](https://github.com/TeamMonad/LabWeaver/issues/210)、[#216](https://github.com/TeamMonad/LabWeaver/issues/216) |
+| [S5-20 #217](https://github.com/TeamMonad/LabWeaver/issues/217) | 将 Agent 生成改为可恢复的持续协作会话 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#200](https://github.com/TeamMonad/LabWeaver/issues/200)、[#201](https://github.com/TeamMonad/LabWeaver/issues/201)、[#210](https://github.com/TeamMonad/LabWeaver/issues/210)、[#216](https://github.com/TeamMonad/LabWeaver/issues/216)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207) |
 | [S5-21 #215](https://github.com/TeamMonad/LabWeaver/issues/215) | 收紧构建执行的网络、资源、内存和取消边界 | [#200](https://github.com/TeamMonad/LabWeaver/issues/200)、[#210](https://github.com/TeamMonad/LabWeaver/issues/210)、[#212](https://github.com/TeamMonad/LabWeaver/issues/212) |
 | [S5-22 #216](https://github.com/TeamMonad/LabWeaver/issues/216) | 统一模型输入授权、敏感信息处理和诊断留存 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199) |
 | [S5-23 #218](https://github.com/TeamMonad/LabWeaver/issues/218) | 让 Agent 在现有容器与 VM Work 中完成配置和排障 | [#202](https://github.com/TeamMonad/LabWeaver/issues/202)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#217](https://github.com/TeamMonad/LabWeaver/issues/217)、[#215](https://github.com/TeamMonad/LabWeaver/issues/215) |
 | [S5-24 #219](https://github.com/TeamMonad/LabWeaver/issues/219) | 建立课程、助教、名单与个人/小组实验流程 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#201](https://github.com/TeamMonad/LabWeaver/issues/201)、[#202](https://github.com/TeamMonad/LabWeaver/issues/202) |
-| [S5-25 #220](https://github.com/TeamMonad/LabWeaver/issues/220) | 完成实验创作、可读审核、学生预览和一次发布 | [#197](https://github.com/TeamMonad/LabWeaver/issues/197)、[#217](https://github.com/TeamMonad/LabWeaver/issues/217)、[#215](https://github.com/TeamMonad/LabWeaver/issues/215)、[#219](https://github.com/TeamMonad/LabWeaver/issues/219) |
+| [S5-25 #220](https://github.com/TeamMonad/LabWeaver/issues/220) | 完成实验创作、可读审核、学生预览和一次发布 | [#197](https://github.com/TeamMonad/LabWeaver/issues/197)、[#217](https://github.com/TeamMonad/LabWeaver/issues/217)、[#215](https://github.com/TeamMonad/LabWeaver/issues/215)、[#219](https://github.com/TeamMonad/LabWeaver/issues/219)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207) |
 | [S5-26 #221](https://github.com/TeamMonad/LabWeaver/issues/221) | 贯通提交、进行中评测、确定性成绩和可读反馈 | [#197](https://github.com/TeamMonad/LabWeaver/issues/197)、[#200](https://github.com/TeamMonad/LabWeaver/issues/200)、[#201](https://github.com/TeamMonad/LabWeaver/issues/201)、[#210](https://github.com/TeamMonad/LabWeaver/issues/210)、[#219](https://github.com/TeamMonad/LabWeaver/issues/219) |
 | [S5-27 #222](https://github.com/TeamMonad/LabWeaver/issues/222) | 提供成绩册、重评、申诉、导出与学期归档 | [#219](https://github.com/TeamMonad/LabWeaver/issues/219)、[#221](https://github.com/TeamMonad/LabWeaver/issues/221) |
-| [S5-28 #223](https://github.com/TeamMonad/LabWeaver/issues/223) | 完成管理员全局库存、资源搜索和决策表单 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#201](https://github.com/TeamMonad/LabWeaver/issues/201)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209)、[#213](https://github.com/TeamMonad/LabWeaver/issues/213) |
+| [S5-28 #223](https://github.com/TeamMonad/LabWeaver/issues/223) | 完成管理员全局库存、资源搜索和决策表单 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#201](https://github.com/TeamMonad/LabWeaver/issues/201)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209)、[#213](https://github.com/TeamMonad/LabWeaver/issues/213)、[#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207) |
 | [S5-29 #230](https://github.com/TeamMonad/LabWeaver/issues/230) | 接通 Grafana 指标、日志、链路与可操作告警 | [#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#205](https://github.com/TeamMonad/LabWeaver/issues/205)、[#229](https://github.com/TeamMonad/LabWeaver/issues/229) |
 | [S5-30 #224](https://github.com/TeamMonad/LabWeaver/issues/224) | 提供站内通知与可选邮件的到期、抢占和处置提醒 | [#201](https://github.com/TeamMonad/LabWeaver/issues/201)、[#203](https://github.com/TeamMonad/LabWeaver/issues/203) |
-| [S5-31 #226](https://github.com/TeamMonad/LabWeaver/issues/226) | 发布统一外部用户授权的稳定 API 与生成契约 | [#198](https://github.com/TeamMonad/LabWeaver/issues/198)、[#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#200](https://github.com/TeamMonad/LabWeaver/issues/200)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209)、[#219](https://github.com/TeamMonad/LabWeaver/issues/219) |
+| [S5-31 #226](https://github.com/TeamMonad/LabWeaver/issues/226) | 发布统一外部用户授权的稳定 API 与生成契约 | [#198](https://github.com/TeamMonad/LabWeaver/issues/198)、[#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#200](https://github.com/TeamMonad/LabWeaver/issues/200)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209)、[#219](https://github.com/TeamMonad/LabWeaver/issues/219)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207) |
 | [S5-32 #227](https://github.com/TeamMonad/LabWeaver/issues/227) | 完善校园 SSO、无客户端网页入口与可选私网连接 | [#198](https://github.com/TeamMonad/LabWeaver/issues/198)、[#204](https://github.com/TeamMonad/LabWeaver/issues/204)、[#206](https://github.com/TeamMonad/LabWeaver/issues/206) |
 | [S5-33 #228](https://github.com/TeamMonad/LabWeaver/issues/228) | 统一成员离开、账号停用和项目归档的资源收尾 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209)、[#225](https://github.com/TeamMonad/LabWeaver/issues/225)、[#224](https://github.com/TeamMonad/LabWeaver/issues/224) |
 | [S5-34 #229](https://github.com/TeamMonad/LabWeaver/issues/229) | 统一进程排空、Outbox、分页和孤儿回收的恢复语义 | [#200](https://github.com/TeamMonad/LabWeaver/issues/200) |
 | [S5-35 #231](https://github.com/TeamMonad/LabWeaver/issues/231) | 完成 100 个 CPU 环境和 20 个并发创建的容量基准 | [#206](https://github.com/TeamMonad/LabWeaver/issues/206)、[#208](https://github.com/TeamMonad/LabWeaver/issues/208)、[#225](https://github.com/TeamMonad/LabWeaver/issues/225)、[#218](https://github.com/TeamMonad/LabWeaver/issues/218)、[#221](https://github.com/TeamMonad/LabWeaver/issues/221)、[#230](https://github.com/TeamMonad/LabWeaver/issues/230)、[#229](https://github.com/TeamMonad/LabWeaver/issues/229) |
 | [S5-36 #234](https://github.com/TeamMonad/LabWeaver/issues/234) | 收敛增量 CI、阶段发布与空数据切换流程 | 其余37项 |
 | [S5-37 #232](https://github.com/TeamMonad/LabWeaver/issues/232) | 交付按用户任务组织的完整使用手册 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#202](https://github.com/TeamMonad/LabWeaver/issues/202)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#210](https://github.com/TeamMonad/LabWeaver/issues/210)、[#225](https://github.com/TeamMonad/LabWeaver/issues/225)、[#217](https://github.com/TeamMonad/LabWeaver/issues/217)、[#218](https://github.com/TeamMonad/LabWeaver/issues/218)、[#219](https://github.com/TeamMonad/LabWeaver/issues/219)、[#220](https://github.com/TeamMonad/LabWeaver/issues/220)、[#221](https://github.com/TeamMonad/LabWeaver/issues/221)、[#222](https://github.com/TeamMonad/LabWeaver/issues/222)、[#223](https://github.com/TeamMonad/LabWeaver/issues/223)、[#224](https://github.com/TeamMonad/LabWeaver/issues/224)、[#226](https://github.com/TeamMonad/LabWeaver/issues/226)、[#228](https://github.com/TeamMonad/LabWeaver/issues/228) |
-| [S5-38 #233](https://github.com/TeamMonad/LabWeaver/issues/233) | 交付完整安装、配置、升级和故障恢复手册 | [#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#206](https://github.com/TeamMonad/LabWeaver/issues/206)、[#205](https://github.com/TeamMonad/LabWeaver/issues/205)、[#208](https://github.com/TeamMonad/LabWeaver/issues/208)、[#213](https://github.com/TeamMonad/LabWeaver/issues/213)、[#214](https://github.com/TeamMonad/LabWeaver/issues/214)、[#230](https://github.com/TeamMonad/LabWeaver/issues/230)、[#227](https://github.com/TeamMonad/LabWeaver/issues/227)、[#229](https://github.com/TeamMonad/LabWeaver/issues/229)、[#231](https://github.com/TeamMonad/LabWeaver/issues/231) |
+| [S5-38 #233](https://github.com/TeamMonad/LabWeaver/issues/233) | 交付完整安装、配置、升级和故障恢复手册 | [#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#206](https://github.com/TeamMonad/LabWeaver/issues/206)、[#205](https://github.com/TeamMonad/LabWeaver/issues/205)、[#208](https://github.com/TeamMonad/LabWeaver/issues/208)、[#213](https://github.com/TeamMonad/LabWeaver/issues/213)、[#214](https://github.com/TeamMonad/LabWeaver/issues/214)、[#230](https://github.com/TeamMonad/LabWeaver/issues/230)、[#227](https://github.com/TeamMonad/LabWeaver/issues/227)、[#229](https://github.com/TeamMonad/LabWeaver/issues/229)、[#231](https://github.com/TeamMonad/LabWeaver/issues/231)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#215](https://github.com/TeamMonad/LabWeaver/issues/215) |
+
+运行权限交付由 S5-11 落实环境契约、Pod 配置及专用执行边界，新增依赖 S5-08 的平台策略配置。S5-03 定义对象授权与预授权，S5-20/23 接入 Agent 声明和权限变更，S5-21 保持构建权限独立。S5-25/28 提供教师审核和管理员策略/审批界面。S5-31/37/38 同步 API、用户和部署说明。各任务按职责交付，不新增通用权限服务。
 
 日常流程：
 
@@ -376,6 +405,7 @@ S5-36 可提前整理 CI，但最终完成依赖其余交付。S5-37/38 随功�
 | 项目协作 | 成员按权限共享，操作可归属，撤权能关闭长连接 |
 | 应用访问 | 隔离域的 WebSocket/SSE 应用可用，邀请撤销及时生效，不能操作平台 origin |
 | Agent | 持续输入和输出、批准、取消、重连、失败继续，同一 Work 写入协调 |
+| 容器运行权限 | 普通容器默认 root 且仅有获准 capabilities，特权容器只在获准专用边界执行。Agent 声明经平台授权后落实，越权及过期批准被拒绝。DinD 实际创建和清理容器，运行权限不提高构建权限 |
 | 资源 | 公平排队、真实容量、预留暂借和5分钟召回、清理失败不重复分配 |
 | Credits | 估价、预占、结算、退款、补偿无重复，不产生隐性负债 |
 | 存储 | 停止/抢占/单节点故障保留持久文件，7天只读保留、导出、恢复和清除 |
