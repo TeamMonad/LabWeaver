@@ -34,6 +34,9 @@ use super::*;
 #[path = "oidc_login_tests.rs"]
 mod oidc_login_tests;
 
+#[path = "platform_configuration_browser_tests.rs"]
+mod platform_configuration_browser_tests;
+
 #[path = "../tests/support/mod.rs"]
 mod support;
 
