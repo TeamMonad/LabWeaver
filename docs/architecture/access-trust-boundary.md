@@ -16,6 +16,16 @@ Keycloak 验证用户和服务身份；Access 验证项目、课程、环境、�
 
 令牌获取与内部 HTTP 使用服务端 TLS；凭据来自 Secret 文件，不写入 URL、命令参数或日志。不保留固定 SPIFFE principal、假 mTLS 参数或关闭验证的生产 fallback。保留 NATS 与 SSH 各自实际需要的认证和加密。
 
+## OIDC 登录事务
+
+浏览器以顶层导航访问 `GET /auth/login?return_to=<门户路径>`。Access 为每次登录生成独立的 state、PKCE verifier、nonce 和浏览器秘密，并将事务加密保存在 PostgreSQL。浏览器秘密只通过 `__Host-labweaver_oidc_<state的SHA-256>` Cookie 发送；Cookie 使用 `Path=/; Secure; HttpOnly; SameSite=Lax`，不设置 Domain。有效期由 `browser.oidc_transaction_ttl_seconds` 控制（60–900 秒，示例为300秒）。多个标签页分别保留各自 Cookie。
+
+回调在数据库行锁内核对 state、浏览器秘密和到期时间，然后原子地标记事务已消费。缺少、伪造或重复事务 Cookie 时返回 `401 / LW_AUTH_OIDC_BROWSER_REJECTED`，不消费另一浏览器的事务。过期和已消费事务返回 `401 / LW_AUTH_OIDC_STATE_REJECTED`。通过浏览器校验后，身份提供方拒绝、缺少 code 或兑换失败也会使本次事务结束；用户须重新发起登录。成功与失败回调只删除本次 Cookie，其他标签页可以继续。登录与回调响应均使用 `Cache-Control: no-store` 和 `Referrer-Policy: no-referrer`。
+
+`return_to` 只接受以单个 `/` 开头、最多2048字节的门户路径，可包含查询和片段，例如 `/researcher/workspaces?project=example#active`。Access 在保存事务前和最终重定向前分别校验目标。外部 URL、`//` 网络路径、反斜杠及控制字符返回 `400 / LW_AUTH_OIDC_RETURN_TO_REJECTED`，且不会创建事务。省略参数时返回配置的门户地址。配置的 callback 必须使用 `/auth/callback`，没有查询、片段或用户信息；默认门户地址必须与 callback 同源。Keycloak 须注册精确 callback，不能使用通配符。两条成功重定向均返回 HTTP 307。
+
+登录不创建计费资源或删除 Work 数据。发布这一变更会使更新前尚未完成的登录事务失效；这些用户重新发起登录即可。既有 BFF 会话不受事务格式更新影响。
+
 OIDC callback verifies the signed ID token, including its `exp`, before creating a
 local browser session. The BFF session then uses the configured
 `browser.session_ttl_seconds` as its absolute lifetime and
