@@ -71,7 +71,7 @@ impl ImportPhase {
 impl Drop for ImportPhase {
     fn drop(&mut self) {
         tracing::info!(event = "agent.platform_image_import.phase", artifact_id = %self.artifact_id,
-            phase = self.phase, outcome = "finished",
+            phase = self.phase, outcome = "scope_closed",
             duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX));
     }
 }
