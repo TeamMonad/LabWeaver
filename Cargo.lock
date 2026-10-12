@@ -132,6 +132,8 @@ dependencies = [
  "flate2",
  "futures",
  "futures-util",
+ "h2 0.4.15",
+ "http 1.4.2",
  "http-auth",
  "hyper-util",
  "jsonschema",
@@ -6307,8 +6309,6 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
 dependencies = [
  "atoi",
  "base64 0.22.1",
