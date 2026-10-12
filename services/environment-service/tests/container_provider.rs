@@ -803,6 +803,358 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     instance
 }
 
+fn configure_work(instance: &mut contracts::environment::EnvironmentInstance) {
+    instance.class = contracts::authoring::EnvironmentClass::Work;
+    instance.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
+    let lease_id = contracts::LeaseId::new();
+    instance.lease_id = Some(lease_id);
+    instance.capacity_binding = Some("synthetic-capacity".to_owned());
+    instance.operation.lease_authorization =
+        Some(contracts::environment::EnvironmentLeaseAuthorization {
+            resource_request_id: contracts::ResourceRequestId::new(),
+            lease_id,
+            lease_revision: revision(1),
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            capacity_binding: "synthetic-capacity".to_owned(),
+            approved_resources: instance.approved_resources.clone(),
+            gpu_allocation: None,
+            active_from: timestamp("2026-07-14T00:00:00.000Z"),
+            expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+        });
+}
+
+#[derive(Clone, Copy)]
+struct UnusedWorkAdmission;
+#[async_trait]
+impl environment_service::WorkAdmissionResolver for UnusedWorkAdmission {
+    async fn resolve(
+        &self,
+        _id: contracts::AgentRunId,
+        _query: &contracts::http::WorkConfigurationAdmissionQuery,
+        _now: UtcTimestamp,
+    ) -> Result<
+        contracts::http::WorkConfigurationAdmissionBinding,
+        environment_service::WorkAdmissionClientError,
+    > {
+        Err(environment_service::WorkAdmissionClientError::Configuration)
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one synthetic database follows Work creation through freeze and endpoint admission with the same identity"
+)]
+async fn existing_work_freeze_and_http_target_follow_pinned_placement_and_keep_identity_fences()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, subjects};
+    use environment_service::{
+        FreezeBindingConfiguration, FreezeBindingService, OwnerResolver, PgEnvironmentStore,
+        PgReleaseProjectionStore,
+    };
+    use testcontainers::{ImageExt, runners::AsyncRunner};
+    let pg = testcontainers_modules::postgres::Postgres::default()
+        .with_tag("17.5-alpine")
+        .start()
+        .await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            pg.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let mut projection = projection();
+    projection.environment_spec.class = contracts::authoring::EnvironmentClass::Work;
+    let mut instance = instance_for(&projection);
+    configure_work(&mut instance);
+    let event_contract = EVENT_CONTRACTS
+        .iter()
+        .copied()
+        .find(|c| c.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED)
+        .ok_or("event contract")?;
+    let releases = PgReleaseProjectionStore::new(pool.clone());
+    releases
+        .accept(
+            "synthetic-release",
+            &CloudEvent {
+                specversion: SPEC_VERSION.to_owned(),
+                id: contracts::EventId::new(),
+                source: event_contract.source().to_owned(),
+                event_type: event_contract.event_type.to_owned(),
+                subject: event_contract.subject.to_owned(),
+                time: projection.release.published_at,
+                datacontenttype: "application/json".to_owned(),
+                dataschema: event_contract.data_schema(),
+                project_id: instance.project_id,
+                course_id: instance.course_id,
+                aggregate_revision: revision(1),
+                aggregate_sequence: contracts::Sequence(1),
+                trace_id: "synthetic-placement-freeze".to_owned(),
+                data: projection.clone(),
+            },
+        )
+        .await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    store.create("synthetic-work-create", &instance).await?;
+    let profile = environment_service::ContainerNamespaceProfile::Existing {
+        namespace: "synthetic-work-tests".to_owned(),
+        namespace_uid: uuid::Uuid::from_u128(207),
+        project_id: instance.project_id,
+    };
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()))
+        .with_namespace_profile(profile)?;
+    let plan = provider.plan(&instance, &resolved(projection), ReconcileAction::Provision)?;
+    let mut transaction = pool.begin().await?;
+    plan.placement().pin(&mut transaction).await?;
+    transaction.commit().await?;
+    for (index, action) in [
+        ReconcileAction::Validate,
+        ReconcileAction::Validate,
+        ReconcileAction::Build,
+        ReconcileAction::Provision,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let lease = store
+            .claim_due(
+                &format!("synthetic-worker-{index}"),
+                std::time::Duration::from_secs(30),
+            )
+            .await?
+            .ok_or("reconcile claim")?;
+        let environment_service::ProviderOutcome::Completed(observation) = provider
+            .execute(action, &lease.instance)
+            .await
+            .map_err(|e| format!("{e:?}"))?
+        else {
+            return Err("pending fixture".into());
+        };
+        let updated = environment_service::apply_provider_observation(
+            &lease.instance,
+            lease.instance.operation.id,
+            observation,
+        )?;
+        store.save_reconciled(&lease, &updated).await?;
+    }
+    let ready = store.load(instance.id).await?;
+    assert_eq!(ready.observed_state, ObservedEnvironmentState::Ready);
+    assert_eq!(ready.observed_generation, ready.generation);
+    let freeze = FreezeBindingService::new_with_admission_resolver(
+        pool.clone(),
+        releases.clone(),
+        FreezeBindingConfiguration {
+            container_workspace_storage_class: "synthetic-storage".to_owned(),
+            vm: None,
+        },
+        UnusedWorkAdmission,
+    )?;
+    let request = contracts::submission::EnvironmentFreezeBindingRequest {
+        project_id: ready.project_id,
+        course_id: ready.course_id,
+        actor_id: ready.owner_id,
+        expected_revision: ready.revision,
+        collector_public_key_openssh: None,
+    };
+    let binding = freeze.resolve(instance.id, &request).await?;
+    let contracts::submission::EnvironmentFreezeSourceBinding::Container {
+        namespace,
+        persistent_volume_claim,
+        ..
+    } = binding.source
+    else {
+        return Err("container source".into());
+    };
+    assert_eq!(namespace, plan.namespace);
+    assert_eq!(
+        persistent_volume_claim,
+        plan.placement().resource_name("workspace")
+    );
+    let mut foreign = request.clone();
+    foreign.project_id = contracts::ProjectId::new();
+    assert!(freeze.resolve(instance.id, &foreign).await.is_err());
+    foreign = request.clone();
+    foreign.actor_id = contracts::ActorId::new();
+    assert!(freeze.resolve(instance.id, &foreign).await.is_err());
+    foreign = request.clone();
+    foreign.expected_revision = instance.revision;
+    assert!(freeze.resolve(instance.id, &foreign).await.is_err());
+    let now = time::OffsetDateTime::now_utc();
+    let caller = auth::ServiceIdentity {
+        issuer: "https://synthetic.example".to_owned(),
+        subject: "access".to_owned(),
+        client_id: "access".to_owned(),
+        expires_at: now + time::Duration::minutes(1),
+        permissions: ["environment.endpoint.resolve".to_owned()]
+            .into_iter()
+            .collect(),
+    };
+    let resolver = OwnerResolver::new(store, releases);
+    let eligibility_request = contracts::environment::EnvironmentEndpointEligibilityRequest {
+        environment_id: ready.id,
+        project_id: ready.project_id,
+        course_id: ready.course_id,
+        actor_id: ready.owner_id,
+        subject_kind: contracts::environment::EnvironmentAccessSubjectKind::Owner,
+        expected_revision: ready.revision,
+        endpoint_ids: ready.endpoints.iter().map(|e| e.id).collect(),
+    };
+    let target = resolver
+        .resolve_endpoint_eligibility(&caller, &eligibility_request)
+        .await?
+        .runtime_target
+        .ok_or("runtime target")?;
+    assert_eq!(target.namespace, plan.namespace);
+    assert_eq!(
+        target.service_name,
+        plan.placement().resource_name("runtime")
+    );
+    let mut stale = ready.clone();
+    stale.observed_generation -= 1;
+    assert!(
+        environment_service::authorize_endpoint_eligibility(
+            &stale,
+            &eligibility_request,
+            UtcTimestamp::from_utc(now.replace_nanosecond(0)?)?
+        )
+        .is_err()
+    );
+    stale = ready;
+    stale
+        .operation
+        .lease_authorization
+        .as_mut()
+        .ok_or("lease")?
+        .expires_at = timestamp("2026-07-14T00:01:00.000Z");
+    assert!(
+        environment_service::authorize_endpoint_eligibility(
+            &stale,
+            &eligibility_request,
+            UtcTimestamp::from_utc(now.replace_nanosecond(0)?)?
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn existing_namespace_plan_scopes_work_objects_and_preserves_operator_policies() {
+    let mut projection = projection();
+    projection.environment_spec.class = contracts::authoring::EnvironmentClass::Work;
+    let mut instance = instance_for(&projection);
+    configure_work(&mut instance);
+    let profile = environment_service::ContainerNamespaceProfile::Existing {
+        namespace: "synthetic-work-tests".to_owned(),
+        namespace_uid: uuid::Uuid::from_u128(207),
+        project_id: instance.project_id,
+    };
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()))
+        .with_namespace_profile(profile)
+        .expect("profile valid");
+    let plan = provider
+        .plan(
+            &instance,
+            &resolved(projection.clone()),
+            ReconcileAction::Provision,
+        )
+        .expect("Work plan");
+    assert_eq!(plan.namespace, "synthetic-work-tests");
+    assert_eq!(plan.namespace_uid, Some(uuid::Uuid::from_u128(207)));
+    assert_eq!(plan.resources.len(), 4);
+    for object in &plan.resources {
+        assert!(matches!(
+            object.kind.as_str(),
+            "Deployment" | "Service" | "ServiceAccount" | "PersistentVolumeClaim"
+        ));
+        assert!(object.name.starts_with(&format!("lw-{}-", instance.id)));
+        assert_eq!(object.namespace.as_deref(), Some("synthetic-work-tests"));
+    }
+    let placement = plan.placement();
+    let deployment = resource(&plan, "Deployment");
+    assert_eq!(
+        deployment
+            .document
+            .pointer("/spec/template/spec/serviceAccountName"),
+        Some(&json!(placement.resource_name("runtime")))
+    );
+    assert_eq!(
+        deployment
+            .document
+            .pointer("/spec/template/spec/volumes/0/persistentVolumeClaim/claimName"),
+        Some(&json!(placement.resource_name("workspace")))
+    );
+    assert_eq!(
+        deployment
+            .document
+            .pointer("/spec/selector/matchLabels/app"),
+        Some(&json!(placement.resource_name("runtime")))
+    );
+    assert_eq!(
+        resource(&plan, "ServiceAccount")
+            .document
+            .pointer("/imagePullSecrets/0/name"),
+        Some(&json!(placement.resource_name("registry-pull")))
+    );
+    let mut second = instance.clone();
+    second.id = contracts::EnvironmentId::new();
+    let other = provider
+        .plan(&second, &resolved(projection), ReconcileAction::Provision)
+        .expect("second Work");
+    assert!(plan.resources.iter().all(|a| {
+        other
+            .resources
+            .iter()
+            .all(|b| a.kind != b.kind || a.name != b.name)
+    }));
+}
+
+#[test]
+fn existing_namespace_profile_rejects_wrong_project_experiment_and_network_modes() {
+    let mut projection = projection();
+    let mut instance = instance_for(&projection);
+    let profile = environment_service::ContainerNamespaceProfile::Existing {
+        namespace: "synthetic-work-tests".to_owned(),
+        namespace_uid: uuid::Uuid::from_u128(207),
+        project_id: instance.project_id,
+    };
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()))
+        .with_namespace_profile(profile)
+        .expect("profile");
+    assert!(
+        provider
+            .plan(
+                &instance,
+                &resolved(projection.clone()),
+                ReconcileAction::Provision
+            )
+            .is_err()
+    );
+    configure_work(&mut instance);
+    projection.environment_spec.class = contracts::authoring::EnvironmentClass::Work;
+    projection.environment_spec.network = NetworkPolicySpec::AllowAll;
+    assert!(
+        provider
+            .plan(
+                &instance,
+                &resolved(projection.clone()),
+                ReconcileAction::Provision
+            )
+            .is_err()
+    );
+    projection.environment_spec.network = NetworkPolicySpec::DenyAll;
+    instance.project_id = contracts::ProjectId::new();
+    assert!(
+        provider
+            .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+            .is_err()
+    );
+}
+
 #[test]
 fn experiment_gpu_allocation_renders_workload_limits_and_request_quota_for_modes() {
     for (mode, allocation_binding) in [
