@@ -4,6 +4,7 @@ import { getOidcAccessToken } from '@/composables/useAuth'
 import type { ProblemDetails } from '@/generated/contracts'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
+import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
 export type CsrfTokenProvider = () => Promise<string | undefined>
@@ -151,6 +152,12 @@ function attachResponseInterceptor(instance: AxiosInstance): void {
       if (error.code === AxiosError.ECONNABORTED) {
         return Promise.reject(new LabWeaverApiError('LW_SDK_REQUEST_TIMEOUT', 'The API request timed out.'))
       }
+      // Keep the server's x-request-id with the error body (the generated SDK
+      // hands that same object back as result.error) and with the error itself.
+      const headers = error.response?.headers as { get?: (name: string) => unknown; [name: string]: unknown } | undefined
+      const headerValue = typeof headers?.get === 'function' ? headers.get(REQUEST_ID_HEADER) : headers?.[REQUEST_ID_HEADER]
+      rememberHeaderRequestId(error, headerValue)
+      rememberHeaderRequestId(error.response?.data, headerValue)
       // Preserve AxiosError and ProblemDetails so the generated SDK can expose
       // response.data through its result.error field.
       return Promise.reject(error)

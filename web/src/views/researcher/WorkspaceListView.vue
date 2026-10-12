@@ -14,6 +14,8 @@
     <DiagnosticBanner
       v-if="projects.outcome"
       :code="projects.outcome.diagnostic.code"
+      :request-id="projects.outcome.diagnostic.requestId"
+      :next-step="projects.outcome.diagnostic.nextStep"
       :message="projects.outcome.diagnostic.message"
       :retryable="projects.outcome.diagnostic.retryable"
       :severity="projects.outcome.kind === 'error' ? 'error' : 'info'"
@@ -198,6 +200,8 @@
             <DiagnosticBanner
               v-if="members.outcome"
               :code="members.outcome.diagnostic.code"
+              :request-id="members.outcome.diagnostic.requestId"
+              :next-step="members.outcome.diagnostic.nextStep"
               :message="members.outcome.diagnostic.message"
               :retryable="members.outcome.diagnostic.retryable"
               :severity="members.outcome.kind === 'error' ? 'error' : 'info'"

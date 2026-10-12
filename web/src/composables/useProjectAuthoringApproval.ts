@@ -21,7 +21,7 @@ import { idempotencyKey } from '@/utils/format'
 
 function errorDiagnostic(error: unknown, fallbackCode: string, fallbackMessage: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
+  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true, problem)
 }
 
 function staleContextDiagnostic(subject: string): DiagnosticViewModel {

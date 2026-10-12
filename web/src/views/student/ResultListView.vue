@@ -94,6 +94,8 @@
             v-if="evaluation.loadMoreError"
             class="load-more-error"
             :code="evaluation.loadMoreError.code"
+            :request-id="evaluation.loadMoreError.requestId"
+            :next-step="evaluation.loadMoreError.nextStep"
             :message="evaluation.loadMoreError.message"
             :retryable="evaluation.loadMoreError.retryable"
             severity="warning"

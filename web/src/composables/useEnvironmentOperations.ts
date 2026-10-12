@@ -35,6 +35,7 @@ export function useEnvironmentOperations(environmentId: Ref<string | undefined>)
           problem?.diagnosticCode ?? 'OPERATION_LIST_FAILED',
           problem?.detail ?? '加载环境操作历史失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       return
@@ -60,6 +61,7 @@ export function useEnvironmentOperations(environmentId: Ref<string | undefined>)
           problem?.diagnosticCode ?? 'ENVIRONMENT_OPERATION_CANCEL_FAILED',
           problem?.detail ?? '取消环境操作失败',
           problem?.retryable ?? true,
+          problem,
         )
         cancelDiagnostic.value = diagnostic
         return { ok: false, diagnostic }
