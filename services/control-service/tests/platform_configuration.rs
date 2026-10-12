@@ -433,6 +433,42 @@ async fn bundle_registration_is_fenced_replayable_and_preserves_inflight_binding
     Ok(())
 }
 
+/// Synthetic deployment-input boundary for state-machine tests. The separate loaded
+/// integration target uses the actual age/Bundle producer rather than this receipt fixture.
+fn synthetic_loaded(
+    version: &contracts::platform_configuration::PlatformConfigurationVersion,
+    encrypted_bundle_sha256: &str,
+) -> Result<control_service::platform_configuration::LoadedConfiguration, Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let version_file = directory.path().join("version.json");
+    let source_file = directory.path().join("source.json");
+    std::fs::write(&version_file, serde_json::to_vec(version)?)?;
+    std::fs::write(
+        &source_file,
+        serde_json::to_vec(&serde_json::json!({
+            "apiVersion":"deploy.labweaver.io/loaded-source/v1",
+            "desiredRevision":version.revision,
+            "configurationSha256":version.configuration_sha256,
+            "encryptedBundleSha256":encrypted_bundle_sha256,
+            "installation":{"namespace":"synthetic-control", "releaseName":"synthetic"}
+        }))?,
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for file in [&version_file, &source_file] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(
+        control_service::platform_configuration::LoadedConfiguration::load(
+            &version_file,
+            &source_file,
+        )?,
+    )
+}
+
 async fn progress(
     pool: &PgPool,
     state: &PlatformConfigurationStatus,
@@ -441,7 +477,7 @@ async fn progress(
 ) -> TestResult<PlatformConfigurationStatus> {
     let apply = state.latest_apply.as_ref().ok_or("no attempt")?;
     let desired = configuration::get_version(pool, apply.desired_revision).await?;
-    let loaded = configuration_common::loaded(&desired, &apply.encrypted_bundle_sha256)?;
+    let loaded = synthetic_loaded(&desired, &apply.encrypted_bundle_sha256)?;
     Ok(configuration::report(
         pool,
         Some(&loaded),
