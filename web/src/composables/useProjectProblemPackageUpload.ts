@@ -316,13 +316,13 @@ export function useProjectProblemPackageUpload(
     transfers.clear()
   }
 
-  function errorState(code: string, message: string, retryable: boolean): PackageUploadState {
-    return { kind: 'error', diagnostic: makeDiagnostic(code, message, retryable) }
+  function errorState(code: string, message: string, retryable: boolean, problem?: Parameters<typeof makeDiagnostic>[3]): PackageUploadState {
+    return { kind: 'error', diagnostic: makeDiagnostic(code, message, retryable, problem) }
   }
 
   function problemState(error: unknown, fallbackCode: string, fallbackMessage: string): PackageUploadState {
     const problem = extractProblemDetails(error)
-    return errorState(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
+    return errorState(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true, problem)
   }
 
   /** Terminal sessions are never revived; the next start creates a new intent. */
@@ -420,7 +420,7 @@ export function useProjectProblemPackageUpload(
       if (problem?.status === 404) {
         writeIntent(null)
         session.value = null
-        state.value = errorState(problem.diagnosticCode ?? 'UPLOAD_SESSION_NOT_FOUND', '找不到原上传会话。请重新上传材料包。', false)
+        state.value = errorState(problem.diagnosticCode ?? 'UPLOAD_SESSION_NOT_FOUND', '找不到原上传会话。请重新上传材料包。', false, problem)
         return
       }
       state.value = problemState(result.error, 'UPLOAD_SESSION_QUERY_FAILED', '暂时无法查询上传进度。重试会继续查询同一个上传会话。')
