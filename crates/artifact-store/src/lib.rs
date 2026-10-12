@@ -1084,7 +1084,10 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .content_type(media_type)
             .if_none_match("*")
             .presigned(
-                PresigningConfig::expires_in(expires)
+                PresigningConfig::builder()
+                    .start_time(system_time_from_utc(now)?)
+                    .expires_in(expires)
+                    .build()
                     .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
             )
             .await
@@ -1617,6 +1620,63 @@ mod tests {
         Ok(GenericImage::new(name.to_owned(), tag.to_owned()))
     }
 
+    fn current_test_time() -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
+        let now = time::OffsetDateTime::now_utc();
+        let now = now.replace_nanosecond(now.nanosecond() / 1_000_000 * 1_000_000)?;
+        Ok(UtcTimestamp::from_utc(now)?)
+    }
+
+    #[tokio::test]
+    async fn material_signature_clock_preserves_original_session_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = S3StoreConfig {
+            binding: "test-store".to_owned(),
+            endpoint: "https://minio.invalid".parse()?,
+            bucket: "test-materials".to_owned(),
+            region: "test-region".to_owned(),
+            object_prefix: "materials".to_owned(),
+            upload_ttl_seconds: 60,
+            max_object_bytes: 1_024,
+            force_path_style: true,
+            ca_bundle_file: None,
+        };
+        let client = aws_sdk_s3::Client::from_conf(
+            S3ConfigBuilder::new()
+                .behavior_version(BehaviorVersion::latest())
+                .region(Region::new(config.region.clone()))
+                .endpoint_url(config.endpoint.as_str())
+                .credentials_provider(Credentials::new(
+                    "test-access",
+                    "test-secret",
+                    None,
+                    None,
+                    "test",
+                ))
+                .force_path_style(true)
+                .build(),
+        );
+        let store = S3ImmutableObjectStore { config, client };
+        let start: UtcTimestamp = "2026-07-15T08:00:20.000Z".parse()?;
+        let deadline: UtcTimestamp = "2026-07-15T08:01:00.000Z".parse()?;
+        let signed = store
+            .presign_upload_until("materials/missing-file", 1, "text/plain", start, deadline)
+            .await?;
+        let parameters = url::Url::parse(&signed.url)?
+            .query_pairs()
+            .into_owned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            parameters.get("X-Amz-Date").map(String::as_str),
+            Some("20260715T080020Z")
+        );
+        assert_eq!(
+            parameters.get("X-Amz-Expires").map(String::as_str),
+            Some("40")
+        );
+        assert_eq!(signed.expires_at, deadline);
+        Ok(())
+    }
+
     #[test]
     fn upload_diagnostics_extract_service_metadata() -> Result<(), Box<dyn std::error::Error>> {
         let mut response = Response::new(StatusCode::try_from(404_u16)?, SdkBody::empty());
@@ -1783,7 +1843,7 @@ mod tests {
                 key,
                 u64::try_from(bytes.len())?,
                 "text/plain",
-                "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
+                current_test_time()?,
             )
             .await?;
         let http = reqwest::Client::builder().no_proxy().build()?;
@@ -1800,7 +1860,7 @@ mod tests {
                 "problem-packages/course/upload/bounded-object",
                 store.config.max_object_bytes,
                 "text/plain",
-                "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
+                current_test_time()?,
             )
             .await?;
         let mut bounded_request = http.put(&bounded.url);
@@ -2048,7 +2108,7 @@ mod tests {
                 package_key,
                 u64::try_from(package_bytes.len())?,
                 "text/plain",
-                "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
+                current_test_time()?,
             )
             .await?;
         let mut package_request = http.put(&package_upload.url);
