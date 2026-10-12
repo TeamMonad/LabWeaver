@@ -189,6 +189,7 @@ fn report(
         observed_configuration_sha256,
         observed_encrypted_bundle_sha256: (phase == Stage::Succeeded)
             .then(|| apply.encrypted_bundle_sha256.clone()),
+        control_replica_observations: None,
     })
 }
 

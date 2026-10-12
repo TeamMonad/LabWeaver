@@ -19,3 +19,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- $digest -}}
 {{- end -}}
+
+{{- define "labweaver.controlManagedConfigMap" -}}
+{{- printf "%s-control-loaded-%s" .Release.Name (include "labweaver.controlManagedChecksum" . | trunc 20) -}}
+{{- end -}}
+
+{{- define "labweaver.controlManagedChecksum" -}}
+{{- printf "%s\n%s" (required "managedControlConfiguration.versionJson is required" .Values.managedControlConfiguration.versionJson) (required "managedControlConfiguration.sourceJson is required" .Values.managedControlConfiguration.sourceJson) | sha256sum -}}
+{{- end -}}

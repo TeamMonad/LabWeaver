@@ -2403,6 +2403,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         PLATFORM_ADMIN,
         Service
     ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/platform-configuration/loaded",
+        "getLoadedPlatformConfiguration",
+        "control.platform_configuration.apply",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
     // Project is the cross-domain ownership root. The list and create operations
     // are actor-scoped by Access even though they do not carry a project path.
     op!(

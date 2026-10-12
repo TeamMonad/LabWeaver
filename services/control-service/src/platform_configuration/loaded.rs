@@ -4,8 +4,11 @@ use std::fs::{File, symlink_metadata};
 use std::io::Read;
 use std::path::Path;
 
-use contracts::Revision;
-use contracts::platform_configuration::{PlatformConfigurationVersion, valid_configuration_sha256};
+use contracts::platform_configuration::{
+    ControlConfigurationDeploymentObservation, ControlConfigurationReplicaObservation,
+    PlatformConfigurationVersion, valid_configuration_sha256,
+};
+use contracts::{Revision, UtcTimestamp};
 use persistence_sqlx::Sha256Digest;
 use serde::Deserialize;
 
@@ -22,6 +25,8 @@ struct Source {
     configuration_sha256: String,
     encrypted_bundle_sha256: String,
     installation: Installation,
+    #[serde(default = "one_replica")]
+    expected_control_replicas: u32,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +43,15 @@ pub struct LoadedConfiguration {
     version: PlatformConfigurationVersion,
     encrypted_bundle_sha256: String,
     installation: Installation,
+    expected_control_replicas: u32,
+    replica: Option<ReplicaIdentity>,
+    instance_id: String,
+}
+
+struct ReplicaIdentity {
+    name: String,
+    namespace: String,
+    uid: String,
 }
 
 impl LoadedConfiguration {
@@ -61,6 +75,7 @@ impl LoadedConfiguration {
             || !valid_configuration_sha256(&source.encrypted_bundle_sha256)
             || !dns_label(&source.installation.namespace)
             || !dns_label(&source.installation.release_name)
+            || !(1..=16).contains(&source.expected_control_replicas)
         {
             return Err(ConfigurationError::ObservationMismatch);
         }
@@ -70,7 +85,111 @@ impl LoadedConfiguration {
             version,
             encrypted_bundle_sha256: source.encrypted_bundle_sha256,
             installation: source.installation,
+            expected_control_replicas: source.expected_control_replicas,
+            replica: None,
+            instance_id: uuid::Uuid::now_v7().to_string(),
         })
+    }
+
+    /// Binds the actual Downward API identity once, before this service instance is published.
+    pub fn on_replica(
+        mut self,
+        name: &str,
+        namespace: &str,
+        uid: &str,
+    ) -> Result<Self, ConfigurationError> {
+        if !dns_label(name)
+            || namespace != self.installation.namespace
+            || !valid_uid(uid)
+            || self.replica.is_some()
+        {
+            return Err(ConfigurationError::Invalid);
+        }
+        self.replica = Some(ReplicaIdentity {
+            name: name.to_owned(),
+            namespace: namespace.to_owned(),
+            uid: uid.to_owned(),
+        });
+        Ok(self)
+    }
+
+    /// Returns only the actual process snapshot and identity. It does not reread files.
+    pub fn observe(
+        &self,
+        now: UtcTimestamp,
+    ) -> Result<ControlConfigurationReplicaObservation, ConfigurationError> {
+        let replica = self
+            .replica
+            .as_ref()
+            .ok_or(ConfigurationError::ObservationMismatch)?;
+        Ok(ControlConfigurationReplicaObservation {
+            pod_name: replica.name.clone(),
+            pod_uid: replica.uid.clone(),
+            namespace: replica.namespace.clone(),
+            instance_id: self.instance_id.clone(),
+            desired_revision: self.version.revision,
+            configuration_sha256: self.version.configuration_sha256.clone(),
+            encrypted_bundle_sha256: self.encrypted_bundle_sha256.clone(),
+            observed_at: now,
+        })
+    }
+
+    /// Whether a startup without the Downward API identity is incomplete for this source.
+    #[must_use]
+    pub const fn requires_replica_identity(&self) -> bool {
+        self.expected_control_replicas > 1
+    }
+
+    pub(super) fn replicas_match(
+        &self,
+        observed: Option<&ControlConfigurationDeploymentObservation>,
+        requested_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> bool {
+        let Some(observed) = observed else {
+            return self.replica.is_none() && self.expected_control_replicas == 1;
+        };
+        let Some(current) = self.replica.as_ref() else {
+            return false;
+        };
+        if observed.expected_replicas != self.expected_control_replicas
+            || observed.replicas.len() != self.expected_control_replicas as usize
+            || observed.namespace != self.installation.namespace
+            || observed.release_name != self.installation.release_name
+            || !valid_uid(&observed.deployment_uid)
+            || observed.deployment_generation == 0
+        {
+            return false;
+        }
+        let mut uids = std::collections::BTreeSet::new();
+        let mut names = std::collections::BTreeSet::new();
+        let mut instances = std::collections::BTreeSet::new();
+        let mut contains_current = false;
+        for replica in &observed.replicas {
+            if !valid_uid(&replica.pod_uid)
+                || !valid_uid(&replica.instance_id)
+                || !dns_label(&replica.pod_name)
+                || !uids.insert(&replica.pod_uid)
+                || !names.insert(&replica.pod_name)
+                || !instances.insert(&replica.instance_id)
+                || replica.namespace != self.installation.namespace
+                || replica.desired_revision != self.version.revision
+                || replica.configuration_sha256 != self.version.configuration_sha256
+                || replica.encrypted_bundle_sha256 != self.encrypted_bundle_sha256
+                || replica.observed_at < requested_at
+                || replica.observed_at > now
+                || (now.get() - replica.observed_at.get()) > time::Duration::seconds(30)
+            {
+                return false;
+            }
+            if replica.pod_uid == current.uid {
+                if replica.pod_name != current.name || replica.instance_id != self.instance_id {
+                    return false;
+                }
+                contains_current = true;
+            }
+        }
+        contains_current
     }
 
     pub(super) fn matches(
@@ -94,8 +213,17 @@ impl std::fmt::Debug for LoadedConfiguration {
             .field("encrypted_bundle_sha256", &self.encrypted_bundle_sha256)
             .field("namespace", &self.installation.namespace)
             .field("release_name", &self.installation.release_name)
+            .field("expected_control_replicas", &self.expected_control_replicas)
             .finish_non_exhaustive()
     }
+}
+
+const fn one_replica() -> u32 {
+    1
+}
+
+fn valid_uid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|uid| !uid.is_nil() && uid.to_string() == value)
 }
 
 fn dns_label(value: &str) -> bool {
@@ -146,7 +274,7 @@ fn private_file(path: &Path) -> Result<Vec<u8>, ConfigurationError> {
     Ok(payload)
 }
 
-fn same_file(first: &std::fs::Metadata, second: &std::fs::Metadata) -> bool {
+pub(super) fn same_file(first: &std::fs::Metadata, second: &std::fs::Metadata) -> bool {
     if !second.is_file()
         || first.len() != second.len()
         || first.permissions() != second.permissions()

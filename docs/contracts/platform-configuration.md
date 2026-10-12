@@ -110,7 +110,21 @@ Control 将读取结果固定在同一服务实例中。修改投影文件或保
 
 来源文件是获准部署路径交付的非秘密输入，不是签名证书或实际节点/namespace 的运行观察。该检查只闭合 Control 的加载与数据库发布边界。#199 的运行准入消费者继续从同一已验证 applied 记录读取策略；其授权、成员和 ResourceApproval 规则不变。其他服务、实际实例和安装位置仍需执行者独立验证。来源文件或命令退出成功本身不足以提交完整部署成功报告。
 
-现有 Helm 部署尚未挂载这两个新输入。不要仅设置环境变量并指向缺失路径；后续安装接线必须从已验证 Bundle 交付同一版本和来源文件，再按实际部署范围验收。此增量不新增公共 DTO、服务、审批状态或配置仓库。
+Helm 现在从认证打开后的同一 Bundle values 生成不可变 Control 配置 ConfigMap。Pod 使用同一 Control 摘要镜像的初始化命令，读取一个 AtomicWriter 代次的两文件，校验派生 checksum 与类型绑定，复制为自有普通 `0600` 文件。主进程只读挂载该受限 emptyDir，并取得真实 Pod name/namespace/UID。没有新镜像、服务、RBAC、网络规则或 Secret 来源。直接渲染与首装请求保留原范围，不产生认证加载挂载。
+
+初始化失败或更换投影不会覆盖已有 runtime/current。原样重试可复用；不同输入需新 Pod 的受限目录。缩容、扩容和版本变化应修改原 Bundle，重新登记并执行；禁止独立手改派生副本数或加载路径。Control 启动拒绝缺少、多项不完整或跨来源 namespace 的 Pod 身份。
+
+### Control 副本观察
+
+`getLoadedPlatformConfiguration` 是内部只读 `GET /internal/v1/platform-configuration/loaded`。它复用 `control.platform_configuration.apply` 权限及原 Access 网关拒绝规则，默认客户端白名单和权限配置不变。响应包含本进程固定的 Pod 身份、启动 instanceId、revision、实际设置与原密文摘要、读取时间，设置 `Cache-Control: no-store`。文件变化不会改变该进程的响应；重启产生新的 instanceId。
+
+原 report 增加可选 `controlReplicaObservations`：当前 Deployment UID/generation、预期副本数、namespace/releaseName及各实际进程响应。Pod 模式和多副本模式须完整提供；原生本地单实例的既有范围保持。字段缺失时序列化省略，保持原幂等请求摘要。内部七参数调用签名不变。
+
+成功还须满足同 Bundle 派生副本数、唯一 Pod UID/name/instanceId、全部 revision/settings/ciphertext一致，观察不早于该尝试且不超过30秒，接收进程自己的 Pod UID与当前启动 instanceId在证据中。缺副本、重复身份、旧版、错来源、跨 namespace、陈旧观察或重启前接收实例证据均拒绝。失败仍保留最后验证的 applied 与原失败历史；没有额外副本表或生命周期。
+
+获准原执行者用只读工具[收集实际副本](../deployment/encrypted-bundle.md#control-挂载与副本观察)，在观察前后读取 Deployment/ReplicaSet/Pod并核代次、归属和活跃集合，逐个从实际 Pod地址取得HTTPS响应。Ready、命令退出或重复访问负载均衡入口不能替代完整观察。角色须已有这些读取权限、Control Pod网络路径、现有TLS CA和原apply权限；工具不配置真实凭据、授予权限或修改网络。
+
+外部执行者负责 roster 和每个 peer 读回的真实性。报告接收者核对完整性、时限及自身实际快照，不能独立证明别的 Pod 在读取后的每一时刻都保持该状态。观察是一次有时限的事实，后续漂移仍需实际重新观察；不新增长期监控状态机。
 
 执行期间允许管理员保存新 desired。当前尝试仍绑定原 desired。原尝试成功后，applied 指向原版本，新 desired 继续保留为未应用期望。
 
@@ -183,4 +197,6 @@ cargo test -p control-service --test platform_configuration_loaded \
 
 该目标使用新生成的合成 age 身份与完整 Bundle，执行原解密和派生入口，再由实际 Control API 和 PostgreSQL 保存结果。它验证未加载、另一份密文、旧进程、文件变化、失败保留最后验证版本与重试。外部 JWT issuer/Access 决策为测试边界；没有真实集群或其他服务的部署观察。CI 显式执行此目标，普通 Rust 的 ignored 不能计作通过。
 
-尚未完成的范围：旧 PKI/NATS 签发 workspace、其他服务的实际部署观察、默认值消费者、Helm 加载输入接线，以及 #207 运行授权与执行边界。
+双副本目标用同一真实 age Bundle、两个实际 Control HTTP路由实例与 PostgreSQL验证完整观察、旧副本、重启、错摘要及失败重试。运行 `cargo test -p control-service --test platform_configuration_replicas all_control_replicas_must_report_actual_loaded_source_before_applied --locked -- --ignored --exact --test-threads=1`。CI 显式运行，普通 ignored 不计通过。Kubernetes roster/身份是合成边界，不代表真实集群安装。
+
+尚未完成的范围：旧 PKI/NATS 签发 workspace、实际多节点安装与观察窗口、其他服务的实际部署观察、默认值消费者，以及 #207 运行授权与执行边界。

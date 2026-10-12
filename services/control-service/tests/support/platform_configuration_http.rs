@@ -83,6 +83,7 @@ pub(super) struct HttpFixture {
     _access: TlsServiceHandle,
     _temporary: tempfile::TempDir,
     key: String,
+    state: Arc<ApiState>,
 }
 impl HttpFixture {
     pub async fn new(pool: PgPool) -> Result<Self, Box<dyn std::error::Error>> {
@@ -153,7 +154,29 @@ impl HttpFixture {
             _access: access,
             _temporary: temporary,
             key,
+            state,
         })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "only replica integration targets fork the shared fixture"
+    )]
+    pub fn replica(
+        &self,
+        pool: PgPool,
+        loaded: control_service::platform_configuration::LoadedConfiguration,
+    ) -> Result<Router, Box<dyn std::error::Error>> {
+        let state = Arc::new(ApiState {
+            control: ControlService::new(pool, Arc::new(NoObjects), config()?)?
+                .with_loaded_platform_configuration(loaded),
+            access: self.state.access.clone(),
+            agent: self.state.agent.clone(),
+            environment: self.state.environment.clone(),
+            evaluation: self.state.evaluation.clone(),
+            service_token_verifier: Arc::clone(&self.state.service_token_verifier),
+        });
+        Ok(authenticated_router(&state, &state.service_token_verifier))
     }
     pub fn token(
         &self,

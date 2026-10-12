@@ -383,6 +383,33 @@ Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob
 
 Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，从实际读取的 typed 设置计算摘要，将快照固定在运行实例。原 apply/report 成功路径还要核对该快照与原尝试，不能只复制执行者的两个摘要。保存 desired、修改投影文件和命令退出成功均不会自动更新 applied。旧进程或错密文来源的成功回报被拒绝；失败保留最后验证的版本及待核对状态。具体输入与限制见[Control 启动加载](../contracts/platform-configuration.md#control-启动加载)。
 
-该路径只验证 Control 与数据库消费者。现有 Helm 工作负载尚未挂载新加载输入，其他配置消费者也没有完整活动 revision/hash 观察。Bundle 中的目标名称不是实际安装位置证明。执行者仍须独立核对实际实例、位置和其他服务的采用结果，才提交完整 succeeded。缺少这些事实时保留待核对结果，不将来源文件、投影或 rollout 就绪作为完整部署回执。
+该路径只验证 Control 与数据库消费者。其他配置消费者仍没有完整活动 revision/hash 观察。Bundle 中的目标名称不是实际安装位置证明。执行者仍须独立核对实际实例、位置和其他服务的采用结果，才提交完整 succeeded。缺少这些事实时保留待核对结果，不将来源文件、投影或 rollout 就绪作为完整部署回执。
+
+## Control 挂载与副本观察
+
+认证打开管理版本后，派生 Helm values 包含同一版本和来源的两个 JSON输入。chart只为现有Control部署生成不可变ConfigMap、Pod checksum、初始化复制及主进程只读挂载；别的workload不挂载。初始化使用原Control摘要镜像、原非root身份、drop ALL、只读根文件系统和禁用的服务账户token，不启用新权限或签发身份。
+
+Kubernetes [AtomicWriter](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/volume/util/atomic_writer.go) 用同一代次目录和符号链接发布投影。因此初始化命令固定一个 `..data` 代次，校验字节checksum后写入普通0600文件，保留加载器原有的链接拒绝。主进程的身份来自 [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)；挂载文件改变不会替换已经加载的进程快照。
+
+Control副本数在原Bundle的 `application.helmValues.workloads.control-service.replicas` 配置为1到16，默认1。Source及chart必须一致。不要手改派生值、加载环境路径、Downward身份或ConfigMap数据。任一来源、摘要或必需字段错误会明确失败。
+
+完成已获准部署后，原执行者在 `verifying` 阶段收集一次实际观察：
+
+```sh
+python tools/observe_control_configuration.py \
+  --source-file "$LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE" \
+  --token-file .private/operator/executor.jwt \
+  --ca-file .private/operator/control-ca.pem \
+  --tls-server-name "control-service.$LW_INSTALL_NAMESPACE.svc" \
+  --port 9444 --output .private/observations/control.json
+```
+
+在Bundle `exec` 的消费者命令中执行该工具。输出须在临时目录外；文件原子创建为0600，已存在不覆盖。示例文件由获准操作员提供，工具不生成真实Token或CA。它只调用现有kubectl的Deployment/ReplicaSet/Pod读取和实际Pod的HTTPS GET，不apply、exec Pod、创建身份或变更权限。需要已有读取权限、网络路径和原 `control.platform_configuration.apply` 权限；缺任一条件明确失败，不自动扩权。
+
+工具核对UID/generation、副本数、原Deployment→ReplicaSet→Pod归属、Ready、实际IP与活跃集合。过渡中的旧/终止/额外Pod阻止成功；观察后再次核对代次、集合和容器重启事实。每个响应还须与Source版本和两摘要一致且在30秒内。TLS连接使用实际Pod IP，仍校验原Control Service DNS及现有CA；不跟随重定向或输出Token/原始失败响应。
+
+把输出作为原report的 `controlReplicaObservations`，同时使用原两摘要、attempt ETag和稳定幂等键。完整观察后才提交succeeded。丢失响应时重放同一个请求；重新观察会产生新的时间与实例事实，应先查询attempt，再使用新的幂等键。失败仍报告原有failureReason并保留最后验证版本，不静默覆盖旧effective。
+
+该入口提供代码、本地合成验证及Control副本观察能力。它没有执行真实集群安装，也没有覆盖全部lifecycle/runtime/builder消费者。全安装、实际replica/位置和其他服务的验收仍由唯一获准执行owner安排。
 
 隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。本入口没有落实运行策略的实际对象授权或执行位置。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。
