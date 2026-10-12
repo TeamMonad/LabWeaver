@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>Configuration BFF transport test</title></head>
+  <body>
+    <main>Configuration BFF transport test. This is a test harness, not the product console.</main>
+    <script type="module">
+      import { initializeSdkClient } from '../../src/api/client.ts'
+      import * as sdk from '../../src/generated/contracts/index.ts'
+      initializeSdkClient().then(() => { window.configurationBffSdk = sdk })
+    </script>
+  </body>
+</html>

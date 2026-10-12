@@ -67,7 +67,7 @@ async function sessionStatus(page) {
 try {
   // Browser trusts only this disposable fixture via its test option. Rust
   // OIDC/service clients keep strict TLS and explicit fixture trust anchors.
-  browser = await chromium.launch()
+  browser = await chromium.launch({ ...(process.env.LABWEAVER_TEST_CHROMIUM ? { executablePath: process.env.LABWEAVER_TEST_CHROMIUM } : {}) })
   const options = { ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } }
   const initiating = await browser.newContext(options)
   const unrelated = await browser.newContext(options)

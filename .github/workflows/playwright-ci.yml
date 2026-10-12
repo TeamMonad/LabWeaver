@@ -68,3 +68,5 @@ jobs:
           echo /tmp/age >> "$GITHUB_PATH"
       - name: Run generated SDK against real Control and PostgreSQL
         run: cargo test -p control-service --test platform_configuration browser_sdk_registers_real_ciphertext_and_reads_durable_failure --locked -- --ignored --exact --test-threads=1
+      - name: Run native Keycloak login and Bundle CSRF against actual Access and Control
+        run: cargo test -p access-service --bin access-service browser_proxy_tests::platform_configuration_browser_tests::chromium_login_and_csrf_reach_real_platform_configuration --locked -- --ignored --exact --test-threads=1

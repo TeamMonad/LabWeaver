@@ -1,0 +1,141 @@
+//! Shared non-business dependencies for real configuration integration tests.
+use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
+use async_trait::async_trait;
+use contracts::supply_chain::BuildNetworkPolicy;
+use contracts::{ArtifactRef, PolicyId, Revision, UtcTimestamp};
+use control_service::{ContainerBuildPolicy, ControlConfig, EvaluationRuntimePolicy};
+use persistence_sqlx::Sha256Digest;
+
+pub(super) struct NoObjects;
+#[async_trait]
+impl ImmutableObjectStore for NoObjects {
+    async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
+        Err(ObjectStoreError::ObjectUnavailable)
+    }
+    fn binding(&self) -> &'static str {
+        "unused-fixture"
+    }
+    async fn presign_upload(
+        &self,
+        _: &str,
+        _: u64,
+        _: &str,
+        _: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        Err(ObjectStoreError::ObjectUnavailable)
+    }
+    async fn read_verified(
+        &self,
+        _: &str,
+        _: &ArtifactRef,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        Err(ObjectStoreError::ObjectUnavailable)
+    }
+    async fn freeze_current(
+        &self,
+        _: &str,
+        _: u64,
+        _: &str,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        Err(ObjectStoreError::ObjectUnavailable)
+    }
+}
+
+pub(super) fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
+    Ok(ControlConfig {
+        package_object_prefix: "problem-packages".to_owned(),
+        upload_ttl_seconds: 900,
+        completion_lease_seconds: 300,
+        max_package_files: 100,
+        max_package_bytes: 1_048_576,
+        retention_policy_id: PolicyId::new(),
+        retention_seconds: 86_400,
+        sse_retention_seconds: 3_600,
+        trust_revision: Revision::new(1)?,
+        image_policy_id: PolicyId::new(),
+        image_policy_revision: Revision::new(1)?,
+        environment_schema_sha256: Sha256Digest::of_bytes(b"environment"),
+        evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
+        container_build: ContainerBuildPolicy {
+            builder_binding: "buildkit-primary-v1".to_owned(),
+            output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
+            dockerfile_path: "Dockerfile".to_owned(),
+            runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
+            network: BuildNetworkPolicy::DenyAll,
+            max_duration_milliseconds: 600_000,
+            max_cpu_millicores: 2_000,
+            max_memory_bytes: 2_147_483_648,
+        },
+        virtual_machine_bases: control_service::VirtualMachineBaseCatalog {
+            provider_binding: "kubevirt-primary-v1".to_owned(),
+            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+            max_bases: 8,
+            max_capacity_bytes: 137_438_953_472,
+            bases: vec![control_service::VirtualMachineBasePolicy {
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                    binding: "ubuntu-24.04-v1".to_owned(),
+                    source_registry_digest: concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    )
+                    .to_owned(),
+                    capacity_bytes: 10_737_418_240,
+                },
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            }],
+        },
+        evaluation_runtime: EvaluationRuntimePolicy {
+            provider_binding: "evaluation-primary-v1".to_owned(),
+            runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+        },
+        llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+            models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                model: "fixture-provider-v1".to_owned(),
+                label: "Fixture model".to_owned(),
+            }],
+            default_model: "fixture-provider-v1".to_owned(),
+            runtime_binding: "claude-code-test".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
+        },
+    })
+}
+
+pub(super) fn ciphertext() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let identity = directory.path().join("synthetic-identity");
+    let plaintext = directory.path().join("synthetic-plaintext");
+    let archive = directory.path().join("synthetic.age");
+    let generate = std::process::Command::new("age-keygen")
+        .arg("-o")
+        .arg(&identity)
+        .output()?;
+    if !generate.status.success() {
+        return Err("synthetic age key generation failed".into());
+    }
+    let recipient = std::process::Command::new("age-keygen")
+        .arg("-y")
+        .arg(&identity)
+        .output()?;
+    if !recipient.status.success() {
+        return Err("synthetic age recipient failed".into());
+    }
+    std::fs::write(&plaintext, b"synthetic-only-configuration-and-secret")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&plaintext, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let encrypted = std::process::Command::new("age")
+        .arg("-r")
+        .arg(String::from_utf8(recipient.stdout)?.trim())
+        .arg("-o")
+        .arg(&archive)
+        .arg(&plaintext)
+        .output()?;
+    if !encrypted.status.success() {
+        return Err("synthetic age encryption failed".into());
+    }
+    Ok(std::fs::read(archive)?)
+}
