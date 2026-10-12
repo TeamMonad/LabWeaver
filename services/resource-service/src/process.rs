@@ -268,6 +268,7 @@ async fn run_outbox(
     let mut interval = tokio::time::interval(OUTBOX_INTERVAL);
     loop {
         tokio::select! {
+            biased;
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } }
             _ = interval.tick() => {
                 if let Err(error) = store.expire_pending_task_once().await {
@@ -304,6 +305,7 @@ async fn run_accounting(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            biased;
             changed=shutdown.changed()=>{if changed.is_err() || *shutdown.borrow(){return Ok(());}}
             _=interval.tick()=>{
                 if let Err(error)=credits.expire_unknown_once().await {
