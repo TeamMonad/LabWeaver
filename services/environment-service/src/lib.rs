@@ -23,6 +23,7 @@ mod process;
 mod reconciler;
 mod resolver;
 mod runtime;
+mod runtime_admission;
 mod runtime_executor;
 mod store;
 mod terminal_bridge;
@@ -100,6 +101,9 @@ pub use resolver::{
     owner_resolver_router,
 };
 pub use runtime::{OwnerResolverRuntime, OwnerResolverRuntimeError};
+pub use runtime_admission::{
+    EnvironmentRuntimeAdmission, EnvironmentRuntimeAuthority, RuntimeAdmissionError,
+};
 pub use runtime_executor::{KubernetesContainerExecutor, RuntimeExecutorConfiguration};
 pub use store::{
     EnvironmentInventoryFilter, EnvironmentInventoryPage, EnvironmentOperationPage,

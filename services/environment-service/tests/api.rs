@@ -856,7 +856,7 @@ fn gpu_release_projection(
             "network": {"mode": "deny_all"},
             "entries": [{"name": "web", "protocol": "http", "servicePort": 8080}],
             "security": {
-                "userPolicy": "non_root_required",
+                "runAsUser": 65534,
                 "rootFilesystemPolicy": "read_only_required",
                 "privilegeEscalationPolicy": "deny",
                 "publicExposurePolicy": "deny",

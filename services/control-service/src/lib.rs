@@ -9601,7 +9601,7 @@ mod tests {
                 "network": {"mode": "deny_all"},
                 "entries": [{"name": "ssh", "protocol": "ssh", "servicePort": 22}],
                 "security": {
-                    "userPolicy": "non_root_required",
+                    "runAsUser": 65534,
                     "rootFilesystemPolicy": "mutable_required",
                     "privilegeEscalationPolicy": "deny",
                     "publicExposurePolicy": "deny",

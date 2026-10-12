@@ -1244,6 +1244,7 @@ fn build_create_instance(
         gpu_allocation: spec.gpu_allocation.clone(),
         resource_reservation_released: false,
         provider_binding: spec.provider_binding.clone(),
+        runtime_authorization: spec.runtime_authorization.clone(),
         desired_state: DesiredEnvironmentState::Running,
         observed_state: ObservedEnvironmentState::Requested,
         revision: command.expected_revision,
@@ -2386,6 +2387,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let actor_id = ActorId::new();
         let request = CreateEnvironmentRequest {
+            resource_request_id: contracts::ResourceRequestId::new(),
             project_id: ProjectId::new(),
             course_id: Some(CourseId::new()),
             release_id: ReleaseId::new(),

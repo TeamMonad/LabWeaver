@@ -1792,6 +1792,8 @@ impl InternalCompleteEvaluationStepRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironmentRequest {
+    /// Existing Resource request whose original approval selects the Environment target identity.
+    pub resource_request_id: ResourceRequestId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub release_id: ReleaseId,

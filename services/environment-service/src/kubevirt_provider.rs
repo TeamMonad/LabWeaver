@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::access::validate_ssh_public_key;
 use contracts::authoring::{
     EnvironmentRuntimeSpec, NetworkPolicySpec, PrivilegeEscalationPolicy, PublicExposurePolicy,
-    RootFilesystemPolicy, RuntimeKind, RuntimeUserPolicy,
+    RootFilesystemPolicy, RuntimeKind,
 };
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
@@ -1704,6 +1704,7 @@ pub struct KubeVirtSshBootstrap {
     pub evaluation_namespace: Option<String>,
     pub evaluation_pod_label: Option<String>,
     pub user_ca_public_key: String,
+    pub workspace_root: String,
 }
 
 impl KubeVirtSshBootstrap {
@@ -1731,7 +1732,20 @@ impl KubeVirtSshBootstrap {
             evaluation_namespace: None,
             evaluation_pod_label: None,
             user_ca_public_key: public_key.normalized_openssh,
+            workspace_root: "/workspace".to_owned(),
         })
+    }
+
+    pub fn with_workspace_root(mut self, root: String) -> Result<Self, ReleaseProjectionError> {
+        if !root.starts_with('/')
+            || root.contains("..")
+            || root.contains(char::is_whitespace)
+            || root.contains([',', '[', ']', '\"', '\''])
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        self.workspace_root = root;
+        Ok(self)
     }
 
     /// Adds the exact namespace and pod label allowed to reach the VM for
@@ -2348,7 +2362,8 @@ where
         if instance.runtime_kind != RuntimeKind::VirtualMachine
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
-            || instance.project_id != projection.release.project_id
+            || (instance.class == contracts::authoring::EnvironmentClass::Work
+                && instance.project_id != projection.release.project_id)
             || instance.course_id != projection.release.course_id
             || instance.provider_binding != self.binding
         {
@@ -2378,8 +2393,6 @@ where
             || base_binding.source_registry_digest != base_disk.source_registry_digest
             || base_binding.capacity_bytes != base_disk.capacity_bytes
             || base_binding.format != *format
-            || projection.environment_spec.security.user_policy
-                != RuntimeUserPolicy::NonRootRequired
             || projection.environment_spec.security.root_filesystem_policy
                 != RootFilesystemPolicy::MutableRequired
             || projection
@@ -2540,7 +2553,9 @@ where
             "labweaver.io/cdi-importer-memory-limit-bytes": budget.cdi_importer_memory_limit_bytes.to_string(),
             "labweaver.io/cdi-scratch-storage-bytes": budget.cdi_scratch_storage_bytes.to_string(),
         });
-        let cloud_init = self.cloud_init_user_data(&base_binding.guest_user);
+        let guest_uid = crate::runtime_admission::authorized_uid(instance, projection)?;
+        let guest_user = guest_username(guest_uid, &base_binding.guest_user);
+        let cloud_init = self.cloud_init_user_data(guest_user, guest_uid);
         let cloud_init_data = BASE64_STANDARD.encode(cloud_init.as_bytes());
         let cloud_init_network_data = BASE64_STANDARD.encode(
             b"version: 2\nethernets:\n  default:\n    match:\n      name: \"en*\"\n    dhcp4: true\n",
@@ -2778,10 +2793,20 @@ where
         Ok(())
     }
 
-    fn cloud_init_user_data(&self, guest_user: &str) -> String {
+    fn cloud_init_user_data(&self, guest_user: &str, guest_uid: u32) -> String {
         format!(
-            "#cloud-config\nusers:\n  - name: {user}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n      labweaver-evaluation\n      labweaver-agent\n  - path: /etc/ssh/sshd_config.d/99-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin no\n      AllowTcpForwarding no\n      AllowAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n  - [install, -d, -o, {user}, -g, {user}, -m, '0700', /home/{user}/workspace]\n  - [sshd, -t]\n  - [systemctl, enable, --now, ssh.service]\n",
+            "#cloud-config\ndisable_root: false\nusers:\n  - name: {user}\n    uid: {uid}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n      labweaver-evaluation\n      labweaver-agent\n  - path: /etc/ssh/sshd_config.d/00-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin {root_login}\n      AllowTcpForwarding no\n      AllowAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n{uid_check}",
             user = guest_user,
+            uid = guest_uid,
+            root_login = if guest_uid == 0 {
+                "prohibit-password"
+            } else {
+                "no"
+            },
+            uid_check = format!(
+                "  - |\n      set -eu\n      systemctl stop ssh.service\n      current_uid=$(id -u {guest_user})\n      if [ \"$current_uid\" != \"{guest_uid}\" ]; then usermod -u {guest_uid} {guest_user}; fi\n      test \"$(id -u {guest_user})\" = \"{guest_uid}\"\n      install -d -o {guest_user} -g {guest_user} -m 0700 {}\n      sshd -t\n      systemctl enable --now ssh.service\n",
+                self.configuration.ssh.workspace_root
+            ),
             ca = self.configuration.ssh.user_ca_public_key,
         )
     }
@@ -3279,6 +3304,16 @@ pub(crate) fn valid_dns_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+pub(crate) fn guest_username(uid: u32, configured: &str) -> &str {
+    if uid == 0 {
+        "root"
+    } else if configured == "root" {
+        "labweaver"
+    } else {
+        configured
+    }
 }
 
 fn valid_guest_user(value: &str) -> bool {

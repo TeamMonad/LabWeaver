@@ -139,6 +139,7 @@ pub struct Reconciler {
     registry: ProviderRegistry,
     provider_timeout: Duration,
     resource_reservations: Option<Arc<dyn crate::metering::ExperimentResourceAllocator>>,
+    runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
 }
 
 /// Durable one-item reconciler worker. A caller may drive this in a bounded loop.
@@ -416,6 +417,7 @@ impl Reconciler {
             registry,
             provider_timeout,
             resource_reservations: None,
+            runtime_admission: None,
         })
     }
 
@@ -430,12 +432,35 @@ impl Reconciler {
         self
     }
 
+    #[must_use]
+    pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
+        self.runtime_admission = Some(admission);
+        self
+    }
+
     pub async fn execute_once(
         &self,
         instance: &EnvironmentInstance,
         now: UtcTimestamp,
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
+        let mut authorized = instance.clone();
+        if matches!(
+            action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            let receipt = self
+                .runtime_admission
+                .as_ref()
+                .ok_or(ReconcileError::ResourceUnavailable)?
+                .for_instance(instance)
+                .await?;
+            authorized.runtime_authorization = Some(receipt);
+        }
+        let instance = &authorized;
         if requires_experiment_activation(instance, action) {
             self.activate_experiment_reservation(instance).await?;
         }
@@ -597,6 +622,8 @@ pub fn next_action(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReconcileError {
+    #[error(transparent)]
+    RuntimeAdmission(#[from] crate::RuntimeAdmissionError),
     #[error("LW_ENVIRONMENT_PROVIDER_REGISTRY_INVALID")]
     InvalidProviderRegistry,
     #[error("LW_ENVIRONMENT_PROVIDER_UNAVAILABLE")]
@@ -625,6 +652,7 @@ impl ReconcileError {
     #[must_use]
     pub fn diagnostic_code(&self) -> &str {
         match self {
+            Self::RuntimeAdmission(error) => error.diagnostic_code(),
             Self::InvalidProviderRegistry => "LW_ENVIRONMENT_PROVIDER_REGISTRY_INVALID",
             Self::ProviderUnavailable => "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
             Self::InvalidTimeout => "LW_ENVIRONMENT_PROVIDER_TIMEOUT_INVALID",
@@ -641,6 +669,7 @@ impl ReconcileError {
     #[must_use]
     pub const fn retryable(&self) -> bool {
         match self {
+            Self::RuntimeAdmission(error) => error.retryable(),
             Self::ProviderUnavailable | Self::ProviderTimeout => true,
             Self::Provider(failure) => failure.retryable,
             Self::InvalidProviderRegistry
@@ -713,6 +742,7 @@ mod tests {
             course_id: Some(CourseId::new()),
             owner_id: ActorId::new(),
             class: EnvironmentClass::Experiment,
+            runtime_authorization: None,
             runtime_kind: RuntimeKind::Container,
             release_id: ReleaseId::new(),
             release_version: 1,

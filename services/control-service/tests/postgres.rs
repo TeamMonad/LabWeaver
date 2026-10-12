@@ -2789,7 +2789,7 @@ fn environment_candidate(
         "network":{"mode":"deny_all"},
         "entries":[{"name":"code-server","protocol":"https","servicePort":8080}],
         "security":{
-            "userPolicy":"non_root_required",
+            "runAsUser":65534,
             "rootFilesystemPolicy":"read_only_required",
             "privilegeEscalationPolicy":"deny",
             "publicExposurePolicy":"deny",

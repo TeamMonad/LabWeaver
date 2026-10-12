@@ -824,6 +824,14 @@ fn configure_work(instance: &mut contracts::environment::EnvironmentInstance) {
             active_from: timestamp("2026-07-14T00:00:00.000Z"),
             expires_at: timestamp("2027-07-15T00:00:00.000Z"),
         });
+    if let Some(receipt) = instance.runtime_authorization.as_mut() {
+        receipt.lease_authorization = instance
+            .operation
+            .lease_authorization
+            .clone()
+            .expect("synthetic lease");
+        receipt.authorization.request_id = receipt.lease_authorization.resource_request_id;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1270,7 +1278,7 @@ fn projection() -> ReleasePublished {
         "network":{"mode":"deny_all"},
         "entries":[{"name":"web","protocol":"http","servicePort":8080}],
         "security":{
-            "userPolicy":"non_root_required",
+            "runAsUser":65534,
             "rootFilesystemPolicy":"read_only_required",
             "privilegeEscalationPolicy":"deny",
             "publicExposurePolicy":"deny",

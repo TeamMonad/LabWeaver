@@ -186,8 +186,9 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
         binding: "container-primary-v1",
         delay: Duration::ZERO,
     }))?;
-    let reconciler =
-        Reconciler::new(exact, Duration::from_secs(1))?.with_resource_allocator(test_allocator());
+    let reconciler = Reconciler::new(exact, Duration::from_secs(1))?
+        .with_runtime_admission(support::runtime_admission(&instance))
+        .with_resource_allocator(test_allocator());
     let observation = reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
         .await?
@@ -200,8 +201,9 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
         binding: "different-provider-v1",
         delay: Duration::ZERO,
     }))?;
-    let reconciler =
-        Reconciler::new(wrong, Duration::from_secs(1))?.with_resource_allocator(test_allocator());
+    let reconciler = Reconciler::new(wrong, Duration::from_secs(1))?
+        .with_runtime_admission(support::runtime_admission(&instance))
+        .with_resource_allocator(test_allocator());
     assert!(matches!(
         reconciler
             .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
@@ -227,6 +229,7 @@ async fn duplicate_binding_and_provider_timeout_fail_closed()
         Err(ReconcileError::InvalidProviderRegistry)
     ));
     let reconciler = Reconciler::new(registry, Duration::from_millis(1))?
+        .with_runtime_admission(support::runtime_admission(&planned_restart()?))
         .with_resource_allocator(test_allocator());
     assert!(matches!(
         reconciler
@@ -245,13 +248,14 @@ async fn experiment_resource_fence_wraps_provider_start_and_stop_in_order()
     registry.register(Arc::new(RecordingProvider {
         events: Arc::clone(&events),
     }))?;
-    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?.with_resource_allocator(
-        RecordingAllocator {
+    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?
+        .with_runtime_admission(support::runtime_admission(&ready_instance()))
+        .with_resource_allocator(RecordingAllocator {
             events: Arc::clone(&events),
-        },
-    );
+        });
 
     let mut start = ready_instance();
+    let reconciler = reconciler.with_runtime_admission(support::runtime_admission(&start));
     start.observed_state = ObservedEnvironmentState::Stopped;
     start.operation.kind = EnvironmentOperationKind::Start;
     start.operation.state = contracts::environment::OperationState::Accepted;
@@ -311,11 +315,12 @@ async fn experiment_reset_and_recovered_provision_require_resource_activation()
     registry.register(Arc::new(RecordingProvider {
         events: Arc::clone(&events),
     }))?;
-    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?.with_resource_allocator(
-        RecordingAllocator {
+    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?
+        .with_runtime_admission(support::runtime_admission(&ready_instance()))
+        .with_resource_allocator(RecordingAllocator {
             events: Arc::clone(&events),
-        },
-    );
+        });
+    let reconciler = reconciler.with_runtime_admission(support::runtime_admission(&instance));
     reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
         .await?;

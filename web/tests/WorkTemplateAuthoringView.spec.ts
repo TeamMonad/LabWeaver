@@ -91,7 +91,7 @@ const spec = {
     publicExposurePolicy: 'deny',
     rootFilesystemPolicy: 'read_only',
     securityProfileBinding: 'default',
-    userPolicy: 'non_root',
+    runAsUser: 65534,
   },
 }
 

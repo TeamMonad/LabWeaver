@@ -819,7 +819,7 @@ export async function createRealWorkPackage(
       ? [{ name: 'ssh', protocol: 'ssh', servicePort: vm.sshPort }]
       : [{ name: 'workspace-files', protocol: 'http', servicePort: 8080 }],
     security: {
-      userPolicy: 'non_root_required',
+      runAsUser: 65534,
       rootFilesystemPolicy: vm ? 'mutable_required' : 'read_only_required',
       privilegeEscalationPolicy: 'deny',
       publicExposurePolicy: 'deny',
@@ -997,7 +997,7 @@ export function assertRealWorkVmCandidate(candidate, vm, gpu = null) {
     || spec.entries[0].name !== 'ssh'
     || spec.entries[0].protocol !== 'ssh'
     || spec.entries[0].servicePort !== 22
-    || spec.security?.userPolicy !== 'non_root_required'
+    || spec.security?.runAsUser !== 65534
     || spec.security?.rootFilesystemPolicy !== 'mutable_required'
     || spec.security?.privilegeEscalationPolicy !== 'deny'
     || spec.security?.publicExposurePolicy !== 'deny'

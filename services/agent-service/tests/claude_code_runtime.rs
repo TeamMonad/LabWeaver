@@ -645,7 +645,7 @@ fn environment_candidate() -> Value {
             "servicePort": 22
         }],
         "security": {
-            "userPolicy": "non_root_required",
+            "runAsUser": 65534,
             "rootFilesystemPolicy": "mutable_required",
             "privilegeEscalationPolicy": "deny",
             "publicExposurePolicy": "deny",
@@ -693,7 +693,7 @@ fn container_environment_candidate() -> Value {
             "servicePort": 8080
         }],
         "security": {
-            "userPolicy": "non_root_required",
+            "runAsUser": 65534,
             "rootFilesystemPolicy": "read_only_required",
             "privilegeEscalationPolicy": "deny",
             "publicExposurePolicy": "deny",
@@ -4838,7 +4838,7 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
         "\"mode\":\"generated\"",
         "Every generated container Dockerfile must create a readable (possibly empty) `/opt/labweaver/workspace-seed` directory",
         "provide POSIX `/bin/sh`, `find`, and `cp` for the fixed workspace seed init step",
-        "fixed non-root UID/GID 65534 with a read-only root filesystem and writable `/workspace` and `/tmp`",
+        "declared runtime UID and root-filesystem policy, with writable `/workspace` and `/tmp`",
         "do not add a fake readiness process or alter the requested HTTP/service behavior",
     ] {
         assert!(

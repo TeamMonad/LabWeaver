@@ -2246,7 +2246,31 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
 }
 
 fn validate_plan(plan: &ContainerResourcePlan) -> Result<(), ProviderFailure> {
-    if plan.placement().validate().is_err()
+    if plan.resources.iter().any(|resource| {
+        resource.kind == "Deployment"
+            && resource
+                .document
+                .pointer("/spec/template/spec")
+                .is_none_or(|pod| {
+                    ["hostNetwork", "hostPID", "hostIPC"]
+                        .iter()
+                        .any(|field| pod.get(field).and_then(Value::as_bool) == Some(true))
+                        || ["initContainers", "containers", "ephemeralContainers"]
+                            .iter()
+                            .any(|field| {
+                                pod.get(field)
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|containers| {
+                                        containers.iter().any(|container| {
+                                            container
+                                                .pointer("/securityContext/privileged")
+                                                .and_then(Value::as_bool)
+                                                == Some(true)
+                                        })
+                                    })
+                            })
+                })
+    }) || plan.placement().validate().is_err()
         || plan.resources.is_empty()
         || plan.resources.len() > 32
         || Sha256Digest::of_canonical(&json!({

@@ -63,6 +63,7 @@ pub struct EnvironmentApiState {
     freeze_bindings: FreezeBindingService,
     pub(crate) work_executions: Option<ContainerWorkExecutionService>,
     resource_reservations: Option<Arc<dyn ExperimentResourceAllocator>>,
+    runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
 }
 
 impl EnvironmentApiState {
@@ -82,6 +83,7 @@ impl EnvironmentApiState {
             freeze_bindings,
             work_executions: None,
             resource_reservations: None,
+            runtime_admission: None,
         }
     }
 
@@ -89,6 +91,12 @@ impl EnvironmentApiState {
     #[must_use]
     pub fn with_work_executions(mut self, service: ContainerWorkExecutionService) -> Self {
         self.work_executions = Some(service);
+        self
+    }
+
+    #[must_use]
+    pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
+        self.runtime_admission = Some(admission);
         self
     }
 
@@ -480,6 +488,26 @@ async fn accept_resource_work_handoff(
     if authorization.lease_revision != handoff.lease_revision {
         return Err(EnvironmentApiError::LeaseFenceInvalid);
     }
+    let runtime_authorization = state
+        .runtime_admission
+        .as_ref()
+        .ok_or(EnvironmentApiError::ResourceReservationUnavailable)?
+        .resolve(
+            &contracts::environment::ResolveEnvironmentRuntimeAuthorizationRequest {
+                expected_lease_id: Some(handoff.lease_id),
+                resource_request_id: handoff.request_id,
+                environment_id: Some(handoff.environment_id),
+                project_id: handoff.project_id,
+                course_id: handoff.course_id,
+                owner_actor_id: handoff.owner_actor_id,
+                release_id: handoff.release_id,
+                release_version: handoff.release_version,
+            },
+        )
+        .await?;
+    if runtime_authorization.lease_authorization != authorization {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
     let command = EnvironmentLifecycleCommand {
         environment_id: handoff.environment_id,
         kind: EnvironmentOperationKind::Create,
@@ -499,6 +527,7 @@ async fn accept_resource_work_handoff(
         owner_actor_id: handoff.owner_actor_id,
         display_label: handoff.display_label,
         class: EnvironmentClass::Work,
+        runtime_authorization: Some(runtime_authorization),
         runtime_kind: release.projection.release.runtime_kind,
         release_id: handoff.release_id,
         release_version: handoff.release_version,
@@ -785,7 +814,6 @@ async fn create_environment(
         .resolve(request.release_id, request.release_version)
         .await?;
     if release.withdrawn_at.is_some()
-        || release.projection.release.project_id != request.project_id
         || release.projection.release.course_id != request.course_id
         || release.projection.environment_spec.class != EnvironmentClass::Experiment
     {
@@ -807,7 +835,28 @@ async fn create_environment(
     };
     let accepted_at = state.store.current_time().await?;
     let deadline_at = add_duration(accepted_at, OPERATION_DEADLINE)?;
-    let environment_id = EnvironmentId::new();
+    let runtime_authorization = state
+        .runtime_admission
+        .as_ref()
+        .ok_or(EnvironmentApiError::ResourceReservationUnavailable)?
+        .resolve(
+            &contracts::environment::ResolveEnvironmentRuntimeAuthorizationRequest {
+                expected_lease_id: None,
+                resource_request_id: request.resource_request_id,
+                environment_id: None,
+                project_id: request.project_id,
+                course_id: request.course_id,
+                owner_actor_id: actor_id,
+                release_id: request.release_id,
+                release_version: request.release_version,
+            },
+        )
+        .await?;
+    let contracts::resource::ResourceTarget::Environment { environment_id, .. } =
+        runtime_authorization.authorization.target
+    else {
+        return Err(EnvironmentApiError::ResourceReservationRejected);
+    };
     let command = EnvironmentLifecycleCommand {
         environment_id,
         kind: EnvironmentOperationKind::Create,
@@ -844,6 +893,7 @@ async fn create_environment(
             .clone()
             .unwrap_or_else(|| release.projection.environment_spec.name.clone()),
         class: release.projection.environment_spec.class,
+        runtime_authorization: Some(runtime_authorization),
         runtime_kind: release.projection.release.runtime_kind,
         release_id: request.release_id,
         release_version: request.release_version,
@@ -1369,6 +1419,8 @@ fn instance_response(instance: EnvironmentInstance) -> Result<Response, Environm
 /// Stable public API failures with no provider or credential detail.
 #[derive(Debug, thiserror::Error)]
 pub enum EnvironmentApiError {
+    #[error(transparent)]
+    RuntimeAdmission(#[from] crate::RuntimeAdmissionError),
     #[error("LW_ENVIRONMENT_GATEWAY_DENIED")]
     CallerDenied,
     #[error("LW_AUTH_SESSION_REJECTED")]
@@ -1440,12 +1492,14 @@ impl IntoResponse for EnvironmentApiError {
                 | EnvironmentStoreError::InvalidLimit,
             ) => StatusCode::BAD_REQUEST,
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
-            Self::RevisionConflict
+            Self::RuntimeAdmission(crate::RuntimeAdmissionError::Binding)
+            | Self::RevisionConflict
             | Self::LeaseFenceInvalid
             | Self::WorkExecution(
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
             ) => StatusCode::PRECONDITION_FAILED,
-            Self::ReleaseDenied
+            Self::RuntimeAdmission(crate::RuntimeAdmissionError::Release)
+            | Self::ReleaseDenied
             | Self::ResourceReservationRejected
             | Self::Store(EnvironmentStoreError::InvalidCreateAggregate)
             | Self::WorkExecution(WorkExecutionError::EnvironmentNotEligible)

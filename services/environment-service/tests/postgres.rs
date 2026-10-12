@@ -457,6 +457,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
@@ -523,6 +524,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let restarted_worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(crash_registry, Duration::from_millis(100))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
@@ -691,6 +693,7 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
@@ -798,6 +801,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         reset_target: None,
     };
     let create = EnvironmentCreateSpec {
+        runtime_authorization: None,
         project_id: handoff.project_id,
         course_id: handoff.course_id,
         owner_actor_id: handoff.owner_id,
@@ -1343,7 +1347,7 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     // migration marker is unknown compute/storage; Stop closes only compute, Restart
     // recovers storage and starts a new known compute interval, and Delete closes both.
     let migrated_ready = store.load(instances[0].id).await?;
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     store
         .accept_command(
             "legacy-meter-stop",
@@ -1403,8 +1407,11 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     // database observation for the following Ready transition so this test
     // does not confuse its historical fixture timestamps with live boundaries.
     let restart_observed_at = store.current_time().await?;
-    let worker =
-        success_worker_with_restart_ready_observation(store.clone(), Some(restart_observed_at))?;
+    let worker = success_worker_with_restart_ready_observation(
+        store.clone(),
+        Some(restart_observed_at),
+        pool.clone(),
+    )?;
     store
         .accept_command(
             "legacy-meter-restart",
@@ -1638,7 +1645,7 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
         .clone();
     store.create("create-key-lease-refresh", &work).await?;
 
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     for index in 0..4 {
         assert!(matches!(
             worker
@@ -1886,7 +1893,7 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
         .create("create-key-timeout-worker", &timed_out)
         .await?;
     let timeout_now = timestamp("2026-07-14T00:10:01.000Z");
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     assert!(matches!(
         worker
             .run_once("environment-worker-timeout", timeout_now)
@@ -2811,13 +2818,15 @@ fn kubevirt_fence(
 
 fn success_worker(
     store: PgEnvironmentStore,
+    pool: sqlx::PgPool,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
-    success_worker_with_restart_ready_observation(store, None)
+    success_worker_with_restart_ready_observation(store, None, pool)
 }
 
 fn success_worker_with_restart_ready_observation(
     store: PgEnvironmentStore,
     restart_ready_observed_at: Option<UtcTimestamp>,
+    pool: sqlx::PgPool,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(LifecycleSuccessProvider {
@@ -2826,6 +2835,7 @@ fn success_worker_with_restart_ready_observation(
     Ok(ReconcileWorker::new(
         store,
         Reconciler::new(registry, Duration::from_millis(100))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
@@ -3303,6 +3313,7 @@ async fn pending_reconcile_changes_only_schedule_without_retry_event_or_usage()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_millis(10),

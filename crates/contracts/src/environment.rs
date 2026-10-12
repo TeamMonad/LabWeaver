@@ -84,6 +84,8 @@ pub struct EnvironmentCreateSpec {
     pub release_id: ReleaseId,
     pub release_version: u64,
     pub provider_binding: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<EnvironmentRuntimeAuthorizationResolution>,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
     /// Resources approved by the immutable ReleaseProjection or Work lease.
@@ -398,6 +400,79 @@ pub struct EnvironmentLeaseVerificationResponse {
     pub version: u8,
     pub state: EnvironmentLeaseState,
     pub authorization: Option<EnvironmentLeaseAuthorization>,
+}
+
+/// Existing ResourceApproval resolution consumed by Environment before creating or replacing compute.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveEnvironmentRuntimeAuthorizationRequest {
+    pub expected_lease_id: Option<LeaseId>,
+    pub resource_request_id: ResourceRequestId,
+    pub environment_id: Option<EnvironmentId>,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub owner_actor_id: ActorId,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+}
+
+/// A transport receipt of the original approval and its verified platform execution values.
+/// This is not a second grant, approval lifecycle, or client-supplied permission source.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentRuntimeAuthorizationResolution {
+    pub lease_authorization: EnvironmentLeaseAuthorization,
+    pub authorization: crate::runtime_authorization::RuntimeAuthorizationBinding,
+    pub owner_actor_id: ActorId,
+    pub default_container_uid: u32,
+    pub privileged_execution_location:
+        Option<crate::platform_configuration::PrivilegedExecutionLocation>,
+}
+
+impl EnvironmentRuntimeAuthorizationResolution {
+    /// The expected digest is computed from Environment's server-owned immutable release, never supplied by the user.
+    pub fn validate_for(
+        &self,
+        request: &ResolveEnvironmentRuntimeAuthorizationRequest,
+        spec: &crate::authoring::EnvironmentSpec,
+        expected_configuration_sha256: &str,
+    ) -> Result<EnvironmentId, EnvironmentError> {
+        let crate::resource::ResourceTarget::Environment {
+            environment_id,
+            release_id,
+            release_version,
+        } = self.authorization.target
+        else {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        };
+        self.lease_authorization.validate()?;
+        if self.lease_authorization.resource_request_id != request.resource_request_id
+            || self.lease_authorization.environment_id != environment_id
+            || self.lease_authorization.project_id != request.project_id
+            || self.lease_authorization.course_id != request.course_id
+            || self.lease_authorization.owner_actor_id != request.owner_actor_id
+            || request
+                .expected_lease_id
+                .is_some_and(|id| id != self.lease_authorization.lease_id)
+            || self.authorization.request_id != request.resource_request_id
+            || self.authorization.project_id != request.project_id
+            || self.authorization.course_id != request.course_id
+            || self.owner_actor_id != request.owner_actor_id
+            || self.authorization.configuration.configuration_sha256
+                != expected_configuration_sha256
+            || request
+                .environment_id
+                .is_some_and(|expected| expected != environment_id)
+            || release_id != request.release_id
+            || release_version != request.release_version
+            || self.authorization.permissions.capabilities != spec.security.capabilities
+            || self.authorization.permissions.privileged != spec.security.privileged
+            || (spec.security.privileged && self.privileged_execution_location.is_none())
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(environment_id)
+    }
 }
 
 /// Resource-to-Environment command to create one Work aggregate from an already-approved
@@ -1134,6 +1209,9 @@ pub struct EnvironmentInstance {
     pub capacity_binding: Option<String>,
     pub approved_resources: WorkloadResources,
     pub provider_binding: String,
+    /// Receipt of the original ResourceApproval; the source is re-read before new compute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<EnvironmentRuntimeAuthorizationResolution>,
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
     pub revision: Revision,

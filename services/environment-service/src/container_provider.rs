@@ -1388,7 +1388,8 @@ where
         if instance.runtime_kind != RuntimeKind::Container
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
-            || instance.project_id != projection.release.project_id
+            || (instance.class == contracts::authoring::EnvironmentClass::Work
+                && instance.project_id != projection.release.project_id)
             || instance.course_id != projection.release.course_id
             || instance.provider_binding != self.binding
             || container_provider_binding(projection)? != self.binding
@@ -1452,9 +1453,15 @@ where
         }) {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
-        if projection.environment_spec.security.root_filesystem_policy
-            != RootFilesystemPolicy::ReadOnlyRequired
-        {
+        let uid = crate::runtime_admission::authorized_uid(instance, projection)?;
+        let security = &projection.environment_spec.security;
+        let security_context = json!({"runAsNonRoot":uid!=0,"runAsUser":uid,"privileged":security.privileged,
+            "allowPrivilegeEscalation":security.privilege_escalation_policy==contracts::authoring::PrivilegeEscalationPolicy::Allow,
+            "readOnlyRootFilesystem":security.root_filesystem_policy==RootFilesystemPolicy::ReadOnlyRequired,
+            "capabilities":{"drop":if security.privileged {Vec::<String>::new()}else{vec!["ALL".to_owned()]},"add":security.capabilities},
+            "seccompProfile":{"type":if security.privileged {"Unconfined"}else{"RuntimeDefault"}}});
+        // A selector alone does not establish a verified privileged execution boundary.
+        if security.privileged {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
         let cpu = format!("{cpu_millicores}m");
@@ -1623,26 +1630,25 @@ where
                             "metadata":{"labels":pod_labels},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
-                                // The shared NFS PVC is provisioned with the `nobody` owner.
-                                // Pinning the runtime identity to that non-root UID keeps the
-                                // student workspace writable. The fixed init command copies the
+                                // The approved identity is shared by the runtime and workspace seed.
+                                // The fixed init command copies the
                                 // approved image's seed exactly once and preserves an existing
                                 // workspace across stop/start and pod replacement.
-                                "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
+                                "securityContext":{"runAsNonRoot":uid!=0,"runAsUser":uid,"runAsGroup":uid,"fsGroup":uid,"seccompProfile":{"type":"RuntimeDefault"}},
                                 "initContainers":[{
                                     "name":"workspace-seed",
                                     "image":image,
                                     "imagePullPolicy":"IfNotPresent",
                                     "command":["/bin/sh","-c",WORKSPACE_SEED_COMMAND],
                                     "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"128Mi"}},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "securityContext":security_context,
                                     "volumeMounts":[{"name":"workspace","mountPath":WORKSPACE_ROOT}]
                                 }],
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
                                     "ports":[{"name":"service","containerPort":service_port}],
                                      "resources":{"requests":workload_requests,"limits":workload_limits},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "securityContext":security_context,
                                     "volumeMounts":[
                                         {"name":"workspace","mountPath":WORKSPACE_ROOT},
                                         {"name":"runtime-tmp","mountPath":"/tmp"}
