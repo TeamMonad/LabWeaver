@@ -1,55 +1,64 @@
 <template>
-  <Teleport to="body">
-    <div
-      v-if="open"
-      class="confirm-dialog__scrim"
-      aria-hidden="true"
-      @click="dismissible && $emit('cancel')"
-    />
-    <dialog
-      v-if="open"
-      ref="dialogRef"
-      class="confirm-dialog"
-      role="alertdialog"
-      aria-modal="true"
-      :aria-labelledby="titleId"
-      :aria-describedby="descId"
-      open
-      @keydown.esc.prevent="dismissible && $emit('cancel')"
-      @keydown.tab="trapFocus"
-    >
-      <div class="confirm-dialog__icon" aria-hidden="true">
-        <SvgIcon :name="icon" size="xl" />
-      </div>
-      <div class="confirm-dialog__content">
-        <h2 :id="titleId" class="confirm-dialog__title">{{ title }}</h2>
-        <p :id="descId" class="confirm-dialog__description">{{ description }}</p>
-      </div>
-      <div class="confirm-dialog__actions">
-        <button
-          v-if="dismissible"
-          ref="cancelButtonRef"
-          type="button"
-          class="text-button"
-          @click="$emit('cancel')"
-        >
-          {{ cancelText }}
-        </button>
-        <button
-          type="button"
-          class="filled-button"
-          :class="`filled-button--${confirmSeverity}`"
-          @click="$emit('confirm')"
-        >
-          {{ confirmText }}
-        </button>
-      </div>
-    </dialog>
-  </Teleport>
+  <AlertDialogRoot :open="open">
+    <AlertDialogPortal>
+      <AlertDialogOverlay
+        class="confirm-dialog__scrim"
+        @click="dismissible && $emit('cancel')"
+      />
+      <AlertDialogContent
+        class="confirm-dialog"
+        @escape-key-down="onEscape"
+        @open-auto-focus="onOpenAutoFocus"
+      >
+        <div class="confirm-dialog__icon" aria-hidden="true">
+          <SvgIcon :name="icon" size="xl" />
+        </div>
+        <div class="confirm-dialog__content">
+          <AlertDialogTitle as="h2" class="confirm-dialog__title">{{ title }}</AlertDialogTitle>
+          <AlertDialogDescription as="p" class="confirm-dialog__description">{{ description }}</AlertDialogDescription>
+        </div>
+        <div class="confirm-dialog__actions">
+          <AlertDialogCancel
+            v-if="dismissible"
+            type="button"
+            class="text-button"
+            @click="$emit('cancel')"
+          >
+            {{ cancelText }}
+          </AlertDialogCancel>
+          <button
+            ref="confirmButtonRef"
+            type="button"
+            class="filled-button"
+            :class="`filled-button--${severity}`"
+            @click="$emit('confirm')"
+          >
+            {{ confirmText }}
+          </button>
+        </div>
+      </AlertDialogContent>
+    </AlertDialogPortal>
+  </AlertDialogRoot>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+/**
+ * Confirmation for consequential actions, built on Reka UI AlertDialog: focus is
+ * trapped inside, lands on Cancel so an accidental Enter never confirms, Esc
+ * cancels, and focus returns to the opening control when the dialog closes.
+ * The dialog is controlled by `open`; it never closes itself, the parent does
+ * on `confirm` or `cancel`.
+ */
+import { computed, ref } from 'vue'
+import {
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogOverlay,
+  AlertDialogPortal,
+  AlertDialogRoot,
+  AlertDialogTitle,
+} from 'reka-ui'
 import SvgIcon from './SvgIcon.vue'
 
 interface Props {
@@ -69,58 +78,25 @@ const props = withDefaults(defineProps<Props>(), {
   severity: 'warning',
 })
 
-defineEmits<{
+const emit = defineEmits<{
   confirm: []
   cancel: []
 }>()
 
-const instanceId = `lw-confirm-${Math.random().toString(36).slice(2, 10)}`
-const titleId = computed(() => `confirm-title-${instanceId}`)
-const descId = computed(() => `confirm-desc-${instanceId}`)
+const confirmButtonRef = ref<HTMLButtonElement | null>(null)
 
-const dialogRef = ref<HTMLDialogElement | null>(null)
-const cancelButtonRef = ref<HTMLButtonElement | null>(null)
+function onEscape(event: KeyboardEvent) {
+  // Esc never closes the dialog by itself: a dismissible dialog reports cancel,
+  // a non-dismissible one ignores it.
+  event.preventDefault()
+  if (props.dismissible) emit('cancel')
+}
 
-// Focus lands on the cancel action so an accidental Enter can never trigger an
-// irreversible confirm (GCP-style destructive-action protection).
-let returnFocus: HTMLElement | null = null
-
-watch(
-  () => props.open,
-  async (open) => {
-    if (!open) {
-      // Return focus to the control that opened the dialog so keyboard users keep their place.
-      const target = returnFocus
-      returnFocus = null
-      await nextTick()
-      if (target?.isConnected) target.focus()
-      return
-    }
-    if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) returnFocus = document.activeElement
-    await nextTick()
-    if (props.dismissible) cancelButtonRef.value?.focus()
-    else dialogRef.value?.querySelector<HTMLButtonElement>('.filled-button')?.focus()
-  },
-  { immediate: true },
-)
-
-function trapFocus(event: KeyboardEvent) {
-  const dialog = dialogRef.value
-  if (!dialog) return
-  const focusable = Array.from(
-    dialog.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
-  )
-  if (focusable.length === 0) return
-  const first = focusable[0]
-  const last = focusable[focusable.length - 1]
-  const active = document.activeElement
-  if (event.shiftKey && (active === first || !dialog.contains(active))) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && active === last) {
-    event.preventDefault()
-    first.focus()
-  }
+function onOpenAutoFocus(event: Event) {
+  // Reka focuses Cancel by default; without Cancel the only action gets focus.
+  if (props.dismissible) return
+  event.preventDefault()
+  confirmButtonRef.value?.focus()
 }
 
 const icon = computed(() => {
@@ -133,8 +109,6 @@ const icon = computed(() => {
       return 'warning'
   }
 })
-
-const confirmSeverity = computed(() => props.severity)
 </script>
 
 <style scoped>
@@ -158,6 +132,7 @@ const confirmSeverity = computed(() => props.severity)
   margin: 0;
   padding: 24px;
   border: none;
+  outline: none;
   border-radius: var(--md-sys-shape-extra-large);
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface);
