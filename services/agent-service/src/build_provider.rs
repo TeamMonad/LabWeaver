@@ -124,22 +124,10 @@ impl NatsBuildSupplyChainProvider {
             }
             Err(_) => return Err(unavailable()),
         };
-        if message.payload.len() > MAX_RESPONSE_BYTES {
-            return Err(output_invalid());
-        }
-        let response: BuildExecutorResponseEnvelope =
-            serde_json::from_slice(&message.payload).map_err(|_| output_invalid())?;
-        if response.protocol_version != context.protocol_version
-            || response.build_request_id != context.build_request_id
-            || response.fence_generation != context.fence_generation
-            || response.stage != context.stage
-            || response.stage_request_id != context.stage_request_id
-        {
-            return Err(identity_mismatch());
-        }
+        let response = decode_executor_response(context, &message.payload)?;
         if !queried
             && context.stage == BuildProviderStage::Build
-            && matches!(&response.response, BuildExecutorResponse::Failed { failure } if matches!(failure.code, BuildProviderFailureCode::ExecutionUnknown | BuildProviderFailureCode::Unavailable))
+            && matches!(&response, BuildExecutorResponse::Failed { failure } if matches!(failure.code, BuildProviderFailureCode::ExecutionUnknown | BuildProviderFailureCode::Unavailable))
         {
             let payload = serde_json::to_vec(&BuildExecutorRequestEnvelope {
                 context,
@@ -160,23 +148,30 @@ impl NatsBuildSupplyChainProvider {
                     code: BuildProviderFailureCode::ExecutionUnknown,
                     retryable: false,
                 })?;
-            if message.payload.len() > MAX_RESPONSE_BYTES {
-                return Err(output_invalid());
-            }
-            let original: BuildExecutorResponseEnvelope =
-                serde_json::from_slice(&message.payload).map_err(|_| output_invalid())?;
-            if original.protocol_version != context.protocol_version
-                || original.build_request_id != context.build_request_id
-                || original.fence_generation != context.fence_generation
-                || original.stage != context.stage
-                || original.stage_request_id != context.stage_request_id
-            {
-                return Err(identity_mismatch());
-            }
-            return Ok(original.response);
+            return decode_executor_response(context, &message.payload);
         }
-        Ok(response.response)
+        Ok(response)
     }
+}
+
+fn decode_executor_response(
+    context: BuildProviderRequestContext,
+    payload: &[u8],
+) -> Result<BuildExecutorResponse, BuildProviderFailure> {
+    if payload.len() > MAX_RESPONSE_BYTES {
+        return Err(output_invalid());
+    }
+    let response: BuildExecutorResponseEnvelope =
+        serde_json::from_slice(payload).map_err(|_| output_invalid())?;
+    if response.protocol_version != context.protocol_version
+        || response.build_request_id != context.build_request_id
+        || response.fence_generation != context.fence_generation
+        || response.stage != context.stage
+        || response.stage_request_id != context.stage_request_id
+    {
+        return Err(identity_mismatch());
+    }
+    Ok(response.response)
 }
 
 #[async_trait]
@@ -742,7 +737,7 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
         }
     }
 
-    /// Enables the actual authenticated Resource owner; absent configuration rejects BuildKit.
+    /// Enables the actual authenticated Resource owner; absent configuration rejects `BuildKit`.
     #[must_use]
     pub fn with_billing_client(mut self, client: task_execution::resource::ResourceClient) -> Self {
         self.billing = Some(client);
