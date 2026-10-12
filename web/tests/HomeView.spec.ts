@@ -188,4 +188,12 @@ describe('HomeView (current project in progress)', () => {
     expect(wrapper.get('h1').text()).toBe('欢迎进入 LabWeaver')
     expect(listEnvironments).not.toHaveBeenCalled()
   })
+
+  it('says when only the first page was checked instead of implying the list is complete', async () => {
+    vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [environment('env-ready', 'ready')], nextCursor: 'cursor-2' }))
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: [], page: 1, pageSize: 50, hasMore: true }))
+    const { wrapper } = await createWrapper()
+    expect(wrapper.get('[data-home-section="environments"]').text()).toContain('只显示前 50 个运行中的环境')
+    expect(wrapper.get('[data-home-section="agent-runs"]').text()).toContain('只检查了最近 50 个任务')
+  })
 })
