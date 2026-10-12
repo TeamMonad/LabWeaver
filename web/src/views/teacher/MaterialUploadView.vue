@@ -251,6 +251,12 @@
         </p>
       </div>
 
+      <UploadRecoveryStatus
+        :state="upload.state"
+        :has-session="upload.session !== null"
+        @cancel="upload.cancel"
+      />
+
       <div class="upload-actions">
         <button
           type="button"
@@ -269,6 +275,9 @@
           </template>
           <template v-else-if="upload.state.kind === 'completing'">
             确认归档…
+          </template>
+          <template v-else-if="upload.state.kind === 'needs-files'">
+            继续上传
           </template>
           <template v-else>
             上传材料包
@@ -530,6 +539,7 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import UploadRecoveryStatus from '@/components/common/UploadRecoveryStatus.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
@@ -550,7 +560,7 @@ const courseId = computed(() => projects.selectedProject?.courseId ?? null)
 const policy = useActiveProjectLlmPolicy(projectId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))
 const retentionChoice = ref<ProblemPackageRetentionChoice>('finite')
-const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice)
+const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice, { recoveryScope: 'teacher-materials' })
 const agent = useProjectAgentRun(projectId, { kind: 'authoring', environmentClass: 'experiment' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -563,7 +573,7 @@ const fileColumns: DataTableColumn<UploadFile>[] = [
 ]
 
 const canUpload = computed(() => {
-  const ready = upload.state.kind === 'ready' || upload.state.kind === 'error'
+  const ready = ['ready', 'error', 'needs-files', 'cancelled'].includes(upload.state.kind)
   return ready && upload.files.length > 0 && policyRevision.value !== undefined
 })
 
@@ -579,7 +589,7 @@ const uploadedPackage = computed(() => (upload.state.kind === 'done' ? upload.st
 const retentionChoiceEditable = computed(() => (
   upload.session === null
   && !packageDone.value
-  && ['idle', 'ready', 'error'].includes(upload.state.kind)
+  && ['idle', 'ready', 'error', 'cancelled'].includes(upload.state.kind)
 ))
 const IN_FLIGHT_RUN_STATES = ['requested', 'running', 'cancelling', 'awaiting_approval'] as const
 
