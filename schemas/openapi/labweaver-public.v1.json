@@ -12367,12 +12367,13 @@
     },
     "/auth/callback": {
       "get": {
+        "description": "Requires the initiating browser's transaction cookie. Wrong-browser requests cannot consume the transaction. Matching callbacks consume it once and clear only that cookie, including provider refusal or exchange failure. Responses are not cached.",
         "operationId": "completeOidcLogin",
         "parameters": [
           {
             "in": "query",
             "name": "code",
-            "required": true,
+            "required": false,
             "schema": {
               "minLength": 1,
               "type": "string"
@@ -12383,14 +12384,25 @@
             "name": "state",
             "required": true,
             "schema": {
-              "minLength": 1,
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[A-Za-z0-9_-]{64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Provider refusal; replaces code and consumes only a browser-bound transaction.",
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
               "type": "string"
             }
           }
         ],
         "responses": {
-          "302": {
-            "description": "Session established and redirected to the allowlisted return URL"
+          "307": {
+            "description": "Session established and redirected to the validated same-origin portal path"
           },
           "401": {
             "$ref": "#/components/responses/Problem"
@@ -12405,20 +12417,27 @@
     },
     "/auth/login": {
       "get": {
+        "description": "Creates a short-lived single-use login transaction and a Secure, HttpOnly, host-only cookie unique to this transaction. Navigate in the browser; retain cookies for the callback.",
         "operationId": "beginOidcLogin",
         "parameters": [
           {
+            "description": "Portal path beginning with one slash, including optional query and fragment. External URLs, network paths, backslashes and control characters are rejected. Omission uses the configured portal destination.",
             "in": "query",
             "name": "return_to",
             "required": false,
             "schema": {
+              "maxLength": 2048,
+              "minLength": 1,
               "type": "string"
             }
           }
         ],
         "responses": {
-          "302": {
-            "description": "Redirect to the configured OIDC provider"
+          "307": {
+            "description": "Redirect to the configured OIDC provider with the transaction cookie"
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
           },
           "503": {
             "$ref": "#/components/responses/Problem"

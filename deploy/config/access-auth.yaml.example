@@ -9,7 +9,9 @@ oidc:
   issuer: "https://keycloak.example.invalid/realms/labweaver"
   client_id: "labweaver-web"
   audience: "labweaver-api"
+  # Register this exact callback in Keycloak, without wildcards, query or fragment.
   redirect_uri: "https://portal.example.invalid/auth/callback"
+  # Also used when login omits return_to; must share the callback origin.
   post_logout_redirect_uri: "https://portal.example.invalid/"
   trusted_ca_file: "/etc/labweaver/secrets/oidc-ca.pem"
   role_claim_path: ["realm_access", "roles"]
@@ -26,6 +28,7 @@ browser:
   allowed_origins: ["https://portal.example.invalid"]
   session_ttl_seconds: 900
   session_idle_ttl_seconds: 300
+  # Each tab receives its own Secure/HttpOnly transaction cookie for this 60-900s lifetime.
   oidc_transaction_ttl_seconds: 300
   runtime_pool_max_connections: 10
   cleanup_interval_seconds: 60
