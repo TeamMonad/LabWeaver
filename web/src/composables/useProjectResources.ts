@@ -15,7 +15,7 @@ import { idempotencyKey as makeIdempotencyKey, ifMatch } from '@/utils/format'
 
 function errorDiagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true)
+  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true, problem)
 }
 
 async function listProjectRequests(projectId: string) {

@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import NavigationDrawer from '@/components/layout/NavigationDrawer.vue'
 
@@ -78,5 +78,39 @@ describe('NavigationDrawer', () => {
     expect(wrapper.findAll('[data-nav-group]')).toHaveLength(0)
     expect(wrapper.findAll('.drawer-item')).toHaveLength(0)
     expect(wrapper.text()).toContain('登录后显示可用任务')
+  })
+
+  describe('modal (compact viewport)', () => {
+    const originalWidth = window.innerWidth
+    beforeEach(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 }) })
+    afterEach(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth }) })
+
+    async function mountModal(open: boolean) {
+      const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:pathMatch(.*)*', component: { template: '<div />' } }] })
+      await router.push('/')
+      await router.isReady()
+      const wrapper = mount(NavigationDrawer, { props: { open }, global: { plugins: [router] }, attachTo: document.body })
+      await flushPromises()
+      return wrapper
+    }
+
+    it('renders a modal dialog with focus on the close button and closes on Escape', async () => {
+      const wrapper = await mountModal(true)
+      const dialog = document.body.querySelector('[role="dialog"]')
+      expect(dialog?.classList.contains('navigation-drawer--modal')).toBe(true)
+      expect(dialog?.textContent).toContain('应用导航')
+      expect(document.activeElement?.getAttribute('aria-label')).toBe('关闭导航')
+      expect(wrapper.find('.rail-toggle').exists()).toBe(false)
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushPromises()
+      expect(wrapper.emitted('close')).toHaveLength(1)
+      wrapper.unmount()
+    })
+
+    it('renders nothing while closed', async () => {
+      const wrapper = await mountModal(false)
+      expect(document.body.querySelector('.navigation-drawer')).toBeNull()
+      wrapper.unmount()
+    })
   })
 })

@@ -92,7 +92,7 @@ export interface ProjectReleaseOption {
 
 function diagnostic(error: unknown, fallbackCode: string, fallbackMessage: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
+  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true, problem)
 }
 
 function stateFromItems<T>(items: T[]): AsyncState<T[]> {

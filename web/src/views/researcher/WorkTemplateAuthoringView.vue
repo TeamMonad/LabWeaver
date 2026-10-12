@@ -82,6 +82,8 @@
       <DiagnosticBanner
         v-if="upload.state.kind === 'error'"
         :code="upload.state.diagnostic.code"
+        :request-id="upload.state.diagnostic.requestId"
+        :next-step="upload.state.diagnostic.nextStep"
         :message="upload.state.diagnostic.message"
         :retryable="upload.state.diagnostic.retryable"
         severity="error"
@@ -251,6 +253,8 @@
           <DiagnosticBanner
             v-if="candidateOutcome"
             :code="candidateOutcome.code"
+            :request-id="candidateOutcome.requestId"
+            :next-step="candidateOutcome.nextStep"
             :message="candidateOutcome.message"
             :retryable="candidateOutcome.retryable"
             :severity="candidateOutcome.code.includes('FAILED') ? 'error' : 'info'"
@@ -294,6 +298,8 @@
       <DiagnosticBanner
         v-if="releaseOutcome"
         :code="releaseOutcome.code"
+        :request-id="releaseOutcome.requestId"
+        :next-step="releaseOutcome.nextStep"
         :message="releaseOutcome.message"
         :retryable="releaseOutcome.retryable"
         :severity="releaseOutcome.code.includes('FAILED') ? 'error' : 'info'"
@@ -588,7 +594,7 @@ async function loadCandidate(id: string, silent = false) {
       environmentCandidate.value = { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', '环境候选在限定时间内仍未同步，请重试。', true) }
       return
     }
-    environmentCandidate.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_LOAD_FAILED', problem?.detail ?? '加载 Work 环境候选失败', problem?.retryable ?? true) }
+    environmentCandidate.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_LOAD_FAILED', problem?.detail ?? '加载 Work 环境候选失败', problem?.retryable ?? true, problem) }
     return
   }
   candidateNotFoundRetryCount = 0
@@ -679,7 +685,7 @@ async function loadRelease(id: string, silent = false) {
   if (generation !== releaseGeneration || props.projectId !== projectId || releaseIdRef.value !== id) return
   if (result.error) {
     const problem = extractProblemDetails(result.error)
-    const diagnostic = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_LOAD_FAILED', problem?.detail ?? '加载 Work 模板发布状态失败', problem?.retryable ?? true)
+    const diagnostic = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_LOAD_FAILED', problem?.detail ?? '加载 Work 模板发布状态失败', problem?.retryable ?? true, problem)
     releaseRouteState.value = 'error'
     release.value = { kind: 'error', diagnostic }
     releaseOutcome.value = diagnostic
@@ -764,7 +770,7 @@ async function approveCandidate() {
     })
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      candidateOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_APPROVAL_FAILED', problem?.detail ?? '批准环境候选失败', problem?.retryable ?? true)
+      candidateOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_CANDIDATE_APPROVAL_FAILED', problem?.detail ?? '批准环境候选失败', problem?.retryable ?? true, problem)
       return
     }
     approvedCandidate.value = result.data
@@ -796,7 +802,7 @@ async function publishRelease() {
     })
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      const diagnostic = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_FAILED', problem?.detail ?? '发布 Work 模板失败', problem?.retryable ?? true)
+      const diagnostic = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_FAILED', problem?.detail ?? '发布 Work 模板失败', problem?.retryable ?? true, problem)
       release.value = { kind: 'error', diagnostic }
       releaseOutcome.value = diagnostic
       return
@@ -838,6 +844,7 @@ async function confirmReleaseWithdrawal() {
         problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED',
         problem?.detail ?? '撤回 Work 模板失败',
         problem?.retryable ?? true,
+        problem,
       )
       return
     }
@@ -855,6 +862,7 @@ async function confirmReleaseWithdrawal() {
       problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED',
       problem?.detail ?? '撤回 Work 模板失败',
       problem?.retryable ?? true,
+      problem,
     )
   } finally {
     withdrawalInFlight.value = false

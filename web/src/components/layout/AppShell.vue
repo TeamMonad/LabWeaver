@@ -17,16 +17,35 @@
     />
 
     <main ref="appMain" class="app-main">
-      <RouterView />
+      <div
+        v-if="context.state.value.kind === 'loading'"
+        class="project-context-loading"
+        role="status"
+      >
+        <span class="spinner" aria-hidden="true" />
+        <span>正在确认项目…</span>
+      </div>
+      <ProjectContextRecovery
+        v-else-if="context.state.value.kind === 'unavailable'"
+        :key="context.state.value.projectId"
+        :state="context.state.value"
+      />
+      <RouterView v-else v-slot="{ Component }">
+        <!-- Re-create project pages when the project changes so no view keeps
+             the previous project's results while new requests are in flight. -->
+        <component :is="Component" :key="viewKey" />
+      </RouterView>
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick, watch } from 'vue'
+import { computed, ref, onMounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import TopAppBar from './TopAppBar.vue'
 import NavigationDrawer from './NavigationDrawer.vue'
+import ProjectContextRecovery from './ProjectContextRecovery.vue'
+import { useProjectContextSync } from '@/composables/useProjectContext'
 import { useThemeStore } from '@/stores/theme'
 
 const themeStore = useThemeStore()
@@ -34,6 +53,11 @@ const route = useRoute()
 const appMain = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 const drawerRail = ref(false)
+const context = useProjectContextSync()
+const viewKey = computed(() => {
+  const state = context.state.value
+  return state.kind === 'ready' ? `project:${state.project.id}` : 'global'
+})
 
 function handleToggleDrawer() {
   if (typeof window !== 'undefined' && window.innerWidth >= 840) {
@@ -85,6 +109,29 @@ onMounted(() => {
   overflow-y: auto;
   padding: 24px 16px 48px;
   min-width: 0;
+}
+
+.project-context-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 16px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
+}
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--md-sys-color-outline-variant);
+  border-top-color: var(--md-sys-color-primary);
+  border-radius: 50%;
+  animation: shell-spin 0.8s linear infinite;
+}
+
+@keyframes shell-spin {
+  to { transform: rotate(360deg); }
 }
 
 @media (min-width: 840px) {

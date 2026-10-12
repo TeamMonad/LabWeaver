@@ -65,6 +65,8 @@
       <DiagnosticBanner
         v-if="createDiagnostic"
         :code="createDiagnostic.code"
+        :request-id="createDiagnostic.requestId"
+        :next-step="createDiagnostic.nextStep"
         :message="createDiagnostic.message"
         :retryable="createDiagnostic.retryable"
         severity="error"
@@ -580,6 +582,7 @@ async function load() {
         problem?.diagnosticCode ?? 'ENVIRONMENT_LIST_FAILED',
         problem?.detail ?? '加载实验列表失败',
         problem?.retryable ?? true,
+        problem,
       ),
     }
     return

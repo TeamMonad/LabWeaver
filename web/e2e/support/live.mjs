@@ -133,26 +133,31 @@ export async function configureProjectPolicyByUi(page, projectId, budgetOverride
   return await expectJson(await responsePromise, 'PROJECT_POLICY_UI_SAVE_FAILED')
 }
 
-/** Enter a role workbench through the public home task cards. */
+/**
+ * Enter a role workbench from the home page through the task navigation.
+ * The home page shows the current project's in-progress items; the drawer is
+ * the single entry for every workbench the account may open.
+ */
 export async function navigateFromHomeByUi(page, taskLabel) {
   await page.goto('/', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: '欢迎进入 LabWeaver', exact: true })).toBeVisible({ timeout: 60_000 })
-  const tasks = page.locator('.task-grid a.task-card')
+  const navigation = page.getByRole('navigation', { name: '任务导航', exact: true })
+  await expect(navigation).toBeVisible({ timeout: 60_000 })
+  const items = navigation.locator('a.drawer-item')
   const compact = (value) => String(value ?? '').replace(/\s+/g, '')
   let matchingIndexes = []
   await expect.poll(
     async () => {
-      matchingIndexes = await tasks.evaluateAll((cards, expected) => cards.reduce((indexes, card, index) => {
-        const title = card.querySelector('.card-title')?.textContent ?? ''
-        if (title.replace(/\s+/g, '') === expected) indexes.push(index)
+      matchingIndexes = await items.evaluateAll((links, expected) => links.reduce((indexes, link, index) => {
+        const label = link.querySelector('.drawer-item__label')?.textContent ?? ''
+        if (label.replace(/\s+/g, '') === expected) indexes.push(index)
         return indexes
       }, []), compact(taskLabel))
       return matchingIndexes.length
     },
     { timeout: 60_000, intervals: [250, 500, 1000] },
   ).toBe(1)
-  if (matchingIndexes.length !== 1) throw new Error(`HOME_TASK_CARD_NOT_UNIQUE:${taskLabel}`)
-  await tasks.nth(matchingIndexes[0]).click()
+  if (matchingIndexes.length !== 1) throw new Error(`NAVIGATION_ITEM_NOT_UNIQUE:${taskLabel}`)
+  await items.nth(matchingIndexes[0]).click()
 }
 
 export async function createProjectByUi(page, name) {

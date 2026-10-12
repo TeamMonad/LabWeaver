@@ -1,39 +1,36 @@
 <template>
-  <Teleport to="body">
-    <div
-      v-if="open"
-      class="evidence-scrim"
-      aria-hidden="true"
-      @click="dismissible && $emit('close')"
-    />
-    <aside
-      v-if="open"
-      class="evidence-sheet"
-      role="complementary"
-      aria-label="证据侧栏"
-    >
-      <header class="evidence-sheet__header">
-        <h2 class="evidence-sheet__title">{{ title }}</h2>
-        <button
-          v-if="dismissible"
-          ref="closeButton"
-          type="button"
-          class="icon-button"
-          aria-label="关闭证据侧栏"
-          @click="$emit('close')"
-        >
-          <SvgIcon name="close" size="md" aria-label="关闭" />
-        </button>
-      </header>
-      <div class="evidence-sheet__content">
-        <slot />
-      </div>
-    </aside>
-  </Teleport>
+  <DialogRoot :open="open" @update:open="onOpenChange">
+    <DialogPortal>
+      <DialogOverlay class="evidence-scrim" />
+      <DialogContent
+        as="aside"
+        class="evidence-sheet"
+        aria-label="证据侧栏"
+        :aria-describedby="undefined"
+        @escape-key-down="guardDismiss"
+        @interact-outside="guardDismiss"
+        @open-auto-focus="onOpenAutoFocus"
+      >
+        <header class="evidence-sheet__header">
+          <DialogTitle class="evidence-sheet__title">{{ title }}</DialogTitle>
+          <DialogClose
+            v-if="dismissible"
+            class="icon-button"
+            aria-label="关闭证据侧栏"
+          >
+            <SvgIcon name="close" size="md" aria-label="关闭" />
+          </DialogClose>
+        </header>
+        <div class="evidence-sheet__content">
+          <slot />
+        </div>
+      </DialogContent>
+    </DialogPortal>
+  </DialogRoot>
 </template>
 
 <script setup lang="ts">
-import { watch, nextTick, ref } from 'vue'
+import { DialogClose, DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from 'reka-ui'
 import SvgIcon from './SvgIcon.vue'
 
 interface Props {
@@ -46,20 +43,26 @@ const props = withDefaults(defineProps<Props>(), {
   dismissible: true,
 })
 
-defineEmits<{
+const emit = defineEmits<{
   close: []
 }>()
 
-const closeButton = ref<HTMLButtonElement | null>(null)
+// Reka Dialog supplies the focus trap, Escape/outside dismissal, scroll lock and
+// focus return to the opener; a non-dismissible sheet blocks both dismiss paths.
+function onOpenChange(next: boolean) {
+  if (!next && props.dismissible) emit('close')
+}
 
-watch(
-  () => props.open,
-  (open) => {
-    if (open) {
-      void nextTick(() => closeButton.value?.focus())
-    }
-  }
-)
+function guardDismiss(event: Event) {
+  if (!props.dismissible) event.preventDefault()
+}
+
+function onOpenAutoFocus(event: Event) {
+  if (props.dismissible) return
+  // Without a close button keep focus on the sheet itself rather than the first slotted control.
+  event.preventDefault()
+  ;(event.target as HTMLElement | null)?.focus?.()
+}
 </script>
 
 <style scoped>
@@ -82,6 +85,7 @@ watch(
   background: var(--md-sys-color-surface);
   border-left: 1px solid var(--md-sys-color-outline-variant);
   box-shadow: var(--md-sys-elevation-3);
+  outline: none;
   transform: translateX(0);
   transition: transform 0.25s ease;
 }

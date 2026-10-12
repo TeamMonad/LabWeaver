@@ -21,8 +21,10 @@ import {
   deleteEnvironment,
   retryEnvironment,
   restartEnvironment,
+  stopEnvironment,
   freezeSubmission,
   getFrozenSubmission,
+  listOwnProjectEvaluationResults,
 } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
@@ -43,6 +45,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     startEnvironment: vi.fn(),
     freezeSubmission: vi.fn(),
     getFrozenSubmission: vi.fn(),
+    listOwnProjectEvaluationResults: vi.fn(),
     stopEnvironment: vi.fn(),
     restartEnvironment: vi.fn(),
     deleteEnvironment: vi.fn(),
@@ -213,6 +216,7 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined as never })
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listOwnProjectEvaluationResults).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never } as never)
     window.localStorage.clear()
   })
 
@@ -565,10 +569,11 @@ describe('EnvironmentEntryView', () => {
 
     await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
     const hint = wrapper.get('#lifecycle-action-hint').text()
-    expect(hint).toContain('计算用量已停止计量')
-    expect(hint).toContain('工作目录和磁盘仍保留并继续按存储费率核算')
-    expect(hint).toContain('GPU 预留和 Work 资源租约会保留')
-    expect(hint).toContain('删除环境并完成回收后才归还容量')
+    expect(hint).toContain('工作目录和磁盘仍保留')
+    expect(hint).toContain('继续计入存储用量，直到删除')
+    expect(hint).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
+    // No stop-impact contract yet: the hint must not promise GPU or billing outcomes.
+    expect(hint).not.toMatch(/GPU 预留(已|会)?释放|GPU 预留和 Work 资源租约会保留|已停止计量/)
 
     await wrapper.find('button[aria-label="删除"]').trigger('click')
     const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
@@ -577,7 +582,7 @@ describe('EnvironmentEntryView', () => {
     expect(dialog.props('description')).toContain('项目材料、已冻结提交和评测记录不在本环境删除范围内')
   })
 
-  it('explains that a stopped experiment releases GPU capacity for the next start', async () => {
+  it('does not claim a stopped experiment released its GPU capacity', async () => {
     mockEnvironmentInstance({
       class: 'experiment',
       desiredState: 'stopped',
@@ -588,9 +593,8 @@ describe('EnvironmentEntryView', () => {
 
     await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
     const hint = wrapper.get('#lifecycle-action-hint').text()
-    expect(hint).toContain('GPU 预留已释放')
-    expect(hint).toContain('重新启动时会重新进行 GPU 资源准入')
-    expect(hint).not.toContain('Work 资源租约会保留')
+    expect(hint).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
+    expect(hint).not.toMatch(/GPU 预留(已|会)?释放|资源租约会保留/)
   })
 
   it('keeps teacher console navigation in the teacher workbench and omits student submission controls', async () => {
@@ -1216,6 +1220,74 @@ describe('EnvironmentEntryView', () => {
     expect(freezeSubmission).not.toHaveBeenCalled()
   })
 
+  it('remembers a new submission and shows its progress until a result arrives', async () => {
+    const stored = new Map<string, string>()
+    vi.mocked(window.localStorage.getItem).mockImplementation((key) => stored.get(key) ?? null)
+    vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => { stored.set(key, value) })
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [{ ...mockRelease, submissionManifest: mockSubmissionManifest }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(freezeSubmission).mockResolvedValue({
+      data: {
+        environmentId: 'env-1',
+        operationId: 'freeze-op-1',
+        revision: 12,
+        statusUrl: '/api/v1/projects/project-1/frozen-submissions/00000000-0000-7000-8000-000000000001',
+      },
+      error: undefined as never,
+    } as never)
+    vi.mocked(getFrozenSubmission).mockResolvedValue({
+      data: {
+        id: '00000000-0000-7000-8000-000000000001',
+        projectId: 'project-1',
+        environment: { environmentId: 'env-1', environmentRevision: 12, releaseId: 'rel-1', releaseVersion: 1, runtimeKind: 'container' },
+        object: { artifactId: 'artifact-1', mediaType: 'application/tar', objectVersion: 'object-version-1', sizeBytes: 123, storeBinding: 'evaluation-store' },
+        contentSha256: 'b'.repeat(64),
+        frozenAt: '2026-07-11T10:10:00.000Z',
+      },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
+    await vi.waitFor(() => expect(startButton.attributes('disabled')).toBeUndefined())
+    await startButton.trigger('click')
+    await wrapper.get('[role="dialog"]').findAll('button').find((button) => button.text() === '确认冻结')!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="submission-tracking"]').exists()).toBe(true))
+    const tracking = wrapper.get('[data-testid="submission-tracking"]')
+    expect(tracking.text()).toContain('正在等待评测结果')
+    expect(tracking.get('[aria-current="step"]').attributes('data-stage')).toBe('result')
+    expect(tracking.get('a').attributes('href')).toBe('/student/results?projectId=project-1&submissionId=00000000-0000-7000-8000-000000000001')
+    expect(JSON.parse(stored.get('labweaver_submissions:project-1') ?? '[]')).toEqual([
+      expect.objectContaining({ submissionId: '00000000-0000-7000-8000-000000000001', environmentId: 'env-1' }),
+    ])
+    // Only identifiers are stored; state always comes from the server.
+    expect(stored.get('labweaver_submissions:project-1')).not.toContain('succeeded')
+  })
+
+  it('exposes the detail sections as an accessible tab list', async () => {
+    mockEnvironmentInstance()
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    const tablist = wrapper.get('[role="tablist"]')
+    expect(tablist.attributes('aria-label')).toBe('环境资源详情')
+    const tabs = tablist.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toEqual(['概览与访问', 'Web 控制台', '异步操作与诊断', '实验提交与凭据'].map((label) => expect.stringContaining(label)))
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    const panel = wrapper.get(`#${tabs[0].attributes('aria-controls')}`)
+    expect(panel.attributes('role')).toBe('tabpanel')
+    await tabs[3].trigger('click')
+    expect(tabs[3].attributes('aria-selected')).toBe('true')
+    // Inactive panels stay mounted so an open console session is not torn down.
+    expect(panel.attributes('hidden')).toBeDefined()
+    expect(wrapper.findAll('[role="tabpanel"]').length).toBe(4)
+  })
+
   it('reuses the freeze idempotency key when a retryable submission error is retried', async () => {
     mockEnvironmentInstance()
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
@@ -1266,5 +1338,56 @@ describe('EnvironmentEntryView', () => {
     const firstRequest = vi.mocked(freezeSubmission).mock.calls[0][0] as never as { headers: { 'Idempotency-Key': string } }
     const secondRequest = vi.mocked(freezeSubmission).mock.calls[1][0] as never as { headers: { 'Idempotency-Key': string } }
     expect(secondRequest.headers['Idempotency-Key']).toBe(firstRequest.headers['Idempotency-Key'])
+  })
+
+  describe('lifecycle confirmation', () => {
+    function lifecycleDialog(wrapper: Awaited<ReturnType<typeof mountAt>>['wrapper']) {
+      return wrapper.findAllComponents({ name: 'ConfirmDialog' }).find((dialog) => ['停止环境', '重启环境'].includes(dialog.props('title')))!
+    }
+
+    beforeEach(() => {
+      mockEnvironmentInstance({ operation: { ...mockOperation('succeeded', { kind: 'start' }) } })
+      vi.mocked(stopEnvironment).mockResolvedValue({ data: { environmentId: 'env-1', operationId: 'op-stop', revision: 12 }, error: undefined } as never)
+      vi.mocked(restartEnvironment).mockResolvedValue({ data: { environmentId: 'env-1', operationId: 'op-restart', revision: 12 }, error: undefined } as never)
+    })
+
+    it.each([
+      ['停止', stopEnvironment, '环境实际停止后，计算用量才停止计量'],
+      ['重启', restartEnvironment, '重启完成前无法连接'],
+    ] as const)('asks before %s and sends nothing until confirmed', async (label, sdkCall, impact) => {
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect((wrapper.find(`button[aria-label="${label}"]`).element as HTMLButtonElement).disabled).toBe(false))
+
+      await wrapper.find(`button[aria-label="${label}"]`).trigger('click')
+      const dialog = lifecycleDialog(wrapper)
+      expect(dialog.props('open')).toBe(true)
+      expect(dialog.props('description')).toContain('会断开当前终端、桌面和 Web 访问会话')
+      expect(dialog.props('description')).toContain(impact)
+      expect(sdkCall).not.toHaveBeenCalled()
+
+      dialog.vm.$emit('confirm')
+      await vi.waitFor(() => expect(sdkCall).toHaveBeenCalledTimes(1))
+      expect(lifecycleDialog(wrapper).props('open')).toBe(false)
+    })
+
+    it('cancelling the stop confirmation keeps the environment running', async () => {
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect((wrapper.find('button[aria-label="停止"]').element as HTMLButtonElement).disabled).toBe(false))
+      await wrapper.find('button[aria-label="停止"]').trigger('click')
+      lifecycleDialog(wrapper).vm.$emit('cancel')
+      await flushPromises()
+      expect(lifecycleDialog(wrapper).props('open')).toBe(false)
+      expect(stopEnvironment).not.toHaveBeenCalled()
+    })
+
+    it('keeps stop impact conditional instead of promising GPU or billing outcomes', async () => {
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect((wrapper.find('button[aria-label="停止"]').element as HTMLButtonElement).disabled).toBe(false))
+      await wrapper.find('button[aria-label="停止"]').trigger('click')
+      const description = lifecycleDialog(wrapper).props('description') as string
+      expect(description).toContain('提交停止不代表已停止计量')
+      expect(description).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
+      expect(description).not.toMatch(/GPU 预留(会|已)?释放|资源租约会保留|不再计量|存储费率/)
+    })
   })
 })
