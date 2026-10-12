@@ -177,6 +177,7 @@ async fn upgrade(
             }
         || instance.desired_state != DesiredEnvironmentState::Running
         || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.observed_generation != instance.generation
         || instance
             .eligibility_expires_at
             .is_some_and(|deadline| deadline <= now)

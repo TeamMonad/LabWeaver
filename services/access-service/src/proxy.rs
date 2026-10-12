@@ -1369,8 +1369,8 @@ pub(super) async fn forward_runtime(
     )
     .await?;
     let mut upstream = Url::parse(&format!(
-        "http://runtime.lw-env-{}.svc.cluster.local:8080/",
-        target.environment_id
+        "http://{}.{}.svc.cluster.local:8080/",
+        target.service.service_name, target.service.namespace
     ))
     .map_err(|_| ApiError::internal("LW_ACCESS_RUNTIME_TARGET_INVALID"))?;
     upstream.set_path(&runtime_path);
@@ -1447,6 +1447,7 @@ pub(super) async fn forward_runtime(
 
 struct RuntimeTarget {
     environment_id: contracts::EnvironmentId,
+    service: contracts::environment::ContainerServiceTarget,
 }
 
 #[allow(
@@ -1579,7 +1580,14 @@ async fn authorize_runtime(
     {
         return Err(ApiError::forbidden("LW_ACCESS_RUNTIME_DENIED"));
     }
-    Ok(RuntimeTarget { environment_id })
+    let service = eligibility
+        .runtime_target
+        .filter(|target| target.valid_for(environment_id))
+        .ok_or_else(|| ApiError::unavailable("LW_ACCESS_RUNTIME_TARGET_INVALID"))?;
+    Ok(RuntimeTarget {
+        environment_id,
+        service,
+    })
 }
 
 async fn forward(
