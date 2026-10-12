@@ -57,8 +57,13 @@ describe('RuntimePermissions (#207 运行权限展示)', () => {
     const groups = runtimePermissionGroups(environmentCandidateView.candidate.spec)
     const rows = Object.fromEntries(groups.flatMap((group) => group.rows.map((row) => [row.label, row])))
     expect(rows['运行用户'].value).toContain('UID 65534')
-    expect(rows['系统目录']).toMatchObject({ value: '只读，只能写工作目录', tone: 'restricted' })
-    expect(rows['提升权限'].tone).toBe('restricted')
+    expect(rows['系统目录']).toMatchObject({
+      value: '只读根文件系统（可写工作目录与独立 /tmp）',
+      tone: 'restricted',
+    })
+    expect(rows['系统目录'].hint).toContain('独立 /tmp')
+    expect(rows['提升权限']).toMatchObject({ value: '禁止（容器 no_new_privs）', tone: 'restricted' })
+    expect(rows['提升权限'].hint).toContain('setuid')
     expect(rows['特权模式']).toMatchObject({ value: '关闭（默认）', tone: 'restricted' })
     expect(rows['Capabilities'].value).toContain('无额外能力')
     expect(rows['seccomp'].value).toBe('runtime_default')
@@ -97,4 +102,50 @@ describe('RuntimePermissions (#207 运行权限展示)', () => {
     expect(rows['已批准能力']).toContain('NET_BIND_SERVICE')
     expect(rows['默认容器 UID']).toBe('65534')
   })
+
+  it('states that privileged execution is not open in this version', () => {
+    const spec = structuredClone(environmentCandidateView.candidate.spec)
+    spec.security.privileged = true
+    spec.security.capabilities = []
+    const rows = Object.fromEntries(
+      runtimePermissionGroups(spec).flatMap((group) => group.rows.map((row) => [row.label, row])),
+    )
+    expect(rows['特权模式'].hint).toContain('本版本尚未开放实际特权执行')
+    expect(rows['特权模式'].hint).not.toContain('除非已验证执行位置')
+    expect(rows['Capabilities'].value).toContain('特权模式声明包含全部能力')
+    expect(rows['Capabilities'].value).not.toContain('drop ALL')
+  })
+
+  it('keeps root UID independent from privileged, and clarifies VM escalation semantics', () => {
+    const containerRoot = structuredClone(environmentCandidateView.candidate.spec)
+    containerRoot.security.runAsUser = 0
+    containerRoot.security.privileged = false
+    const containerRows = Object.fromEntries(
+      runtimePermissionGroups(containerRoot).flatMap((group) => group.rows.map((row) => [row.label, row])),
+    )
+    expect(containerRows['运行用户'].hint).toContain('不等于 privileged')
+    expect(containerRows['特权模式'].value).toContain('关闭')
+
+    const vmSpec = structuredClone(environmentCandidateView.candidate.spec)
+    vmSpec.runtime = {
+      kind: 'virtual_machine',
+      provider_binding: 'qemu-default',
+      ssh_port: 22,
+      storage_class_binding: 'vm-disk-v1',
+      base_disk: {
+        artifactId: 'img-1',
+        mediaType: 'application/x-qcow2',
+        objectVersion: 'v1',
+        sha256: 'sha256:bb',
+        sizeBytes: 1,
+      },
+    } as typeof vmSpec.runtime
+    vmSpec.security.privilegeEscalationPolicy = 'deny'
+    const vmRows = Object.fromEntries(
+      runtimePermissionGroups(vmSpec).flatMap((group) => group.rows.map((row) => [row.label, row])),
+    )
+    expect(vmRows['提升权限'].hint).toContain('guest OS')
+    expect(vmRows['提升权限'].value).toContain('容器字段语义')
+  })
+
 })

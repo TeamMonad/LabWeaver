@@ -176,11 +176,22 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
   attachAuthInterceptor(instance, options.authentication)
   attachResponseInterceptor(instance)
 
+  // Axios interceptors cover REST; generated SSE uses fetch via createSseClient
+  // and only picks up Authorization through the generated `auth` resolver.
+  const authentication = options.authentication
+  const auth =
+    authentication.mode === 'bearer'
+      ? async () => authentication.accessToken()
+      : undefined
+
   return createClient({
     axios: instance,
     baseURL: baseUrl,
     timeout,
-  })
+    auth,
+    // BFF SSE (fetch) must send the session cookie; REST already uses axios withCredentials.
+    ...(authentication.mode === 'bff' ? { credentials: 'include' } : {}),
+  } as Parameters<typeof createClient>[0])
 }
 
 export const apiClient = createLabWeaverApiClient({
