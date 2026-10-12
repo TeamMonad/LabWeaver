@@ -327,13 +327,13 @@ pub fn runtime_receipt(
         .clone()
         .unwrap_or_else(|| contracts::environment::EnvironmentLeaseAuthorization {
             resource_request_id: contracts::ResourceRequestId::new(),
-            lease_id: contracts::LeaseId::new(),
+            lease_id: instance.lease_id.unwrap_or_else(contracts::LeaseId::new),
             lease_revision: revision(1),
             environment_id: instance.id,
             project_id: instance.project_id,
             course_id: instance.course_id,
             owner_actor_id: instance.owner_id,
-            capacity_binding: "synthetic-capacity".to_owned(),
+            capacity_binding: instance.id.to_string(),
             approved_resources: instance.approved_resources.clone(),
             gpu_allocation: instance.gpu_allocation.clone(),
             active_from: timestamp("2026-07-14T00:00:00.000Z"),
@@ -446,6 +446,8 @@ impl environment_service::EnvironmentRuntimeAuthority for RuntimeFixtureAuthorit
         instance.owner_id = request.owner_actor_id;
         instance.release_id = request.release_id;
         instance.release_version = request.release_version;
+        instance.operation.lease_authorization = None;
+        instance.lease_id = request.expected_lease_id;
         let mut receipt = runtime_receipt(&instance, &runtime_projection(&instance));
         receipt.authorization.request_id = request.resource_request_id;
         receipt.lease_authorization.resource_request_id = request.resource_request_id;
@@ -454,6 +456,87 @@ impl environment_service::EnvironmentRuntimeAuthority for RuntimeFixtureAuthorit
         }
         Ok(receipt)
     }
+    async fn resolve_credit_grant(
+        &self,
+        lease: &contracts::environment::EnvironmentLeaseAuthorization,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        environment_service::ResourceUsageClientError,
+    > {
+        credit_grant_for_lease(lease)
+    }
+}
+
+/// Explicit zero-price external Resource fixture; financial behavior is exercised with the real store separately.
+pub fn credit_grant_for_lease(
+    lease: &contracts::environment::EnvironmentLeaseAuthorization,
+) -> Result<
+    contracts::resource::environment_funding::EnvironmentCreditGrant,
+    environment_service::ResourceUsageClientError,
+> {
+    use contracts::resource::{
+        FixedDecimal, Money,
+        costing::{ResourceCostEstimate, ResourceCostEstimateRequest},
+        credits::{CreditHold, CreditHoldState},
+    };
+    Ok(
+        contracts::resource::environment_funding::EnvironmentCreditGrant {
+            request_id: lease.resource_request_id,
+            lease_id: lease.lease_id,
+            lease_revision: lease.lease_revision,
+            claim_id: lease
+                .capacity_binding
+                .parse()
+                .map_err(|_| environment_service::ResourceUsageClientError::InvalidResponse)?,
+            approval_id: contracts::ResourceApprovalId::new(),
+            covered_from: lease.active_from,
+            covered_until: lease.expires_at,
+            can_authorize_execution: true,
+            hold: CreditHold {
+                id: uuid::Uuid::new_v4(),
+                project_id: lease.project_id,
+                request_id: Some(lease.resource_request_id),
+                build_request_id: None,
+                build_attempt: None,
+                business_key: "synthetic-zero-price".into(),
+                owner_client_id: "synthetic-environment".into(),
+                amount: FixedDecimal::zero(),
+                remaining: FixedDecimal::zero(),
+                state: CreditHoldState::Pending,
+                measurement_unknown: false,
+                reason: None,
+                created_at: lease.active_from,
+                unknown_since: None,
+                reconciliation_due_at: None,
+                expired_unknown_at: None,
+            },
+            estimate: ResourceCostEstimate {
+                project_id: lease.project_id,
+                input: ResourceCostEstimateRequest {
+                    resources: lease.approved_resources.clone(),
+                    compute_from: lease.active_from,
+                    compute_until: lease.expires_at,
+                    storage_from: lease.active_from,
+                    storage_until: lease.expires_at,
+                },
+                lines: vec![],
+                total: Money {
+                    amount: FixedDecimal::zero(),
+                    currency: "CREDITS".into(),
+                },
+            },
+        },
+    )
+}
+
+pub fn funded_instance(mut instance: EnvironmentInstance) -> EnvironmentInstance {
+    instance.operation.lease_authorization = None;
+    let receipt = runtime_receipt(&instance, &runtime_projection(&instance));
+    instance.lease_id = Some(receipt.lease_authorization.lease_id);
+    instance.capacity_binding = Some(receipt.lease_authorization.capacity_binding.clone());
+    instance.operation.lease_authorization = Some(receipt.lease_authorization.clone());
+    instance.runtime_authorization = Some(receipt);
+    instance
 }
 
 pub fn runtime_admission(

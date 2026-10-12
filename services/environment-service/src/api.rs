@@ -442,13 +442,12 @@ async fn accept_resource_work_handoff(
         .releases
         .resolve(handoff.release_id, handoff.release_version)
         .await?;
-    if release.withdrawn_at.is_some()
-        || release.projection.release.project_id != handoff.project_id
-        || release.projection.release.course_id != handoff.course_id
-        || release.projection.environment_spec.class != EnvironmentClass::Work
-    {
+    if release.withdrawn_at.is_some() {
         return Err(EnvironmentApiError::ReleaseDenied);
     }
+    let class = handoff
+        .class_for_release(&release.projection)
+        .map_err(|_| EnvironmentApiError::ReleaseDenied)?;
     let provider_binding = match &release.projection.environment_spec.runtime {
         EnvironmentRuntimeSpec::Container {
             provider_binding, ..
@@ -517,7 +516,7 @@ async fn accept_resource_work_handoff(
         course_id: handoff.course_id,
         owner_actor_id: handoff.owner_actor_id,
         display_label: handoff.display_label,
-        class: EnvironmentClass::Work,
+        class,
         runtime_authorization: Some(runtime_authorization),
         runtime_kind: release.projection.release.runtime_kind,
         release_id: handoff.release_id,
@@ -800,10 +799,7 @@ async fn create_environment(
         .releases
         .resolve(request.release_id, request.release_version)
         .await?;
-    if release.withdrawn_at.is_some()
-        || release.projection.release.course_id != request.course_id
-        || release.projection.environment_spec.class != EnvironmentClass::Experiment
-    {
+    if release.withdrawn_at.is_some() || release.projection.release.course_id != request.course_id {
         return Err(EnvironmentApiError::ReleaseDenied);
     }
     let runtime_authorization = state
@@ -828,10 +824,13 @@ async fn create_environment(
     else {
         return Err(EnvironmentApiError::ResourceReservationRejected);
     };
-    // The original target is valid, but its funded lease cannot be transplanted
-    // into the separate Experiment reservation. No new ID or allocation is created.
-    tracing::debug!(%environment_id, "experiment allocation path requires unification");
-    Err(crate::RuntimeAdmissionError::AllocationPathUnsupported.into())
+    // Resource owns allocation and delivers the single original handoff. Public create only
+    // attaches its idempotent intent to that aggregate; it cannot reserve or create another one.
+    let accepted = state
+        .store
+        .bind_funded_api_create(key.as_str(), &request, actor_id, environment_id)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
 }
 
 async fn get_environment(
@@ -1296,6 +1295,7 @@ impl IntoResponse for EnvironmentApiError {
                 StatusCode::CONFLICT
             }
             Self::RuntimeAdmission(crate::RuntimeAdmissionError::Binding)
+            | Self::Store(EnvironmentStoreError::LeaseAuthorizationInvalid)
             | Self::RevisionConflict
             | Self::LeaseFenceInvalid
             | Self::WorkExecution(
@@ -1318,7 +1318,12 @@ impl IntoResponse for EnvironmentApiError {
             )
             | Self::Release(ReleaseProjectionError::NotFound)
             | Self::WorkExecution(WorkExecutionError::NotFound) => StatusCode::NOT_FOUND,
-            Self::Store(
+            Self::RuntimeAdmission(
+                crate::RuntimeAdmissionError::FundingInactive
+                | crate::RuntimeAdmissionError::FundingChanged,
+            )
+            | Self::Store(EnvironmentStoreError::AllocationPending)
+            | Self::Store(
                 EnvironmentStoreError::IdempotencyConflict
                 | EnvironmentStoreError::IdempotencyInProgress,
             ) => StatusCode::CONFLICT,

@@ -1559,6 +1559,10 @@ pub enum ResourceApiError {
 }
 
 impl IntoResponse for ResourceApiError {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the combined runtime and financial diagnostics stay in the single existing HTTP mapping"
+    )]
     fn into_response(self) -> Response {
         let diagnostic_code = resource_diagnostic_code(&self.to_string());
         let status = match &self {

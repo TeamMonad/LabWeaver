@@ -33,6 +33,8 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "environment_funded_handoff.rs"]
+mod funded_handoff;
 #[path = "runtime_authorization_lease.rs"]
 mod lease_cases;
 
@@ -284,7 +286,51 @@ pub(super) async fn assert_bindings_after_publication(
         binding.platform_configuration_revision, candidate.policy_revision,
         "LLM revision cannot substitute for applied runtime policy"
     );
-    let store = PgResourceStore::new(pool.clone());
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner("synthetic-environment".into());
+    for (index, unit) in [
+        contracts::resource::ResourceBillingUnit::CpuMillicoreSecond,
+        contracts::resource::ResourceBillingUnit::MemoryByteSecond,
+        contracts::resource::ResourceBillingUnit::StorageByteSecond,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .create_rate(
+                &format!("runtime-funded-rate-{index}"),
+                &contracts::http::CreateResourceRateRequest {
+                    builder_binding: None,
+                    unit,
+                    gpu_mode: None,
+                    gpu_class: None,
+                    unit_quantity: if index == 0 { 1000 } else { 1 },
+                    unit_price: contracts::resource::Money {
+                        amount: contracts::resource::FixedDecimal::parse(if index == 0 {
+                            "0.010000"
+                        } else {
+                            "0.000000"
+                        })?,
+                        currency: "CREDITS".into(),
+                    },
+                    effective_from: UtcTimestamp::from_utc(now.get() - time::Duration::hours(1))?,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    resource_service::credits::PgCreditStore::new(pool.clone())
+        .admin(
+            "runtime-funds",
+            ActorId::new(),
+            &[PlatformRole::PlatformAdmin],
+            &contracts::resource::credits::CreditAdminOperation::Grant {
+                project_id: request.project_id,
+                amount: contracts::resource::FixedDecimal::parse("1000.000000")?,
+                reason: "synthetic integration allowance".into(),
+            },
+        )
+        .await?;
     store
         .create("runtime-create", &request, "runtime-create")
         .await?;
@@ -294,7 +340,15 @@ pub(super) async fn assert_bindings_after_publication(
         request_id: request.id,
         request_revision: request.revision,
         approver_id: ActorId::new(),
-        provider_binding: "kubernetes-standard".to_owned(),
+        provider_binding: match &candidate.spec.runtime {
+            contracts::authoring::EnvironmentRuntimeSpec::Container {
+                provider_binding, ..
+            }
+            | contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
+                provider_binding,
+                ..
+            } => provider_binding.clone(),
+        },
         approved_resources: resources.clone(),
         approved_duration_seconds: 600,
         reason: "approve immutable configuration".to_owned(),

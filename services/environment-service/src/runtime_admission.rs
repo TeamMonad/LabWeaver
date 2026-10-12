@@ -16,6 +16,14 @@ pub trait EnvironmentRuntimeAuthority: Send + Sync {
         &self,
         request: &ResolveEnvironmentRuntimeAuthorizationRequest,
     ) -> Result<EnvironmentRuntimeAuthorizationResolution, crate::ResourceUsageClientError>;
+
+    async fn resolve_credit_grant(
+        &self,
+        authorization: &contracts::environment::EnvironmentLeaseAuthorization,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        crate::ResourceUsageClientError,
+    >;
 }
 
 #[async_trait]
@@ -30,6 +38,23 @@ impl EnvironmentRuntimeAuthority for crate::metering::ResourceUsageClient {
             .await
             .map_err(|_| crate::ResourceUsageClientError::InvalidResponse)
     }
+
+    async fn resolve_credit_grant(
+        &self,
+        authorization: &contracts::environment::EnvironmentLeaseAuthorization,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        crate::ResourceUsageClientError,
+    > {
+        self.get_json(&format!(
+            "internal/v1/environment-credit-grants/{}",
+            authorization.lease_id
+        ))
+        .await?
+        .json()
+        .await
+        .map_err(|_| crate::ResourceUsageClientError::InvalidResponse)
+    }
 }
 
 #[derive(Clone)]
@@ -39,6 +64,14 @@ pub struct EnvironmentRuntimeAdmission {
 }
 
 impl EnvironmentRuntimeAdmission {
+    pub async fn from_env<R: ContainerReleaseResolver + 'static>(
+        releases: R,
+    ) -> Result<Self, crate::ResourceUsageClientError> {
+        Ok(Self::new(
+            releases,
+            Arc::new(crate::metering::ResourceUsageClient::from_env().await?),
+        ))
+    }
     pub fn new<R: ContainerReleaseResolver + 'static>(
         releases: R,
         authority: Arc<dyn EnvironmentRuntimeAuthority>,
@@ -63,7 +96,7 @@ impl EnvironmentRuntimeAdmission {
         {
             return Err(RuntimeAdmissionError::Release);
         }
-        let resolution = self
+        let mut resolution = self
             .authority
             .resolve_runtime_authorization(request)
             .await?;
@@ -97,6 +130,18 @@ impl EnvironmentRuntimeAdmission {
         {
             return Err(RuntimeAdmissionError::Binding);
         }
+        let grant = self
+            .authority
+            .resolve_credit_grant(&resolution.lease_authorization)
+            .await?;
+        validate_credit_grant(
+            &grant,
+            &resolution.lease_authorization,
+            release.authority_now,
+        )?;
+        // Funds and runtime permission remain separate Resource facts. The persisted receipt's
+        // execution deadline is bounded by both; no second hold or consumption marker is minted.
+        resolution.valid_until = resolution.valid_until.min(grant.covered_until);
         Ok(resolution)
     }
 
@@ -104,6 +149,9 @@ impl EnvironmentRuntimeAdmission {
         &self,
         instance: &EnvironmentInstance,
     ) -> Result<EnvironmentRuntimeAuthorizationResolution, RuntimeAdmissionError> {
+        if !instance.has_resource_lease() {
+            return Err(RuntimeAdmissionError::AllocationPathUnsupported);
+        }
         let request_id = instance
             .runtime_authorization
             .as_ref()
@@ -132,8 +180,18 @@ impl EnvironmentRuntimeAdmission {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeAdmissionError {
+    #[error("LW_RUNTIME_AUTHORITY_UNAVAILABLE")]
+    Unavailable,
+    #[error("LW_RUNTIME_EXECUTION_DEADLINE_EXCEEDED")]
+    Deadline,
+    #[error(transparent)]
+    Store(#[from] crate::EnvironmentStoreError),
     #[error("LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED")]
     AllocationPathUnsupported,
+    #[error("LW_RUNTIME_FUNDING_INACTIVE")]
+    FundingInactive,
+    #[error("LW_RUNTIME_FUNDING_CHANGED")]
+    FundingChanged,
     #[error("LW_RUNTIME_CONFIGURATION_BINDING_MISMATCH")]
     Binding,
     #[error("LW_RUNTIME_RELEASE_UNAVAILABLE")]
@@ -146,7 +204,12 @@ impl RuntimeAdmissionError {
     #[must_use]
     pub fn diagnostic_code(&self) -> &str {
         match self {
+            Self::Unavailable => "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
+            Self::Deadline => "LW_RUNTIME_EXECUTION_DEADLINE_EXCEEDED",
+            Self::Store(_) => "LW_RUNTIME_AUTHORITY_READ_FAILED",
             Self::AllocationPathUnsupported => "LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED",
+            Self::FundingInactive => "LW_RUNTIME_FUNDING_INACTIVE",
+            Self::FundingChanged => "LW_RUNTIME_FUNDING_CHANGED",
             Self::Binding => "LW_RUNTIME_CONFIGURATION_BINDING_MISMATCH",
             Self::Release => "LW_RUNTIME_RELEASE_UNAVAILABLE",
             Self::Resource(error) => error.diagnostic_code(),
@@ -155,10 +218,79 @@ impl RuntimeAdmissionError {
     #[must_use]
     pub const fn retryable(&self) -> bool {
         match self {
+            Self::Store(error) => error.retryable(),
             Self::Resource(error) => error.retryable(),
-            Self::Binding | Self::Release | Self::AllocationPathUnsupported => false,
+            Self::FundingChanged => true,
+            Self::Unavailable
+            | Self::Deadline
+            | Self::FundingInactive
+            | Self::Binding
+            | Self::Release
+            | Self::AllocationPathUnsupported => false,
         }
     }
+}
+
+/// Fresh execution permission is read before opening the executor's fencing transaction.
+/// A completed response can still be replayed if this read fails; a new effect cannot start.
+pub(crate) async fn executor_authorization(
+    admission: Option<&EnvironmentRuntimeAdmission>,
+    pool: sqlx::PgPool,
+    environment_id: contracts::EnvironmentId,
+    deadline: contracts::UtcTimestamp,
+) -> Result<(), RuntimeAdmissionError> {
+    let admission = admission.ok_or(RuntimeAdmissionError::Unavailable)?;
+    let store = crate::PgEnvironmentStore::new(pool);
+    let (instance, now) = store.load_for_owner_resolution(environment_id).await?;
+    let remaining = std::time::Duration::try_from(deadline.get() - now.get())
+        .map_err(|_| RuntimeAdmissionError::Deadline)?;
+    if remaining.is_zero() {
+        return Err(RuntimeAdmissionError::Deadline);
+    }
+    let receipt = tokio::time::timeout(remaining, admission.for_instance(&instance))
+        .await
+        .map_err(|_| RuntimeAdmissionError::Deadline)??;
+    if deadline > receipt.valid_until {
+        return Err(RuntimeAdmissionError::Deadline);
+    }
+    Ok(())
+}
+
+fn validate_credit_grant(
+    grant: &contracts::resource::environment_funding::EnvironmentCreditGrant,
+    lease: &contracts::environment::EnvironmentLeaseAuthorization,
+    now: contracts::UtcTimestamp,
+) -> Result<(), RuntimeAdmissionError> {
+    if grant.request_id != lease.resource_request_id
+        || grant.lease_id != lease.lease_id
+        || grant.claim_id.to_string() != lease.capacity_binding
+        || grant.hold.request_id != Some(lease.resource_request_id)
+        || grant.hold.project_id != lease.project_id
+        || grant.estimate.project_id != lease.project_id
+    {
+        return Err(RuntimeAdmissionError::Binding);
+    }
+    if grant.lease_revision > lease.lease_revision {
+        // A concurrent funded renewal may occur between the two read-only Resource queries.
+        // Re-read the original authorization within the existing operation retry budget.
+        return Err(RuntimeAdmissionError::FundingChanged);
+    }
+    if grant.lease_revision != lease.lease_revision
+        || grant.covered_from != lease.active_from
+        || grant.covered_until != lease.expires_at
+    {
+        return Err(RuntimeAdmissionError::Binding);
+    }
+    if !grant.can_authorize_execution
+        || grant.hold.state != contracts::resource::credits::CreditHoldState::Pending
+        || grant.hold.measurement_unknown
+        || grant.hold.expired_unknown_at.is_some()
+        || grant.covered_from > now
+        || grant.covered_until <= now
+    {
+        return Err(RuntimeAdmissionError::FundingInactive);
+    }
+    Ok(())
 }
 
 pub(crate) fn authorized_uid(

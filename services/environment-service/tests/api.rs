@@ -80,10 +80,19 @@ impl environment_service::EnvironmentRuntimeAuthority for StaticRuntimeAuthority
     > {
         Ok(self.0.clone())
     }
+    async fn resolve_credit_grant(
+        &self,
+        lease: &contracts::environment::EnvironmentLeaseAuthorization,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        ResourceUsageClientError,
+    > {
+        support::credit_grant_for_lease(lease)
+    }
 }
 
 #[tokio::test]
-async fn public_create_rejects_unintegrated_claim_before_second_allocation()
+async fn public_create_waits_for_original_handoff_without_second_allocation()
 -> Result<(), Box<dyn Error>> {
     let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
     let database_url = format!(
@@ -186,7 +195,7 @@ async fn public_create_rejects_unintegrated_claim_before_second_allocation()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(first.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(first.0, StatusCode::CONFLICT);
     let replay = send(
         &api,
         Method::POST,
@@ -199,10 +208,10 @@ async fn public_create_rejects_unintegrated_claim_before_second_allocation()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(replay.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(replay.0, StatusCode::CONFLICT);
     assert_eq!(
         first.1["diagnosticCode"],
-        "LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED"
+        "LW_ENVIRONMENT_ALLOCATION_PENDING"
     );
     assert_eq!(replay.1["diagnosticCode"], first.1["diagnosticCode"]);
 
@@ -220,7 +229,7 @@ async fn public_create_rejects_unintegrated_claim_before_second_allocation()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(conflict.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(conflict.0, StatusCode::CONFLICT);
 
     let other_actor = send(
         &api,

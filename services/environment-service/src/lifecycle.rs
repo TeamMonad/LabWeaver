@@ -145,10 +145,11 @@ pub fn plan_command_authorized(
     } else {
         None
     };
-    if current.class == contracts::authoring::EnvironmentClass::Work
+    if current.has_resource_lease()
         && matches!(
             command.kind,
             EnvironmentOperationKind::Start
+                | EnvironmentOperationKind::Restart
                 | EnvironmentOperationKind::Retry
                 | EnvironmentOperationKind::Recover
                 | EnvironmentOperationKind::Reset
@@ -164,7 +165,7 @@ pub fn plan_command_authorized(
     // that persisted fence to ensure cleanup readback cannot release a newer
     // claim after an older operation completes.
     let retained_lease_authorization = lease_authorization.or_else(|| {
-        (current.class == contracts::authoring::EnvironmentClass::Work)
+        (current.has_resource_lease())
             .then(|| current.operation.lease_authorization.clone())
             .flatten()
     });

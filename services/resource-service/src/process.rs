@@ -254,12 +254,6 @@ async fn run_outbox(
             biased;
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } }
             _ = interval.tick() => {
-                if let Err(error) = store.expire_pending_task_once().await {
-                    let safe_detail = resource_error_safe_detail(&error);
-                    tracing::warn!(event = "resource.task_expiry.failed", outcome = "will_retry",
-                        error_kind = resource_error_kind(&error), failure_stage = "task.expiry",
-                        safe_detail = safe_detail.as_str());
-                }
                 if let Err(ref e) = outbox.dispatch_once().await {
                     let safe_detail = e.safe_detail();
                     tracing::warn!(
@@ -291,6 +285,13 @@ async fn run_accounting(
             biased;
             changed=shutdown.changed()=>{if changed.is_err() || *shutdown.borrow(){return Ok(());}}
             _=interval.tick()=>{
+                if let Err(error) = store.expire_pending_task_once().await {
+                    let safe_detail = resource_error_safe_detail(&error);
+                    tracing::warn!(event = "resource.task_expiry.failed", outcome = "will_retry",
+                        error_kind = resource_error_kind(&error), failure_stage = "task.expiry",
+                        safe_detail = safe_detail.as_str());
+                }
+
                 if let Err(error)=store.reconcile_build_deadlines_once().await {
                     tracing::warn!(event="resource.build_cost.deadline_failed",diagnostic_code=%error,outcome="will_retry");
                 }

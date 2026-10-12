@@ -137,7 +137,7 @@ impl FreezeBindingService {
             || instance
                 .eligibility_expires_at
                 .is_some_and(|deadline| deadline <= now)
-            || (instance.class == contracts::authoring::EnvironmentClass::Work
+            || (instance.has_resource_lease()
                 && instance
                     .operation
                     .lease_authorization

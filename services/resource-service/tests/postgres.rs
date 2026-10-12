@@ -874,11 +874,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     // namespace and lease without extending its window or advancing revisions.
     assert_eq!(
         store
-            .acknowledge_task_resource(
+            .acknowledge_funded_task_resource(
                 task_run_id,
-                claimed.claim_revision,
-                claimed.lease_revision,
-                "labweaver-evaluation-runs",
+                &contracts::http::AcknowledgeTaskResourceRequest {
+                    expected_claim_revision: claimed.claim_revision,
+                    expected_lease_revision: claimed.lease_revision,
+                    execution_namespace: "labweaver-evaluation-runs".into(),
+                },
+                "synthetic-task-owner",
                 "trace-task-ack-response-lost",
             )
             .await?,
@@ -886,11 +889,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     );
     assert!(matches!(
         store
-            .acknowledge_task_resource(
+            .acknowledge_funded_task_resource(
                 task_run_id,
-                claimed.claim_revision,
-                claimed.lease_revision,
-                "another-namespace",
+                &contracts::http::AcknowledgeTaskResourceRequest {
+                    expected_claim_revision: claimed.claim_revision,
+                    expected_lease_revision: claimed.lease_revision,
+                    execution_namespace: "another-namespace".into(),
+                },
+                "synthetic-task-owner",
                 "trace-task-ack-wrong-namespace",
             )
             .await,

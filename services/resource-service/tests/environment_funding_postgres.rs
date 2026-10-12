@@ -108,6 +108,7 @@ async fn fixture_with_approval_seconds(
         .create(&Uuid::new_v4().to_string(), &request, "synthetic-create")
         .await?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: request.revision,
