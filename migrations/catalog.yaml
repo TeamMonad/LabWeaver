@@ -46,6 +46,9 @@ domains:
       - id: 13
         file: control/0013_platform_image_multipart_uploads.sql
         sha256: b81fd23d1a129375bca4856db443afdc7a3b634b54959e6511ab1a29e21dc5b9
+      - id: 15
+        file: control/0015_platform_configuration.sql
+        sha256: 72e5b99f01936eb48931e34c349cd4f4aea1afe95320050dce1c206ebb8fd4c7
   - name: access
     migrations:
       - id: 1

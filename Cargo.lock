@@ -1443,6 +1443,7 @@ dependencies = [
  "contracts",
  "futures-util",
  "hyper-util",
+ "jsonwebtoken",
  "persistence-sqlx",
  "rcgen",
  "reqwest",
