@@ -36,6 +36,11 @@ function readObjectStoreError(responseText: string | undefined) {
   return { code: safeCode, message: safeMessage }
 }
 
+/** The object already exists: conditional PUTs never overwrite, so the session must be queried. */
+export function isPreconditionFailed(error: unknown): boolean {
+  return error instanceof ObjectStoreUploadError && error.status === 412
+}
+
 function cancelledError() {
   return new Error('上传已取消。')
 }
