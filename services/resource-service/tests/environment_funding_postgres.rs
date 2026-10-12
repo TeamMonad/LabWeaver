@@ -603,7 +603,8 @@ async fn estimated_original_hold_and_consent_survive_activation_without_a_second
     let (_c, pool, store, credits, request, lease) = fixture().await?;
     prices(&store, "1.000000").await?;
     allowance(&credits, request.project_id, "100.000000").await?;
-    let from = store.current_time().await?;
+    // Consent must be requested before its proposed start; future coverage cannot yet execute.
+    let from = at(store.current_time().await?, 60)?;
     let estimate = store
         .estimate_cost(
             request.project_id,
@@ -630,6 +631,7 @@ async fn estimated_original_hold_and_consent_survive_activation_without_a_second
     activate(&store, lease, from, at(from, 10)?).await?;
     let grant = store.environment_credit_grant(OWNER, lease).await?;
     assert_eq!(grant.hold.id, original.hold.id);
+    assert!(!grant.can_authorize_execution);
     assert_eq!(grant.hold.amount, money("60.000000")?);
     let snapshot: serde_json::Value = sqlx::query_scalar(
         "SELECT snapshot FROM resource.credit_cost_snapshots WHERE request_id=$1",
