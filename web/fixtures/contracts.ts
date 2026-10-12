@@ -196,6 +196,7 @@ const sceneEnvironmentIds: Partial<Record<string, string>> = {
   'resource-authorized': 'env-physics-ready',
   'resource-reclaim': 'env-physics-ready',
   'workspace-members': 'env-workbench',
+  'work-launcher': 'env-workbench',
 }
 
 function environmentClassFor(id: string): EnvironmentInstanceSchema['class'] {
@@ -305,7 +306,7 @@ function projectsForScene(): ProjectSchema[] {
 
 function releasesForScene(): EnvironmentTemplateReleaseViewSchema[] {
   if (authoringScene()) return authoringReleases()
-  return activeScene.value.id === 'teacher-template-empty' || activeScene.value.id === 'resource-empty'
+  return ['teacher-template-empty', 'resource-empty', 'work-launcher-empty'].includes(activeScene.value.id)
     ? []
     : [release, vmRelease]
 }
@@ -752,7 +753,16 @@ export async function endResourceRate() { return unsupportedResponse('结束资�
 
 // Preview-only boundary: SDK operations the gallery does not cover fail
 // explicitly instead of crashing the module graph or faking a success.
-export async function getActiveProjectLlmPolicy(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取项目 AI 设置') }
+export async function getActiveProjectLlmPolicy(_options?: unknown): Promise<FixtureError> {
+  // Work launcher scenes model a project with no model configured.
+  if (activeScene.value.id.startsWith('work-launcher')) {
+    return Promise.resolve({
+      data: undefined,
+      error: { type: 'about:blank', title: '未配置', status: 404, detail: '当前项目没有已激活的项目 AI 设置。', instance: '/fixture-preview', requestId: 'fixture-llm-policy-not-found', diagnosticCode: 'LW_LLM_POLICY_NOT_FOUND', retryable: false },
+    })
+  }
+  return unsupportedResponse('读取项目 AI 设置')
+}
 export async function withdrawEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('撤回环境模板版本') }
 export async function getOwnProjectEvaluationResult(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取评测结果') }
 export async function listOwnProjectEvaluationResults(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取评测结果列表') }

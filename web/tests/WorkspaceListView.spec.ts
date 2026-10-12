@@ -134,6 +134,13 @@ describe('WorkspaceListView', () => {
     directoryState.users = { kind: 'idle' }
   })
 
+  it('starts new Work on the Work page instead of the raw resource form', async () => {
+    const { wrapper } = await mountView()
+    const link = wrapper.findAll('a').find((anchor) => anchor.text().includes('新建 Work'))
+    expect(link?.attributes('href')).toBe('/researcher/environments?projectId=project-1')
+    wrapper.unmount()
+  })
+
   it('shows a blocked Work allocation without an environment and keeps recovery in its project', async () => {
     mocks.requests = [
       { id: 'blocked-1', projectId: 'project-1', state: 'active', target: { kind: 'environment' }, diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' },
