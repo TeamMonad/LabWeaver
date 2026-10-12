@@ -388,4 +388,26 @@ describe('problem package upload recovery (#197)', () => {
     expect(second.upload.state).toEqual({ kind: 'needs-files', missing: ['a.txt', 'b.txt'] })
     second.stop()
   })
+
+  it('a generic retry after a lost create replays the frozen request even if course or retention changed', async () => {
+    const course = ref<string | null>('course-a')
+    const retention = ref<'finite' | 'course_archive'>('finite')
+    const scopeRunner = effectScope()
+    const upload = scopeRunner.run(() => useProjectProblemPackageUpload(ref('project-1'), ref(1), course as never, retention as never, { recoveryScope: 'test-scope' }))!
+    upload.addFiles([file('a.txt'), file('b.txt')])
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValueOnce(lost())
+    await upload.createSession()
+    course.value = 'course-b'
+    retention.value = 'course_archive'
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValueOnce(ok(session()))
+    vi.mocked(completeProjectProblemPackageUpload).mockResolvedValue(ok(pkg))
+    await upload.retry()
+    await flushPromises()
+    const calls = vi.mocked(createProjectProblemPackageUpload).mock.calls as unknown as [{ headers: Record<string, string>; body: Record<string, unknown> }][]
+    expect(calls).toHaveLength(2)
+    expect(calls[1][0].headers['Idempotency-Key']).toBe(calls[0][0].headers['Idempotency-Key'])
+    expect(calls[1][0].body).toEqual(calls[0][0].body)
+    expect(calls[1][0].body).toMatchObject({ courseId: 'course-a', retentionChoice: 'finite' })
+    scopeRunner.stop()
+  })
 })

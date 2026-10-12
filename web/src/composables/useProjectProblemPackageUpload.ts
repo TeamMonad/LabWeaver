@@ -265,6 +265,14 @@ export function useProjectProblemPackageUpload(
     return `${courseId.value ?? ''}|${retentionChoice.value}|${filesPart}`
   }
 
+  /** Whether the selected files are the ones the recorded intent was created for. */
+  function sameFiles(recorded: UploadIntent, list: UploadFile[]): boolean {
+    const frozen = recorded.createBody?.files
+    if (!frozen) return recorded.fingerprint === fingerprintOf(list)
+    const key = (file: { path: string; sizeBytes: number; mediaType: string }) => `${file.path}\u0000${file.sizeBytes}\u0000${file.mediaType}`
+    return frozen.map(key).join('\u0001') === list.map(key).join('\u0001')
+  }
+
   function storageKey(id: string): string | null {
     return options.recoveryScope ? `${UPLOAD_INTENT_STORAGE_PREFIX}${options.recoveryScope}:${id}` : null
   }
@@ -529,17 +537,16 @@ export function useProjectProblemPackageUpload(
       return
     }
     const generation = ++loadGeneration
-    const uploadId = intent?.projectId === id ? intent.uploadId : undefined
-    if (!uploadId && intent?.projectId === id && intent.createBody && (files.value.length === 0 || intent.fingerprint === fingerprintOf(files.value))) {
+    const recorded = intent?.projectId === id ? intent : null
+    // A generic retry continues the recorded intent: it replays the frozen create
+    // request or queries the original upload. Course, retention or policy changes
+    // since then do not mint a new intent; only choosing other files does.
+    if (recorded && !recorded.uploadId && recorded.createBody) {
       await sendCreate(generation, id)
       return
     }
-    if (uploadId && intent?.fingerprint === fingerprintOf(files.value)) {
-      await reconcile(uploadId, generation, id)
-      return
-    }
-    if (uploadId && files.value.length === 0) {
-      await reconcile(uploadId, generation, id)
+    if (recorded?.uploadId && (files.value.length === 0 || sameFiles(recorded, files.value))) {
+      await reconcile(recorded.uploadId, generation, id)
       return
     }
     await createSession()
