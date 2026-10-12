@@ -2873,7 +2873,8 @@ mod tests {
         }
     }
     #[test]
-    fn observed_history_time_keeps_fractional_milliseconds_and_missing_bounds_visible() {
+    fn observed_history_time_keeps_fractional_milliseconds_and_missing_bounds_visible()
+    -> Result<(), Box<dyn std::error::Error>> {
         use bollard_buildkit_proto::google::protobuf::Timestamp;
         use contracts::resource::build_costing::BuildUsageMeasurement;
         let (_, _, mut record) = history_fixture();
@@ -2891,7 +2892,7 @@ mod tests {
             ..
         } = history_usage(&record)
         else {
-            panic!("known exact bounds");
+            return Err("known exact bounds".into());
         };
         assert_eq!(
             (finished_at.get() - started_at.get()).whole_milliseconds(),
@@ -2899,7 +2900,7 @@ mod tests {
         );
         record.completed_at = None;
         let BuildUsageMeasurement::Unknown { reason } = history_usage(&record) else {
-            panic!("missing completion stays unknown");
+            return Err("missing completion stays unknown".into());
         };
         assert!(reason.contains("250000000"));
         record.completed_at = Some(Timestamp {
@@ -2907,8 +2908,9 @@ mod tests {
             nanos: 250_000_001,
         });
         let BuildUsageMeasurement::Unknown { reason } = history_usage(&record) else {
-            panic!("submillisecond bounds retained without invented zero charge");
+            return Err("submillisecond bounds retained without invented zero charge".into());
         };
         assert!(reason.contains("250000001"));
+        Ok(())
     }
 }

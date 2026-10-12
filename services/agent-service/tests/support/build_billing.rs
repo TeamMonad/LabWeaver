@@ -1,4 +1,4 @@
-//! Real Resource SQLx authority and signed service JWT over TLS; only the issuer is synthetic.
+//! Real Resource `SQLx` authority and signed service JWT over TLS; only the issuer is synthetic.
 #![allow(
     dead_code,
     clippy::too_many_lines,
@@ -22,20 +22,20 @@ use task_execution::resource::{ResourceClient, ResourceClientConfiguration};
 const CLIENT: &str = "synthetic-build-agent";
 const AUDIENCE: &str = "labweaver-resource";
 #[derive(Clone)]
-struct Issuer {
+struct TokenAuthority {
     issuer: String,
     jwk: Value,
     token: String,
 }
-async fn discovery(State(s): State<Issuer>) -> Json<Value> {
+async fn discovery(State(s): State<TokenAuthority>) -> Json<Value> {
     Json(
         json!({"issuer":s.issuer,"authorization_endpoint":format!("{}/authorize",s.issuer),"token_endpoint":format!("{}/token",s.issuer),"jwks_uri":format!("{}/jwks",s.issuer),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["ES256"],"grant_types_supported":["client_credentials"]}),
     )
 }
-async fn jwks(State(s): State<Issuer>) -> Json<Value> {
+async fn jwks(State(s): State<TokenAuthority>) -> Json<Value> {
     Json(json!({"keys":[s.jwk]}))
 }
-async fn token(State(s): State<Issuer>) -> Json<Value> {
+async fn token(State(s): State<TokenAuthority>) -> Json<Value> {
     Json(json!({"access_token":s.token,"token_type":"Bearer","expires_in":300}))
 }
 struct TlsListener {
@@ -117,7 +117,7 @@ impl BuildBillingFixture {
             )
             .route("/realms/synthetic/jwks", get(jwks))
             .route("/realms/synthetic/token", post(token))
-            .with_state(Issuer {
+            .with_state(TokenAuthority {
                 issuer: issuer.clone(),
                 jwk,
                 token: token_value,
