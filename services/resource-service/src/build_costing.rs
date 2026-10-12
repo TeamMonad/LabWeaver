@@ -159,6 +159,10 @@ pub(crate) async fn admit_in_transaction(
 }
 
 /// Persists the provider fact and its ledger effect atomically. Unknown facts remain observable.
+#[allow(
+    clippy::too_many_lines,
+    reason = "history fact, price coverage and ledger effect are one atomic observation"
+)]
 pub(crate) async fn observe_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     owner: &str,
