@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import router from '@/router'
+import { NAVIGATION_DETAIL_ROUTES, NAVIGATION_GROUPS } from '@/utils/navigation'
 import type { User } from 'oidc-client-ts'
 
 const loginMock = vi.fn()
@@ -94,5 +95,32 @@ describe('route guard', () => {
     mockUser = makeUser('teacher,student')
     await router.push('/researcher/environments')
     expect(router.currentRoute.value.path).toBe('/researcher/environments')
+  })
+})
+
+describe('single navigation and route config', () => {
+  it('routes every navigation item with its label as the title and its project scope', () => {
+    for (const group of NAVIGATION_GROUPS) {
+      for (const item of group.items) {
+        const resolved = router.resolve(item.path)
+        expect(resolved.name, item.path).not.toBe('not-found')
+        expect(resolved.meta.title).toBe(item.label)
+        expect(Boolean(resolved.meta.projectScoped)).toBe(Boolean(item.projectScoped))
+        expect(resolved.meta.requiredRoles).toEqual([...group.allowedRoles])
+      }
+    }
+  })
+
+  it('routes detail pages declared next to their navigation item', () => {
+    for (const detail of NAVIGATION_DETAIL_ROUTES) {
+      const resolved = router.resolve(detail.path.replace(/:\w+/g, 'sample-id'))
+      expect(resolved.name).not.toBe('not-found')
+      expect(resolved.meta.title).toBe(detail.title)
+      expect(resolved.meta.projectScoped).toBe(true)
+    }
+  })
+
+  it('keeps the home page project-scoped so a link names one project', () => {
+    expect(router.resolve('/').meta.projectScoped).toBe(true)
   })
 })

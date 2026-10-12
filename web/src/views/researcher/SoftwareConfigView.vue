@@ -28,6 +28,8 @@
     <DiagnosticBanner
       v-if="projects.projects.kind === 'error'"
       :code="projects.projects.diagnostic.code"
+      :request-id="projects.projects.diagnostic.requestId"
+      :next-step="projects.projects.diagnostic.nextStep"
       :message="projects.projects.diagnostic.message"
       :retryable="projects.projects.diagnostic.retryable"
       severity="error"
@@ -75,6 +77,8 @@
     <DiagnosticBanner
       v-if="mode === 'configuration' && agent.outcome"
       :code="agent.outcome.code"
+      :request-id="agent.outcome.requestId"
+      :next-step="agent.outcome.nextStep"
       :message="agent.outcome.message"
       :retryable="agent.outcome.retryable"
       :severity="agent.outcome.code.includes('FAILED') ? 'error' : 'info'"
@@ -142,6 +146,8 @@
           <DiagnosticBanner
             v-if="packageUpload.state.kind === 'error'"
             :code="packageUpload.state.diagnostic.code"
+            :request-id="packageUpload.state.diagnostic.requestId"
+            :next-step="packageUpload.state.diagnostic.nextStep"
             :message="packageUpload.state.diagnostic.message"
             :retryable="packageUpload.state.diagnostic.retryable"
             severity="error"
@@ -275,6 +281,8 @@
               <DiagnosticBanner
                 v-if="planApprovalOutcome"
                 :code="planApprovalOutcome.code"
+                :request-id="planApprovalOutcome.requestId"
+                :next-step="planApprovalOutcome.nextStep"
                 :message="planApprovalOutcome.message"
                 :retryable="planApprovalOutcome.retryable"
                 :severity="planApprovalOutcome.code.includes('FAILED') ? 'error' : 'info'"
@@ -653,7 +661,7 @@ async function reloadPolicy() {
   if (generation !== policyGeneration || selectedProjectId.value !== id || mode.value !== requestedMode) return
   if (result.error) {
     const problem = extractProblemDetails(result.error)
-    policy.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_POLICY_LOAD_FAILED', problem?.detail ?? '加载项目 LLM 策略失败', problem?.retryable ?? true) }
+    policy.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_POLICY_LOAD_FAILED', problem?.detail ?? '加载项目 LLM 策略失败', problem?.retryable ?? true, problem) }
     return
   }
   policy.value = { kind: 'success', data: result.data }
@@ -700,7 +708,7 @@ async function reloadPlan(runId?: string) {
   ) return
   if (result.error) {
     const problem = extractProblemDetails(result.error)
-    plan.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_WORK_PLAN_LOAD_FAILED', problem?.detail ?? '加载 Work 配置计划失败', problem?.retryable ?? true) }
+    plan.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_WORK_PLAN_LOAD_FAILED', problem?.detail ?? '加载 Work 配置计划失败', problem?.retryable ?? true, problem) }
     return
   }
   plan.value = { kind: 'success', data: result.data }
@@ -738,7 +746,7 @@ async function approvePlan() {
     if (!current()) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      planApprovalOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_WORK_PLAN_APPROVAL_FAILED', problem?.detail ?? '批准 Work 配置失败', problem?.retryable ?? true)
+      planApprovalOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_WORK_PLAN_APPROVAL_FAILED', problem?.detail ?? '批准 Work 配置失败', problem?.retryable ?? true, problem)
       return
     }
     if (!result.data) {
