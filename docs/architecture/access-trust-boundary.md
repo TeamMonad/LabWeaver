@@ -26,6 +26,18 @@ Keycloak 验证用户和服务身份；Access 验证项目、课程、环境、�
 
 登录不创建计费资源或删除 Work 数据。发布这一变更会使更新前尚未完成的登录事务失效；这些用户重新发起登录即可。既有 BFF 会话不受事务格式更新影响。
 
+隔离浏览器集成用例复用 Access 的生产路由、临时真实 Keycloak 和 PostgreSQL。先安装仓库锁定的 Web 测试依赖与 Chromium，再显式运行：
+
+```sh
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web exec playwright install chromium
+cargo test -p access-service --bin access-service chromium_oidc_navigation_enforces_browser_binding_and_session_lifecycle --locked -- --ignored --nocapture
+```
+
+该用例需要 Node、Docker 和 Playwright Chromium。它在 `https://localhost` 门户与 `https://127.0.0.1` Keycloak 之间完成原生跨站导航，覆盖浏览器隔离、多标签、重放、过期、返回目标、刷新和 CSRF/provider 退出。返回页只用于检查登录导航，不能替代 Vue 控制台旅程。截图写入系统临时目录。浏览器仅对临时夹具的自签名证书启用测试信任选项，Access 的 OIDC/服务客户端仍执行严格 TLS 验证。
+
+浏览器可在 HTTP/2 请求中将 Cookie 拆成多个字段。Access 从全部字段读取唯一的 BFF session Cookie；重复 session Cookie 不选取任何值。另一个标签的登录事务 Cookie 不会遮挡已建立的 BFF 会话。
+
 OIDC callback verifies the signed ID token, including its `exp`, before creating a
 local browser session. The BFF session then uses the configured
 `browser.session_ttl_seconds` as its absolute lifetime and
@@ -42,6 +54,8 @@ logout-token validation and RP session clearing follow
 ## 浏览器与 SSH
 
 浏览器退出先向 BFF 提交带 Origin 和 CSRF 的请求。Access 撤销本地会话及控制台连接、清理会话 Cookie，并返回身份提供方的完整退出地址；浏览器随后进行顶层导航完成 [OIDC RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)。跨源退出不能用后台 fetch 跟随重定向代替。退出响应不允许缓存，页面在会话失效时清除本地登录状态并提示重新登录。
+
+SSH Gateway 会话绑定独立的 AccessGrant、密钥和端点，而非 BFF session。BFF 退出不自动撤销全部 SSH 授权；SSH 按 AccessGrant 到期、显式撤销及成员/环境授权变化的既定规则收尾。验证 OIDC 登录不能冒充已验证真实 SSH 传输：后者需要临时 Gateway/sshd、受控服务 JWT/TLS、真实目标端点和 grant 撤销事件。
 
 Web Terminal、noVNC 和 SSH/SFTP 共享 AccessGrant 的范围、到期和撤销规则。浏览器保留会话、Origin、CSRF 和一次性 ConsoleCapability 检查；Environment 提供真实端点与运行状态，客户端不能选择任意目标地址。
 

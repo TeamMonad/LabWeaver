@@ -754,6 +754,46 @@ async fn oidc_wrong_browser_cannot_consume_login_transaction() -> Result<(), Box
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
+async fn session_cookie_headers_support_http2_and_reject_duplicates() -> Result<(), Box<dyn Error>>
+{
+    // The parser needs configuration only; it never connects to this lazy pool.
+    let pool = PgPoolOptions::new().connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")?;
+    let mut tasks = Tasks(Vec::new());
+    let (state, _) = Box::pin(state(pool, Uuid::now_v7(), &mut tasks)).await?;
+    let session_id = Uuid::now_v7();
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_static("__Host-labweaver_oidc_other=pending"),
+    );
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{}={session_id}",
+            state.deployment.browser.session_cookie_name
+        ))?,
+    );
+    assert_eq!(
+        cookie_session_id(&state, &headers),
+        Some(session_id),
+        "HTTP/2 can split independent cookies into separate fields"
+    );
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{}={session_id}",
+            state.deployment.browser.session_cookie_name
+        ))?,
+    );
+    assert!(
+        cookie_session_id(&state, &headers).is_none(),
+        "duplicate session cookies must not choose a value"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn browser_logout_rejects_csrf_and_returns_exact_provider_url_after_revocation()
 -> Result<(), Box<dyn Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
