@@ -68,6 +68,38 @@ export function environmentStateLabel(value: string | null | undefined): string 
   return labelOf(ENVIRONMENT_STATE, value)
 }
 
+const ENVIRONMENT_OPERATION_KIND: Record<string, string> = {
+  create: '创建环境',
+  start: '启动环境',
+  stop: '停止环境',
+  restart: '重启环境',
+  reset: '重置环境',
+  retry: '重试环境',
+  cancel: '取消操作',
+  recover: '恢复环境',
+  expire: '处理过期环境',
+  delete: '删除环境',
+  cleanup: '清理环境',
+  freeze: '冻结提交',
+}
+
+export function environmentOperationKindLabel(value: string | null | undefined): string {
+  return value ? ENVIRONMENT_OPERATION_KIND[value] ?? '环境操作' : '环境操作'
+}
+
+const ENVIRONMENT_OPERATION_STATE: Record<string, string> = {
+  accepted: '已受理',
+  running: '处理中',
+  cancelling: '取消中',
+  succeeded: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+}
+
+export function environmentOperationStateLabel(value: string | null | undefined): string {
+  return value ? ENVIRONMENT_OPERATION_STATE[value] ?? '状态未知' : '状态未知'
+}
+
 const RESOURCE_REQUEST_STATE: Record<string, string> = {
   draft: '草稿',
   submitted: '已提交',

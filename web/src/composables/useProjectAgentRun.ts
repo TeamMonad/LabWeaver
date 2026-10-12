@@ -16,7 +16,7 @@ import { idempotencyKey, ifMatch } from '@/utils/format'
 
 function errorDiagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true)
+  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true, problem)
 }
 
 const TERMINAL_STATES = new Set<AgentRunSchema['state']>(['succeeded', 'failed', 'partially_succeeded', 'cancelled'])

@@ -11,6 +11,7 @@ function resultError(error: unknown, fallbackCode: string, fallbackDetail: strin
     problem?.diagnosticCode ?? fallbackCode,
     problem?.detail ?? fallbackDetail,
     problem?.retryable ?? true,
+    problem,
   )
   if (problem?.status === 401 || problem?.status === 403) return { kind: 'unauthorized', diagnostic }
   return { kind: 'error', diagnostic }
@@ -106,6 +107,34 @@ export function useEvaluationResults(projectId: Ref<string | undefined>) {
     }
   }
 
+  let refreshing = false
+  /**
+   * Re-read the first page without clearing what is shown, so a waiting page
+   * can pick up new terminal results without flicker. Rows are matched by run.
+   */
+  async function refresh() {
+    const project = projectId.value
+    if (!project || refreshing || results.value.kind === 'loading') return
+    const generation = loadGeneration
+    refreshing = true
+    try {
+      const response = await listOwnProjectEvaluationResults({ path: { projectId: project }, query: { limit: 50 } })
+      if (generation !== loadGeneration || projectId.value !== project || response.error) return
+      const incoming = response.data.items.filter((item) => item.projectId === project)
+      const current = results.value.kind === 'success' ? results.value.data : []
+      const byRun = new Map(incoming.map((item) => [item.runId, item]))
+      const kept = current.filter((item) => !byRun.has(item.runId))
+      const items = [...incoming, ...kept]
+      if (results.value.kind !== 'success' && results.value.kind !== 'empty') return
+      if (!current.length) nextCursor.value = response.data.nextCursor ?? null
+      results.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
+    } catch {
+      // A failed background refresh keeps the last confirmed rows; the next tick retries.
+    } finally {
+      refreshing = false
+    }
+  }
+
   watch(
     projectId,
     () => {
@@ -124,6 +153,7 @@ export function useEvaluationResults(projectId: Ref<string | undefined>) {
     loadingMore,
     loadMoreError,
     load,
+    refresh,
     loadMore: () => (nextCursor.value ? load(nextCursor.value) : Promise.resolve()),
   })
 }
@@ -142,7 +172,7 @@ export function useEvaluationResult(
     if (!project || !run) {
       result.value = {
         kind: 'blocked',
-        diagnostic: makeDiagnostic('EVALUATION_RESULT_ID_REQUIRED', '缺少项目或 EvaluationRun 标识。'),
+        diagnostic: makeDiagnostic('EVALUATION_RESULT_ID_REQUIRED', '缺少项目或评测标识。'),
       }
       return
     }

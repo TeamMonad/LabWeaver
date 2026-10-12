@@ -15,6 +15,8 @@
         <DiagnosticBanner
           v-if="event.diagnostic"
           :code="event.diagnostic.code"
+          :request-id="event.diagnostic.requestId"
+          :next-step="event.diagnostic.nextStep"
           :message="event.diagnostic.message"
           :retryable="event.diagnostic.retryable"
           severity="info"

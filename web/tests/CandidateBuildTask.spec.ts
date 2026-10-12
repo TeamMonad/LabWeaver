@@ -18,6 +18,12 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 beforeEach(() => { vi.useFakeTimers(); vi.resetAllMocks(); actor.authenticated = true; actor.roles = ['teacher'] })
 afterEach(() => { vi.useRealTimers() })
 
+
+// Diagnostic copy buttons are not task actions.
+function actionButtons(wrapper: { findAll: (selector: string) => Array<{ classes: () => string[] }> }) {
+  return wrapper.findAll('button').filter((button) => !button.classes().includes('copy-button'))
+}
+
 describe('candidate build authority', () => {
   it('requests exact task cancellation and keeps recycling until the authority confirms cleanup', async () => {
     getBuild.mockResolvedValueOnce(result(task())).mockResolvedValueOnce(result(task('candidate-1', 'cancelled', 4, true, false)))
@@ -32,7 +38,7 @@ describe('candidate build authority', () => {
       headers: { 'If-Match': '"rev-2"', 'Idempotency-Key': expect.any(String) },
     }))
     expect(wrapper.text()).toContain('仍在回收中'); expect(wrapper.text()).not.toContain('已回收')
-    expect(wrapper.findAll('button')).toHaveLength(0)
+    expect(actionButtons(wrapper)).toHaveLength(0)
     await vi.advanceTimersByTimeAsync(3000); await flushPromises()
     expect(wrapper.text()).toContain('已回收'); expect(wrapper.text()).not.toContain('仍在回收中')
     wrapper.unmount()
@@ -59,7 +65,7 @@ describe('candidate build authority', () => {
     await flushPromises(); await wrapper.find('button').trigger('click'); await flushPromises()
     expect(wrapper.text()).toContain('重新提交同一次取消请求')
     getBuild.mockResolvedValue(result(task('candidate-1', 'running', 3, true)))
-    await wrapper.findAll('button').find(b => b.text().includes('同一次'))!.trigger('click'); await flushPromises()
+    await actionButtons(wrapper).find(b => b.text().includes('同一次'))!.trigger('click'); await flushPromises()
     expect(cancelBuild.mock.calls[0]?.[0]).toEqual(cancelBuild.mock.calls[1]?.[0])
     expect(wrapper.text()).toContain('取消中'); expect(wrapper.text()).not.toContain('同一次')
     wrapper.unmount()
@@ -67,10 +73,10 @@ describe('candidate build authority', () => {
   it('shows no cancellable task before enqueue and refuses cross-project results', async () => {
     getBuild.mockResolvedValueOnce({ error: { diagnosticCode: 'NOT_FOUND' }, response: { status: 404 } } as never)
     const wrapper = mount(CandidateBuildTask, { props: { projectId: 'project-1', candidateId: 'candidate-1', target: 'environment' } })
-    await flushPromises(); expect(wrapper.text()).toContain('尚未开始'); expect(wrapper.findAll('button')).toHaveLength(0)
+    await flushPromises(); expect(wrapper.text()).toContain('尚未开始'); expect(actionButtons(wrapper)).toHaveLength(0)
     const wrong = task(); wrong.status.projectId = 'foreign'
     getBuild.mockResolvedValueOnce(result(wrong)); await vi.advanceTimersByTimeAsync(3000); await flushPromises()
-    expect(wrapper.text()).toContain('构建任务引用已变化'); expect(wrapper.findAll('button')).toHaveLength(0)
+    expect(wrapper.text()).toContain('构建任务引用已变化'); expect(actionButtons(wrapper)).toHaveLength(0)
     wrapper.unmount()
   })
   it.each([400, 403, 404, 409, 410, 422, 503])('does not retry an explicit rejected cancellation (%i)', async (status) => {
@@ -84,9 +90,9 @@ describe('candidate build authority', () => {
   it('clears an old task when it is no longer found and uses existing authenticated roles', async () => {
     getBuild.mockResolvedValueOnce(result(task())).mockResolvedValueOnce({ error: {}, response: { status: 404 } } as never)
     const wrapper = mount(CandidateBuildTask, { props: { projectId: 'project-1', candidateId: 'candidate-1', target: 'environment' } })
-    await flushPromises(); expect(wrapper.findAll('button')).toHaveLength(1)
+    await flushPromises(); expect(actionButtons(wrapper)).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(3000); await flushPromises()
-    expect(wrapper.text()).toContain('尚未开始'); expect(wrapper.findAll('button')).toHaveLength(0)
+    expect(wrapper.text()).toContain('尚未开始'); expect(actionButtons(wrapper)).toHaveLength(0)
     wrapper.unmount()
     actor.roles = []; getBuild.mockResolvedValue(result(task()))
     const unauthorized = mount(CandidateBuildTask, { props: { projectId: 'project-1', candidateId: 'candidate-1', target: 'environment' } })

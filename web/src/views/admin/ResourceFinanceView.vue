@@ -70,6 +70,8 @@
     <DiagnosticBanner
       v-if="finance.outcome"
       :code="finance.outcome.diagnostic.code"
+      :request-id="finance.outcome.diagnostic.requestId"
+      :next-step="finance.outcome.diagnostic.nextStep"
       :message="finance.outcome.diagnostic.message"
       :retryable="finance.outcome.diagnostic.retryable"
       :severity="finance.outcome.kind === 'error' ? 'error' : 'info'"
@@ -79,6 +81,8 @@
     <DiagnosticBanner
       v-if="rates.outcome"
       :code="rates.outcome.diagnostic.code"
+      :request-id="rates.outcome.diagnostic.requestId"
+      :next-step="rates.outcome.diagnostic.nextStep"
       :message="rates.outcome.diagnostic.message"
       :retryable="rates.outcome.diagnostic.retryable"
       :severity="rates.outcome.kind === 'error' ? 'error' : 'info'"
@@ -239,6 +243,8 @@
         <DiagnosticBanner
           v-if="rateUnit === 'gpu_unit_second' && catalog.kind === 'error'"
           :code="catalog.diagnostic.code"
+          :request-id="catalog.diagnostic.requestId"
+          :next-step="catalog.diagnostic.nextStep"
           :message="catalog.diagnostic.message"
           :retryable="catalog.diagnostic.retryable"
           @retry="loadCatalog"
@@ -359,6 +365,8 @@
         <DiagnosticBanner
           v-if="finance.usageContext.kind === 'error'"
           :code="finance.usageContext.diagnostic.code"
+          :request-id="finance.usageContext.diagnostic.requestId"
+          :next-step="finance.usageContext.diagnostic.nextStep"
           :message="finance.usageContext.diagnostic.message"
           :retryable="finance.usageContext.diagnostic.retryable"
           @retry="finance.loadUsagePage(finance.usagePage)"
@@ -780,7 +788,7 @@ async function loadCatalog() {
     catalog.value = options.size ? { kind: 'success', data: [...options.values()] } : { kind: 'empty' }
   } catch (error) {
     const problem = extractProblemDetails(error)
-    catalog.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'GPU_CATALOG_LOAD_FAILED', problem?.detail ?? '无法加载 GPU 目录，不能创建 GPU 费率。', problem?.retryable ?? true) }
+    catalog.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'GPU_CATALOG_LOAD_FAILED', problem?.detail ?? '无法加载 GPU 目录，不能创建 GPU 费率。', problem?.retryable ?? true, problem) }
   }
 }
 const rateDateError = computed(() => {
