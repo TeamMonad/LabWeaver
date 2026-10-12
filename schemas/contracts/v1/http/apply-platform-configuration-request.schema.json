@@ -13,9 +13,6 @@
     "desiredRevision": {
       "$ref": "#/$defs/Revision"
     },
-    "encryptedBundleSha256": {
-      "type": "string"
-    },
     "expectedRevision": {
       "format": "uint64",
       "minimum": 0,
@@ -24,8 +21,7 @@
   },
   "required": [
     "expectedRevision",
-    "desiredRevision",
-    "encryptedBundleSha256"
+    "desiredRevision"
   ],
   "title": "ApplyPlatformConfigurationRequest",
   "type": "object"

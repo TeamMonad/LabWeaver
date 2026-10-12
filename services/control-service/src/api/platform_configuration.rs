@@ -10,17 +10,20 @@ use axum::extract::Request;
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use contracts::platform_configuration::{
-    ApplyPlatformConfigurationRequest, ReportPlatformConfigurationApplyRequest,
+    ApplyPlatformConfigurationRequest, PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES,
+    RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
     UpdatePlatformConfigurationRequest,
 };
 use contracts::{OperationId, Revision};
+use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub(super) fn public_routes() -> Router<Arc<ApiState>> {
@@ -32,6 +35,10 @@ pub(super) fn public_routes() -> Router<Arc<ApiState>> {
         .route(
             "/api/v1/admin/platform-configuration/versions/{revision}",
             get(version),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+            get(bundle).post(register_bundle),
         )
         .route("/api/v1/admin/platform-configuration/applies", post(apply))
         .route(
@@ -160,6 +167,113 @@ async fn application(
     response(value, revision, StatusCode::OK)
 }
 
+async fn bundle(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(revision): Path<Revision>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    admin(
+        &state,
+        &principal,
+        &headers,
+        "getPlatformConfigurationBundle",
+    )
+    .await?;
+    let value = configuration::get_bundle(&state.control.pool, revision).await?;
+    let revision = value.registered_at_revision.get();
+    response(value, revision, StatusCode::OK)
+}
+
+async fn register_bundle(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(revision): Path<Revision>,
+    query: Result<
+        Query<RegisterPlatformConfigurationBundleRequest>,
+        axum::extract::rejection::QueryRejection,
+    >,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let actor = admin(
+        &state,
+        &principal,
+        request.headers(),
+        "registerPlatformConfigurationBundle",
+    )
+    .await?;
+    let Query(binding) =
+        query.map_err(|_| ApiError::bad_request("LW_PLATFORM_CONFIGURATION_INVALID"))?;
+    fence(request.headers(), binding.expected_revision)?;
+    let key = idempotency(request.headers())?;
+    if request
+        .headers()
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok())
+        != Some("application/octet-stream")
+    {
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "LW_PLATFORM_CONFIGURATION_CONTENT_TYPE_INVALID",
+            false,
+        ));
+    }
+    let ciphertext = receive_ciphertext(request.into_body()).await?;
+    let value = configuration::register_bundle(
+        &state.control.pool,
+        actor,
+        revision,
+        &binding,
+        ciphertext,
+        &key,
+        now()?,
+    )
+    .await?;
+    let revision = value.revision;
+    response(value, revision, StatusCode::OK)
+}
+
+/// Hash opaque ciphertext without buffering or persisting the uploaded file.
+async fn receive_ciphertext(
+    body: axum::body::Body,
+) -> Result<configuration::BundleCiphertext, ApiError> {
+    const HEADER: &[u8] = b"age-encryption.org/v1\n";
+    let invalid = || {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "LW_PLATFORM_CONFIGURATION_INVALID",
+            false,
+        )
+    };
+    let mut stream = body.into_data_stream();
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut header = Vec::with_capacity(HEADER.len());
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| invalid())?;
+        bytes = bytes.checked_add(chunk.len() as u64).ok_or_else(invalid)?;
+        if bytes > PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+                false,
+            ));
+        }
+        header.extend_from_slice(&chunk[..chunk.len().min(HEADER.len() - header.len())]);
+        if header.len() == HEADER.len() && header != HEADER {
+            return Err(invalid());
+        }
+        digest.update(&chunk);
+    }
+    if bytes <= HEADER.len() as u64 || header != HEADER {
+        return Err(invalid());
+    }
+    let digest = format!("{:x}", digest.finalize())
+        .parse()
+        .map_err(|_| invalid())?;
+    Ok(configuration::BundleCiphertext { digest, bytes })
+}
+
 async fn update(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -277,6 +391,64 @@ fn parse_yaml<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, ApiError
 mod tests {
     use super::{fence, parse_json, parse_yaml};
     use axum::http::HeaderMap;
+
+    #[tokio::test]
+    async fn ciphertext_stream_hashes_every_chunk_and_rejects_plaintext_or_overflow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::receive_ciphertext;
+        use axum::body::{Body, Bytes};
+        use axum::response::IntoResponse;
+        let chunks = [
+            b"age-encrypt".as_slice(),
+            b"ion.org/v1\n".as_slice(),
+            b"synthetic-stream-payload".as_slice(),
+        ];
+        let bytes = chunks.concat();
+        let body = Body::from_stream(futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(|bytes| Ok::<_, std::io::Error>(Bytes::copy_from_slice(bytes))),
+        ));
+        let facts = receive_ciphertext(body)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(facts.bytes, bytes.len() as u64);
+        assert_eq!(
+            facts.digest,
+            persistence_sqlx::Sha256Digest::of_bytes(&bytes)
+        );
+        let rejected = receive_ciphertext(Body::from("synthetic-secret-do-not-echo"))
+            .await
+            .err()
+            .ok_or("plaintext accepted")?;
+        assert!(!format!("{rejected:?}").contains("synthetic-secret-do-not-echo"));
+        let large = futures_util::stream::iter((0..71).map(|index| {
+            let mut bytes = vec![0_u8; 1024 * 1024];
+            if index == 0 {
+                let header = b"age-encryption.org/v1\n";
+                bytes[..header.len()].copy_from_slice(header);
+            }
+            Ok::<_, std::io::Error>(Bytes::from(bytes))
+        }));
+        let rejected = receive_ciphertext(Body::from_stream(large))
+            .await
+            .err()
+            .ok_or("oversized upload accepted")?;
+        assert_eq!(
+            rejected.into_response().status(),
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let broken = Body::from_stream(futures_util::stream::iter([
+            Ok(Bytes::from_static(b"age-encryption.org/v1\n")),
+            Err(std::io::Error::other("synthetic-secret-stream-error")),
+        ]));
+        let error = receive_ciphertext(broken)
+            .await
+            .err()
+            .ok_or("broken stream accepted")?;
+        assert!(!format!("{error:?}").contains("synthetic-secret-stream-error"));
+        Ok(())
+    }
 
     #[test]
     fn json_and_yaml_reject_nested_duplicate_keys_and_weak_revision_headers() {

@@ -256,6 +256,30 @@ pub struct PlatformConfigurationVersion {
     pub created_at: UtcTimestamp,
 }
 
+/// An administrator's registration of received ciphertext, not deployment approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformConfigurationBundle {
+    pub registered_at_revision: Revision,
+    pub desired_revision: Revision,
+    /// Administrator-declared binding to the immutable settings snapshot.
+    pub configuration_sha256: String,
+    /// Computed by Control from actual uploaded ciphertext bytes.
+    pub encrypted_bundle_sha256: String,
+    pub encrypted_bytes: u64,
+    pub registered_by: ActorId,
+    pub registered_at: UtcTimestamp,
+}
+
+pub const PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES: u64 = 70 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegisterPlatformConfigurationBundleRequest {
+    pub expected_revision: u64,
+    pub configuration_sha256: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformConfigurationApplyStage {
@@ -343,6 +367,8 @@ pub struct PlatformConfigurationStatus {
     #[serde(default)]
     pub defaults: PlatformConfigurationDesired,
     pub desired: Option<PlatformConfigurationVersion>,
+    /// Current desired's last registered artifact. Registration alone never applies it.
+    pub registered_bundle: Option<PlatformConfigurationBundle>,
     pub applied: Option<PlatformConfigurationVersion>,
     pub applied_state: PlatformConfigurationAppliedState,
     pub applied_at: Option<UtcTimestamp>,
@@ -384,7 +410,6 @@ pub struct UpdatePlatformConfigurationRequest {
 pub struct ApplyPlatformConfigurationRequest {
     pub expected_revision: u64,
     pub desired_revision: Revision,
-    pub encrypted_bundle_sha256: String,
 }
 
 /// Only a permission-checked deployment identity can submit execution facts.
