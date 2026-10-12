@@ -37,6 +37,9 @@ MAX_ARCHIVE_BYTES = MAX_TOTAL_BYTES + MAX_FILES * 10240
 DEFAULT_MANIFEST = (
     Path(__file__).resolve().parents[1] / "deploy/config/platform-bundle-manifest.json"
 )
+WORKLOADS_FILE = (
+    Path(__file__).resolve().parents[1] / "deploy/helm/labweaver/values.yaml"
+)
 RESERVED_VARIABLES = {
     "platform_application_namespace",
     "platform_application_release_name",
@@ -213,6 +216,113 @@ def _value_references(value: Any, references: set[str]) -> None:
         raise BundleError("LW_BUNDLE_TEMPLATE_FORBIDDEN")
 
 
+def _configuration_version(payload: bytes) -> dict[str, Any]:
+    """Use Control's Rust contract and canonical digest, without a second policy parser."""
+    target = Path(
+        os.environ.get("CARGO_TARGET_DIR", WORKLOADS_FILE.parents[3] / "target")
+    )
+    tool = Path(
+        os.environ.get("LABWEAVER_BUNDLE_CONFIGURATION_TOOL", target / "debug/xtask")
+    )
+    try:
+        result = subprocess.run(
+            [str(tool), "bundle-configuration"],
+            input=payload,
+            capture_output=True,
+            timeout=30,
+        )
+    except FileNotFoundError as error:
+        raise BundleError("LW_BUNDLE_CONFIGURATION_TOOL_REQUIRED") from error
+    except (OSError, subprocess.SubprocessError) as error:
+        raise BundleError("LW_BUNDLE_CONFIGURATION_INVALID") from error
+    if result.returncode:
+        code = "LW_BUNDLE_CONFIGURATION_INVALID"
+        for diagnostic in (
+            "LW_BUNDLE_CONFIGURATION_DIGEST_MISMATCH",
+            "LW_BUNDLE_CONFIGURATION_LIMIT",
+            "LW_BUNDLE_CONFIGURATION_IO_FAILED",
+        ):
+            if diagnostic.encode() in result.stderr:
+                code = diagnostic
+        raise BundleError(code)
+    try:
+        return json.loads(result.stdout)
+    except (ValueError, UnicodeError) as error:
+        raise BundleError("LW_BUNDLE_CONFIGURATION_INVALID") from error
+
+
+def _workload_inputs(
+    application: dict[str, Any], manifest: dict[str, Any]
+) -> dict[str, Any]:
+    workloads = _document(WORKLOADS_FILE.read_bytes())["workloads"]
+    inputs = _exact(application["workloadInputs"], set(workloads))
+    overrides = application["helmValues"].get("workloads", {})
+    if not isinstance(overrides, dict) or set(overrides) - set(workloads):
+        raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
+    downward = {
+        "LABWEAVER_EXECUTOR_POD_NAME",
+        "LABWEAVER_EXECUTOR_POD_NAMESPACE",
+        "LABWEAVER_EXECUTOR_POD_UID",
+        "LABWEAVER_EXECUTOR_CONTAINER_NAME",
+    }
+    result = {}
+    for name, defaults in workloads.items():
+        override = overrides.get(name, {})
+        if not isinstance(override, dict) or {
+            "env",
+            "secretEnv",
+            "configMap",
+            "secret",
+        } & set(override):
+            raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
+        configuration = dict(defaults, **override)
+        source = _exact(inputs[name], {"env", "secretEnv"})
+        env = source["env"]
+        secret_env = source["secretEnv"]
+        if not isinstance(env, dict) or not isinstance(secret_env, dict):
+            raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
+        if type(configuration.get("enabled")) is not bool:
+            raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
+        if configuration["enabled"]:
+            if set(defaults.get("env", {})) - set(env) or set(
+                defaults.get("secretEnv", {})
+            ) - set(secret_env):
+                raise BundleError("LW_BUNDLE_WORKLOAD_INPUT_MISSING")
+            for group, field in (("configMaps", "configMap"), ("secrets", "secret")):
+                if (
+                    configuration.get(field)
+                    and configuration[field] not in manifest[group]
+                ):
+                    raise BundleError("LW_BUNDLE_WORKLOAD_OBJECT_MISSING")
+        if set(env) & set(secret_env) or downward & (set(env) | set(secret_env)):
+            raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
+        for key, value in env.items():
+            if (
+                not isinstance(key, str)
+                or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key)
+                or not isinstance(value, str)
+                or "\x00" in value
+                or "{{" in value
+                or "{%" in value
+            ):
+                raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
+            if SECRET_FIELD.search(key):
+                raise BundleError("LW_BUNDLE_SECRET_REFERENCE_REQUIRED")
+        for key, reference in secret_env.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
+                raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
+            reference = _exact(reference, {"secret", "key"})
+            if (
+                not isinstance(reference["secret"], str)
+                or not isinstance(reference["key"], str)
+                or reference["secret"] not in manifest["secrets"]
+                or reference["key"] not in manifest["secrets"][reference["secret"]]
+            ):
+                raise BundleError("LW_BUNDLE_SECRET_REFERENCE_INVALID")
+        result[name] = source
+    return result
+
+
 def load_bundle(
     root: Path, manifest_path: Path = DEFAULT_MANIFEST
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -229,6 +339,7 @@ def load_bundle(
             "versions",
             "docs",
             "application",
+            "configurationFile",
         },
     )
     if (
@@ -247,13 +358,14 @@ def load_bundle(
     docs = _exact(model["docs"], {"operationsFile"})
     references = {
         MODEL_FILE,
+        _relative(model["configurationFile"], "config"),
         _relative(versions["lockFile"], "versions"),
         _relative(versions["packageFile"], "versions"),
         _relative(docs["operationsFile"], "docs"),
     }
     application = _exact(
         model["application"],
-        {"configMaps", "secrets", "helmValues", "ansibleVariables"},
+        {"configMaps", "secrets", "helmValues", "ansibleVariables", "workloadInputs"},
     )
     manifest = objects._load_manifest(manifest_path)
     for group, prefix in (("configMaps", "config"), ("secrets", "secrets")):
@@ -265,7 +377,9 @@ def load_bundle(
         application["ansibleVariables"], dict
     ):
         raise BundleError("LW_BUNDLE_MODEL_INVALID")
-    if {"deploymentIdentity", "images"} & set(application["helmValues"]):
+    if {"deploymentIdentity", "images", "workloadInputs"} & set(
+        application["helmValues"]
+    ):
         raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
     for key in application["ansibleVariables"]:
         if not key.startswith("platform_application_") or key in RESERVED_VARIABLES:
@@ -277,6 +391,10 @@ def load_bundle(
         raise BundleError("LW_BUNDLE_HELM_SECRET_FORBIDDEN")
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
+    version = _configuration_version(files[model["configurationFile"]])
+    if version["revision"] != model["revision"]:
+        raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
+    _workload_inputs(application, manifest)
     lock = _document(files[versions["lockFile"]])
     package = _document(files[versions["packageFile"]])
     if (
@@ -298,6 +416,15 @@ def load_bundle(
         ):
             raise BundleError("LW_BUNDLE_VERSIONS_INVALID")
         components.add(image["component"])
+    workloads = _document(WORKLOADS_FILE.read_bytes())["workloads"]
+    overrides = application["helmValues"].get("workloads", {})
+    required_images = {
+        workload["imageKey"]
+        for name, workload in workloads.items()
+        if overrides.get(name, {}).get("enabled", workload["enabled"])
+    }
+    if required_images - {component.replace("-", "_") for component in components}:
+        raise BundleError("LW_BUNDLE_WORKLOAD_IMAGE_MISSING")
     secret_payloads = {
         payload
         for name, payload in files.items()
@@ -318,7 +445,10 @@ def load_bundle(
 
 def _write(path: Path, payload: bytes) -> None:
     _private_directory(path.parent, create=True)
-    objects._write_exclusive(path, payload)
+    try:
+        objects._write_exclusive(path, payload)
+    except FileExistsError as error:
+        raise BundleError("LW_BUNDLE_OUTPUT_EXISTS") from error
 
 
 def _resolve_values(value: Any, root: Path, files: dict[str, bytes]) -> Any:
@@ -361,12 +491,18 @@ def derive_bundle(
     shutil.rmtree(inputs)
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     values = dict(application["helmValues"])
+    values["workloadInputs"] = _workload_inputs(application, manifest)
     package = _document(files[model["versions"]["packageFile"]])
     values["images"] = {
         image["component"].replace("-", "_"): image["reference"]
         for image in package["images"]
     }
     values["deploymentIdentity"] = {"configurationBundleSha256": digest}
+    version = _configuration_version(files[model["configurationFile"]])
+    _write(
+        output / "platform-configuration.json",
+        json.dumps(version, sort_keys=True).encode(),
+    )
     values_output = output / "helm-values.yaml"
     _write(values_output, yaml.safe_dump(values, sort_keys=True).encode())
     variables = _resolve_values(application["ansibleVariables"], root, files)
@@ -391,9 +527,71 @@ def derive_bundle(
     )
     return {
         "revision": model["revision"],
-        "configurationSha256": digest,
+        "applicationObjectsSha256": digest,
         "files": len(files),
+        "managedConfigurationSha256": version["configurationSha256"],
     }
+
+
+def _private_file(path: Path) -> bytes:
+    _private_directory(path.absolute().parent)
+    _no_symlink_ancestors(path.absolute())
+    info = path.stat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+        or not 0 < info.st_size <= objects.MAX_FILE_BYTES
+    ):
+        raise BundleError("LW_BUNDLE_PERMISSIONS_INVALID")
+    return path.read_bytes()
+
+
+def _publish_private(path: Path, payload: bytes) -> None:
+    """Publish a complete request or snapshot without replacing existing material."""
+    _private_directory(path.parent, create=True)
+    _no_symlink_ancestors(path)
+    descriptor, pending_name = tempfile.mkstemp(prefix=".settings-", dir=path.parent)
+    pending = Path(pending_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(pending, path)
+    except FileExistsError as error:
+        raise BundleError("LW_BUNDLE_OUTPUT_EXISTS") from error
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def export_settings(version_file: Path, output: Path) -> dict[str, Any]:
+    """Save only a verified immutable desired version, never applied or deployment history."""
+    version = _configuration_version(_private_file(version_file))
+    _publish_private(output.absolute(), json.dumps(version, sort_keys=True).encode())
+    return {
+        "revision": version["revision"],
+        "managedConfigurationSha256": version["configurationSha256"],
+    }
+
+
+def import_settings(
+    archive: Path, identity: Path, runtime: Path, expected_revision: int, output: Path
+) -> dict[str, Any]:
+    """Prepare the existing conditional update request. Authentication remains at the API."""
+    if type(expected_revision) is not int or not 0 <= expected_revision <= 2**63 - 1:
+        raise BundleError("LW_BUNDLE_VERSION_INVALID")
+    with opened_bundle(archive, identity, runtime) as (root, _rendered, metadata):
+        model, files = load_bundle(root)
+        version = _configuration_version(files[model["configurationFile"]])
+        request = {
+            "expectedRevision": expected_revision,
+            "configuration": version["configuration"],
+        }
+        _publish_private(
+            output.absolute(), json.dumps(request, sort_keys=True).encode()
+        )
+    return dict(metadata, expectedRevision=expected_revision)
 
 
 def _age(argv: list[str], **kwargs: Any) -> None:
@@ -585,6 +783,14 @@ def main() -> int:
     use.add_argument("--archive", type=Path, required=True)
     use.add_argument("--identity", type=Path, required=True)
     use.add_argument("command", nargs=argparse.REMAINDER)
+    export = subcommands.add_parser("settings-export")
+    export.add_argument("--version-file", type=Path, required=True)
+    export.add_argument("--output", type=Path, required=True)
+    restore = subcommands.add_parser("settings-import")
+    restore.add_argument("--archive", type=Path, required=True)
+    restore.add_argument("--identity", type=Path, required=True)
+    restore.add_argument("--expected-revision", type=int, required=True)
+    restore.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     previous = {
         sig: signal.signal(sig, _interrupt) for sig in (signal.SIGINT, signal.SIGTERM)
@@ -606,6 +812,16 @@ def main() -> int:
                 arguments.recipient,
                 arguments.runtime,
             )
+        elif arguments.operation == "settings-export":
+            metadata = export_settings(arguments.version_file, arguments.output)
+        elif arguments.operation == "settings-import":
+            metadata = import_settings(
+                arguments.archive,
+                arguments.identity,
+                arguments.runtime,
+                arguments.expected_revision,
+                arguments.output,
+            )
         else:
             with opened_bundle(
                 arguments.archive, arguments.identity, arguments.runtime
@@ -620,6 +836,9 @@ def main() -> int:
                         LW_BUNDLE_RENDERED_ROOT=str(rendered),
                         LABWEAVER_APPLICATION_VARS_FILE=str(
                             rendered / "ansible-vars.yaml"
+                        ),
+                        LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE=str(
+                            rendered / "platform-configuration.json"
                         ),
                     )
                     # A consumer can read secrets. Do not forward its stdout/stderr to ordinary logs.

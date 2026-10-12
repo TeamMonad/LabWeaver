@@ -2,6 +2,7 @@
 
 import base64
 import copy
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -80,6 +81,7 @@ class DeploymentBundleTests(unittest.TestCase):
         self.model = {
             "apiVersion": bundle.API_VERSION,
             "revision": 7,
+            "configurationFile": "config/platform-configuration.json",
             "target": {"namespace": "labweaver-system", "releaseName": "labweaver"},
             "versions": {
                 "lockFile": "versions/lock.yaml",
@@ -89,7 +91,10 @@ class DeploymentBundleTests(unittest.TestCase):
             "application": {
                 "configMaps": configmaps,
                 "secrets": secrets,
-                "helmValues": {"hostAliases": []},
+                "helmValues": {
+                    "hostAliases": [],
+                    "network": {"kubernetesApiCidrs": ["192.0.2.10/32"]},
+                },
                 "ansibleVariables": {
                     "platform_application_minio_password": {
                         "secret": "secrets/shared-token"
@@ -98,8 +103,70 @@ class DeploymentBundleTests(unittest.TestCase):
                         "file": "secrets/nats.creds"
                     },
                 },
+                "workloadInputs": {
+                    name: {
+                        "env": (
+                            dict(configuration.get("env", {}))
+                            if configuration["enabled"]
+                            else {}
+                        ),
+                        "secretEnv": (
+                            {
+                                key: {
+                                    "secret": reference.get(
+                                        "secret", configuration["secret"]
+                                    ),
+                                    "key": reference["key"],
+                                }
+                                for key, reference in configuration.get(
+                                    "secretEnv", {}
+                                ).items()
+                            }
+                            if configuration["enabled"]
+                            else {}
+                        ),
+                    }
+                    for name, configuration in yaml.safe_load(
+                        bundle.WORKLOADS_FILE.read_bytes()
+                    )["workloads"].items()
+                },
             },
         }
+        self.configuration = {
+            "lifecycle": {
+                "readOnlyRetentionSeconds": 604800,
+                "detailedLogRetentionSeconds": 2592000,
+                "expiryReminderSeconds": [86400, 3600],
+                "preemptionGraceSeconds": 60,
+            },
+            "runtimePolicy": {
+                "defaultContainerUid": 0,
+                "allowedCapabilities": [],
+                "preauthorizations": [],
+                "privilegedAllowed": False,
+                "privilegedExecutionLocation": None,
+            },
+            "builderPolicy": {
+                "capabilities": [],
+                "allowPrivilegeEscalation": False,
+                "entitlements": [],
+            },
+        }
+        self.version = {
+            "revision": 7,
+            "configuration": self.configuration,
+            "configurationSha256": hashlib.sha256(
+                json.dumps(
+                    self.configuration, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+            "createdBy": "00000000-0000-7000-8000-000000000001",
+            "createdAt": "1970-01-01T00:00:00.000Z",
+        }
+        write(
+            self.root / self.model["configurationFile"],
+            json.dumps(self.version).encode(),
+        )
         write(
             self.root / "versions/lock.yaml",
             b"schema_version: 1\nplatform_foundation: {}\n",
@@ -110,9 +177,19 @@ class DeploymentBundleTests(unittest.TestCase):
                 {
                     "images": [
                         {
-                            "component": "control-service",
-                            "reference": "example.invalid/control@sha256:" + "a" * 64,
+                            "component": name.replace("_", "-"),
+                            "reference": "example.invalid/"
+                            + (
+                                "control"
+                                if name == "control_service"
+                                else name.replace("_", "-")
+                            )
+                            + "@sha256:"
+                            + "a" * 64,
                         }
+                        for name in yaml.safe_load(bundle.WORKLOADS_FILE.read_bytes())[
+                            "images"
+                        ]
                     ]
                 }
             ).encode(),
@@ -128,6 +205,261 @@ class DeploymentBundleTests(unittest.TestCase):
 
     def save_model(self) -> None:
         write(self.root / bundle.MODEL_FILE, yaml.safe_dump(self.model).encode())
+
+    def save_version(self) -> None:
+        self.version["configurationSha256"] = hashlib.sha256(
+            json.dumps(
+                self.configuration, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        write(
+            self.root / self.model["configurationFile"],
+            json.dumps(self.version).encode(),
+        )
+
+    def test_settings_export_and_encrypted_import_keep_policy_and_prepare_one_update(
+        self,
+    ) -> None:
+        self.configuration["runtimePolicy"].update(
+            allowedCapabilities=["NET_ADMIN", "NET_RAW"],
+            privilegedAllowed=True,
+            privilegedExecutionLocation={
+                "kind": "dedicated_node_pool",
+                "nodeSelector": {"labweaver.io/pool": "research"},
+                "taintKey": "labweaver.io/research",
+                "taintValue": "reserved",
+            },
+        )
+        self.save_version()
+        response = self.private / "server-version.json"
+        write(response, json.dumps(self.version).encode())
+        exported = self.private / "exported/config/platform-configuration.json"
+        bundle.export_settings(response, exported)
+        self.assertEqual(json.loads(exported.read_bytes()), self.version)
+        self.seal()
+        shutil.rmtree(self.root)
+        update_file = self.private / "restored/update.json"
+        result = bundle.import_settings(
+            self.archive, self.identity, self.runtime, 12, update_file
+        )
+        update = json.loads(update_file.read_bytes())
+        self.assertEqual(set(update), {"expectedRevision", "configuration"})
+        self.assertEqual(update["expectedRevision"], 12)
+        self.assertEqual(update["configuration"], self.configuration)
+        self.assertEqual(
+            update["configuration"]["builderPolicy"],
+            {"capabilities": [], "allowPrivilegeEscalation": False, "entitlements": []},
+        )
+        self.assertEqual(
+            result["managedConfigurationSha256"], self.version["configurationSha256"]
+        )
+        self.assertEqual(update_file.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(self.secret, update_file.read_bytes())
+        self.clean_runtime()
+
+    def test_managed_version_hash_revision_fields_and_executor_boundary_are_required(
+        self,
+    ) -> None:
+        cases = []
+        wrong_hash = copy.deepcopy(self.version)
+        wrong_hash["configuration"]["lifecycle"]["preemptionGraceSeconds"] = 90
+        cases.append((wrong_hash, "LW_BUNDLE_CONFIGURATION_DIGEST_MISMATCH"))
+        wrong_revision = dict(self.version, revision=8)
+        cases.append((wrong_revision, "LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH"))
+        for field, value in (
+            ("allowedCapabilities", ["ALL"]),
+            ("privilegedAllowed", True),
+        ):
+            invalid = copy.deepcopy(self.version)
+            invalid["configuration"]["runtimePolicy"][field] = value
+            cases.append((invalid, "LW_BUNDLE_CONFIGURATION_INVALID"))
+        secret = copy.deepcopy(self.version)
+        secret["configuration"]["token"] = self.secret.decode()
+        cases.append((secret, "LW_BUNDLE_CONFIGURATION_INVALID"))
+        for version, code in cases:
+            with self.subTest(code=code):
+                write(
+                    self.root / self.model["configurationFile"],
+                    json.dumps(version).encode(),
+                )
+                with self.assertRaisesRegex(bundle.BundleError, code):
+                    bundle.load_bundle(self.root)
+        write(
+            self.root / self.model["configurationFile"],
+            json.dumps(self.version).encode(),
+        )
+        del self.model["configurationFile"]
+        self.save_model()
+        with self.assertRaisesRegex(bundle.BundleError, "LW_BUNDLE_MODEL_INVALID"):
+            bundle.load_bundle(self.root)
+
+    def test_settings_import_failure_retains_existing_output_and_cleans_plaintext(
+        self,
+    ) -> None:
+        self.seal()
+        update_file = self.private / "update.json"
+        write(update_file, b"keep-existing-request")
+        with self.assertRaisesRegex(bundle.BundleError, "LW_BUNDLE_OUTPUT_EXISTS"):
+            bundle.import_settings(
+                self.archive, self.identity, self.runtime, 0, update_file
+            )
+        self.assertEqual(update_file.read_bytes(), b"keep-existing-request")
+        self.clean_runtime()
+        other_key = self.directory / "wrong-import-key.txt"
+        self.key(other_key)
+        missing = self.private / "never-created.json"
+        with self.assertRaisesRegex(bundle.BundleError, "LW_BUNDLE_AGE_FAILED"):
+            bundle.import_settings(self.archive, other_key, self.runtime, 0, missing)
+        self.assertFalse(missing.exists())
+        self.clean_runtime()
+
+    def test_workload_inputs_are_complete_single_source_with_existing_secret_objects(
+        self,
+    ) -> None:
+        inputs = self.model["application"]["workloadInputs"]
+        inputs["control-service"]["env"]["LABWEAVER_SERVICE_SCOPES"] = "synthetic.scope"
+        self.save_model()
+        bundle.derive_bundle(self.root, self.private / "rendered-inputs")
+        values = yaml.safe_load(
+            (self.private / "rendered-inputs/helm-values.yaml").read_bytes()
+        )
+        self.assertEqual(values["workloadInputs"], inputs)
+        self.assertNotIn("workloads", values)
+        del inputs["control-service"]["env"]["LABWEAVER_SERVICE_SCOPES"]
+        self.save_model()
+        with self.assertRaisesRegex(
+            bundle.BundleError, "LW_BUNDLE_WORKLOAD_INPUT_MISSING"
+        ):
+            bundle.load_bundle(self.root)
+
+    def test_environment_secret_injection_and_helm_override_cannot_make_another_source(
+        self,
+    ) -> None:
+        original = copy.deepcopy(self.model)
+        for change, code in (
+            (
+                {"env": {"ANTHROPIC_AUTH_TOKEN": self.secret.decode()}},
+                "LW_BUNDLE_SECRET_REFERENCE_REQUIRED",
+            ),
+            (
+                {"secretEnv": {"TOKEN": {"secret": "not-in-bundle", "key": "token"}}},
+                "LW_BUNDLE_SECRET_REFERENCE_INVALID",
+            ),
+        ):
+            self.model = copy.deepcopy(original)
+            for group, extra in change.items():
+                self.model["application"]["workloadInputs"]["agent-service"][
+                    group
+                ].update(extra)
+            self.save_model()
+            with self.assertRaisesRegex(bundle.BundleError, code):
+                bundle.load_bundle(self.root)
+        self.model = copy.deepcopy(original)
+        self.model["application"]["helmValues"]["workloads"] = {
+            "control-service": {"env": {}}
+        }
+        self.save_model()
+        with self.assertRaisesRegex(
+            bundle.BundleError, "LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN"
+        ):
+            bundle.load_bundle(self.root)
+
+    def test_missing_contract_tool_fails_before_encryption(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LABWEAVER_BUNDLE_CONFIGURATION_TOOL": str(
+                    self.directory / "absent-validator"
+                )
+            },
+        ):
+            with self.assertRaisesRegex(
+                bundle.BundleError, "LW_BUNDLE_CONFIGURATION_TOOL_REQUIRED"
+            ):
+                bundle.seal_bundle(self.root, self.archive, [self.key()], self.runtime)
+        self.assertFalse(self.archive.exists())
+
+    def test_failed_settings_publish_is_atomic_and_cli_does_not_echo_sensitive_io_error(
+        self,
+    ) -> None:
+        output = self.private / "export-pending/version.json"
+        arguments = [
+            "deployment_bundle.py",
+            "settings-export",
+            "--version-file",
+            str(self.root / self.model["configurationFile"]),
+            "--output",
+            str(output),
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", arguments), patch.object(
+            bundle.os, "link", side_effect=OSError(self.secret.decode())
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(bundle.main(), 1)
+        self.assertFalse(output.exists())
+        self.assertEqual(list(output.parent.iterdir()), [])
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue().strip(), "LW_BUNDLE_IO_FAILED")
+        self.assertNotIn(self.secret.decode(), stderr.getvalue())
+
+    def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(
+        self,
+    ) -> None:
+        helm = shutil.which("helm")
+        self.assertIsNotNone(
+            helm, "The pinned Helm renderer is required for Bundle input tests."
+        )
+        self.configuration["runtimePolicy"].update(
+            allowedCapabilities=["SYS_ADMIN"],
+            privilegedAllowed=True,
+            privilegedExecutionLocation={
+                "kind": "virtual_machine_guest",
+                "providerBinding": "synthetic-vm",
+            },
+        )
+        self.save_version()
+        self.model["application"]["workloadInputs"]["control-service"]["env"][
+            "LABWEAVER_SERVICE_SCOPES"
+        ] = "synthetic.bundle.scope"
+        self.save_model()
+        rendered = self.private / "helm-rendered"
+        bundle.derive_bundle(self.root, rendered)
+        result = subprocess.run(
+            [
+                helm,
+                "template",
+                "labweaver",
+                str(bundle.WORKLOADS_FILE.parent),
+                "--namespace",
+                "labweaver-system",
+                "--values",
+                str(rendered / "helm-values.yaml"),
+                "--set-string",
+                "workloads.control-service.env.LEGACY_ONLY=must-not-be-rendered",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deployments = {
+            item["metadata"]["name"]: item
+            for item in yaml.safe_load_all(result.stdout)
+            if item and item.get("kind") == "Deployment"
+        }
+        control = deployments["control-service"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]
+        env = {item["name"]: item for item in control["env"]}
+        self.assertEqual(
+            env["LABWEAVER_SERVICE_SCOPES"]["value"], "synthetic.bundle.scope"
+        )
+        self.assertNotIn("LEGACY_ONLY", env)
+        builder = deployments["build-executor"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]
+        self.assertFalse(builder["securityContext"]["allowPrivilegeEscalation"])
+        self.assertEqual(builder["securityContext"]["capabilities"], {"drop": ["ALL"]})
 
     def key(self, path: Path | None = None) -> str:
         if shutil.which("age") is None or shutil.which("age-keygen") is None:
@@ -205,21 +537,21 @@ class DeploymentBundleTests(unittest.TestCase):
         values = yaml.safe_load((rendered / "helm-values.yaml").read_bytes())
         self.assertEqual(
             values["deploymentIdentity"]["configurationBundleSha256"],
-            metadata["configurationSha256"],
+            metadata["applicationObjectsSha256"],
         )
         self.assertEqual(
             values["images"]["control_service"],
             "example.invalid/control@sha256:" + "a" * 64,
         )
         self.assertFalse((rendered / "object-inputs").exists())
-        previous = metadata["configurationSha256"]
+        previous = metadata["applicationObjectsSha256"]
         write(
             self.root / "secrets/shared-token",
             b"rotated-synthetic-credential-9876543210",
         )
         second = self.private / "second"
         changed = bundle.derive_bundle(self.root, second)
-        self.assertNotEqual(changed["configurationSha256"], previous)
+        self.assertNotEqual(changed["applicationObjectsSha256"], previous)
         for document in yaml.safe_load_all((second / "application.yaml").read_bytes()):
             if document["kind"] == "Secret":
                 for key, payload in document["data"].items():

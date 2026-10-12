@@ -510,6 +510,65 @@ async fn http_json_yaml_share_revision_and_only_signed_executor_can_report() -> 
             .preemption_grace_seconds,
         90
     );
+    // Bundle export reads this immutable version. Its import uses the existing
+    // complete update request and the destination fence, never source apply facts.
+    let source_revision = state.desired.as_ref().ok_or("no desired")?.revision;
+    let exported = fixture
+        .router
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("{root}/versions/{}", source_revision.get()),
+            fixture.admin,
+            vec![],
+            "application/json",
+            state.revision,
+            "http-export-version",
+        )?)
+        .await?;
+    assert_eq!(exported.status(), StatusCode::OK);
+    let exported: contracts::platform_configuration::PlatformConfigurationVersion =
+        serde_json::from_slice(&to_bytes(exported.into_body(), 1024 * 1024).await?)?;
+    let imported = UpdatePlatformConfigurationRequest {
+        expected_revision: state.revision,
+        configuration: exported.configuration.clone(),
+    };
+    let imported_response = fixture
+        .router
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            root,
+            fixture.admin,
+            serde_json::to_vec(&imported)?,
+            "application/json",
+            imported.expected_revision,
+            "http-import-settings",
+        )?)
+        .await?;
+    assert_eq!(imported_response.status(), StatusCode::OK);
+    let state: PlatformConfigurationStatus =
+        serde_json::from_slice(&to_bytes(imported_response.into_body(), 1024 * 1024).await?)?;
+    let desired = state.desired.as_ref().ok_or("no imported desired")?;
+    assert_eq!(desired.configuration, exported.configuration);
+    assert_eq!(desired.configuration_sha256, exported.configuration_sha256);
+    assert_ne!(desired.revision, source_revision);
+    assert!(state.applied.is_none());
+    assert!(state.latest_apply.is_none());
+    let stale_import = fixture
+        .router
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            root,
+            fixture.admin,
+            serde_json::to_vec(&imported)?,
+            "application/json",
+            imported.expected_revision,
+            "http-stale-import-settings",
+        )?)
+        .await?;
+    assert_eq!(stale_import.status(), StatusCode::CONFLICT);
     let invalid = fixture
         .router
         .clone()
