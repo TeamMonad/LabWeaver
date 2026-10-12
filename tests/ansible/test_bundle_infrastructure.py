@@ -274,6 +274,15 @@ pathlib.Path(__import__('sys').argv[1]).write_text('ok')
                 acceptance.prepare(
                     "labweaver-system", self.fixture.private / "bad.yaml"
                 )
+            created = self.fixture.private / "create-namespace.yaml"
+            created_metadata = acceptance.prepare(
+                "lw-bundle-203-synthetic", created, create_namespace=True
+            )
+            self.assertEqual(created_metadata["objects"], 5)
+            self.assertEqual(created_metadata["namespaceMode"], "create")
+            self.assertEqual(
+                next(yaml.safe_load_all(created.read_bytes()))["kind"], "Namespace"
+            )
             configuration_file = rendered / "platform-configuration.json"
             configuration_file.write_bytes(configuration_file.read_bytes() + b"\n")
             with self.assertRaisesRegex(bundle.BundleError, "CONFIG_CHANGED"):
@@ -281,12 +290,21 @@ pathlib.Path(__import__('sys').argv[1]).write_text('ok')
                     "lw-bundle-203-synthetic", self.fixture.private / "changed.yaml"
                 )
         documents = list(yaml.safe_load_all(output.read_bytes()))
-        self.assertEqual(metadata["objects"], 5)
+        self.assertEqual(metadata["objects"], 4)
+        self.assertEqual(metadata["namespaceMode"], "existing")
+        self.assertEqual(
+            metadata["cleanupObjects"],
+            [
+                "job/bundle-restore",
+                "configmap/bundle-configuration",
+                "resourcequota/bundle-acceptance",
+            ],
+        )
         self.assertNotIn(self.fixture.secret, output.read_bytes())
         self.assertNotIn(b"PRIVATE KEY", output.read_bytes())
         self.assertEqual(
             {obj["kind"] for obj in documents},
-            {"Namespace", "ResourceQuota", "NetworkPolicy", "ConfigMap", "Job"},
+            {"ResourceQuota", "NetworkPolicy", "ConfigMap", "Job"},
         )
         job = next(obj for obj in documents if obj["kind"] == "Job")
         quota = next(obj for obj in documents if obj["kind"] == "ResourceQuota")
