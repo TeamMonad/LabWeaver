@@ -9,6 +9,7 @@ use artifact_store::{
     S3StoreConfig, VerifiedObject,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
 use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
     AgentTrackKind, AuthoringApproval, AuthoringApprovalPublicationStatus,
@@ -2463,7 +2464,7 @@ async fn work_configuration_admission_reads_live_access_memberships()
         .execute(&pool)
         .await?;
     sqlx::query(
-        "INSERT INTO access.course_memberships
+        "INSERT INTO control.course_memberships
          (course_id,actor_id,role,state,revision,expires_at)
          VALUES ($1,$2,'student','active',1,NULL)",
     )
@@ -2472,9 +2473,9 @@ async fn work_configuration_admission_reads_live_access_memberships()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO access.project_memberships
-         (course_id,project_id,actor_id,role,state,revision,expires_at)
-         VALUES ($1,$2,$3,'student','active',1,NULL)",
+        "INSERT INTO control.project_memberships
+         (course_id,project_id,actor_id,role,object_role,state,revision,expires_at)
+         VALUES ($1,$2,$3,'student','editor','active',1,NULL)",
     )
     .bind(course_id.as_uuid())
     .bind(project_id.as_uuid())
@@ -2559,7 +2560,7 @@ async fn work_configuration_admission_reads_live_access_memberships()
     assert!(binding.preauthorization.is_none());
 
     sqlx::query(
-        "UPDATE access.project_memberships
+        "UPDATE control.project_memberships
          SET state = 'revoked', revision = 2
          WHERE project_id = $1 AND actor_id = $2",
     )
@@ -3928,5 +3929,311 @@ async fn transient_completion_recovers_original_intent_and_cancel_fences_an_infl
             .await?,
         1
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn object_actions_use_control_truth_and_revoke_real_idle_sse()
+-> Result<(), Box<dyn std::error::Error>> {
+    use auth::object_authorization::authorize_project_action;
+    use contracts::object_authorization::{ObjectAction, ProjectObjectRole};
+    use futures_util::StreamExt;
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
+        .execute(&pool)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+    let owner = ActorId::new();
+    let member = ActorId::new();
+    for actor in [owner, member] {
+        sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256) VALUES($1,'https://synthetic.invalid',$2)")
+            .bind(actor.as_uuid()).bind(Sha256Digest::of_bytes(actor.as_uuid().as_bytes()).to_string()).execute(&pool).await?;
+    }
+    let now = UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?;
+    let project = service
+        .create_project(
+            owner,
+            contracts::PlatformRole::Student,
+            &contracts::CreateProjectRequest {
+                name: "synthetic authorization".to_owned(),
+                description: None,
+                course_id: None,
+            },
+            &IdempotencyKey::parse("object-project")?,
+            now,
+        )
+        .await
+        .map_err(|error| format!("create project: {error:?}"))?;
+    let membership = service
+        .add_project_membership(
+            project.id,
+            owner,
+            false,
+            &contracts::http::ResolvedProjectMembershipRequest {
+                actor_id: member,
+                role: contracts::PlatformRole::Teacher,
+                object_role: ProjectObjectRole::Viewer,
+                expires_at: None,
+            },
+            &IdempotencyKey::parse("object-member")?,
+            now,
+        )
+        .await
+        .map_err(|error| format!("add member: {error:?}"))?;
+    let edit = contracts::UpdateProjectRequest {
+        expected_revision: project.revision,
+        name: "shared edit".to_owned(),
+        description: None,
+    };
+    assert!(matches!(
+        service
+            .update_project(
+                project.id,
+                member,
+                false,
+                &edit,
+                &IdempotencyKey::parse("viewer-edit")?,
+                now
+            )
+            .await,
+        Err(ControlError::ProjectGovernanceDenied)
+    ));
+    let current = auth::load_membership_snapshot(&pool, member.as_uuid()).await?;
+    let context = auth::AuthorizationContext {
+        actor: contracts::AuthenticatedActor {
+            actor_id: member,
+            roles: vec![contracts::PlatformRole::Teacher],
+            expires_at: UtcTimestamp::from_utc(
+                time::OffsetDateTime::now_utc().replace_nanosecond(0)? + time::Duration::minutes(5),
+            )?,
+        },
+        course_memberships: current.course_memberships,
+        project_memberships: current.project_memberships,
+        now: time::OffsetDateTime::now_utc().replace_nanosecond(0)?,
+    };
+    assert!(authorize_project_action(&context, project.id, ObjectAction::Browse).is_ok());
+    for action in [
+        ObjectAction::Edit,
+        ObjectAction::Start,
+        ObjectAction::ConfigureAgent,
+        ObjectAction::ManageMembers,
+        ObjectAction::RequestRuntimePermissions,
+    ] {
+        assert!(
+            authorize_project_action(&context, project.id, action).is_err(),
+            "teacher identity cannot increase viewer actions"
+        );
+    }
+    assert!(authorize_project_action(&context, ProjectId::new(), ObjectAction::Browse).is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('access.project_memberships')::text"
+        )
+        .fetch_one(&pool)
+        .await?,
+        None
+    );
+    let decision = authorize_project_action(&context, project.id, ObjectAction::Browse)?;
+    let key_ring = auth::KeyRing::parse(
+        "synthetic".to_owned(),
+        &format!(
+            "synthetic:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+        ),
+    )?;
+    let bff = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: member.as_uuid(),
+            roles: vec![contracts::PlatformRole::Teacher],
+            authorization_revision: 1,
+            expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(10),
+            idle_ttl: time::Duration::minutes(5),
+            oidc_sid: None,
+            logout_hint: "synthetic-logout-hint".to_owned(),
+        },
+        time::OffsetDateTime::now_utc(),
+    )
+    .await?;
+    let session_id: contracts::BffSessionId = bff.session_id.to_string().parse()?;
+    let live = auth::live_authorization::LiveAuthorization::new(
+        pool.clone(),
+        decision.clone(),
+        "streamProjectEvents",
+        session_id,
+    );
+    assert!(live.active().await);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/events", listener.local_addr()?);
+    let stream_service = service.clone();
+    let stream_decision = decision.clone();
+    // The route delegates to the exact production Control SSE builder. No test business state exists.
+    let router = axum::Router::new().route(
+        "/events",
+        axum::routing::get(move || {
+            let service = stream_service.clone();
+            let decision = stream_decision.clone();
+            async move {
+                control_service::api::event_stream::response(
+                    service,
+                    decision,
+                    session_id,
+                    Some(1),
+                    256,
+                )
+                .await
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let response = reqwest::Client::new().get(endpoint).send().await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut connection = response.bytes_stream();
+    let started = std::time::Instant::now();
+    service
+        .remove_project_membership(
+            project.id,
+            member,
+            owner,
+            false,
+            &contracts::http::RemoveProjectMembershipRequest {
+                expected_revision: membership.revision,
+                reason: "synthetic member left".to_owned(),
+            },
+            &IdempotencyKey::parse("object-remove")?,
+            UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?,
+        )
+        .await?;
+    assert!(!live.active().await);
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(8), connection.next()).await?;
+    assert!(
+        closed.is_none(),
+        "idle real TCP SSE must close and cannot deliver the revocation event to a removed member"
+    );
+    assert!(
+        started.elapsed()
+            < std::time::Duration::from_secs(
+                contracts::object_authorization::MEMBER_REVOCATION_BOUND_SECONDS
+            )
+    );
+    let snapshot = auth::load_membership_snapshot(&pool, member.as_uuid()).await?;
+    let revoked_context = auth::AuthorizationContext {
+        project_memberships: snapshot.project_memberships,
+        ..context
+    };
+    assert!(authorize_project_action(&revoked_context, project.id, ObjectAction::Browse).is_err());
+    assert_eq!(
+        service
+            .project_sse_page(
+                project.id,
+                Some(1),
+                256,
+                UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?
+            )
+            .await
+            .map_err(|error| format!("read post-revoke SSE: {error:?}"))?
+            .len(),
+        1
+    );
+    // Rejoining cannot resurrect the old connection or its frozen revision.
+    let restored = service
+        .add_project_membership(
+            project.id,
+            owner,
+            false,
+            &contracts::http::ResolvedProjectMembershipRequest {
+                actor_id: member,
+                role: contracts::PlatformRole::Teacher,
+                object_role: ProjectObjectRole::Editor,
+                expires_at: None,
+            },
+            &IdempotencyKey::parse("object-rejoin")?,
+            UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?,
+        )
+        .await?;
+    assert!(restored.revision > membership.revision);
+    assert!(!live.active().await);
+    let edited = service
+        .update_project(
+            project.id,
+            member,
+            false,
+            &edit,
+            &IdempotencyKey::parse("editor-edit")?,
+            UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?,
+        )
+        .await?;
+    assert_eq!(edited.name, "shared edit");
+    assert_eq!(edited.owner_actor_id, owner);
+    let snapshot = auth::load_membership_snapshot(&pool, member.as_uuid()).await?;
+    let restored_context = auth::AuthorizationContext {
+        project_memberships: snapshot.project_memberships,
+        ..revoked_context
+    };
+    let restored_decision =
+        authorize_project_action(&restored_context, project.id, ObjectAction::Browse)?;
+    let restored_live = auth::live_authorization::LiveAuthorization::new(
+        pool.clone(),
+        restored_decision.clone(),
+        "streamProjectEvents",
+        session_id,
+    );
+    assert!(restored_live.active().await);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/events", listener.local_addr()?);
+    let stream_service = service.clone();
+    let router = axum::Router::new().route(
+        "/events",
+        axum::routing::get(move || {
+            let service = stream_service.clone();
+            let decision = restored_decision.clone();
+            async move {
+                control_service::api::event_stream::response(
+                    service,
+                    decision,
+                    session_id,
+                    Some(3),
+                    256,
+                )
+                .await
+            }
+        }),
+    );
+    let logout_server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let response = reqwest::Client::new().get(endpoint).send().await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut connection = response.bytes_stream();
+    auth::revoke_bff_session(
+        &pool,
+        bff.session_id,
+        "LW_AUTH_SESSION_REVOKED",
+        time::OffsetDateTime::now_utc(),
+    )
+    .await?;
+    assert!(!restored_live.active().await);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(8), connection.next())
+            .await?
+            .is_none(),
+        "BFF logout must close the actual idle SSE without changing membership"
+    );
+    logout_server.abort();
+    server.abort();
     Ok(())
 }

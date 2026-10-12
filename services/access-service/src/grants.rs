@@ -49,7 +49,8 @@ use super::{
     cookie_session_id, require_browser_origin, service_identity, utc_timestamp,
 };
 
-const TERMINATION_SECONDS: i64 = 60;
+const TERMINATION_SECONDS: i64 =
+    contracts::object_authorization::MEMBER_REVOCATION_BOUND_SECONDS.cast_signed();
 // This request/reply subject deliberately sits outside the persisted
 // `labweaver.access.>` event stream. Otherwise JetStream's PubAck races the
 // authoritative Access response and the caller can observe the wrong payload.
@@ -795,12 +796,12 @@ pub async fn authorize_ssh(
          WHERE k.fingerprint_sha256=$1 AND k.revoked_at IS NULL AND a.disabled_at IS NULL \
            AND EXISTS (SELECT 1 FROM access.access_grants g \
              JOIN access.endpoint_grants eg ON eg.grant_id=g.grant_id \
-             JOIN access.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
+             JOIN control.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
              WHERE g.actor_id=k.actor_id AND g.state='active' AND g.not_before<=$2 AND g.expires_at>$2 \
                AND eg.protocol='ssh' AND eg.health='healthy' AND eg.expires_at>$2 \
                 AND pm.state='active' AND (pm.expires_at IS NULL OR pm.expires_at>$2) \
                 AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
-                AND (g.course_id IS NULL OR EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=g.course_id AND cm.actor_id=g.actor_id AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$2) \
+                AND (g.course_id IS NULL OR EXISTS (SELECT 1 FROM control.course_memberships cm WHERE cm.course_id=g.course_id AND cm.actor_id=g.actor_id AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$2) \
                   AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)))",
     )
     .bind(&request.presented_key_fingerprint_sha256)
@@ -849,13 +850,13 @@ async fn load_gateway_session_candidate(
                 g.environment_revision,g.contract,g.expires_at,eg.endpoint_grant_id,eg.endpoint_id, \
                 eg.endpoint_revision,eg.expires_at AS endpoint_expires_at,pm.expires_at AS project_membership_expires_at \
          FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
-         JOIN access.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
-         LEFT JOIN access.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+         JOIN control.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
+         LEFT JOIN control.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
            AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
          JOIN access.ssh_public_keys k ON k.key_id=$2 AND k.actor_id=g.actor_id \
          WHERE eg.alias=$1 AND eg.protocol='ssh' AND eg.health='healthy' AND g.actor_id=$3 \
            AND g.state='active' AND g.not_before<=$4 AND g.expires_at>$4 AND eg.expires_at>$4 \
-            AND k.revoked_at IS NULL AND pm.state='active' AND (pm.expires_at IS NULL OR pm.expires_at>$4) \
+            AND k.revoked_at IS NULL AND pm.state='active' AND pm.object_role IN ('editor','manager','owner') AND (pm.expires_at IS NULL OR pm.expires_at>$4) \
             AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
             AND (g.course_id IS NULL OR (cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$4))) \
           FOR SHARE OF g,eg,k,pm",
@@ -897,7 +898,7 @@ async fn lock_course_membership(
         EnvironmentAccessSubjectKind::CourseTeacher => "teacher",
     };
     let row = sqlx::query(
-        "SELECT state,expires_at FROM access.course_memberships \
+        "SELECT state,expires_at FROM control.course_memberships \
          WHERE course_id=$1 AND actor_id=$2 AND role=$3 \
          FOR SHARE",
     )
@@ -1111,6 +1112,13 @@ pub async fn heartbeat_gateway_session(
         .await?;
         return Err(error);
     }
+    super::object_authorization::recheck_gateway(
+        &state.pool,
+        session_id,
+        &identity.client_id,
+        &request.connection_id,
+    )
+    .await?;
     Ok(Json(load_session(&state.pool, session_id).await?))
 }
 
@@ -1790,20 +1798,20 @@ pub(super) async fn active_membership(
     let now = OffsetDateTime::now_utc();
     let rows = sqlx::query(
         r"
-        SELECT pm.role, pm.expires_at AS project_expires_at,
+        SELECT pm.role, pm.object_role, pm.expires_at AS project_expires_at,
                CASE WHEN $2::uuid IS NULL THEN NULL ELSE (
                    SELECT cm.expires_at
-                   FROM access.course_memberships cm
+                   FROM control.course_memberships cm
                    WHERE cm.course_id=$2 AND cm.actor_id=$3 AND cm.role=pm.role
                      AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$4)
                    ORDER BY cm.revision DESC LIMIT 1
                ) END AS course_expires_at
-        FROM access.project_memberships pm
+        FROM control.project_memberships pm
         WHERE pm.project_id=$1 AND pm.actor_id=$3 AND pm.state='active'
           AND (pm.expires_at IS NULL OR pm.expires_at>$4)
           AND ($2::uuid IS NULL OR EXISTS (
               SELECT 1
-              FROM access.course_memberships cm
+              FROM control.course_memberships cm
               WHERE cm.course_id=$2 AND cm.actor_id=$3 AND cm.role=pm.role
                 AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$4)
           ))
@@ -1824,7 +1832,14 @@ pub(super) async fn active_membership(
             "platform_admin" => PlatformRole::PlatformAdmin,
             _ => continue,
         };
-        if roles.contains(&role) {
+        let object_role: contracts::object_authorization::ProjectObjectRole =
+            serde_json::from_value(serde_json::Value::String(row.get("object_role")))
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+        if roles.contains(&role)
+            && object_role
+                .actions()
+                .contains(&contracts::object_authorization::ObjectAction::GrantAccess)
+        {
             let expires_at = [
                 row.get::<Option<OffsetDateTime>, _>("project_expires_at"),
                 row.get::<Option<OffsetDateTime>, _>("course_expires_at"),
@@ -2657,8 +2672,12 @@ mod project_scope_tests {
             .connect(&url)
             .await?;
         let migrations = format!(
-            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
-            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA control; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
+            concat!(
+                include_str!("../../../migrations/control/0016_object_authorization.sql"),
+                "\n",
+                include_str!("../../../migrations/access/0001_platform_baseline.sql")
+            ),
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql")
         );
@@ -2675,8 +2694,8 @@ mod project_scope_tests {
         let member_project = ProjectId::new();
         let requested_project = ProjectId::new();
         sqlx::query(
-            "INSERT INTO access.project_memberships (course_id,project_id,actor_id,role,state,revision) \
-             VALUES (NULL,$1,$2,'student','active',1)",
+            "INSERT INTO control.project_memberships (course_id,project_id,actor_id,role,object_role,state,revision) \
+             VALUES (NULL,$1,$2,'student','editor','active',1)",
         )
         .bind(member_project.as_uuid())
         .bind(actor)
@@ -2705,7 +2724,7 @@ mod project_scope_tests {
         assert_eq!(cross_project.diagnostic, "LW_AUTH_SCOPE_DENIED");
 
         sqlx::query(
-            "UPDATE access.project_memberships SET state='revoked',revision=2 \
+            "UPDATE control.project_memberships SET state='revoked',revision=2 \
              WHERE project_id=$1 AND actor_id=$2",
         )
         .bind(member_project.as_uuid())
@@ -2742,8 +2761,12 @@ mod project_scope_tests {
             .connect(&url)
             .await?;
         let migrations = format!(
-            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}\n{}\n{}",
-            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA control; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}\n{}\n{}",
+            concat!(
+                include_str!("../../../migrations/control/0016_object_authorization.sql"),
+                "\n",
+                include_str!("../../../migrations/access/0001_platform_baseline.sql")
+            ),
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql"),
             include_str!("../../../migrations/access/0004_actor_identity_metadata.sql"),
@@ -2781,9 +2804,9 @@ mod project_scope_tests {
         let grant_without_course = Uuid::now_v7();
         let endpoint_grant_without_course = Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO access.project_memberships \
-             (course_id,project_id,actor_id,role,state,revision) \
-             VALUES (NULL,$1,$2,'student','active',1)",
+            "INSERT INTO control.project_memberships \
+             (course_id,project_id,actor_id,role,object_role,state,revision) \
+             VALUES (NULL,$1,$2,'student','editor','active',1)",
         )
         .bind(project_without_course)
         .bind(actor)
@@ -2832,9 +2855,9 @@ mod project_scope_tests {
         let grant_with_course = Uuid::now_v7();
         let endpoint_grant_with_course = Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO access.project_memberships \
-             (course_id,project_id,actor_id,role,state,revision) \
-             VALUES ($1,$2,$3,'student','active',1)",
+            "INSERT INTO control.project_memberships \
+             (course_id,project_id,actor_id,role,object_role,state,revision) \
+             VALUES ($1,$2,$3,'student','editor','active',1)",
         )
         .bind(course_id)
         .bind(project_with_course)
@@ -2842,7 +2865,7 @@ mod project_scope_tests {
         .execute(&pool)
         .await?;
         sqlx::query(
-            "INSERT INTO access.course_memberships \
+            "INSERT INTO control.course_memberships \
              (course_id,actor_id,role,state,revision,expires_at) \
              VALUES ($1,$2,'student','active',1,$3)",
         )
@@ -2911,7 +2934,7 @@ mod project_scope_tests {
         .execute(&pool)
         .await?;
         sqlx::query(
-            "UPDATE access.course_memberships SET state='revoked',revision=2 WHERE course_id=$1 AND actor_id=$2 AND role='student'",
+            "UPDATE control.course_memberships SET state='revoked',revision=2 WHERE course_id=$1 AND actor_id=$2 AND role='student'",
         )
         .bind(course_id)
         .bind(actor)
@@ -2926,7 +2949,7 @@ mod project_scope_tests {
         tx.rollback().await?;
 
         sqlx::query(
-            "UPDATE access.course_memberships SET state='active',revision=3,expires_at=$3 \
+            "UPDATE control.course_memberships SET state='active',revision=3,expires_at=$3 \
              WHERE course_id=$1 AND actor_id=$2 AND role='student'",
         )
         .bind(course_id)
@@ -2961,8 +2984,12 @@ mod project_scope_tests {
             .connect(&url)
             .await?;
         let migrations = format!(
-            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
-            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA control; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
+            concat!(
+                include_str!("../../../migrations/control/0016_object_authorization.sql"),
+                "\n",
+                include_str!("../../../migrations/access/0001_platform_baseline.sql")
+            ),
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql")
         );
@@ -3084,8 +3111,12 @@ mod project_scope_tests {
             .connect(&url)
             .await?;
         let migrations = format!(
-            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}\n{}\n{}",
-            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA control; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}\n{}\n{}",
+            concat!(
+                include_str!("../../../migrations/control/0016_object_authorization.sql"),
+                "\n",
+                include_str!("../../../migrations/access/0001_platform_baseline.sql")
+            ),
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql"),
             include_str!("../../../migrations/access/0004_actor_identity_metadata.sql"),

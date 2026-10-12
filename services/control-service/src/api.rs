@@ -5,6 +5,9 @@
     reason = "HTTP boundary functions keep validation adjacent to each route"
 )]
 
+pub mod event_stream;
+mod object_actions;
+
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,7 +17,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
@@ -48,7 +50,6 @@ use contracts::{
     PlatformImageId, PlatformRole, ProblemDetails, ProblemPackageId, ProjectId, ReleaseId,
     Revision, StreamSequence, UploadSessionId, UtcTimestamp,
 };
-use futures_util::stream;
 use persistence_sqlx::Sha256Digest;
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -99,6 +100,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/projects/{project_id}/archive",
             post(archive_project),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/available-actions",
+            get(object_actions::available_actions),
         )
         .route(
             "/api/v1/projects/{project_id}/members",
@@ -2281,66 +2286,14 @@ async fn events(
         contracts::http::SseResume::Beginning => None,
         contracts::http::SseResume::After(sequence) => Some(sequence.0),
     };
-    let records = state
-        .control
-        .sse_page(course_id, after, query.limit, now()?)
-        .await?;
-    let cursor = records
-        .last()
-        .map_or(after.unwrap_or(0), |record| record.sequence);
-    let output = stream::unfold(
-        EventStreamState {
-            control: state.control.clone(),
-            course_id,
-            cursor,
-            pending: records.into(),
-            valid_until: authorization.valid_until,
-        },
-        |mut state| async move {
-            loop {
-                let Ok(timestamp) = current_timestamp() else {
-                    tracing::error!(
-                        event = "control.sse.clock_failed",
-                        diagnostic = "LW_CONTROL_CLOCK_INVALID",
-                        course_id = %state.course_id,
-                        cursor = state.cursor,
-                    );
-                    return None;
-                };
-                if timestamp >= state.valid_until {
-                    return None;
-                }
-                if let Some(record) = state.pending.pop_front() {
-                    state.cursor = record.sequence;
-                    let event = Event::default()
-                        .id(record.sequence.to_string())
-                        .event(record.event_type)
-                        .data(record.payload.to_string());
-                    return Some((Ok::<_, std::convert::Infallible>(event), state));
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match state
-                    .control
-                    .sse_page(state.course_id, Some(state.cursor), 256, timestamp)
-                    .await
-                {
-                    Ok(records) => state.pending = records.into(),
-                    Err(error) => {
-                        tracing::error!(
-                            event = "control.sse.poll_failed",
-                            diagnostic = %error,
-                            course_id = %state.course_id,
-                            cursor = state.cursor,
-                        );
-                        return None;
-                    }
-                }
-            }
-        },
-    );
-    Ok(Sse::new(output)
-        .keep_alive(KeepAlive::default())
-        .into_response())
+    event_stream::response(
+        state.control.clone(),
+        authorization,
+        parse_header::<BffSessionId>(&headers, SESSION_HEADER)?,
+        after,
+        query.limit,
+    )
+    .await
 }
 
 async fn project_events(
@@ -2373,72 +2326,14 @@ async fn project_events(
         contracts::http::SseResume::Beginning => None,
         contracts::http::SseResume::After(sequence) => Some(sequence.0),
     };
-    let records = state
-        .control
-        .project_sse_page(project_id, after, query.limit, now()?)
-        .await?;
-    let cursor = records
-        .last()
-        .map_or(after.unwrap_or(0), |record| record.sequence);
-    let output = stream::unfold(
-        ProjectEventStreamState {
-            control: state.control.clone(),
-            project_id,
-            cursor,
-            pending: records.into(),
-            valid_until: authorization.valid_until,
-        },
-        |mut state| async move {
-            loop {
-                let Ok(timestamp) = current_timestamp() else {
-                    return None;
-                };
-                if timestamp >= state.valid_until {
-                    return None;
-                }
-                if let Some(record) = state.pending.pop_front() {
-                    state.cursor = record.sequence;
-                    let event = Event::default()
-                        .id(record.sequence.to_string())
-                        .event(record.event_type)
-                        .data(record.payload.to_string());
-                    return Some((Ok::<_, std::convert::Infallible>(event), state));
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match state
-                    .control
-                    .project_sse_page(state.project_id, Some(state.cursor), 256, timestamp)
-                    .await
-                {
-                    Ok(records) => state.pending = records.into(),
-                    Err(error) => {
-                        tracing::error!(event = "control.project_sse.poll_failed", diagnostic = %error,
-                            project_id = %state.project_id, cursor = state.cursor);
-                        return None;
-                    }
-                }
-            }
-        },
-    );
-    Ok(Sse::new(output)
-        .keep_alive(KeepAlive::default())
-        .into_response())
-}
-
-struct EventStreamState {
-    control: ControlService,
-    course_id: CourseId,
-    cursor: u64,
-    pending: std::collections::VecDeque<crate::SseRecord>,
-    valid_until: UtcTimestamp,
-}
-
-struct ProjectEventStreamState {
-    control: ControlService,
-    project_id: ProjectId,
-    cursor: u64,
-    pending: std::collections::VecDeque<crate::SseRecord>,
-    valid_until: UtcTimestamp,
+    event_stream::response(
+        state.control.clone(),
+        authorization,
+        parse_header::<BffSessionId>(&headers, SESSION_HEADER)?,
+        after,
+        query.limit,
+    )
+    .await
 }
 
 async fn authorize(

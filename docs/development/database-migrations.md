@@ -45,3 +45,9 @@ Resource 0015 由 #200 的 `0015_task_approval_deadline.sql` 占用。组合时�
 git 依赖扩大了供应链风险：构建必须固定完整 commit，不得改用可变分支或 tag；更新前必须复核上游 commit、依赖源码、许可证和 Cargo.lock 的 source/revision，并重新运行取消 BEGIN 的真实 PostgreSQL 回归及 workspace 门禁。维护者应在 PR 中记录复核结果。
 
 离线或镜像站构建必须在进入 `--network=none` 的编译步骤前完成 SQLx git revision 的 `cargo fetch --locked`，并将同一 Cargo git 缓存挂载到编译步骤；构建环境还必须能访问 `github.com` 获取该仓库，或由维护者预先准备并复核完整缓存/ vendored 源码。只挂载 registry 缓存不足以构建 git 依赖。
+
+## Sprint5 成员真源切换
+
+#199 将成员事实移到 Control，并保留 Control `0017_object_authorization.sql`、`0018_membership_governance.sql` 和 `0019_runtime_authorization_reads.sql`。组合 #197 的 `0014`、#203 的 `0015`/`0016` 后，按 catalog 的有序并集生成部署输入。Access 只获得 Control 成员表的读取权限。
+
+此次硬切修改旧成员建表身份，只适用于新建数据库。已记录旧校验值的数据库必须拒绝 catalog 不一致。应用启动不能自动清空或重新授权。生产切换另需明确窗口和维护者批准。授权语义见[对象动作与成员授权](../contracts/object-authorization.md)。

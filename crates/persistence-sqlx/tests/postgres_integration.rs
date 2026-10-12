@@ -123,13 +123,13 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
     let auth_tables: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM information_schema.tables \
          WHERE table_schema = 'access' \
-         AND table_name IN ('actors', 'course_memberships', 'project_memberships', \
+         AND table_name IN ('actors', \
                             'service_identities', 'oidc_transactions', 'bff_sessions')",
     )
     .fetch_one(access)
     .await?;
     assert_eq!(
-        auth_tables, 6,
+        auth_tables, 4,
         "auth migration must be applied by the controlled catalog"
     );
     assert!(
@@ -153,22 +153,49 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
     let course_id = Uuid::now_v7();
     let project_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO access.course_memberships (course_id, actor_id, role, state, revision) \
+        "INSERT INTO control.course_memberships (course_id, actor_id, role, state, revision) \
          VALUES ($1, $2, 'student', 'active', 4)",
     )
     .bind(course_id)
     .bind(local_actor.actor_id)
-    .execute(access)
+    .execute(&runtime_pools[&Domain::Control])
     .await?;
     sqlx::query(
-        "INSERT INTO access.project_memberships (course_id, project_id, actor_id, role, state, revision) \
+        "INSERT INTO control.project_memberships (course_id, project_id, actor_id, role, state, revision) \
          VALUES ($1, $2, $3, 'student', 'active', 5)",
     )
     .bind(course_id)
     .bind(project_id)
     .bind(local_actor.actor_id)
-    .execute(access)
+    .execute(&runtime_pools[&Domain::Control])
     .await?;
+    assert!(
+        sqlx::query(
+            "UPDATE control.project_memberships SET object_role='owner' WHERE project_id=$1"
+        )
+        .bind(project_id)
+        .execute(access)
+        .await
+        .is_err(),
+        "Access can read Control facts but cannot expand object permissions"
+    );
+    assert!(
+        sqlx::query("DELETE FROM control.course_memberships WHERE course_id=$1")
+            .bind(course_id)
+            .execute(access)
+            .await
+            .is_err(),
+        "Access cannot mutate the course member authority"
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT has_table_privilege('lw_control_runtime','access.bff_sessions','SELECT')"
+        )
+        .fetch_one(access)
+        .await?,
+        "Control does not gain access to session secrets or raw bearer cookies"
+    );
+    assert!(sqlx::query_scalar::<_, bool>("SELECT has_table_privilege('lw_control_runtime','access.current_authorization_sessions','SELECT')").fetch_one(access).await?);
     let memberships = load_membership_snapshot(access, local_actor.actor_id).await?;
     assert_eq!(memberships.course_memberships.len(), 1);
     assert_eq!(memberships.project_memberships.len(), 1);

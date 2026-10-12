@@ -34,6 +34,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProjectLlmPolicyOptions
     );
     document!(
+        "schemas/contracts/v1/available-object-actions.schema.json",
+        crate::object_authorization::AvailableObjectActions
+    );
+    document!(
         "schemas/contracts/v1/project.schema.json",
         crate::project::Project
     );
@@ -1363,6 +1367,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
             ]);
         }
+        if operation.scope == OperationScopeKind::Project
+            && let Some(action) =
+                crate::object_authorization::project_operation_action(operation.operation_id)
+        {
+            operation_json["x-labweaver-object-action"] = json!(action);
+        }
         if operation.operation_id == "addProjectMembership" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1870,6 +1880,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("control-configuration-replica-observation")
         }
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
+        "getProjectAvailableActions" => contract_ref("available-object-actions"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")
         }

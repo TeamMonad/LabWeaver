@@ -319,11 +319,11 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .bind(grant_id).bind(current_token).execute(&pool).await?.rows_affected();
     assert_eq!(current_rows, 1);
 
-    sqlx::query("INSERT INTO access.course_memberships (course_id,actor_id,role,state,revision,expires_at) VALUES ($1,$2,'student','active',1,now()+interval '30 minutes')")
+    sqlx::query("INSERT INTO control.course_memberships (course_id,actor_id,role,state,revision,expires_at) VALUES ($1,$2,'student','active',1,now()+interval '30 minutes')")
         .bind(course).bind(actor).execute(&pool).await?;
     sqlx::query("UPDATE access.access_grants SET state='active',contract=jsonb_set(contract,'{subjectKind}','\"owner\"'::jsonb) WHERE grant_id=$1")
         .bind(grant_id).execute(&pool).await?;
-    let authorized: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
+    let authorized: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN control.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
         .bind(grant_id).fetch_one(&pool).await?;
     assert!(authorized);
 
@@ -369,9 +369,9 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         );
     }
 
-    sqlx::query("UPDATE access.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
+    sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
         .bind(course).bind(actor).execute(&pool).await?;
-    let authorized_after_revocation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
+    let authorized_after_revocation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN control.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
         .bind(grant_id).fetch_one(&pool).await?;
     assert!(!authorized_after_revocation);
 
