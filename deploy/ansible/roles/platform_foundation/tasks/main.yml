@@ -2,7 +2,7 @@
 - name: Load immutable Sprint 2 foundation identities
   ansible.builtin.set_fact:
     platform_foundation_lock: >-
-      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
+      {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml }}
 
 - name: Validate Sprint 2 foundation inputs
   ansible.builtin.assert:
