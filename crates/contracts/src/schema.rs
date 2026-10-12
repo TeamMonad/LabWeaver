@@ -284,6 +284,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::ResetEnvironmentRequest
     );
     document!(
+        "schemas/contracts/v1/environment-runtime-authorization-request.schema.json",
+        crate::environment::ResolveEnvironmentRuntimeAuthorizationRequest
+    );
+    document!(
+        "schemas/contracts/v1/environment-runtime-authorization-resolution.schema.json",
+        crate::environment::EnvironmentRuntimeAuthorizationResolution
+    );
+    document!(
         "schemas/contracts/v1/environment-lease-verification-request.schema.json",
         crate::environment::EnvironmentLeaseVerificationRequest
     );

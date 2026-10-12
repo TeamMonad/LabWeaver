@@ -216,6 +216,7 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
 #[tokio::test]
 async fn duplicate_binding_and_provider_timeout_fail_closed()
 -> Result<(), Box<dyn std::error::Error>> {
+    let instance = planned_restart()?;
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(FakeProvider {
         binding: "container-primary-v1",
@@ -229,11 +230,11 @@ async fn duplicate_binding_and_provider_timeout_fail_closed()
         Err(ReconcileError::InvalidProviderRegistry)
     ));
     let reconciler = Reconciler::new(registry, Duration::from_millis(1))?
-        .with_runtime_admission(support::runtime_admission(&planned_restart()?))
+        .with_runtime_admission(support::runtime_admission(&instance))
         .with_resource_allocator(test_allocator());
     assert!(matches!(
         reconciler
-            .execute_once(&planned_restart()?, timestamp("2026-07-14T01:00:01.000Z"))
+            .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
             .await,
         Err(ReconcileError::ProviderTimeout)
     ));
@@ -505,5 +506,43 @@ fn retry_and_recover_resume_the_persisted_failed_phase() -> Result<(), Box<dyn s
             );
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn new_compute_without_runtime_authority_never_calls_provider_or_allocator()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(RecordingProvider {
+        events: Arc::clone(&events),
+    }))?;
+    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?.with_resource_allocator(
+        RecordingAllocator {
+            events: Arc::clone(&events),
+        },
+    );
+    let mut start = ready_instance();
+    start.observed_state = ObservedEnvironmentState::Stopped;
+    start.operation.kind = EnvironmentOperationKind::Start;
+    start.operation.state = contracts::environment::OperationState::Accepted;
+    assert!(matches!(
+        reconciler
+            .execute_once(&start, timestamp("2026-07-14T01:00:01.000Z"))
+            .await,
+        Err(ReconcileError::ResourceUnavailable)
+    ));
+    assert!(events.lock().expect("events").is_empty());
+    let mut stop = start;
+    stop.observed_state = ObservedEnvironmentState::Stopping;
+    stop.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
+    stop.operation.kind = EnvironmentOperationKind::Stop;
+    reconciler
+        .execute_once(&stop, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("events"),
+        vec!["provider_stop", "suspend"]
+    );
     Ok(())
 }

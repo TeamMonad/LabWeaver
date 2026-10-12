@@ -800,6 +800,7 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     instance.release_id = projection.release.id;
     instance.release_version = projection.release.version;
     "container-primary-v1".clone_into(&mut instance.provider_binding);
+    instance.runtime_authorization = Some(support::runtime_receipt(&instance, projection));
     instance
 }
 
@@ -1110,6 +1111,17 @@ fn existing_namespace_plan_scopes_work_objects_and_preserves_operator_policies()
     );
     let mut second = instance.clone();
     second.id = contracts::EnvironmentId::new();
+    assert!(
+        provider
+            .plan(
+                &second,
+                &resolved(projection.clone()),
+                ReconcileAction::Provision
+            )
+            .is_err()
+    );
+    configure_work(&mut second);
+    second.runtime_authorization = Some(support::runtime_receipt(&second, &projection));
     let other = provider
         .plan(&second, &resolved(projection), ReconcileAction::Provision)
         .expect("second Work");
@@ -1364,4 +1376,119 @@ fn revision(value: u64) -> Revision {
 
 fn timestamp(value: &str) -> UtcTimestamp {
     UtcTimestamp::from_str(value).expect("valid timestamp")
+}
+
+#[test]
+fn approved_uid_capabilities_and_mutable_root_are_applied_to_both_runtime_and_seed() {
+    let mut release = projection();
+    release.environment_spec.security.run_as_user = None;
+    release.environment_spec.security.root_filesystem_policy =
+        contracts::authoring::RootFilesystemPolicy::MutableRequired;
+    release
+        .environment_spec
+        .security
+        .capabilities
+        .insert(contracts::platform_configuration::LinuxCapability::NetAdmin);
+    let mut instance = instance_for(&release);
+    let provider = provider(release.clone(), Arc::new(FixtureBackend::default()));
+    let resolved = resolved(release.clone());
+    let plan = provider
+        .plan(&instance, &resolved, ReconcileAction::Provision)
+        .expect("approved ordinary container");
+    let pod = &resource(&plan, "Deployment").document["spec"]["template"]["spec"];
+    assert_eq!(pod["securityContext"]["runAsUser"], 0);
+    assert_eq!(pod["securityContext"]["runAsNonRoot"], false);
+    for key in ["initContainers", "containers"] {
+        let security = &pod[key][0]["securityContext"];
+        assert_eq!(security["privileged"], false);
+        assert_eq!(security["readOnlyRootFilesystem"], false);
+        assert_eq!(security["allowPrivilegeEscalation"], false);
+        assert_eq!(security["capabilities"]["add"], json!(["NET_ADMIN"]));
+        assert_eq!(security["capabilities"]["drop"], json!(["ALL"]));
+    }
+    instance
+        .runtime_authorization
+        .as_mut()
+        .expect("receipt")
+        .default_container_uid = 1001;
+    let plan = provider
+        .plan(&instance, &resolved, ReconcileAction::Provision)
+        .expect("verified default UID");
+    assert_eq!(
+        resource(&plan, "Deployment").document["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+            ["runAsUser"],
+        1001
+    );
+    instance.runtime_authorization = None;
+    assert!(
+        provider
+            .plan(&instance, &resolved, ReconcileAction::Provision)
+            .is_err()
+    );
+}
+
+#[test]
+fn changed_security_target_and_unimplemented_privileged_boundary_are_rejected() {
+    let release = projection();
+    let mut instance = instance_for(&release);
+    let ordinary_provider = provider(release.clone(), Arc::new(FixtureBackend::default()));
+    let mut changed = release.clone();
+    changed.environment_spec.security.run_as_user = Some(0);
+    assert!(
+        ordinary_provider
+            .plan(&instance, &resolved(changed), ReconcileAction::Provision)
+            .is_err()
+    );
+    instance
+        .runtime_authorization
+        .as_mut()
+        .expect("receipt")
+        .authorization
+        .target = contracts::resource::ResourceTarget::Environment {
+        environment_id: contracts::EnvironmentId::new(),
+        release_id: instance.release_id,
+        release_version: instance.release_version,
+    };
+    assert!(
+        ordinary_provider
+            .plan(
+                &instance,
+                &resolved(release.clone()),
+                ReconcileAction::Provision
+            )
+            .is_err()
+    );
+    let mut privileged = release;
+    privileged.environment_spec.security.privileged = true;
+    privileged
+        .environment_spec
+        .security
+        .privilege_escalation_policy = contracts::authoring::PrivilegeEscalationPolicy::Allow;
+    privileged.environment_spec.security.seccomp =
+        contracts::authoring::RuntimeSeccompProfile::Unconfined;
+    let mut instance = instance_for(&privileged);
+    instance
+        .runtime_authorization
+        .as_mut()
+        .expect("receipt")
+        .privileged_execution_location = Some(
+        contracts::platform_configuration::PrivilegedExecutionLocation::DedicatedNodePool {
+            node_selector: std::collections::BTreeMap::from([(
+                "synthetic/pool".to_owned(),
+                "privileged".to_owned(),
+            )]),
+            taint_key: "synthetic/pool".to_owned(),
+            taint_value: "privileged".to_owned(),
+        },
+    );
+    let privileged_provider = provider_with_access_mode(
+        privileged.clone(),
+        Arc::new(FixtureBackend::default()),
+        "ReadWriteMany",
+    );
+    assert!(
+        privileged_provider
+            .plan(&instance, &resolved(privileged), ReconcileAction::Provision)
+            .is_err()
+    );
 }

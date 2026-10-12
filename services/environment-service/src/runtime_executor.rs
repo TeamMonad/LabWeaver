@@ -3985,7 +3985,7 @@ mod tests {
                         "apiVersion":"apps/v1",
                         "kind":"Deployment",
                         "metadata":{"name":"runtime","namespace":namespace,"labels":labels},
-                        "spec":{"replicas":1}
+                        "spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"runtime","image":"synthetic/runtime","securityContext":{"privileged":false}}]}}}
                     }),
                 },
             ],

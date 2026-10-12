@@ -181,6 +181,23 @@ impl KubeVirtBackendFence {
         instance: &EnvironmentInstance,
         action: ReconcileAction,
     ) -> Result<Self, ProviderFailure> {
+        let deadline_at = if matches!(
+            action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            instance.operation.deadline_at.min(
+                instance
+                    .runtime_authorization
+                    .as_ref()
+                    .ok_or_else(invalid_observation)?
+                    .valid_until,
+            )
+        } else {
+            instance.operation.deadline_at
+        };
         let request_id = Sha256Digest::of_canonical(&json!({
             "protocolVersion": KUBEVIRT_BACKEND_PROTOCOL_VERSION,
             "environmentId": instance.id,
@@ -201,7 +218,7 @@ impl KubeVirtBackendFence {
             action,
             request_id,
             trace_id: instance.operation.trace_id.clone(),
-            deadline_at: instance.operation.deadline_at,
+            deadline_at,
         })
     }
 }
@@ -1737,10 +1754,16 @@ impl KubeVirtSshBootstrap {
     }
 
     pub fn with_workspace_root(mut self, root: String) -> Result<Self, ReleaseProjectionError> {
-        if !root.starts_with('/')
-            || root.contains("..")
-            || root.contains(char::is_whitespace)
-            || root.contains([',', '[', ']', '\"', '\''])
+        if root.len() < 2
+            || root.len() > 256
+            || !root.starts_with('/')
+            || !root
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"/._-".contains(&c))
+            || root
+                .split('/')
+                .skip(1)
+                .any(|part| part.is_empty() || part == "." || part == "..")
         {
             return Err(ReleaseProjectionError::ConfigurationInvalid);
         }
@@ -2803,7 +2826,7 @@ where
             } else {
                 "no"
             },
-            uid_check = format!(
+            uid_check = format_args!(
                 "  - |\n      set -eu\n      systemctl stop ssh.service\n      current_uid=$(id -u {guest_user})\n      if [ \"$current_uid\" != \"{guest_uid}\" ]; then usermod -u {guest_uid} {guest_user}; fi\n      test \"$(id -u {guest_user})\" = \"{guest_uid}\"\n      install -d -o {guest_user} -g {guest_user} -m 0700 {}\n      sshd -t\n      systemctl enable --now ssh.service\n",
                 self.configuration.ssh.workspace_root
             ),

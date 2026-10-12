@@ -421,6 +421,8 @@ pub struct ResolveEnvironmentRuntimeAuthorizationRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentRuntimeAuthorizationResolution {
+    pub provider_binding: String,
+    pub valid_until: UtcTimestamp,
     pub lease_authorization: EnvironmentLeaseAuthorization,
     pub authorization: crate::runtime_authorization::RuntimeAuthorizationBinding,
     pub owner_actor_id: ActorId,
@@ -446,7 +448,18 @@ impl EnvironmentRuntimeAuthorizationResolution {
             return Err(EnvironmentError::InvalidResourceHandoff);
         };
         self.lease_authorization.validate()?;
-        if self.lease_authorization.resource_request_id != request.resource_request_id
+        let scope_matches = match self.authorization.permissions.scope {
+            crate::platform_configuration::RuntimePreauthorizationScope::Project { project_id } => {
+                project_id == request.project_id
+            }
+            crate::platform_configuration::RuntimePreauthorizationScope::Course { course_id } => {
+                Some(course_id) == request.course_id
+                    && spec.class == crate::authoring::EnvironmentClass::Experiment
+            }
+        };
+        if !scope_matches
+            || self.authorization.configuration.course_id != request.course_id
+            || self.lease_authorization.resource_request_id != request.resource_request_id
             || self.lease_authorization.environment_id != environment_id
             || self.lease_authorization.project_id != request.project_id
             || self.lease_authorization.course_id != request.course_id

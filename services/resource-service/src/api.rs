@@ -38,6 +38,7 @@ use crate::runtime_authorization::RuntimeBindingError;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
+mod environment_runtime_authorization;
 mod runtime_authorization;
 
 /// User identity extracted from an Access-signed resource delegation.
@@ -200,6 +201,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             post(cancel_task_resource),
         )
         .route("/internal/v1/resource/usage", post(record_internal_usage))
+        .route(
+            "/internal/v1/environment-runtime-authorization",
+            post(environment_runtime_authorization::resolve),
+        )
         .route(
             "/internal/v1/environment-resource-reservations",
             post(resolve_environment_resource_reservation),
@@ -1387,7 +1392,9 @@ fn internal_route_permission(path: &str) -> Option<&'static str> {
     if path == "/internal/v1/resource/usage" {
         return Some("resource.usage.record");
     }
-    if path == "/internal/v1/environment-resource-reservations" {
+    if path == "/internal/v1/environment-resource-reservations"
+        || path == "/internal/v1/environment-runtime-authorization"
+    {
         return Some("resource.environment.resolve");
     }
     if path == "/internal/v1/environment-resource-reservations/release" {

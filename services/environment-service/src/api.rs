@@ -21,8 +21,8 @@ use contracts::{
         EnvironmentLifecycleCommand, EnvironmentOperationKind, EnvironmentOwnerRelation,
         EnvironmentOwnerSummary, EnvironmentResetTarget, EnvironmentSummary,
         EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
-        ResolveEnvironmentResourceReservationRequest, ResourceWorkCleanup,
-        ResourceWorkCleanupStatus, ResourceWorkHandoff, ResourceWorkLeaseUpdate,
+        ResourceWorkCleanup, ResourceWorkCleanupStatus, ResourceWorkHandoff,
+        ResourceWorkLeaseUpdate,
     },
     http::{
         ContainerWorkExecutionQuery, ContainerWorkExecutionReceipt, ContainerWorkExecutionRequest,
@@ -38,8 +38,7 @@ use crate::{
     ContainerReleaseResolver, ContainerWorkExecutionService, EnvironmentInventoryFilter,
     EnvironmentStoreError, FreezeBindingError, FreezeBindingService, NatsAccessRevoker,
     NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore,
-    ReleaseProjectionError, WorkExecutionError, metering::ExperimentResourceAllocator,
-    work_execution::validate_work_environment,
+    ReleaseProjectionError, WorkExecutionError, work_execution::validate_work_environment,
 };
 
 const ACCESS_PERMISSION: &str = "access.environment.forward";
@@ -62,7 +61,6 @@ pub struct EnvironmentApiState {
     lease_verifier: NatsResourceLeaseVerifier,
     freeze_bindings: FreezeBindingService,
     pub(crate) work_executions: Option<ContainerWorkExecutionService>,
-    resource_reservations: Option<Arc<dyn ExperimentResourceAllocator>>,
     runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
 }
 
@@ -82,7 +80,6 @@ impl EnvironmentApiState {
             lease_verifier,
             freeze_bindings,
             work_executions: None,
-            resource_reservations: None,
             runtime_admission: None,
         }
     }
@@ -97,16 +94,6 @@ impl EnvironmentApiState {
     #[must_use]
     pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
         self.runtime_admission = Some(admission);
-        self
-    }
-
-    /// Installs the Resource reservation boundary used to reserve Experiment resources.
-    #[must_use]
-    pub fn with_resource_reservations<T>(mut self, client: T) -> Self
-    where
-        T: ExperimentResourceAllocator + 'static,
-    {
-        self.resource_reservations = Some(Arc::new(client));
         self
     }
 }
@@ -436,6 +423,10 @@ fn require_resource_service(
     require_permission(caller, RESOURCE_PERMISSION)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "original lease verification, runtime approval and idempotent Work acceptance are one boundary"
+)]
 async fn accept_resource_work_handoff(
     State(state): State<EnvironmentApiState>,
     caller: Option<Extension<auth::ServiceIdentity>>,
@@ -782,13 +773,9 @@ fn environment_summary(
     Ok(summary)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Experiment GPU resolution and the idempotent accept boundary stay visible together"
-)]
 async fn create_environment(
     State(state): State<EnvironmentApiState>,
-    Extension(context): Extension<telemetry::RequestContext>,
+    Extension(_context): Extension<telemetry::RequestContext>,
     caller: Option<Extension<auth::ServiceIdentity>>,
     headers: HeaderMap,
     body: Bytes,
@@ -819,22 +806,6 @@ async fn create_environment(
     {
         return Err(EnvironmentApiError::ReleaseDenied);
     }
-    let provider_binding = match &release.projection.environment_spec.runtime {
-        EnvironmentRuntimeSpec::Container {
-            provider_binding, ..
-        }
-        | EnvironmentRuntimeSpec::VirtualMachine {
-            provider_binding, ..
-        } => provider_binding.clone(),
-    };
-    let approved_resources = contracts::resource::WorkloadResources {
-        cpu_millicores: release.projection.environment_spec.resources.cpu_millicores,
-        memory_bytes: release.projection.environment_spec.resources.memory_bytes,
-        storage_bytes: release.projection.environment_spec.resources.storage_bytes,
-        gpu: release.projection.environment_spec.resources.gpu.clone(),
-    };
-    let accepted_at = state.store.current_time().await?;
-    let deadline_at = add_duration(accepted_at, OPERATION_DEADLINE)?;
     let runtime_authorization = state
         .runtime_admission
         .as_ref()
@@ -857,193 +828,10 @@ async fn create_environment(
     else {
         return Err(EnvironmentApiError::ResourceReservationRejected);
     };
-    let command = EnvironmentLifecycleCommand {
-        environment_id,
-        kind: EnvironmentOperationKind::Create,
-        expected_revision: Revision::new(1).map_err(|_| EnvironmentApiError::RequestInvalid)?,
-        actor_id,
-        trace_id: context.trace_id().to_owned(),
-        accepted_at,
-        deadline_at,
-        access_revocation_revision: None,
-        preserve_mutable_disk: false,
-        max_attempts: 3,
-        reset_target: None,
-    };
-    let gpu_allocation = resolve_experiment_resources(
-        &state,
-        &approved_resources,
-        release.projection.environment_spec.resources.gpu.as_ref(),
-        environment_id,
-        request.project_id,
-        request.course_id,
-        actor_id,
-        &provider_binding,
-        contracts::OperationId::new(),
-        1,
-        context.trace_id(),
-    )
-    .await?;
-    let create = EnvironmentCreateSpec {
-        project_id: request.project_id,
-        course_id: request.course_id,
-        owner_actor_id: actor_id,
-        display_label: request
-            .display_label
-            .clone()
-            .unwrap_or_else(|| release.projection.environment_spec.name.clone()),
-        class: release.projection.environment_spec.class,
-        runtime_authorization: Some(runtime_authorization),
-        runtime_kind: release.projection.release.runtime_kind,
-        release_id: request.release_id,
-        release_version: request.release_version,
-        provider_binding,
-        lease_id: None,
-        capacity_binding: None,
-        approved_resources: approved_resources.clone(),
-        gpu_allocation: gpu_allocation.clone(),
-        retention: release.projection.environment_spec.retention.clone(),
-        eligibility_expires_at: release.projection.environment_spec.retention.retain_until,
-    };
-    let accepted = match state
-        .store
-        .accept_api_create_command(
-            key.as_str(),
-            &command,
-            &create,
-            request.project_id,
-            request.course_id,
-            state.store.create_api_request_hash(&request, actor_id)?,
-        )
-        .await
-    {
-        Ok(accepted) => accepted,
-        Err(error) => {
-            release_experiment_resource_reservation(
-                &state,
-                true,
-                environment_id,
-                request.project_id,
-                actor_id,
-                contracts::OperationId::new(),
-                2,
-                context.trace_id(),
-            )
-            .await;
-            return Err(error.into());
-        }
-    };
-    if accepted.environment_id != environment_id {
-        // The idempotency ledger replayed a previously accepted Environment. The allocation
-        // resolved above belongs to a fresh identity that was never persisted, so release it
-        // instead of leaking capacity. The original Environment keeps its durable reservation.
-        release_experiment_resource_reservation(
-            &state,
-            true,
-            environment_id,
-            request.project_id,
-            actor_id,
-            contracts::OperationId::new(),
-            2,
-            context.trace_id(),
-        )
-        .await;
-    }
-    Ok((StatusCode::ACCEPTED, Json(accepted)))
-}
-
-/// Resolves the durable Resource reservation for an Experiment create command.
-///
-/// Resource receives the complete immutable `ReleaseProjection` resource snapshot. A missing
-/// client fails closed even for a non-GPU release because CPU, memory, and storage authorization
-/// also belongs to Resource.
-#[allow(clippy::too_many_arguments)]
-async fn resolve_experiment_resources(
-    state: &EnvironmentApiState,
-    approved_resources: &contracts::resource::WorkloadResources,
-    gpu: Option<&contracts::resource::GpuRequest>,
-    environment_id: EnvironmentId,
-    project_id: contracts::ProjectId,
-    course_id: Option<contracts::CourseId>,
-    owner_actor_id: ActorId,
-    provider_binding: &str,
-    operation_id: contracts::OperationId,
-    environment_generation: u64,
-    trace_id: &str,
-) -> Result<Option<contracts::resource::GpuAllocation>, EnvironmentApiError> {
-    let client = state
-        .resource_reservations
-        .as_ref()
-        .ok_or(EnvironmentApiError::ResourceReservationUnavailable)?;
-    let request = ResolveEnvironmentResourceReservationRequest {
-        version: 1,
-        environment_id,
-        project_id,
-        course_id,
-        owner_actor_id,
-        provider_binding: provider_binding.to_owned(),
-        approved_resources: approved_resources.clone(),
-        gpu: gpu.cloned(),
-        operation_id,
-        environment_generation,
-        trace_id: trace_id.to_owned(),
-    };
-    match client.resolve_resource_reservation(&request).await {
-        Ok(allocation) => Ok(allocation),
-        Err(error) => {
-            tracing::warn!(
-                event = "environment.resource_reservation.resolve_failed",
-                component = "api-error-boundary",
-                environment_id = %environment_id,
-                diagnostic_code = error.diagnostic_code(),
-                error_kind = "resource_dependency",
-                retryable = error.retryable(),
-            );
-            Err(EnvironmentApiError::ResourceReservationRejected)
-        }
-    }
-}
-
-/// Best-effort release for an Experiment reservation that was not persisted.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the cleanup identity is kept explicit at the Resource boundary"
-)]
-async fn release_experiment_resource_reservation(
-    state: &EnvironmentApiState,
-    reservation_resolved: bool,
-    environment_id: EnvironmentId,
-    project_id: contracts::ProjectId,
-    owner_actor_id: ActorId,
-    operation_id: contracts::OperationId,
-    environment_generation: u64,
-    trace_id: &str,
-) {
-    if !reservation_resolved {
-        return;
-    }
-    let Some(client) = state.resource_reservations.as_ref() else {
-        return;
-    };
-    let request = contracts::environment::ReleaseEnvironmentResourceReservationRequest {
-        version: 1,
-        environment_id,
-        project_id,
-        owner_actor_id,
-        operation_id,
-        environment_generation,
-        trace_id: trace_id.to_owned(),
-    };
-    if let Err(error) = client.release_resource_reservation(&request).await {
-        tracing::error!(
-            event = "environment.resource_reservation.orphan_release_failed",
-            component = "api-error-boundary",
-            environment_id = %environment_id,
-            diagnostic_code = error.diagnostic_code(),
-            error_kind = "resource_dependency",
-            retryable = true,
-        );
-    }
+    // The original target is valid, but its funded lease cannot be transplanted
+    // into the separate Experiment reservation. No new ID or allocation is created.
+    tracing::debug!(%environment_id, "experiment allocation path requires unification");
+    Err(crate::RuntimeAdmissionError::AllocationPathUnsupported.into())
 }
 
 async fn get_environment(
@@ -1467,7 +1255,7 @@ pub enum EnvironmentApiError {
 
 impl IntoResponse for EnvironmentApiError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let status = match &self {
             Self::CallerDenied
             | Self::ScopeDenied
             | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied) => StatusCode::FORBIDDEN,
@@ -1492,13 +1280,31 @@ impl IntoResponse for EnvironmentApiError {
                 | EnvironmentStoreError::InvalidLimit,
             ) => StatusCode::BAD_REQUEST,
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
+            Self::RuntimeAdmission(crate::RuntimeAdmissionError::Resource(
+                crate::ResourceUsageClientError::Problem {
+                    diagnostic_code, ..
+                },
+            )) if diagnostic_code == "LW_RUNTIME_SCOPE_DENIED"
+                || diagnostic_code == "LW_RUNTIME_TEACHER_APPROVAL_REQUIRED"
+                || diagnostic_code == "LW_RUNTIME_PERMISSION_OUTSIDE_PLATFORM_RANGE" =>
+            {
+                StatusCode::FORBIDDEN
+            }
+            Self::RuntimeAdmission(crate::RuntimeAdmissionError::Resource(error))
+                if !error.retryable() =>
+            {
+                StatusCode::CONFLICT
+            }
             Self::RuntimeAdmission(crate::RuntimeAdmissionError::Binding)
             | Self::RevisionConflict
             | Self::LeaseFenceInvalid
             | Self::WorkExecution(
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
             ) => StatusCode::PRECONDITION_FAILED,
-            Self::RuntimeAdmission(crate::RuntimeAdmissionError::Release)
+            Self::RuntimeAdmission(
+                crate::RuntimeAdmissionError::Release
+                | crate::RuntimeAdmissionError::AllocationPathUnsupported,
+            )
             | Self::ReleaseDenied
             | Self::ResourceReservationRejected
             | Self::Store(EnvironmentStoreError::InvalidCreateAggregate)

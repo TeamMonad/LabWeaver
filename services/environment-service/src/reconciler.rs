@@ -443,6 +443,20 @@ impl Reconciler {
         instance: &EnvironmentInstance,
         now: UtcTimestamp,
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
+        // Authority reads and provider effects share the reconciler's existing bounded lease budget.
+        timeout(
+            self.provider_timeout,
+            self.execute_authorized_once(instance, now),
+        )
+        .await
+        .map_err(|_| ReconcileError::ProviderTimeout)?
+    }
+
+    async fn execute_authorized_once(
+        &self,
+        instance: &EnvironmentInstance,
+        now: UtcTimestamp,
+    ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
         let mut authorized = instance.clone();
         if matches!(
@@ -465,9 +479,7 @@ impl Reconciler {
             self.activate_experiment_reservation(instance).await?;
         }
         let provider = self.registry.resolve(&instance.provider_binding)?;
-        let result = timeout(self.provider_timeout, provider.execute(action, instance))
-            .await
-            .map_err(|_| ReconcileError::ProviderTimeout)?;
+        let result = provider.execute(action, instance).await;
         let outcome = result.map_err(ReconcileError::Provider)?;
         if instance.class == EnvironmentClass::Experiment
             && instance.desired_state != contracts::environment::DesiredEnvironmentState::Deleted

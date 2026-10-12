@@ -507,7 +507,7 @@ fn plan_is_deterministic_private_and_digest_bound() {
     assert!(cloud_init.contains("AllowAgentForwarding no"));
     assert!(!cloud_init.contains("PermitAgentForwarding"));
     assert!(cloud_init.contains("      sshd -t"));
-    assert!(cloud_init.contains("- [systemctl, enable, --now, ssh.service]"));
+    assert!(cloud_init.contains("      systemctl enable --now ssh.service"));
     assert!(!cloud_init.contains("ssh_authorized_keys"));
     assert!(!cloud_init.contains("PRIVATE KEY"));
     let network_data_encoded = cloud_init_secret
@@ -643,6 +643,7 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
         active_from: timestamp("2026-07-16T08:00:00.000Z"),
         expires_at: timestamp("2026-07-16T09:00:00.000Z"),
     });
+    instance.runtime_authorization = Some(support::runtime_receipt(&instance, &projection));
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
     let plan = provider
         .plan(&instance, &resolved(projection), ReconcileAction::Provision)
@@ -1342,6 +1343,7 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     instance.release_version = projection.release.version;
     instance.runtime_kind = RuntimeKind::VirtualMachine;
     "kubevirt-primary-v1".clone_into(&mut instance.provider_binding);
+    instance.runtime_authorization = Some(support::runtime_receipt(&instance, projection));
     instance
 }
 
@@ -2004,4 +2006,35 @@ fn unseeded_base_without_runtime_policy_fails_closed() {
         ),
         Err(ReleaseProjectionError::SecurityPostureInvalid)
     ));
+}
+
+#[test]
+fn default_guest_root_has_the_same_workspace_and_ca_only_identity_without_host_privilege() {
+    let mut release = projection();
+    release.environment_spec.security.run_as_user = None;
+    let instance = instance_for(&release);
+    let provider = provider(release.clone(), Arc::new(FixtureBackend::default()));
+    let plan = provider
+        .plan(&instance, &resolved(release), ReconcileAction::Provision)
+        .expect("approved guest root");
+    let encoded = resource(&plan, "Secret").document["data"]["userdata"]
+        .as_str()
+        .expect("userdata");
+    let data = BASE64_STANDARD.decode(encoded).expect("base64");
+    let data = std::str::from_utf8(&data).expect("userdata text");
+    assert!(data.contains("name: root\n    uid: 0"));
+    assert!(data.contains("AllowUsers root"));
+    assert!(data.contains("PermitRootLogin prohibit-password"));
+    assert!(data.contains("AuthorizedKeysFile none"));
+    assert!(data.contains("PasswordAuthentication no"));
+    assert!(data.contains("test \"$(id -u root)\" = \"0\""));
+    assert!(data.contains("install -d -o root -g root -m 0700 /workspace"));
+    assert!(!data.contains("sudo:"));
+    assert!(!data.contains("PRIVATE KEY"));
+    let vm = resource(&plan, "VirtualMachine");
+    assert!(
+        vm.document
+            .pointer("/spec/template/spec/domain/securityContext/privileged")
+            .is_none()
+    );
 }

@@ -264,7 +264,8 @@ pub fn revision(value: u64) -> Revision {
 
 /// A synthetic immutable release for lifecycle tests whose provider is an external-boundary stub.
 pub fn runtime_projection(instance: &EnvironmentInstance) -> contracts::events::ReleasePublished {
-    use contracts::authoring::{CandidateApproval, CandidateDecision, EnvironmentTemplateRelease};
+    use contracts::authoring::{CandidateApproval, CandidateDecision};
+    use contracts::supply_chain::EnvironmentTemplateRelease;
     use contracts::supply_chain::ImageArtifact;
     let spec = serde_json::from_value(serde_json::json!({
         "apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"synthetic-runtime",
@@ -339,6 +340,8 @@ pub fn runtime_receipt(
             expires_at: timestamp("2027-07-15T00:00:00.000Z"),
         });
     contracts::environment::EnvironmentRuntimeAuthorizationResolution {
+        provider_binding: instance.provider_binding.clone(),
+        valid_until: lease.expires_at,
         authorization: RuntimeAuthorizationBinding {
             request_id: lease.resource_request_id,
             project_id: instance.project_id,

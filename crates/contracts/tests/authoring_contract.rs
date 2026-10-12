@@ -372,3 +372,66 @@ fn course_policy_operation_exposes_optional_if_match() -> Result<(), Box<dyn std
     }));
     Ok(())
 }
+
+#[test]
+fn runtime_defaults_and_guest_root_are_independent_of_privileged()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::authoring::{
+        PrivilegeEscalationPolicy, RootFilesystemPolicy, RuntimeSeccompProfile,
+    };
+    let mut value = environment_spec_value(None);
+    value["security"] =
+        json!({"publicExposurePolicy":"deny","securityProfileBinding":"standard-v1"});
+    let spec: EnvironmentSpec = serde_json::from_value(value.clone())?;
+    spec.validate()?;
+    assert_eq!(spec.security.run_as_user, None);
+    assert!(!spec.security.privileged);
+    assert!(spec.security.capabilities.is_empty());
+    assert_eq!(
+        spec.security.root_filesystem_policy,
+        RootFilesystemPolicy::MutableRequired
+    );
+    assert_eq!(
+        spec.security.privilege_escalation_policy,
+        PrivilegeEscalationPolicy::Deny
+    );
+    assert_eq!(spec.security.seccomp, RuntimeSeccompProfile::RuntimeDefault);
+    for uid in [0, 1000, 65534] {
+        value["security"]["runAsUser"] = json!(uid);
+        let spec: EnvironmentSpec = serde_json::from_value(value.clone())?;
+        spec.validate()?;
+        assert!(!spec.security.privileged);
+    }
+    value["security"]["runAsUser"] = json!(u32::MAX);
+    assert!(serde_json::from_value::<EnvironmentSpec>(value).is_err());
+    Ok(())
+}
+
+#[test]
+fn capability_declarations_are_closed_and_privileged_cannot_claim_partial_caps()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut value = environment_spec_value(None);
+    value["security"]["capabilities"] = json!(["NET_ADMIN"]);
+    let spec: EnvironmentSpec = serde_json::from_value(value.clone())?;
+    spec.validate()?;
+    let declared =
+        contracts::runtime_authorization::declared_runtime_permissions(&spec, ProjectId::new())?;
+    assert_eq!(declared.capabilities, spec.security.capabilities);
+    assert!(!declared.privileged);
+    let mut sys_admin = value.clone();
+    sys_admin["security"]["capabilities"] = json!(["SYS_ADMIN"]);
+    assert!(serde_json::from_value::<EnvironmentSpec>(sys_admin.clone()).is_err());
+    sys_admin["security"]["privilegeEscalationPolicy"] = json!("allow");
+    serde_json::from_value::<EnvironmentSpec>(sys_admin)?.validate()?;
+    value["security"]["capabilities"] = json!(["arbitrary_host_power"]);
+    assert!(serde_json::from_value::<EnvironmentSpec>(value.clone()).is_err());
+    value["security"]["capabilities"] = json!([]);
+    value["security"]["privileged"] = json!(true);
+    assert!(serde_json::from_value::<EnvironmentSpec>(value.clone()).is_err());
+    value["security"]["privilegeEscalationPolicy"] = json!("allow");
+    value["security"]["seccomp"] = json!("unconfined");
+    serde_json::from_value::<EnvironmentSpec>(value.clone())?.validate()?;
+    value["security"]["capabilities"] = json!(["NET_ADMIN"]);
+    assert!(serde_json::from_value::<EnvironmentSpec>(value).is_err());
+    Ok(())
+}

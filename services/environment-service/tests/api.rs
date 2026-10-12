@@ -21,11 +21,8 @@ use axum::{
     http::{HeaderValue, Method, Request, StatusCode, header},
 };
 use contracts::environment::{
-    ActivateEnvironmentResourceReservationRequest, ActivateEnvironmentResourceReservationResponse,
     EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentInstance,
-    EnvironmentOperationKind, EnvironmentResourceReservationState,
-    ReleaseEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationRequest,
-    SuspendEnvironmentResourceReservationRequest, SuspendEnvironmentResourceReservationResponse,
+    EnvironmentOperationKind,
 };
 use contracts::events::ReleasePublished;
 use contracts::http::{SnapshotPage, StrongEtag};
@@ -35,11 +32,10 @@ use contracts::{
     ImageArtifactId, OperationId, PolicyId, ProjectId, ReleaseId, Revision, UtcTimestamp,
 };
 use environment_service::{
-    EnvironmentApiState, ExperimentResourceAllocator, FreezeBindingConfiguration,
-    FreezeBindingService, NatsAccessRevoker, NatsResourceLeaseVerifier, PgEnvironmentStore,
-    PgReleaseProjectionStore, ProviderObservation, ResourceUsageClientError,
-    WorkAdmissionClientError, WorkAdmissionResolver, apply_provider_failure,
-    apply_provider_observation, environment_api_router,
+    EnvironmentApiState, FreezeBindingConfiguration, FreezeBindingService, NatsAccessRevoker,
+    NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore, ProviderObservation,
+    ResourceUsageClientError, WorkAdmissionClientError, WorkAdmissionResolver,
+    apply_provider_failure, apply_provider_observation, environment_api_router,
 };
 use futures_util::StreamExt;
 use persistence_sqlx::Sha256Digest;
@@ -72,77 +68,22 @@ impl WorkAdmissionResolver for UnusedAdmission {
 }
 
 #[derive(Clone)]
-struct CountingGpuAllocator {
-    resolve_count: Arc<AtomicUsize>,
-    release_count: Arc<AtomicUsize>,
-    allocation: GpuAllocation,
-}
-
+struct StaticRuntimeAuthority(contracts::environment::EnvironmentRuntimeAuthorizationResolution);
 #[async_trait]
-impl ExperimentResourceAllocator for CountingGpuAllocator {
-    async fn resolve_resource_reservation(
+impl environment_service::EnvironmentRuntimeAuthority for StaticRuntimeAuthority {
+    async fn resolve_runtime_authorization(
         &self,
-        request: &ResolveEnvironmentResourceReservationRequest,
-    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
-        let count = self.resolve_count.fetch_add(1, Ordering::SeqCst) + 1;
-        if count > 1 {
-            return Err(ResourceUsageClientError::Rejected { retryable: false });
-        }
-        let gpu = request
-            .gpu
-            .as_ref()
-            .ok_or(ResourceUsageClientError::InvalidResponse)?;
-        if gpu.class != self.allocation.class
-            || gpu.count != self.allocation.count
-            || request.provider_binding != self.allocation.provider_binding
-        {
-            return Err(ResourceUsageClientError::InvalidResponse);
-        }
-        Ok(Some(self.allocation.clone()))
-    }
-
-    async fn release_resource_reservation(
-        &self,
-        request: &ReleaseEnvironmentResourceReservationRequest,
-    ) -> Result<bool, ResourceUsageClientError> {
-        self.release_count.fetch_add(1, Ordering::SeqCst);
-        let _ = request;
-        Ok(true)
-    }
-
-    async fn activate_resource_reservation(
-        &self,
-        request: &ActivateEnvironmentResourceReservationRequest,
-    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError> {
-        Ok(ActivateEnvironmentResourceReservationResponse {
-            version: 1,
-            environment_id: request.environment_id,
-            state: EnvironmentResourceReservationState::Reserved,
-            reservation_generation: 1,
-            environment_generation: request.environment_generation,
-            allocation: request.expected_allocation.clone(),
-            applied: true,
-        })
-    }
-
-    async fn suspend_resource_reservation(
-        &self,
-        request: &SuspendEnvironmentResourceReservationRequest,
-    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError> {
-        Ok(SuspendEnvironmentResourceReservationResponse {
-            version: 1,
-            environment_id: request.environment_id,
-            state: EnvironmentResourceReservationState::Suspended,
-            reservation_generation: 1,
-            environment_generation: request.environment_generation,
-            allocation: Some(self.allocation.clone()),
-            applied: true,
-        })
+        _request: &contracts::environment::ResolveEnvironmentRuntimeAuthorizationRequest,
+    ) -> Result<
+        contracts::environment::EnvironmentRuntimeAuthorizationResolution,
+        ResourceUsageClientError,
+    > {
+        Ok(self.0.clone())
     }
 }
 
 #[tokio::test]
-async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
+async fn public_create_rejects_unintegrated_claim_before_second_allocation()
 -> Result<(), Box<dyn Error>> {
     let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
     let database_url = format!(
@@ -184,21 +125,15 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
 
     let store = PgEnvironmentStore::new(pool.clone());
     let releases = PgReleaseProjectionStore::new(pool.clone());
-    let resolve_count = Arc::new(AtomicUsize::new(0));
-    let release_count = Arc::new(AtomicUsize::new(0));
-    let allocator = CountingGpuAllocator {
-        resolve_count: Arc::clone(&resolve_count),
-        release_count: Arc::clone(&release_count),
-        allocation: GpuAllocation {
-            entry_id: contracts::GpuCatalogEntryId::new(),
-            class: "a100".to_owned(),
-            count: 1,
-            mode: GpuAllocationMode::Exclusive,
-            provider_binding: "container-primary-v1".to_owned(),
-            allocation_binding: "capacity-a100-0".to_owned(),
-            catalog_revision: revision(1),
-        },
-    };
+    let actor_id = ActorId::new();
+    let mut approved = support::requested_instance();
+    approved.project_id = project_id;
+    approved.course_id = course_id;
+    approved.owner_id = actor_id;
+    approved.release_id = projection.release.id;
+    approved.release_version = projection.release.version;
+    let receipt = support::runtime_receipt(&approved, &projection);
+    let request_id = receipt.authorization.request_id;
     let api = environment_api_router(
         EnvironmentApiState::new(
             store,
@@ -223,12 +158,15 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
                 UnusedAdmission,
             )?,
         )
-        .with_resource_reservations(allocator),
+        .with_runtime_admission(environment_service::EnvironmentRuntimeAdmission::new(
+            releases.clone(),
+            Arc::new(StaticRuntimeAuthority(receipt)),
+        )),
     );
     let identity = access_identity();
-    let actor_id = ActorId::new();
     let session_id = uuid::Uuid::now_v7();
     let body = json!({
+        "resourceRequestId": request_id,
         "projectId": project_id,
         "courseId": course_id,
         "releaseId": projection.release.id,
@@ -248,7 +186,7 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(first.0, StatusCode::ACCEPTED);
+    assert_eq!(first.0, StatusCode::UNPROCESSABLE_ENTITY);
     let replay = send(
         &api,
         Method::POST,
@@ -261,11 +199,12 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(replay.0, StatusCode::ACCEPTED);
-    assert_eq!(replay.1["operationId"], first.1["operationId"]);
-    assert_eq!(replay.1["environmentId"], first.1["environmentId"]);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
-    assert_eq!(release_count.load(Ordering::SeqCst), 0);
+    assert_eq!(replay.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        first.1["diagnosticCode"],
+        "LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED"
+    );
+    assert_eq!(replay.1["diagnosticCode"], first.1["diagnosticCode"]);
 
     let mut changed_label = body.clone();
     changed_label["displayLabel"] = json!("different label");
@@ -281,8 +220,7 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(conflict.0, StatusCode::CONFLICT);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
+    assert_eq!(conflict.0, StatusCode::UNPROCESSABLE_ENTITY);
 
     let other_actor = send(
         &api,
@@ -296,8 +234,13 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(other_actor.0, StatusCode::CONFLICT);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
+    assert_eq!(other_actor.0, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM environment.environment_instances")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
     Ok(())
 }
 
@@ -1040,4 +983,185 @@ async fn send(
         serde_json::from_slice(&body)?
     };
     Ok((status, value))
+}
+
+#[tokio::test]
+async fn work_handoff_consumes_original_request_target_and_replays_without_a_second_instance()
+-> Result<(), Box<dyn Error>> {
+    let pg = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            pg.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let nats = GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(4222.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .start()
+        .await?;
+    let client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let mut instance = support::requested_instance();
+    instance.class = contracts::authoring::EnvironmentClass::Work;
+    let mut projection = gpu_release_projection(instance.project_id, instance.course_id)?;
+    projection.environment_spec.class = contracts::authoring::EnvironmentClass::Work;
+    projection.environment_spec.security.run_as_user = None;
+    projection.environment_spec.retention.retain_until =
+        Some(timestamp("2027-07-15T00:00:00.000Z"));
+    instance.release_id = projection.release.id;
+    instance.release_version = projection.release.version;
+    instance.approved_resources = contracts::resource::WorkloadResources {
+        cpu_millicores: projection.environment_spec.resources.cpu_millicores,
+        memory_bytes: projection.environment_spec.resources.memory_bytes,
+        storage_bytes: projection.environment_spec.resources.storage_bytes,
+        gpu: projection.environment_spec.resources.gpu.clone(),
+    };
+    instance.gpu_allocation = Some(GpuAllocation {
+        entry_id: contracts::GpuCatalogEntryId::new(),
+        class: "a100".to_owned(),
+        count: 1,
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: instance.provider_binding.clone(),
+        allocation_binding: "nvidia.com/gpu".to_owned(),
+        catalog_revision: revision(1),
+    });
+    let receipt = support::runtime_receipt(&instance, &projection);
+    let lease = receipt.lease_authorization.clone();
+    sqlx::query("INSERT INTO environment.release_projections (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1)")
+        .bind(projection.release.id.as_uuid()).bind(instance.project_id.as_uuid()).bind(instance.course_id.map(contracts::CourseId::as_uuid)).bind(i64::try_from(instance.release_version)?).bind(&instance.provider_binding).bind(Sha256Digest::of_canonical(&projection)?.to_string()).bind(serde_json::to_value(&projection)?).bind(uuid::Uuid::now_v7()).execute(&pool).await?;
+    let mut requests = client.subscribe(LEASE_VERIFY_SUBJECT).await?;
+    let reply_client = client.clone();
+    let reply_lease = lease.clone();
+    let responder = tokio::spawn(async move {
+        while let Some(message) = requests.next().await {
+            if let Some(reply) = message.reply {
+                let response = contracts::environment::EnvironmentLeaseVerificationResponse {
+                    version: 1,
+                    state: contracts::environment::EnvironmentLeaseState::Active,
+                    authorization: Some(reply_lease.clone()),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&response) {
+                    let _ = reply_client.publish(reply, bytes.into()).await;
+                }
+            }
+        }
+    });
+    client.flush().await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let releases = PgReleaseProjectionStore::new(pool.clone());
+    let api = environment_api_router(
+        EnvironmentApiState::new(
+            store.clone(),
+            releases.clone(),
+            NatsAccessRevoker::new(
+                ACCESS_REVOKE_SUBJECT.to_owned(),
+                client.clone(),
+                Duration::from_secs(2),
+            )?,
+            NatsResourceLeaseVerifier::new(
+                LEASE_VERIFY_SUBJECT.to_owned(),
+                client.clone(),
+                Duration::from_secs(2),
+            )?,
+            FreezeBindingService::new_with_admission_resolver(
+                pool.clone(),
+                releases.clone(),
+                FreezeBindingConfiguration {
+                    container_workspace_storage_class: "synthetic".to_owned(),
+                    vm: None,
+                },
+                UnusedAdmission,
+            )?,
+        )
+        .with_runtime_admission(environment_service::EnvironmentRuntimeAdmission::new(
+            releases,
+            Arc::new(StaticRuntimeAuthority(receipt.clone())),
+        )),
+    );
+    let handoff = contracts::environment::ResourceWorkHandoff {
+        version: 1,
+        request_id: lease.resource_request_id,
+        request_revision: revision(4),
+        lease_id: lease.lease_id,
+        lease_revision: lease.lease_revision,
+        claim_id: contracts::CapacityClaimId::new(),
+        claim_revision: revision(1),
+        environment_id: instance.id,
+        project_id: instance.project_id,
+        course_id: instance.course_id,
+        owner_actor_id: instance.owner_id,
+        display_label: "Approved Work".to_owned(),
+        release_id: instance.release_id,
+        release_version: instance.release_version,
+        provider_binding: instance.provider_binding.clone(),
+        capacity_binding: lease.capacity_binding.clone(),
+        approved_resources: lease.approved_resources.clone(),
+        gpu_allocation: lease.gpu_allocation.clone(),
+        trace_id: "synthetic-handoff".to_owned(),
+    };
+    let mut identity = access_identity();
+    identity.permissions = BTreeSet::from(["resource.environment.manage".to_owned()]);
+    identity.client_id = "synthetic-resource".to_owned();
+    let body = serde_json::to_value(&handoff)?;
+    let first = send(
+        &api,
+        Method::POST,
+        "/internal/v1/resource/work-handoffs".to_owned(),
+        &identity,
+        instance.owner_id,
+        uuid::Uuid::now_v7(),
+        None,
+        Some(body.clone()),
+        None,
+    )
+    .await?;
+    assert_eq!(first.0, StatusCode::ACCEPTED);
+    assert_eq!(first.1["environmentId"], instance.id.to_string());
+    let replay = send(
+        &api,
+        Method::POST,
+        "/internal/v1/resource/work-handoffs".to_owned(),
+        &identity,
+        instance.owner_id,
+        uuid::Uuid::now_v7(),
+        None,
+        Some(body.clone()),
+        None,
+    )
+    .await?;
+    assert_eq!(replay.0, StatusCode::ACCEPTED);
+    assert_eq!(replay.1, first.1);
+    let stored = store.load(instance.id).await?;
+    assert_eq!(stored.lease_id, Some(lease.lease_id));
+    assert_eq!(stored.runtime_authorization, Some(receipt));
+    assert_eq!(stored.operation.lease_authorization, Some(lease));
+    let mut wrong = body;
+    wrong["requestId"] = json!(contracts::ResourceRequestId::new());
+    let rejected = send(
+        &api,
+        Method::POST,
+        "/internal/v1/resource/work-handoffs".to_owned(),
+        &identity,
+        instance.owner_id,
+        uuid::Uuid::now_v7(),
+        None,
+        Some(wrong),
+        None,
+    )
+    .await?;
+    assert_eq!(rejected.0, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM environment.environment_instances")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    responder.abort();
+    Ok(())
 }

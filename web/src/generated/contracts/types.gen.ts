@@ -1834,6 +1834,10 @@ export type EnvironmentInstanceSchema = {
      */
     resourceReservationReleased?: boolean;
     revision: EnvironmentInstanceSchemaRevision;
+    /**
+     * Receipt of the original ResourceApproval; the source is re-read before new compute.
+     */
+    runtimeAuthorization?: EnvironmentRuntimeAuthorizationResolution | null;
     runtimeKind: EnvironmentInstanceSchemaRuntimeKind;
 };
 
@@ -1841,6 +1845,11 @@ export type EnvironmentInstanceSchema = {
  * Strongly typed UUIDv7 identifier for `ActorId`.
  */
 export type EnvironmentInstanceSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type EnvironmentInstanceSchemaApprovalId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ArtifactId`.
@@ -1874,9 +1883,23 @@ export type EnvironmentInstanceSchemaArtifactRef = {
 };
 
 /**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type EnvironmentInstanceSchemaCandidateId = string;
+
+/**
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type EnvironmentInstanceSchemaCourseId = string;
+
+/**
+ * Captured by Control while the verified teacher and current course instructor are checked.
+ */
+export type EnvironmentInstanceSchemaCourseTeacherApprovalScope = {
+    actorId: EnvironmentInstanceSchemaActorId;
+    courseId: EnvironmentInstanceSchemaCourseId;
+    membershipRevision: EnvironmentInstanceSchemaRevision;
+};
 
 /**
  * Requested steady state.
@@ -1998,6 +2021,20 @@ export type EnvironmentResetTarget = {
 };
 
 /**
+ * A transport receipt of the original approval and its verified platform execution values.
+ * This is not a second grant, approval lifecycle, or client-supplied permission source.
+ */
+export type EnvironmentRuntimeAuthorizationResolution = {
+    authorization: RuntimeAuthorizationBinding;
+    defaultContainerUid: number;
+    leaseAuthorization: EnvironmentLeaseAuthorization;
+    ownerActorId: EnvironmentInstanceSchemaActorId;
+    privilegedExecutionLocation?: PrivilegedExecutionLocation | null;
+    providerBinding: string;
+    validUntil: EnvironmentInstanceSchemaUtcTimestamp;
+};
+
+/**
  * The catalog resolution captured on an approved capacity claim.
  */
 export type GpuAllocation = {
@@ -2040,6 +2077,11 @@ export type GpuRequest = {
 export type EnvironmentInstanceSchemaLeaseId = string;
 
 /**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type LinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
  * Authoritative observed lifecycle state.
  */
 export type ObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
@@ -2053,6 +2095,21 @@ export type OperationId = string;
  * Persistent operation state.
  */
 export type OperationState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * An execution boundary declaration. The Environment consumer must prove exclusivity.
+ */
+export type PrivilegedExecutionLocation = {
+    kind: 'dedicated_node_pool';
+    nodeSelector: {
+        [key: string]: string;
+    };
+    taintKey: string;
+    taintValue: string;
+} | {
+    kind: 'virtual_machine_guest';
+    providerBinding: string;
+};
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -2070,14 +2127,83 @@ export type EnvironmentInstanceSchemaReleaseId = string;
 export type EnvironmentInstanceSchemaResourceRequestId = string;
 
 /**
+ * Immutable identity of a Resource request's target.
+ */
+export type ResourceTarget = {
+    environmentId: EnvironmentInstanceSchemaEnvironmentId;
+    kind: 'environment';
+    releaseId: EnvironmentInstanceSchemaReleaseId;
+    releaseVersion: number;
+} | {
+    kind: 'task';
+    taskRunId: EnvironmentInstanceSchemaTaskRunId;
+};
+
+/**
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type EnvironmentInstanceSchemaRevision = number;
+
+export type RuntimeAdmissionBasis = 'restricted_baseline' | 'project_preauthorization' | 'course_preauthorization';
+
+/**
+ * Part of the existing immutable ResourceApproval, with no independent approval lifecycle.
+ */
+export type RuntimeAuthorizationBinding = {
+    basis: RuntimeAdmissionBasis;
+    configuration: RuntimeConfigurationIdentity;
+    courseId?: EnvironmentInstanceSchemaCourseId | null;
+    permissions: RuntimePreauthorization;
+    /**
+     * This is the verified applied platform version, never the candidate's LLM policy revision.
+     */
+    platformConfigurationRevision: EnvironmentInstanceSchemaRevision;
+    platformConfigurationSha256: string;
+    projectId: EnvironmentInstanceSchemaProjectId;
+    requestGeneration: number;
+    requestId: EnvironmentInstanceSchemaResourceRequestId;
+    target: ResourceTarget;
+};
+
+/**
+ * Control-owned immutable configuration identity. Clients cannot supply a replacement digest.
+ */
+export type RuntimeConfigurationIdentity = {
+    authoringApprovalId?: EnvironmentInstanceSchemaApprovalId | null;
+    authoringProjectId: EnvironmentInstanceSchemaProjectId;
+    candidateId: EnvironmentInstanceSchemaCandidateId;
+    candidateRevision: EnvironmentInstanceSchemaRevision;
+    configurationSha256: string;
+    courseId?: EnvironmentInstanceSchemaCourseId | null;
+    teacherScope?: EnvironmentInstanceSchemaCourseTeacherApprovalScope | null;
+};
 
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type EnvironmentInstanceSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+export type RuntimePreauthorization = {
+    capabilities: Array<LinuxCapability>;
+    privileged: boolean;
+    scope: RuntimePreauthorizationScope;
+};
+
+/**
+ * Object scope for a runtime preauthorization, never a builder authorization.
+ */
+export type RuntimePreauthorizationScope = {
+    kind: 'project';
+    projectId: EnvironmentInstanceSchemaProjectId;
+} | {
+    courseId: EnvironmentInstanceSchemaCourseId;
+    kind: 'course';
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `TaskRunId`.
+ */
+export type EnvironmentInstanceSchemaTaskRunId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -3908,6 +4034,10 @@ export type CreateEnvironmentRequestSchema = {
     projectId: CreateEnvironmentRequestSchemaProjectId;
     releaseId: CreateEnvironmentRequestSchemaReleaseId;
     releaseVersion: number;
+    /**
+     * Existing Resource request whose original approval selects the Environment target identity.
+     */
+    resourceRequestId: CreateEnvironmentRequestSchemaResourceRequestId;
 };
 
 /**
@@ -3924,6 +4054,11 @@ export type CreateEnvironmentRequestSchemaProjectId = string;
  * Strongly typed UUIDv7 identifier for `ReleaseId`.
  */
 export type CreateEnvironmentRequestSchemaReleaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type CreateEnvironmentRequestSchemaResourceRequestId = string;
 
 /**
  * CreateEnvironmentTemplateReleaseRequest
@@ -4227,7 +4362,7 @@ export type CreateResourceRequestSchema = {
     projectId: CreateResourceRequestSchemaProjectId;
     requestKey: string;
     resources: CreateResourceRequestSchemaWorkloadResources;
-    target: ResourceTarget;
+    target: CreateResourceRequestSchemaResourceTarget;
 };
 
 /**
@@ -4261,7 +4396,7 @@ export type CreateResourceRequestSchemaReleaseId = string;
 /**
  * Immutable identity of a Resource request's target.
  */
-export type ResourceTarget = {
+export type CreateResourceRequestSchemaResourceTarget = {
     environmentId: CreateResourceRequestSchemaEnvironmentId;
     kind: 'environment';
     releaseId: CreateResourceRequestSchemaReleaseId;
@@ -4655,11 +4790,17 @@ export type EnvironmentRuntimeSpec = {
  * Runtime-independent minimum security posture.
  */
 export type EnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
+    capabilities?: Array<EnvironmentCandidateViewSchemaLinuxCapability>;
+    privilegeEscalationPolicy?: PrivilegeEscalationPolicy;
+    privileged?: boolean;
     publicExposurePolicy: PublicExposurePolicy;
-    rootFilesystemPolicy: RootFilesystemPolicy;
+    rootFilesystemPolicy?: RootFilesystemPolicy;
+    /**
+     * Null uses the verified platform default (root/UID 0 by default); an explicit UID is retained.
+     */
+    runAsUser?: number | null;
+    seccomp?: RuntimeSeccompProfile;
     securityProfileBinding: string;
-    userPolicy: RuntimeUserPolicy;
 };
 
 /**
@@ -4708,6 +4849,11 @@ export type EnvironmentCandidateViewSchemaImageArtifact = {
 export type EnvironmentCandidateViewSchemaImageArtifactId = string;
 
 /**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type EnvironmentCandidateViewSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
  * Network egress posture for a published environment.
  */
 export type NetworkPolicySpec = {
@@ -4724,7 +4870,7 @@ export type NetworkPolicySpec = {
  */
 export type EnvironmentCandidateViewSchemaPolicyId = string;
 
-export type PrivilegeEscalationPolicy = 'deny';
+export type PrivilegeEscalationPolicy = 'deny' | 'allow';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -4790,7 +4936,7 @@ export type EnvironmentCandidateViewSchemaRevision = number;
 
 export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
 
-export type RuntimeUserPolicy = 'non_root_required';
+export type RuntimeSeccompProfile = 'runtime_default' | 'unconfined';
 
 /**
  * Bounded direct-exec terminal owned by an immutable Container release.
@@ -6833,11 +6979,17 @@ export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
  * Runtime-independent minimum security posture.
  */
 export type InternalAgentRunOutcomeSchemaEnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy;
+    capabilities?: Array<InternalAgentRunOutcomeSchemaLinuxCapability>;
+    privilegeEscalationPolicy?: InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy;
+    privileged?: boolean;
     publicExposurePolicy: InternalAgentRunOutcomeSchemaPublicExposurePolicy;
-    rootFilesystemPolicy: InternalAgentRunOutcomeSchemaRootFilesystemPolicy;
+    rootFilesystemPolicy?: InternalAgentRunOutcomeSchemaRootFilesystemPolicy;
+    /**
+     * Null uses the verified platform default (root/UID 0 by default); an explicit UID is retained.
+     */
+    runAsUser?: number | null;
+    seccomp?: InternalAgentRunOutcomeSchemaRuntimeSeccompProfile;
     securityProfileBinding: string;
-    userPolicy: InternalAgentRunOutcomeSchemaRuntimeUserPolicy;
 };
 
 /**
@@ -6989,6 +7141,11 @@ export type InternalAgentRunOutcomeSchemaGpuRequest = {
 };
 
 /**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type InternalAgentRunOutcomeSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
  * Frozen LLM usage for one attempt.
  */
 export type InternalAgentRunOutcomeSchemaLlmUsage = {
@@ -7020,7 +7177,7 @@ export type InternalAgentRunOutcomeSchemaNetworkPolicySpec = {
  */
 export type InternalAgentRunOutcomeSchemaPolicyId = string;
 
-export type InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy = 'deny';
+export type InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy = 'deny' | 'allow';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
@@ -7114,7 +7271,7 @@ export type InternalAgentRunOutcomeSchemaRootFilesystemPolicy = 'read_only_requi
  */
 export type InternalAgentRunOutcomeSchemaRuntimeKind = 'container' | 'virtual_machine';
 
-export type InternalAgentRunOutcomeSchemaRuntimeUserPolicy = 'non_root_required';
+export type InternalAgentRunOutcomeSchemaRuntimeSeccompProfile = 'runtime_default' | 'unconfined';
 
 /**
  * Failure behavior for a Score step.
@@ -9194,7 +9351,7 @@ export type BuilderEntitlement = 'network.host' | 'security.insecure';
  */
 export type BuilderSecurityPolicy = {
     allowPrivilegeEscalation: boolean;
-    capabilities: Array<LinuxCapability>;
+    capabilities: Array<UpdatePlatformConfigurationRequestSchemaLinuxCapability>;
     entitlements: Array<BuilderEntitlement>;
 };
 
@@ -9206,7 +9363,7 @@ export type UpdatePlatformConfigurationRequestSchemaCourseId = string;
 /**
  * Linux capability names from the kernel UAPI. `ALL` is never an addition.
  */
-export type LinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+export type UpdatePlatformConfigurationRequestSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
 
 /**
  * The one managed settings document. It contains no credential values or secret locators.
@@ -9228,20 +9385,20 @@ export type PlatformLifecycleDefaults = {
  * Platform allowed range. This does not replace object authorization or actual placement.
  */
 export type PlatformRuntimePolicy = {
-    allowedCapabilities: Array<LinuxCapability>;
+    allowedCapabilities: Array<UpdatePlatformConfigurationRequestSchemaLinuxCapability>;
     /**
      * Zero means guest/container root, without host privileges.
      */
     defaultContainerUid: number;
-    preauthorizations: Array<RuntimePreauthorization>;
+    preauthorizations: Array<UpdatePlatformConfigurationRequestSchemaRuntimePreauthorization>;
     privilegedAllowed: boolean;
-    privilegedExecutionLocation?: PrivilegedExecutionLocation | null;
+    privilegedExecutionLocation?: UpdatePlatformConfigurationRequestSchemaPrivilegedExecutionLocation | null;
 };
 
 /**
  * An execution boundary declaration. The Environment consumer must prove exclusivity.
  */
-export type PrivilegedExecutionLocation = {
+export type UpdatePlatformConfigurationRequestSchemaPrivilegedExecutionLocation = {
     kind: 'dedicated_node_pool';
     nodeSelector: {
         [key: string]: string;
@@ -9258,16 +9415,16 @@ export type PrivilegedExecutionLocation = {
  */
 export type UpdatePlatformConfigurationRequestSchemaProjectId = string;
 
-export type RuntimePreauthorization = {
-    capabilities: Array<LinuxCapability>;
+export type UpdatePlatformConfigurationRequestSchemaRuntimePreauthorization = {
+    capabilities: Array<UpdatePlatformConfigurationRequestSchemaLinuxCapability>;
     privileged: boolean;
-    scope: RuntimePreauthorizationScope;
+    scope: UpdatePlatformConfigurationRequestSchemaRuntimePreauthorizationScope;
 };
 
 /**
  * Object scope for a runtime preauthorization, never a builder authorization.
  */
-export type RuntimePreauthorizationScope = {
+export type UpdatePlatformConfigurationRequestSchemaRuntimePreauthorizationScope = {
     kind: 'project';
     projectId: UpdatePlatformConfigurationRequestSchemaProjectId;
 } | {
@@ -11359,8 +11516,8 @@ export type ResourceUsagePageSchemaUtcTimestamp = string;
  * Part of the existing immutable ResourceApproval, with no independent approval lifecycle.
  */
 export type RuntimeAuthorizationBindingSchema = {
-    basis: RuntimeAdmissionBasis;
-    configuration: RuntimeConfigurationIdentity;
+    basis: RuntimeAuthorizationBindingSchemaRuntimeAdmissionBasis;
+    configuration: RuntimeAuthorizationBindingSchemaRuntimeConfigurationIdentity;
     courseId?: RuntimeAuthorizationBindingSchemaCourseId | null;
     permissions: RuntimeAuthorizationBindingSchemaRuntimePreauthorization;
     /**
@@ -11446,12 +11603,12 @@ export type RuntimeAuthorizationBindingSchemaResourceTarget = {
  */
 export type RuntimeAuthorizationBindingSchemaRevision = number;
 
-export type RuntimeAdmissionBasis = 'restricted_baseline' | 'project_preauthorization' | 'course_preauthorization';
+export type RuntimeAuthorizationBindingSchemaRuntimeAdmissionBasis = 'restricted_baseline' | 'project_preauthorization' | 'course_preauthorization';
 
 /**
  * Control-owned immutable configuration identity. Clients cannot supply a replacement digest.
  */
-export type RuntimeConfigurationIdentity = {
+export type RuntimeAuthorizationBindingSchemaRuntimeConfigurationIdentity = {
     authoringApprovalId?: RuntimeAuthorizationBindingSchemaApprovalId | null;
     authoringProjectId: RuntimeAuthorizationBindingSchemaProjectId;
     candidateId: RuntimeAuthorizationBindingSchemaCandidateId;

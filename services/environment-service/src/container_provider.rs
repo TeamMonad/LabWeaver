@@ -6,9 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::authoring::{
-    EnvironmentRuntimeSpec, NetworkPolicySpec, RootFilesystemPolicy, RuntimeKind,
-};
+use contracts::authoring::{EnvironmentRuntimeSpec, NetworkPolicySpec, RuntimeKind};
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
@@ -115,6 +113,23 @@ impl ContainerBackendFence {
         instance: &EnvironmentInstance,
         action: ReconcileAction,
     ) -> Result<Self, ProviderFailure> {
+        let deadline_at = if matches!(
+            action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            instance.operation.deadline_at.min(
+                instance
+                    .runtime_authorization
+                    .as_ref()
+                    .ok_or_else(invalid_observation)?
+                    .valid_until,
+            )
+        } else {
+            instance.operation.deadline_at
+        };
         let request_id = Sha256Digest::of_canonical(&serde_json::json!({
             "protocolVersion": CONTAINER_BACKEND_PROTOCOL_VERSION,
             "environmentId": instance.id,
@@ -135,7 +150,7 @@ impl ContainerBackendFence {
             action,
             request_id,
             trace_id: instance.operation.trace_id.clone(),
-            deadline_at: instance.operation.deadline_at,
+            deadline_at,
         })
     }
 }
@@ -560,6 +575,25 @@ impl PgContainerExecutorFenceStore {
             if !valid {
                 return Err(ContainerExecutorFenceError::IdentityMismatch);
             }
+        }
+        if (matches!(&envelope.request, ContainerExecutorRequest::Apply { .. })
+            || matches!(&envelope.request,ContainerExecutorRequest::Scale {replicas,..} if *replicas > 0))
+            && plan.resources.iter().any(|r| r.kind == "Deployment")
+        {
+            let row=sqlx::query("SELECT i.contract AS instance,p.contract AS projection FROM environment.environment_instances i JOIN environment.release_projections p ON p.release_id=i.release_id WHERE i.environment_id=$1")
+                .bind(plan.environment_id.as_uuid()).fetch_optional(&mut *transaction).await?.ok_or(ContainerExecutorFenceError::IdentityMismatch)?;
+            let instance: EnvironmentInstance = serde_json::from_value(row.try_get("instance")?)
+                .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            let projection: ReleasePublished =
+                serde_json::from_value(row.try_get("projection")?)
+                    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            crate::runtime_admission::validate_container_runtime_plan(
+                &instance,
+                &projection,
+                plan,
+                fence.operation_generation,
+            )
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
         }
         let authority_now: time::OffsetDateTime =
             sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
@@ -1454,16 +1488,8 @@ where
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
         let uid = crate::runtime_admission::authorized_uid(instance, projection)?;
-        let security = &projection.environment_spec.security;
-        let security_context = json!({"runAsNonRoot":uid!=0,"runAsUser":uid,"privileged":security.privileged,
-            "allowPrivilegeEscalation":security.privilege_escalation_policy==contracts::authoring::PrivilegeEscalationPolicy::Allow,
-            "readOnlyRootFilesystem":security.root_filesystem_policy==RootFilesystemPolicy::ReadOnlyRequired,
-            "capabilities":{"drop":if security.privileged {Vec::<String>::new()}else{vec!["ALL".to_owned()]},"add":security.capabilities},
-            "seccompProfile":{"type":if security.privileged {"Unconfined"}else{"RuntimeDefault"}}});
-        // A selector alone does not establish a verified privileged execution boundary.
-        if security.privileged {
-            return Err(ReleaseProjectionError::SecurityPostureInvalid);
-        }
+        let security_context =
+            crate::runtime_admission::container_security_context(instance, projection)?;
         let cpu = format!("{cpu_millicores}m");
         let memory = memory_bytes.to_string();
         let quota_request_cpu = cpu_millicores
@@ -2316,6 +2342,44 @@ mod tests {
     };
     use contracts::authoring::EnvironmentRuntimeSpec;
     use serde_json::json;
+
+    #[test]
+    fn compute_deadline_is_bounded_by_original_authorization_and_stop_stays_available()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut instance = crate::test_support::requested_instance();
+        instance.operation.deadline_at = crate::test_support::timestamp("2027-07-20T00:00:00.000Z");
+        let valid_until = crate::test_support::timestamp("2027-07-15T00:00:00.000Z");
+        instance
+            .runtime_authorization
+            .as_mut()
+            .ok_or("receipt")?
+            .valid_until = valid_until;
+        for action in [
+            crate::ReconcileAction::Provision,
+            crate::ReconcileAction::Start,
+            crate::ReconcileAction::Restart,
+            crate::ReconcileAction::Reset,
+        ] {
+            assert_eq!(
+                super::ContainerBackendFence::for_action(&instance, action)
+                    .map_err(|_| "compute fence")?
+                    .deadline_at,
+                valid_until
+            );
+        }
+        instance.runtime_authorization = None;
+        assert!(
+            super::ContainerBackendFence::for_action(&instance, crate::ReconcileAction::Provision)
+                .is_err()
+        );
+        assert_eq!(
+            super::ContainerBackendFence::for_action(&instance, crate::ReconcileAction::Stop)
+                .map_err(|_| "stop fence")?
+                .deadline_at,
+            instance.operation.deadline_at
+        );
+        Ok(())
+    }
 
     #[allow(
         clippy::expect_used,

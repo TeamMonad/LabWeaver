@@ -1170,6 +1170,10 @@ async fn create_in_transaction(
     Ok(accepted)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "create invariants and complete durable contract initialization stay in one audited decision"
+)]
 fn build_create_instance(
     command: &LifecycleCommand,
     spec: &EnvironmentCreateSpec,
@@ -2127,6 +2131,7 @@ fn create_api_request_hash(
     actor_id: ActorId,
 ) -> Result<Sha256Digest, EnvironmentStoreError> {
     canonical_hash(&json!({
+        "resourceRequestId": request.resource_request_id,
         "projectId": request.project_id,
         "courseId": request.course_id,
         "ownerId": actor_id,
@@ -2395,6 +2400,12 @@ mod tests {
             display_label: Some("demo".to_owned()),
         };
         let create_hash = create_api_request_hash(&request, actor_id)?;
+        let mut changed_request = request.clone();
+        changed_request.resource_request_id = contracts::ResourceRequestId::new();
+        assert_ne!(
+            create_hash,
+            create_api_request_hash(&changed_request, actor_id)?
+        );
         let mut changed_label = request.clone();
         changed_label.display_label = Some("other".to_owned());
         assert_ne!(

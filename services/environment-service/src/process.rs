@@ -380,7 +380,6 @@ impl EnvironmentProcessRuntime {
             self.freeze_bindings.clone(),
         )
         .with_work_executions(self.work_executions.clone())
-        .with_resource_reservations(self.resource_usage_client.clone())
         .with_runtime_admission(crate::EnvironmentRuntimeAdmission::new(
             self.release_store.clone(),
             Arc::new(self.resource_usage_client.clone()),

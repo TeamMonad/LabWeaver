@@ -677,7 +677,7 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
         .connect(&url)
         .await?;
     support::apply_environment_migrations(&pool).await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
     let instance = requested_instance();
     store
         .create("create-key-stale-reconcile", &instance)
@@ -1886,7 +1886,7 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
         include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
 
     let timed_out = requested_instance();
     store
@@ -2835,7 +2835,7 @@ fn success_worker_with_restart_ready_observation(
     Ok(ReconcileWorker::new(
         store,
         Reconciler::new(registry, Duration::from_millis(100))?
-            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
+            .with_runtime_admission(support::stored_runtime_admission(pool))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),

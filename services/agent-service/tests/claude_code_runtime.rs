@@ -4826,8 +4826,8 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
         .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
     for required in [
         "runtime variant properties are exactly provider_binding",
-        "Container security requires rootFilesystemPolicy read_only_required",
-        "virtual_machine requires rootFilesystemPolicy mutable_required",
+        "Containers default to mutable_required rootFilesystemPolicy",
+        "virtual_machine requires mutable_required system disk",
         "retainUntil must either be null only for class course_material with disposition retain_until_revoked",
         "Preserve the materials' legal retention form exactly",
         "\"build_recipe\"",

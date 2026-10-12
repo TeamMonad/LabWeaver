@@ -732,6 +732,16 @@ impl EnvironmentSpec {
         {
             return Err(AuthoringError::InvalidEnvironmentSpec("privileged requires explicit escalation and unconfined seccomp, grants all capabilities, and cannot use an add list; ordinary containers require runtime-default seccomp".to_owned()));
         }
+        if self
+            .security
+            .capabilities
+            .contains(&crate::platform_configuration::LinuxCapability::SysAdmin)
+            && self.security.privilege_escalation_policy != PrivilegeEscalationPolicy::Allow
+        {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "SYS_ADMIN requires privilegeEscalationPolicy allow".to_owned(),
+            ));
+        }
         let mut entry_names = BTreeSet::new();
         for entry in &self.entries {
             if entry.name.trim().is_empty()

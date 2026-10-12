@@ -44,3 +44,52 @@ Web Terminal、noVNC、SSH/SFTP 连接使用相同 AccessGrant 边界。实例�
 ## 验证
 
 本地保护创建到回收、重复/乱序、取消、超时、旧 Worker 更新、跨项目访问、撤销后拒绝访问和释放失败。真实容器、KubeVirt、设备和网络行为需对应执行后端验证；本轮本地测试结果不表示完成远端部署。
+
+
+## Runtime declaration and ResourceApproval consumption
+
+`EnvironmentSpec.security` is the only runtime declaration. `runAsUser` is nullable:
+null consumes the same verified platform version's `defaultContainerUid` for a
+container (default 0); VM guest defaults to 0. Explicit nonzero UIDs are preserved.
+`privileged` defaults to false, `capabilities` to an empty closed `LinuxCapability`
+set, `seccomp` to `runtime_default`, root filesystem to `mutable_required`, and
+privilege escalation to `deny`. Old `userPolicy` is rejected. UID/root filesystem,
+capabilities, escalation and seccomp are all covered by the original canonical
+configuration hash. Runtime rights never authorize the image builder.
+
+Environment calls Resource's authenticated `POST /internal/v1/environment-runtime-authorization`
+under the existing `resource.environment.resolve` permission and Environment client
+allowlist. It supplies `resourceRequestId`, optional `expectedLeaseId`, optional
+`environmentId` for first-create target resolution, project/course/owner and exact
+release ID/version. Resource reuses the original request→lease→claim→approval
+helper and returns that binding, its lease and values from the same verified
+platform version. The receipt expires at the earlier approval/lease deadline.
+There is no second grant, runtime approval table or independently configurable UID.
+
+Work uses its existing handoff and lease IDs. Before provision/start/restart/reset,
+including retry/recovery that creates compute, Environment reads the authority
+again. Request, owner/project/course, release, canonical spec, provider and original
+Environment target must agree. Provider and executor admission derive the same
+security context; executor compares the rendered context with the durable instance
+and immutable release. Stop and cleanup do not require a new runtime grant.
+
+The current container executor supports the Kubernetes baseline capability additions
+plus `NET_ADMIN` and `NET_RAW`, only within the verified project's allowed/preauthorized
+range. Broader kernel capabilities and actual `privileged` execution are explicitly
+rejected until a verified execution boundary is implemented. A selector or namespace
+alone is insufficient. `SYS_ADMIN` also requires explicit escalation permission in
+the declaration ([Kubernetes SecurityContext](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)).
+Existing namespace PSA/quota/network policies remain operator-owned: incompatible
+root/capability requests can be rejected by cluster admission, without rewriting
+those policies ([Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
+
+Public `CreateEnvironmentRequest` requires `resourceRequestId`; its approved target
+is resolved from the original request, never replaced with a new Environment ID.
+The current Experiment allocation path cannot consume an already funded claim/lease
+through its separate reservation without double allocation. This combination returns
+`LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED` (422) before creating an instance or reserving
+capacity. Its allocation unification is an integration prerequisite; the existing
+Work handoff path remains implemented. Unknown/inactive requests and changed policy
+return the original Resource diagnostics (409/503); scope denial returns 403 and a
+mismatched transport binding returns 412. No automatic reapproval or substitute IDs
+hide these failures.
