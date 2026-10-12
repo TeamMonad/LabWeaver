@@ -1,0 +1,36 @@
+[
+ {
+  "name": "platform-configuration",
+  "hash": "/admin/platform-configuration?scene=platform-configuration-unverified",
+  "full": true
+ },
+ {
+  "name": "platform-configuration-register",
+  "hash": "/admin/platform-configuration?scene=platform-configuration-unverified",
+  "actions": [
+   { "click": "#pc-register-heading" },
+   { "wait": 300 }
+  ],
+  "full": true
+ },
+ {
+  "name": "platform-configuration-apply-confirm",
+  "hash": "/admin/platform-configuration?scene=platform-configuration-unverified",
+  "actions": [
+   { "click": "[data-testid=pc-apply]" },
+   { "wait": 600 }
+  ]
+ },
+ {
+  "name": "platform-configuration-unconfigured",
+  "hash": "/admin/platform-configuration?scene=platform-configuration-unconfigured",
+  "full": true
+ },
+ {
+  "name": "platform-configuration-mobile",
+  "hash": "/admin/platform-configuration?scene=platform-configuration-unverified",
+  "w": 390,
+  "h": 844,
+  "full": true
+ }
+]
