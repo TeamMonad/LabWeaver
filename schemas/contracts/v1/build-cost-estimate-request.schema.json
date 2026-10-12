@@ -1,0 +1,30 @@
+{
+  "$defs": {
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "builderBinding": {
+      "type": "string"
+    },
+    "from": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "maxDurationMilliseconds": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "builderBinding",
+    "maxDurationMilliseconds",
+    "from"
+  ],
+  "title": "BuildCostEstimateRequest",
+  "type": "object"
+}

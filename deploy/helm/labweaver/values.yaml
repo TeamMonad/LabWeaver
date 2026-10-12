@@ -162,6 +162,12 @@ workloads:
       LABWEAVER_BIND_ADDR: 0.0.0.0:8084
       SSL_CERT_FILE: /etc/labweaver/secrets/outbound-ca.pem
       AWS_CA_BUNDLE: /etc/labweaver/secrets/outbound-ca.pem
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-agent
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_SCOPES: resource.credits.hold,resource.usage.record
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: health, containerPort: 8084, servicePort: 8084}
     readiness: {type: http, port: health, path: /health/ready}
@@ -381,6 +387,7 @@ workloads:
       LABWEAVER_ACCESS_SERVICE_CLIENT_ID: labweaver-access
       LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID: labweaver-environment
       LABWEAVER_TASK_SERVICE_CLIENT_IDS: labweaver-evaluation,labweaver-agent
+      LABWEAVER_AGENT_SERVICE_CLIENT_ID: labweaver-agent
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
       LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key

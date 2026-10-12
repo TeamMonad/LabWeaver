@@ -38,7 +38,8 @@
         "cpu_millicore_second",
         "memory_byte_second",
         "storage_byte_second",
-        "gpu_unit_second"
+        "gpu_unit_second",
+        "build_second"
       ],
       "type": "string"
     },
@@ -51,6 +52,12 @@
   "additionalProperties": false,
   "description": "Administrator-created immutable rate version.",
   "properties": {
+    "builderBinding": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "effectiveFrom": {
       "$ref": "#/$defs/UtcTimestamp"
     },

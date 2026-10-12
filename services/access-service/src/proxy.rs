@@ -926,6 +926,144 @@ async fn authorize_resource_request(
             .await?;
             return Ok("endResourceRate");
         }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "resource-cost-estimate",
+        ] if *method == Method::POST => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let input = contracts::parse_strict_json::<
+                contracts::resource::costing::ResourceCostEstimateRequest,
+            >(body)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            input
+                .validate()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "estimateProjectResourceCost",
+            )
+            .await?;
+            return Ok("estimateProjectResourceCost");
+        }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "build-cost-estimate",
+        ] if *method == Method::POST => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            contracts::parse_strict_json::<
+                contracts::resource::build_costing::BuildCostEstimateRequest,
+            >(body)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "estimateProjectBuildCost",
+            )
+            .await?;
+            return Ok("estimateProjectBuildCost");
+        }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "build-costs",
+            build_id,
+            "attempts",
+            attempt,
+        ] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            build_id
+                .parse::<contracts::BuildRequestId>()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            attempt
+                .parse::<u32>()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "getProjectBuildCost",
+            )
+            .await?;
+            return Ok("getProjectBuildCost");
+        }
+        ["", "api", "v1", "projects", project_id, "credits"] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "getProjectCredits",
+            )
+            .await?;
+            return Ok("getProjectCredits");
+        }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "credits",
+            view @ ("ledger" | "holds"),
+        ] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let Query(query) = Query::<contracts::http::PageQuery>::try_from_uri(uri)
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            query
+                .normalized()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let operation = if *view == "holds" {
+                "listProjectCreditHolds"
+            } else {
+                "listProjectCreditLedger"
+            };
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                operation,
+            )
+            .await?;
+            return Ok(operation);
+        }
+        ["", "api", "v1", "resource", "credits", "operations"] if *method == Method::POST => {
+            contracts::parse_strict_json::<contracts::resource::credits::CreditAdminOperation>(
+                body,
+            )
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Global,
+                "createCreditAdminOperation",
+            )
+            .await?;
+            return Ok("createCreditAdminOperation");
+        }
         ["", "api", "v1", "projects", project_id, "resource-budget"] => {
             let project_id = project_id
                 .parse()
@@ -2161,6 +2299,18 @@ fn valid_resource_path(path: &str) -> bool {
             | ["", "api", "v1", "resource", "rates"]
             | ["", "api", "v1", "projects", _, "resource-budget"]
             | ["", "api", "v1", "projects", _, "charges"]
+            | ["", "api", "v1", "projects", _, "credits"]
+            | ["", "api", "v1", "projects", _, "resource-cost-estimate"]
+            | [
+                "",
+                "api",
+                "v1",
+                "projects",
+                _,
+                "credits",
+                "ledger" | "holds"
+            ]
+            | ["", "api", "v1", "resource", "credits", "operations"]
             | ["", "api", "v1", "projects", _, "usage"]
     ) || matches!(
         segments.as_slice(),

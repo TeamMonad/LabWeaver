@@ -169,6 +169,9 @@ domains:
       - id: 20
         file: agent/0020_unified_usage_payload_target.sql
         sha256: 8621e4c4ace464ed258103eb2bab16452b295667726f67e6cb43fe3e4cfa6329
+      - id: 21
+        file: agent/0021_resource_build_authority_read.sql
+        sha256: d0a2ed8ede540f6df2620df505b9c594895e0d2945d48a1de536cc7e4a9a829a
   - name: evaluation
     migrations:
       - id: 1
@@ -248,3 +251,18 @@ domains:
       - id: 15
         file: resource/0015_task_approval_deadline.sql
         sha256: feacc78df78997cbf7c1602ced3693dfd316860829fdac8c552c4a2c5125750f
+      - id: 16
+        file: resource/0016_project_credits.sql
+        sha256: a08012d2e5a69f898f617d758432f55fba327bb22a898c7b6acdedcd39e9e758
+      - id: 17
+        file: resource/0017_cost_estimates.sql
+        sha256: 3b75defcbf48f5cfb58ae9bb88231ad83d39304a228977a31d32f61d751e215c
+      - id: 18
+        file: resource/0018_unknown_usage_deadline.sql
+        sha256: d68bca4b08afd1d1fb3d5ce07a7f72221a290eab4988f30ed261b8759d4bccd0
+      - id: 19
+        file: resource/0019_build_metering.sql
+        sha256: 3429e29240d69fae733faf7a7e87810039a421145b8d8f357efab85939410012
+      - id: 20
+        file: resource/0020_environment_funding.sql
+        sha256: 3889f72ee93635cfc8b030d55840625a799124e2307519352862d9b9102fdf3d

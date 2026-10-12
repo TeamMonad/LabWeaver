@@ -37,3 +37,5 @@ Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；�
 标识使用现有领域 UUID 类型，revision 和业务序列继续使用既有约束。输入拒绝冲突、未知字段、路径越界和非法数值。错误使用可读 Problem Details 与稳定 diagnostic，保留足够上下文但不记录 Secret 或用户正文。
 
 内容摘要和镜像 digest 用于真实输入与产物完整性；运行时不要求开发证明包或固定镜像数量。生成与校验命令以当前 xtask 和 Web scripts 为准，修改公共契约必须重新生成并检查所有消费者。
+
+项目 Credits 账户、预占与不可变账目接口见 [项目 Credits](project-credits.md)。Rust 真源位于 `resource::credits`，Schema/OpenAPI 与 Web SDK 从此真源生成。

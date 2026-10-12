@@ -1,0 +1,48 @@
+{
+  "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Agent supplies only its execution identity; Resource reads the approved build command.",
+  "properties": {
+    "attempt": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "authorizeExecution": {
+      "type": "boolean"
+    },
+    "buildRequestId": {
+      "$ref": "#/$defs/BuildRequestId"
+    },
+    "executionDeadline": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "leaseToken": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "stageRequestId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "buildRequestId",
+    "attempt",
+    "leaseToken",
+    "executionDeadline",
+    "stageRequestId",
+    "authorizeExecution"
+  ],
+  "title": "BuildCostAdmissionRequest",
+  "type": "object"
+}

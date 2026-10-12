@@ -51,3 +51,16 @@ cargo test -p persistence-sqlx --locked
 取消回归用隔离 PostgreSQL 和测试协议 relay 延迟真实普通 BEGIN 应答。只有服务端报告事务状态后，测试才取消 future 或通过生产 serve_tls/router 发送 h2 RST_STREAM。测试检查原 backend PID、独立 observer、嵌套 savepoint、错误 BEGIN、commit 和关池后的业务终态。HTTP 身份来自 fixture，不使用生产 JWT 或数据库。该结果证明可控条件下的调用链，不证明历史 CI 或线上事故的唯一根因。#234 的导入 fixture 修复仍由其独立 PR 交付。
 
 此补丁不改 API、Schema、迁移或权限。需要回退时 revert 对应 PR。回退依赖补丁会恢复取消 BEGIN 的缺陷，不会修复已经丢失的历史写入。
+## Credits migration
+
+`resource/0016_project_credits.sql` 新增账户、预占和不可变账目。它不修改旧费用，不创建初始余额，不清空数据。catalog 必须包含此文件的 SHA-256。
+
+Resource 0015 由 #200 的 `0015_task_approval_deadline.sql` 占用。组合时保留 0015，再加入 0016。Control 迁移编号属于另一领域。catalog 使用各领域有序并集。
+
+迁移后验证账户约束、双边操作提交约束、账目 UPDATE/DELETE/TRUNCATE 拒绝，以及并发预占。运行时账号沿用现有领域边界，不增加生产凭据权限。
+
+有真实账目后优先前滚修复。不要删除新表或覆盖历史账目。需要回退应用时先停止新增消费，保留三张表与幂等记录，再由维护者核对未结算预占。回滚不能让旧的费用计算路径继续接受付费消费。
+
+Resource `0017_cost_estimates.sql` 保存预占的不可变估价快照，并为用量数值列声明quantity_divisor。它排在#200的Resource0015与#209的0016之后；独立分支保留尚未合入的来源，不重编号其他服务迁移。只在合成数据库验证，不执行生产迁移。
+
+Resource `0018_unknown_usage_deadline.sql` 增加首次未知、1小时到期与处理时刻；只从既有不可变unknown条目的最早时刻恢复元数据，不改账户或原账目。到期资金释放由Resource账务事务执行并追加记录。测试仅运行隔离合成数据库，未在生产执行迁移。
