@@ -141,6 +141,7 @@ def _no_symlink_ancestors(path: Path) -> None:
 def _private_directory(path: Path, create: bool = False) -> Path:
     path = path.absolute()
     _no_symlink_ancestors(path)
+    path = path.resolve()
     if ".private" not in path.parts:
         raise BundleError("LW_BUNDLE_PRIVATE_DIRECTORY_REQUIRED")
     private_root = next(p for p in (path, *path.parents) if p.name == ".private")
@@ -506,6 +507,8 @@ def opened_bundle(
     """Authenticate, validate and derive in a fresh runtime. Cleanup covers all exceptions."""
     _no_symlink_ancestors(archive.absolute())
     _no_symlink_ancestors(identity.absolute())
+    archive = archive.resolve()
+    identity = identity.resolve()
     if not identity.is_file() or identity.stat().st_mode & 0o077:
         raise BundleError("LW_BUNDLE_IDENTITY_REQUIRED")
     if not archive.is_file() or not 0 < archive.stat().st_size <= MAX_ARCHIVE_BYTES:

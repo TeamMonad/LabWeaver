@@ -496,6 +496,15 @@ class DeploymentBundleTests(unittest.TestCase):
         ):
             bundle.load_bundle(self.root)
 
+    def test_private_marker_cannot_be_bypassed_with_parent_components(self) -> None:
+        with self.assertRaisesRegex(
+            bundle.BundleError, "LW_BUNDLE_PRIVATE_DIRECTORY_REQUIRED"
+        ):
+            bundle._private_directory(
+                self.private / ".." / "public-runtime", create=True
+            )
+        self.assertFalse((self.directory / "public-runtime").exists())
+
     def test_external_and_parent_secret_references_fail(self) -> None:
         bindings = self.model["application"]["secrets"]["access-service-secrets"]
         for reference in (
