@@ -1,0 +1,23 @@
+# Synthetic configuration fragment for an already approved, existing namespace.
+# Merge into the isolated Evaluation configuration after operator review.
+# Set workerImage separately to the reviewed, imported immutable image digest.
+coordinator:
+  workerProfile:
+    mode: existing
+    namespace: lw-bundle-synthetic-example
+    secretName: synthetic-freeze-secret
+    serviceAccountName: synthetic-freeze-account
+    networkPolicyNames:
+      - synthetic-default-deny
+      - synthetic-freeze-egress
+    resourceQuotaNames:
+      - synthetic-test-budget
+    # Optional hostname selector for the approved node with the exact imported image.
+    nodeName: synthetic-node
+    resources:
+      requestCpuMillicores: 100
+      limitCpuMillicores: 500
+      requestMemoryBytes: 67108864
+      limitMemoryBytes: 268435456
+  # Existing mode never copies these files or a registry credential into the namespace.
+  workerSecretFiles: {}

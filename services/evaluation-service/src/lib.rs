@@ -55,6 +55,7 @@ pub use control_plane::{
     EvaluationStepLease, PendingResourceMeterDelivery, PgEvaluationControlStore,
 };
 pub use coordinator::{FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError};
+mod freeze_profile;
 pub use environment_client::{
     EnvironmentExecutionBindingClient, EnvironmentExecutionBindingClientConfiguration,
     EnvironmentExecutionBindingClientError, ResolvedEnvironmentExecutionBinding,
@@ -66,6 +67,7 @@ pub use execution::{
 };
 pub use execution_backend::{AdmittedExecution, ExecutionAdmissionError};
 pub use freeze::{FreezeRequest, FreezeService, FreezeServiceError};
+pub use freeze_profile::{FreezeWorkerDispatch, FreezeWorkerProfile, FreezeWorkerResources};
 pub use freeze_store::{BeginFreeze, FreezeLease, PgFreezeStore};
 pub use kubernetes_runner::{
     AnsibleProbeTargetConfiguration, EvaluationExecutionConfiguration, KubernetesEvaluationRunner,

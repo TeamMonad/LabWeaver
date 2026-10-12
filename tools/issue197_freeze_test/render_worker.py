@@ -49,7 +49,9 @@ def render(command, binding, facts, receipt, expected, namespace):
     require(binding['environment']['runtimeKind'] == 'container', 'runtime kind is not container')
     require(binding['source']['namespace'] == namespace,
             'authoritative source binding is outside the approved test namespace; do not rewrite it')
-    require(binding['source']['persistentVolumeClaim'] == 'workspace', 'not the bound workspace PVC')
+    pvc_name = binding['source']['persistentVolumeClaim']
+    require(isinstance(pvc_name, str) and len(pvc_name) <= 63 and
+            re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?', pvc_name), 'invalid authoritative PVC name')
     source_hash = hashlib.sha256(json.dumps(binding['environment'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     require(command['source'] == {'kind': 'pvc', 'workspaceRoot': '/workspace', 'sourceIdentity': source_hash},
             'PVC source differs from the coordinator binding')
@@ -89,7 +91,7 @@ def render(command, binding, facts, receipt, expected, namespace):
                           [('databaseUrl', 'database-url'), ('accessKey', 'minio-access-key'),
                            ('secretKey', 'minio-secret-key'), ('ca', 'minio-ca.pem'),
                            ('postgresCa', 'postgres-ca.pem')]]}},
-               {'name': 'workspace', 'persistentVolumeClaim': {'claimName': 'workspace', 'readOnly': True}}]
+               {'name': 'workspace', 'persistentVolumeClaim': {'claimName': pvc_name, 'readOnly': True}}]
     cm = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': metadata, 'immutable': True,
           'data': {'worker.json': json.dumps(config), 'command.json': json.dumps(command)}}
     job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata, 'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 900,

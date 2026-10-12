@@ -46,6 +46,14 @@ Do not rewrite an exported binding or use a copied fixture as evidence of the or
 PVC references are namespace-local. An existing source PVC must be in the selected namespace.
 A separately reviewed authoritative source solution is required. This bundle does not change it.
 
+The companion Environment profile is owned by Issue 207.
+The Evaluation `existing` coordinator profile uses that real binding and existing approved resources.
+Its configuration is described in `deploy/config/evaluation-freeze-existing-profile.yaml.example`
+and `deploy/config/README.md` at the repository root.
+Record both companion commits before combined validation; the original worker source pin stays unchanged.
+Use the real freeze API and coordinator for a full-chain test.
+Do not apply a second manual worker plan while that coordinator owns the same command.
+
 Complete a local copy of `facts.example.json` only after the parent reviews the missing prerequisites.
 All approval flags start false, and `existingNamespace` starts null.
 Set that field to the exact existing namespace selected by the parent.
