@@ -221,6 +221,7 @@ mod tests {
         let context = AuthorizationContext {
             actor,
             course_memberships: vec![CourseMembership {
+                object_role: contracts::membership_governance::CourseObjectRole::Instructor,
                 course_id,
                 actor_id,
                 role: PlatformRole::Teacher,
@@ -264,6 +265,7 @@ mod tests {
         let context = AuthorizationContext {
             actor,
             course_memberships: vec![CourseMembership {
+                object_role: contracts::membership_governance::CourseObjectRole::Instructor,
                 course_id,
                 actor_id,
                 role: PlatformRole::Student,

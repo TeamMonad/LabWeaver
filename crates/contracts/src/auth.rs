@@ -111,6 +111,9 @@ pub struct CourseMembership {
     pub actor_id: ActorId,
     /// Role permitted by this course.
     pub role: PlatformRole,
+    /// Control-owned course responsibility, independent of platform identity.
+    #[serde(default)]
+    pub object_role: crate::membership_governance::CourseObjectRole,
     /// Current lifecycle state.
     pub state: MembershipState,
     /// Monotonic authorization revision.

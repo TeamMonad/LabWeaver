@@ -2,6 +2,7 @@
 use auth::RepositoryError;
 use contracts::{
     ActorId, CourseId, MembershipState, PlatformRole, ProjectId, ProjectMembership, Revision,
+    UtcTimestamp,
 };
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
@@ -94,4 +95,57 @@ pub(super) async fn permits_in_transaction(
         serde_json::from_value(serde_json::Value::String(role))
             .map_err(|_| crate::ControlError::PersistenceIdentityMismatch)?;
     Ok(role.actions().contains(&action))
+}
+
+/// Writes one Control-owned project member using the same path for direct grants and invitations.
+pub(super) async fn upsert_project_member(
+    transaction: &mut Transaction<'_, Postgres>,
+    project: &contracts::Project,
+    request: &contracts::http::ResolvedProjectMembershipRequest,
+    now: contracts::UtcTimestamp,
+) -> Result<ProjectMembership, crate::ControlError> {
+    let project_id = project.id;
+    if project.owner_actor_id == request.actor_id
+        || request.object_role == contracts::object_authorization::ProjectObjectRole::Owner
+        || request.role == PlatformRole::PlatformAdmin
+    {
+        return Err(crate::ControlError::OwnerMembershipProtected);
+    }
+    sqlx::query(
+        "INSERT INTO control.project_memberships \
+             (course_id,project_id,actor_id,role,object_role,state,revision,expires_at,updated_at) \
+             VALUES ($1,$2,$3,$4,$5,'active',1,$6,$7) \
+             ON CONFLICT (project_id,actor_id) DO UPDATE SET \
+                 course_id=EXCLUDED.course_id, \
+                 role=EXCLUDED.role, object_role=EXCLUDED.object_role, \
+                 state='active', \
+                 revision=control.project_memberships.revision+1, \
+                 expires_at=EXCLUDED.expires_at, \
+                 updated_at=EXCLUDED.updated_at \
+             RETURNING project_id",
+    )
+    .bind(project.course_id.map(CourseId::as_uuid))
+    .bind(project_id.as_uuid())
+    .bind(request.actor_id.as_uuid())
+    .bind(super::platform_role_name(request.role))
+    .bind(request.object_role.as_str())
+    .bind(request.expires_at.map(UtcTimestamp::get))
+    .bind(now.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(super::db)?;
+    let membership_row = sqlx::query(
+            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.object_role,pm.state,pm.revision,pm.expires_at, \
+                    a.username,a.display_name \
+             FROM control.project_memberships pm \
+             JOIN access.actors a ON a.actor_id=pm.actor_id \
+             WHERE pm.project_id=$1 AND pm.actor_id=$2",
+        )
+        .bind(project_id.as_uuid())
+        .bind(request.actor_id.as_uuid())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(super::db)?;
+    let membership = super::project_membership_from_row(&membership_row)?;
+    Ok(membership)
 }

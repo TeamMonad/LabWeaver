@@ -8,6 +8,7 @@ mod grants;
 #[path = "../../http_transport.rs"]
 mod http_transport;
 mod oidc_login;
+mod membership_governance;
 mod object_authorization;
 mod proxy;
 
@@ -390,6 +391,26 @@ fn admin_browser_router() -> Router<Arc<AppState>> {
 fn project_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/api/v1/projects/{project_id}/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}/accept",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}/revoke",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects",
             axum::routing::any(proxy::forward_control),
         )
@@ -533,6 +554,18 @@ fn project_browser_router() -> Router<Arc<AppState>> {
 
 fn course_browser_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route(
+            "/api/v1/courses/{course_id}/members",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/members/{actor_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
         .route(
             "/api/v1/courses/{course_id}/problem-package-uploads",
             axum::routing::any(proxy::forward_control),
@@ -1267,7 +1300,6 @@ fn effective_session_scopes(
     for membership in memberships.course_memberships {
         if membership.actor_id == actor.actor_id
             && membership.state == contracts::MembershipState::Active
-            && actor.roles.contains(&membership.role)
             && membership.expires_at.is_none_or(|value| value.get() > now)
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))

@@ -6,6 +6,7 @@
 )]
 
 pub mod event_stream;
+mod membership_governance;
 mod object_actions;
 
 use std::collections::BTreeMap;
@@ -92,6 +93,7 @@ pub struct GatewayPrincipal {
 /// Builds the complete Issue #48 public control-plane route table.
 pub fn router(state: Arc<ApiState>) -> Router {
     let router = Router::new()
+        .merge(membership_governance::routes())
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route(
             "/api/v1/projects/{project_id}",
@@ -2806,12 +2808,15 @@ impl ApiError {
 impl From<ControlError> for ApiError {
     fn from(error: ControlError) -> Self {
         let status = match error {
-            ControlError::UploadNotFound
+            ControlError::InvitationNotFound
+            | ControlError::UploadNotFound
             | ControlError::CandidateNotFound
             | ControlError::ReleaseNotFound
             | ControlError::NotFound
             | ControlError::PolicyNotFound => StatusCode::NOT_FOUND,
-            ControlError::IdempotencyConflict
+            ControlError::InvitationStateConflict
+            | ControlError::CourseInstructorProtected
+            | ControlError::IdempotencyConflict
             | ControlError::OperationInProgress
             | ControlError::OperationLeaseLost
             | ControlError::UploadStateConflict
@@ -2821,10 +2826,13 @@ impl From<ControlError> for ApiError {
             | ControlError::ProjectionConflict
             | ControlError::ReleaseCandidateMismatch
             | ControlError::ArtifactMismatch => StatusCode::CONFLICT,
-            ControlError::SseCursorExpired | ControlError::PlatformImageUploadExpired => {
-                StatusCode::GONE
-            }
-            ControlError::CourseMismatch | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,
+            ControlError::InvitationExpired
+            | ControlError::SseCursorExpired
+            | ControlError::PlatformImageUploadExpired => StatusCode::GONE,
+            ControlError::InvitationDenied
+            | ControlError::CourseGovernanceDenied
+            | ControlError::CourseMismatch
+            | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,
             ControlError::ConfigurationInvalid
             | ControlError::PersistenceFailed
             | ControlError::ObjectStore(_)

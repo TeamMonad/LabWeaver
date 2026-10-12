@@ -8,6 +8,15 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "CourseObjectRole": {
+      "description": "Course responsibility does not change the actor's verified platform identity.",
+      "enum": [
+        "instructor",
+        "teaching_assistant",
+        "participant"
+      ],
+      "type": "string"
+    },
     "MembershipState": {
       "description": "Authoritative membership state owned by Control Service.",
       "oneOf": [
@@ -81,6 +90,11 @@
         }
       ],
       "description": "Optional hard expiry."
+    },
+    "objectRole": {
+      "$ref": "#/$defs/CourseObjectRole",
+      "default": "participant",
+      "description": "Control-owned course responsibility, independent of platform identity."
     },
     "revision": {
       "$ref": "#/$defs/Revision",

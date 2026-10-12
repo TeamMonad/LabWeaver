@@ -354,6 +354,8 @@ pub(super) async fn forward_control(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     authorize_evaluation_release_path(&state, &method, &uri, &headers).await?;
+    let body = super::membership_governance::resolve_request(&state, &method, &uri, &headers, body)
+        .await?;
     let body = if method == Method::POST {
         if let Some(project_id) = project_membership_path(uri.path()) {
             resolve_project_membership_request(&state, &headers, project_id, &body).await?
@@ -445,7 +447,7 @@ async fn resolve_project_membership_request(
 /// decides whether the already-authenticated caller may proceed to resolve the
 /// provider username.  This ordering prevents a non-owner from using the
 /// provider directory as an account-existence oracle.
-async fn authorize_project_membership_governance(
+pub(super) async fn authorize_project_membership_governance(
     state: &AppState,
     headers: &HeaderMap,
     project_id: contracts::ProjectId,
@@ -2029,6 +2031,7 @@ fn rewrite_runtime_location(
 fn valid_control_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     (path.starts_with("/api/v1/courses/")
+        || super::membership_governance::valid_invitation_path(path)
         || path == "/api/v1/projects"
         || path.starts_with("/api/v1/projects/")
         || valid_admin_image_path(path)

@@ -2368,6 +2368,17 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         PLATFORM_ADMIN,
         Global
+        Get,
+        "/api/v1/projects/{projectId}/member-invitations",
+        "listProjectMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
     ),
     op!(
         Public,
@@ -2376,6 +2387,10 @@ pub const OPERATIONS: &[OperationContract] = &[
         "getPlatformConfigurationBundle",
         "platform_configuration:read",
         BffSession,
+        "/api/v1/courses/{courseId}/member-invitations",
+        "listCourseMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
         None,
         200,
         false,
@@ -2410,6 +2425,36 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         PLATFORM_ADMIN,
         Global
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/member-invitations",
+        "createProjectMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/member-invitations",
+        "createCourseMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Course
     ),
     op!(
         Public,
@@ -2418,6 +2463,10 @@ pub const OPERATIONS: &[OperationContract] = &[
         "getPlatformConfigurationVersion",
         "platform_configuration:read",
         BffSession,
+        "/api/v1/courses/{courseId}/members",
+        "listCourseMemberships",
+        "course_membership:read",
+        Oidc,
         None,
         200,
         false,
@@ -2437,6 +2486,35 @@ pub const OPERATIONS: &[OperationContract] = &[
         false,
         true,
         PLATFORM_ADMIN,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Delete,
+        "/api/v1/courses/{courseId}/members/{actorId}",
+        "removeCourseMembership",
+        "course_membership:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/member-invitations",
+        "listIncomingMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
         Global
     ),
     op!(
@@ -2446,6 +2524,10 @@ pub const OPERATIONS: &[OperationContract] = &[
         "getPlatformConfigurationApply",
         "platform_configuration:read",
         BffSession,
+        "/api/v1/member-invitations/{invitationId}",
+        "getMembershipInvitation",
+        "membership_invitation:read",
+        Oidc,
         None,
         200,
         false,
@@ -2460,6 +2542,16 @@ pub const OPERATIONS: &[OperationContract] = &[
         "reportPlatformConfigurationApply",
         "control.platform_configuration.apply",
         ServiceJwt,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/member-invitations/{invitationId}/accept",
+        "acceptMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
         IdempotentRevisioned,
         200,
         false,
@@ -2480,6 +2572,22 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         PLATFORM_ADMIN,
         Service
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/member-invitations/{invitationId}/revoke",
+        "revokeMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
     ),
     // Project is the cross-domain ownership root. The list and create operations
     // are actor-scoped by Access even though they do not carry a project path.

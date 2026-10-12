@@ -16,6 +16,30 @@ Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、A
 
 普通账号的课程范围仍要求当前课程成员。契约明确允许管理员的课程操作使用全局管理员权限。教学内容接口保留其既有角色约束。项目职责不会授予其他课程、其他项目或他人的个人实验内容。
 
+## 课程职责与邀请
+
+Control 保存课程的 `objectRole`。`instructor` 可管理该课程的成员和邀请。`teaching_assistant` 可浏览该课程名单。`participant` 不能浏览名单。新职责不改变 OIDC 角色，也不扩大既有教学内容权限。最终批准入口的教师范围接线仍须验证，不能仅凭职责字段声称叠加身份已被拒绝。
+
+1. 用精确校园用户名创建项目或课程成员邀请。
+2. 指定 `expiresAt`，明确接受截止时间。
+3. 如需限制成员期限，指定独立的 `membershipExpiresAt`。
+4. 目标账号从收到的邀请中确认职责。
+5. 用原幂等键、`expectedRevision` 和对应 `If-Match` 接受邀请。
+
+项目入口为 `/api/v1/projects/{projectId}/member-invitations`。课程入口为 `/api/v1/courses/{courseId}/member-invitations`。POST 创建邀请。GET 分页读取该范围的邀请。项目要求当前 `manage_members`。课程要求当前教师职责。全局管理员仍可管理。
+
+`GET /api/v1/member-invitations` 只返回当前账号收到的邀请。`GET /api/v1/member-invitations/{invitationId}` 返回本人或当前管理者可读的记录。POST 到该路径下的 `/accept` 接受邀请。POST 到 `/revoke` 取消待处理邀请。取消请求包含原 revision 和原因。
+
+Access 在目录解析前检查管理权限。Control 再检查目标本人、账号状态、截止时间、创建者成员 revision 和目标成员 revision。创建者撤权后再加入不会使旧邀请有效。目标成员已被其他操作修改时，旧邀请返回 409。项目邀请不能授予 owner 或替换项目所有者。课程 instructor 邀请还要求接受者具有已验证的 Teacher 身份。
+
+接受结果、唯一成员事实、变更事件和幂等结果在同一事务提交。事件分别记录实际接受者与授权创建者。传输重放返回原接受记录，不恢复后来已撤销的成员权限。界面须读取当前动作，不把 accepted 当作永久授权。
+
+已接受邀请通过成员入口撤权。项目沿用成员 DELETE。课程使用 `DELETE /api/v1/courses/{courseId}/members/{actorId}`。课程不允许移除最后一名有效教师。助教可访问 `GET /api/v1/courses/{courseId}/members`。普通课程成员不能通过深链接读取名单。
+
+列表使用 `page` 和 `pageSize`，默认每页 25 条，最多 100 条。过期邀请按期限显示 expired，不依赖清理任务。无权读取返回 403。管理员读取不存在的邀请返回 404。状态或 revision 冲突返回 409。过期接受返回 410。请求与 `If-Match` 不一致返回 412。邀请接口使用 `Cache-Control: no-store`。
+
+邀请不停止环境，也不释放资源或费用。课程创建、教学发布、评分及完整邀请界面仍由对应任务完成。本接口不建立第二套成员源。
+
 ## 项目 API
 
 1. 使用当前 BFF 会话访问 `GET /api/v1/projects/{projectId}/available-actions`。
@@ -42,9 +66,9 @@ Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、A
 
 ## 数据库切换
 
-Control 的 `0016_object_authorization.sql` 建立唯一成员表。Control `0014` 属于材料上传，`0015` 属于平台配置。组合 catalog 时保留三个有序条目。
+Control 的 `0016_object_authorization.sql` 建立唯一成员表。`0017_membership_governance.sql` 保存课程职责和成员邀请。每个账号在同一课程只保存一条成员事实。旧重复角色记录会阻止迁移，不能静默丢弃。Control `0014` 属于材料上传，`0015` 属于平台配置。组合 catalog 时保留三个有序条目。
 
-本次使用 Sprint5 已确认的无旧接口兼容规则。Access 旧成员表的创建和写入路径已移除。Access `0006` 只提供当前会话 hash、actor 和期限。Control 无法通过该视图获取原始会话 Cookie、加密 CSRF、Token、sid 或 issuer subject。非空旧数据库的 catalog 身份不匹配时必须停止。普通应用启动不能清空、复制或静默修复旧成员数据。
+本次使用 Sprint5 已确认的无旧接口兼容规则。Access 旧成员表的创建和写入路径已移除。Access `0006` 只提供当前会话 hash、actor 和期限。Access `0007` 将 Control 的账号读取限定为 actor_id、username、display_name 和 disabled_at。Control 无法通过这些读取获取原始会话 Cookie、加密 CSRF、Token、sid 或 issuer subject。非空旧数据库的 catalog 身份不匹配时必须停止。普通应用启动不能清空、复制或静默修复旧成员数据。
 
 当前验证使用新建的合成 PostgreSQL。生产切换需要维护者批准的操作窗口。本代码变更没有执行生产迁移、数据清空或真实账号授权。
 
@@ -52,4 +76,4 @@ Control 的 `0016_object_authorization.sql` 建立唯一成员表。Control `001
 
 这份契约定义项目动作和当前成员撤权。运行策略的唯一类型由 #203 的 `platform_configuration.rs` 提供。#207 负责将获准配置落实到创建、启动、重启和实例替换。成员动作不能代替平台允许清单、配置版本或运行批准。
 
-共享 Work 的领域所有者检查、运行批准消费者、课程助教和邀请管理，以及 Grok 界面仍须完成各自接线和真实流程验证。项目 `available-actions` 不表示这些消费者已交付。只有接入相同授权判断的对象接口才可据此开放操作。
+共享 Work 的领域所有者检查、运行批准消费者、完整课程业务，以及 Grok 邀请界面仍须完成各自接线和真实流程验证。项目 `available-actions` 不表示这些消费者已交付。只有接入相同授权判断的对象接口才可据此开放操作。

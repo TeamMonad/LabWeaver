@@ -197,7 +197,7 @@ pub async fn load_membership_snapshot(
         .parse()
         .map_err(|_| RepositoryError::MembershipInvalid)?;
     let course_rows = sqlx::query(
-        "SELECT course_id, actor_id, role, state, revision, expires_at \
+        "SELECT course_id, actor_id, role, object_role, state, revision, expires_at \
          FROM control.course_memberships WHERE actor_id = $1",
     )
     .bind(actor_id.as_uuid())
@@ -224,10 +224,13 @@ pub async fn load_membership_snapshot(
     })
 }
 
-fn course_membership_from_row(
+/// Decodes a current Control-owned course member row without mutating authority.
+pub fn course_membership_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<CourseMembership, RepositoryError> {
     Ok(CourseMembership {
+        object_role: serde_json::from_value(serde_json::Value::String(row.try_get("object_role")?))
+            .map_err(|_| RepositoryError::MembershipInvalid)?,
         course_id: course_id(row.try_get("course_id")?)?,
         actor_id: actor_id(row.try_get("actor_id")?)?,
         role: parse_role(row.try_get::<String, _>("role")?.as_str())?,

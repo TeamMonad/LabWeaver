@@ -63,12 +63,97 @@ fn authorize_project_action_with_admin_policy(
     })
 }
 
+/// Applies new course governance actions to Control's current responsibility.
+pub fn authorize_course_governance_action(
+    context: &AuthorizationContext,
+    course_id: contracts::CourseId,
+    action: ObjectAction,
+) -> Result<AuthorizationDecision, AuthorizationError> {
+    course_governance_action(context, course_id, action, true)
+}
+
+fn course_governance_action(
+    context: &AuthorizationContext,
+    course_id: contracts::CourseId,
+    action: ObjectAction,
+    allow_global_admin: bool,
+) -> Result<AuthorizationDecision, AuthorizationError> {
+    if context.actor.roles.is_empty() || context.actor.expires_at.get() <= context.now {
+        return Err(AuthorizationError::IdentityExpired);
+    }
+    let (revision, valid_until) =
+        if allow_global_admin && context.actor.roles.contains(&PlatformRole::PlatformAdmin) {
+            (
+                Revision::new(1).map_err(|_| AuthorizationError::RoleDenied)?,
+                context.actor.expires_at,
+            )
+        } else {
+            let member = context
+                .course_memberships
+                .iter()
+                .find(|member| {
+                    member.course_id == course_id
+                        && member.actor_id == context.actor.actor_id
+                        && member.state == MembershipState::Active
+                        && member
+                            .expires_at
+                            .is_none_or(|expiry| expiry.get() > context.now)
+                })
+                .ok_or(AuthorizationError::CourseScopeDenied)?;
+            if !member.object_role.actions().contains(&action)
+                || (action == ObjectAction::ManageMembers
+                    && (member.role != PlatformRole::Teacher
+                        || !context.actor.roles.contains(&PlatformRole::Teacher)))
+            {
+                return Err(AuthorizationError::RoleDenied);
+            }
+            (
+                member.revision,
+                member
+                    .expires_at
+                    .map_or(context.actor.expires_at, |expiry| {
+                        std::cmp::min(expiry, context.actor.expires_at)
+                    }),
+            )
+        };
+    Ok(AuthorizationDecision {
+        actor: context.actor.clone(),
+        scope: AuthorizationScope::Course { course_id },
+        authorization_revision: revision,
+        scope_revision: revision,
+        valid_until,
+        diagnostic_code: None,
+    })
+}
+
 /// Applies object actions to recognized project operations and preserves explicit legacy policies elsewhere.
 pub fn authorize_operation(
     context: &AuthorizationContext,
     scope: AuthorizationScope,
     operation: &contracts::http::OperationContract,
 ) -> Result<AuthorizationDecision, AuthorizationError> {
+    if let AuthorizationScope::Course { course_id } = scope
+        && let Some(action) = contracts::membership_governance::course_governance_operation_action(
+            operation.operation_id,
+        )
+    {
+        if !context
+            .actor
+            .roles
+            .iter()
+            .any(|role| operation.allowed_roles.contains(role))
+        {
+            return Err(AuthorizationError::RoleDenied);
+        }
+        return course_governance_action(
+            context,
+            course_id,
+            action,
+            operation
+                .allowed_roles
+                .contains(&PlatformRole::PlatformAdmin),
+        );
+    }
     if let AuthorizationScope::Project { project_id } = scope
         && let Some(action) = project_operation_action(operation.operation_id)
     {
@@ -100,6 +185,62 @@ pub fn authorize_operation(
 mod tests {
     use super::*;
     use contracts::object_authorization::ProjectObjectRole;
+
+    #[test]
+    fn course_governance_requires_the_course_responsibility_and_explicit_admin_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut context, _, _) = context()?;
+        let course_id = contracts::CourseId::new();
+        context
+            .course_memberships
+            .push(contracts::CourseMembership {
+                course_id,
+                actor_id: context.actor.actor_id,
+                role: PlatformRole::Student,
+                object_role: contracts::membership_governance::CourseObjectRole::TeachingAssistant,
+                state: MembershipState::Active,
+                revision: Revision::new(8)?,
+                expires_at: None,
+            });
+        assert!(
+            authorize_course_governance_action(&context, course_id, ObjectAction::Browse).is_ok()
+        );
+        assert!(
+            authorize_course_governance_action(&context, course_id, ObjectAction::ManageMembers)
+                .is_err()
+        );
+        context.actor.roles.push(PlatformRole::PlatformAdmin);
+        let mut operation = *contracts::operation_contract("createCourseMembershipInvitation")
+            .ok_or("missing operation")?;
+        operation.allowed_roles = &[PlatformRole::Teacher];
+        assert!(
+            authorize_operation(
+                &context,
+                AuthorizationScope::Course { course_id },
+                &operation
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_operation(
+                &context,
+                AuthorizationScope::Course {
+                    course_id: contracts::CourseId::new()
+                },
+                &operation
+            )
+            .is_err()
+        );
+        context.actor.roles = vec![PlatformRole::Student];
+        context.course_memberships[0].object_role =
+            contracts::membership_governance::CourseObjectRole::Instructor;
+        context.course_memberships[0].role = PlatformRole::Teacher;
+        assert!(
+            authorize_course_governance_action(&context, course_id, ObjectAction::ManageMembers)
+                .is_err()
+        );
+        Ok(())
+    }
 
     fn context() -> Result<
         (
