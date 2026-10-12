@@ -17,6 +17,8 @@
     <DiagnosticBanner
       v-else-if="state.kind === 'error' || isFailureState(state.kind)"
       :code="state.diagnostic.code"
+      :request-id="state.diagnostic.requestId"
+      :next-step="state.diagnostic.nextStep"
       :message="state.diagnostic.message"
       :retryable="state.diagnostic.retryable"
       :severity="bannerSeverity(state.kind)"

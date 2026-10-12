@@ -67,6 +67,8 @@
       >
         <DiagnosticBanner
           :code="createDiagnostic.code"
+          :request-id="createDiagnostic.requestId"
+          :next-step="createDiagnostic.nextStep"
           :message="createDiagnostic.message"
           :retryable="createDiagnostic.retryable"
           severity="info"
@@ -222,7 +224,7 @@
                 :title="lifecycleActionReason(env.instance.data, 'stop')"
                 aria-label="停止"
                 aria-describedby="lifecycle-action-hint"
-                @click="runLifecycle(env.instance.data, 'stop')"
+                @click="requestLifecycleConfirmation(env.instance.data, 'stop')"
               >
                 停止
               </button>
@@ -233,7 +235,7 @@
                 :title="lifecycleActionReason(env.instance.data, 'restart')"
                 aria-label="重启"
                 aria-describedby="lifecycle-action-hint"
-                @click="runLifecycle(env.instance.data, 'restart')"
+                @click="requestLifecycleConfirmation(env.instance.data, 'restart')"
               >
                 重启
               </button>
@@ -275,6 +277,8 @@
           >
             <DiagnosticBanner
               :code="lifecycleDiagnostic.code"
+              :request-id="lifecycleDiagnostic.requestId"
+              :next-step="lifecycleDiagnostic.nextStep"
               :message="lifecycleDiagnostic.message"
               :retryable="lifecycleDiagnostic.retryable && !(env.instance.kind === 'success' && env.instance.data.desiredState === 'deleted')"
               severity="error"
@@ -441,6 +445,8 @@
                       >
                         <DiagnosticBanner
                           :code="createGrantDiagnostic.code"
+                          :request-id="createGrantDiagnostic.requestId"
+                          :next-step="createGrantDiagnostic.nextStep"
                           :message="createGrantDiagnostic.message"
                           :retryable="createGrantDiagnostic.retryable"
                           severity="error"
@@ -757,6 +763,8 @@
                 >
                   <DiagnosticBanner
                     :code="operations.cancelDiagnostic.code"
+                    :request-id="operations.cancelDiagnostic.requestId"
+                    :next-step="operations.cancelDiagnostic.nextStep"
                     :message="operations.cancelDiagnostic.message"
                     :retryable="operations.cancelDiagnostic.retryable"
                     severity="error"
@@ -781,6 +789,8 @@
                 >
                   <DiagnosticBanner
                     :code="retryDiagnostic.code"
+                    :request-id="retryDiagnostic.requestId"
+                    :next-step="retryDiagnostic.nextStep"
                     :message="retryDiagnostic.message"
                     :retryable="false"
                     severity="error"
@@ -983,6 +993,8 @@
                   >
                     <DiagnosticBanner
                       :code="freezeDiagnostic.code"
+                      :request-id="freezeDiagnostic.requestId"
+                      :next-step="freezeDiagnostic.nextStep"
                       :message="freezeDiagnostic.message"
                       :retryable="freezeDiagnostic.retryable"
                       severity="error"
@@ -1035,6 +1047,16 @@
       @cancel="deleteEnvironment = null"
       @confirm="confirmDeleteEnvironment"
     />
+
+    <ConfirmDialog
+      :open="lifecycleConfirmation !== null"
+      :title="lifecycleConfirmation?.action === 'restart' ? '重启环境' : '停止环境'"
+      :description="lifecycleConfirmation ? lifecycleConfirmationText(lifecycleConfirmation.data, lifecycleConfirmation.action) : ''"
+      :confirm-text="lifecycleConfirmation?.action === 'restart' ? '重启' : '停止'"
+      severity="warning"
+      @cancel="lifecycleConfirmation = null"
+      @confirm="confirmLifecycle"
+    />
   </div>
 </template>
 
@@ -1059,7 +1081,7 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import GcpActionBar from '@/components/common/GcpActionBar.vue'
 import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
-import { environmentStateLabel, endpointHealthLabel, accessGrantStateLabel } from '@/utils/stateLabels'
+import { environmentStateLabel, endpointHealthLabel, accessGrantStateLabel, environmentOperationKindLabel, environmentOperationStateLabel } from '@/utils/stateLabels'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
@@ -1437,36 +1459,12 @@ const retryableOperation = computed<EnvironmentOperationSnapshotSchema | null>((
     .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0] ?? null
 })
 
-const OPERATION_KIND_LABELS: Record<string, string> = {
-  create: '创建环境',
-  start: '启动环境',
-  stop: '停止环境',
-  restart: '重启环境',
-  reset: '重置环境',
-  retry: '重试环境',
-  cancel: '取消操作',
-  recover: '恢复环境',
-  expire: '处理过期环境',
-  delete: '删除环境',
-  cleanup: '清理环境',
-  freeze: '冻结提交',
-}
-
-const OPERATION_STATE_LABELS: Record<string, string> = {
-  accepted: '已受理',
-  running: '处理中',
-  cancelling: '取消中',
-  succeeded: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-}
-
 function operationKindLabel(kind: string): string {
-  return OPERATION_KIND_LABELS[kind] ?? '环境操作'
+  return environmentOperationKindLabel(kind)
 }
 
 function operationStateLabel(state: EnvironmentOperationSnapshotSchema['state']): string {
-  return OPERATION_STATE_LABELS[state] ?? '状态未知'
+  return environmentOperationStateLabel(state)
 }
 
 function freezeStatusLabel(state: EnvironmentOperationSnapshotSchema['state']): string {
@@ -1684,6 +1682,7 @@ async function freeze(data: EnvironmentInstanceSchema) {
         problem?.diagnosticCode ?? 'FREEZE_FAILED',
         problem?.detail ?? '冻结提交失败',
         problem?.retryable ?? true,
+        problem,
       ),
     }
     freezeDiagnostic.value = freezeState.value.kind === 'error' ? freezeState.value.diagnostic : null
@@ -1917,6 +1916,32 @@ function retryCreate() {
   if (pendingRelease.value) createFromRelease(pendingRelease.value)
 }
 
+type ConfirmedLifecycleAction = 'stop' | 'restart'
+const lifecycleConfirmation = ref<{ data: EnvironmentInstanceSchema; action: ConfirmedLifecycleAction } | null>(null)
+
+/** Stop and restart interrupt sessions and change usage, so they confirm first; start never does. */
+function requestLifecycleConfirmation(data: EnvironmentInstanceSchema, action: ConfirmedLifecycleAction) {
+  lifecycleConfirmation.value = { data, action }
+}
+
+function lifecycleConfirmationText(data: EnvironmentInstanceSchema, action: ConfirmedLifecycleAction): string {
+  const name = `“${data.displayLabel}”`
+  const sessions = '会断开当前终端、桌面和 Web 访问会话，环境中正在运行的程序会结束，未保存到磁盘的内容会丢失。'
+  if (action === 'restart') {
+    return `重启${name}${sessions}环境随后会重新启动，重启完成前无法连接。工作目录和磁盘会保留。确定重启吗？`
+  }
+  const gpu = data.class === 'experiment'
+    ? 'GPU 预留会释放，重新启动时需要重新进行 GPU 资源准入。'
+    : 'GPU 预留和 Work 资源租约会保留，删除环境并完成回收后才归还容量。'
+  return `停止${name}${sessions}停止后计算用量不再计量；工作目录和磁盘仍保留，并继续按存储费率核算。${gpu}之后可以重新启动。确定停止吗？`
+}
+
+async function confirmLifecycle() {
+  const pending = lifecycleConfirmation.value
+  lifecycleConfirmation.value = null
+  if (pending) await runLifecycle(pending.data, pending.action)
+}
+
 async function runLifecycle(data: EnvironmentInstanceSchema, action: LifecycleTarget['action']) {
   lifecycleDiagnostic.value = null
   lastLifecycleTarget.value = { environmentId: data.id, revision: data.revision, action }
@@ -1944,6 +1969,7 @@ async function retryFailedOperation(data: EnvironmentInstanceSchema) {
         problem?.diagnosticCode ?? 'ENVIRONMENT_RETRY_FAILED',
         problem?.detail ?? '重试失败的操作未成功',
         problem?.retryable ?? true,
+        problem,
       )
       return
     }

@@ -16,7 +16,7 @@ type HandoffResourceState =
 
 function resourceReadDiagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? false)
+  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? false, problem)
 }
 
 async function readHandoffResourceState(projectId: string, environmentId: string): Promise<HandoffResourceState> {
@@ -167,6 +167,7 @@ export function useEnvironmentInstance(
           problem?.diagnosticCode ?? 'ENVIRONMENT_LOAD_FAILED',
           problem?.detail ?? '加载环境状态失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       polling.value = false

@@ -17,9 +17,11 @@ export interface FixtureScene {
 const DEFAULT_PROJECT_ID = 'project-physics-lab'
 
 export const fixtureScenes: FixtureScene[] = [
-  { id: 'home-teacher', label: '教师首页 · 全部任务', group: '角色首页与导航', role: 'teacher', path: '/', description: '教师身份同时看到教学、项目与工作任务。' },
-  { id: 'home-student', label: '学生首页 · 全部任务', group: '角色首页与导航', role: 'student', path: '/', description: '学生身份看到我的实验、项目与工作任务。' },
-  { id: 'home-admin', label: '管理员首页 · 全部任务', group: '角色首页与导航', role: 'admin', path: '/', description: '管理员身份同时看到平台管理与项目任务。' },
+  { id: 'home-teacher', label: '教师首页 · 无进行中事项', group: '角色首页与导航', role: 'teacher', path: '/', description: '当前项目没有运行中的环境或未完成任务；侧栏承担功能导航。' },
+  { id: 'home-in-progress', label: '首页 · 当前项目进行中', group: '角色首页与导航', role: 'teacher', path: '/', projectId: DEFAULT_PROJECT_ID, description: '运行中与失败的环境、等待审核的生成任务和待审批资源申请。' },
+  { id: 'home-student', label: '学生首页 · 无进行中事项', group: '角色首页与导航', role: 'student', path: '/', description: '学生身份只看到有权读取的进行中事项。' },
+  { id: 'home-admin', label: '管理员首页 · 无进行中事项', group: '角色首页与导航', role: 'admin', path: '/', description: '管理员身份的当前项目进行中视图。' },
+  { id: 'project-link-unavailable', label: '项目链接 · 无法访问', group: '角色首页与导航', role: 'student', path: '/researcher/resources', projectId: 'project-not-accessible', description: '链接中的项目不在当前账号的项目列表中，显示恢复入口而不是上一个项目的数据。' },
   { id: 'teacher-project-empty', label: '教师项目 · 空状态', group: '教师任务', role: 'teacher', path: '/teacher/overview', description: '还没有项目时给出下一步入口。' },
   { id: 'teacher-project-data', label: '教师项目 · 长名称', group: '教师任务', role: 'teacher', path: '/teacher/overview', projectId: DEFAULT_PROJECT_ID, description: '展示课程项目、材料、审批和项目管理入口。' },
   { id: 'teacher-template-empty', label: '已发布模板 · 空状态', group: '教师任务', role: 'teacher', path: '/teacher/labs', projectId: DEFAULT_PROJECT_ID, description: '没有发布版本时引导准备材料。' },

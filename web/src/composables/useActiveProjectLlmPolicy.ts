@@ -30,6 +30,7 @@ export function useActiveProjectLlmPolicy(projectId: Ref<string | null>) {
           problem?.diagnosticCode ?? 'LLM_POLICY_LOAD_FAILED',
           problem?.detail ?? '加载项目 LLM 策略失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       return

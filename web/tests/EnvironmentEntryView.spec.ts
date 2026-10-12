@@ -21,6 +21,7 @@ import {
   deleteEnvironment,
   retryEnvironment,
   restartEnvironment,
+  stopEnvironment,
   freezeSubmission,
   getFrozenSubmission,
 } from '@/generated/contracts'
@@ -1266,5 +1267,53 @@ describe('EnvironmentEntryView', () => {
     const firstRequest = vi.mocked(freezeSubmission).mock.calls[0][0] as never as { headers: { 'Idempotency-Key': string } }
     const secondRequest = vi.mocked(freezeSubmission).mock.calls[1][0] as never as { headers: { 'Idempotency-Key': string } }
     expect(secondRequest.headers['Idempotency-Key']).toBe(firstRequest.headers['Idempotency-Key'])
+  })
+
+  describe('lifecycle confirmation', () => {
+    function lifecycleDialog(wrapper: Awaited<ReturnType<typeof mountAt>>['wrapper']) {
+      return wrapper.findAllComponents({ name: 'ConfirmDialog' }).find((dialog) => ['停止环境', '重启环境'].includes(dialog.props('title')))!
+    }
+
+    beforeEach(() => {
+      mockEnvironmentInstance({ operation: { ...mockOperation('succeeded', { kind: 'start' }) } })
+      vi.mocked(stopEnvironment).mockResolvedValue({ data: { environmentId: 'env-1', operationId: 'op-stop', revision: 12 }, error: undefined } as never)
+      vi.mocked(restartEnvironment).mockResolvedValue({ data: { environmentId: 'env-1', operationId: 'op-restart', revision: 12 }, error: undefined } as never)
+    })
+
+    it.each([
+      ['停止', stopEnvironment, '停止后计算用量不再计量'],
+      ['重启', restartEnvironment, '重启完成前无法连接'],
+    ] as const)('asks before %s and sends nothing until confirmed', async (label, sdkCall, impact) => {
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect((wrapper.find(`button[aria-label="${label}"]`).element as HTMLButtonElement).disabled).toBe(false))
+
+      await wrapper.find(`button[aria-label="${label}"]`).trigger('click')
+      const dialog = lifecycleDialog(wrapper)
+      expect(dialog.props('open')).toBe(true)
+      expect(dialog.props('description')).toContain('会断开当前终端、桌面和 Web 访问会话')
+      expect(dialog.props('description')).toContain(impact)
+      expect(sdkCall).not.toHaveBeenCalled()
+
+      dialog.vm.$emit('confirm')
+      await vi.waitFor(() => expect(sdkCall).toHaveBeenCalledTimes(1))
+      expect(lifecycleDialog(wrapper).props('open')).toBe(false)
+    })
+
+    it('cancelling the stop confirmation keeps the environment running', async () => {
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect((wrapper.find('button[aria-label="停止"]').element as HTMLButtonElement).disabled).toBe(false))
+      await wrapper.find('button[aria-label="停止"]').trigger('click')
+      lifecycleDialog(wrapper).vm.$emit('cancel')
+      await flushPromises()
+      expect(lifecycleDialog(wrapper).props('open')).toBe(false)
+      expect(stopEnvironment).not.toHaveBeenCalled()
+    })
+
+    it('explains that stopping an experiment releases the GPU reservation', async () => {
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect((wrapper.find('button[aria-label="停止"]').element as HTMLButtonElement).disabled).toBe(false))
+      await wrapper.find('button[aria-label="停止"]').trigger('click')
+      expect(lifecycleDialog(wrapper).props('description')).toContain('GPU 预留会释放')
+    })
   })
 })

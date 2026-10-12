@@ -315,6 +315,8 @@ function projectRequests(): ResourceRequestSchema[] {
     case 'resource-authorized':
     case 'resource-reclaim':
       return [makeRequest('request-authorized', 'work-20260914-authorized', 'active')]
+    case 'home-in-progress':
+      return [makeRequest('request-reviewing', 'work-20260914-review', 'reviewing')]
     default:
       return []
   }
@@ -491,7 +493,19 @@ export async function listOrganizationUsers(_options?: FixtureOptions): Promise<
 }
 
 export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<FixtureResult<AgentRunHistoryPageSchema>> {
-  return unsupportedResponse('项目 AgentRun 历史')
+  if (activeScene.value.id !== 'home-in-progress') {
+    return fixtureResponse({ items: [], page: 1, pageSize: 50, hasMore: false })
+  }
+  return fixtureResponse({
+    items: [
+      { id: 'agent-run-materials-04', projectId: fixtureProjectId, courseId: 'course-physics-2026', purpose: { kind: 'authoring', environmentClass: 'experiment' }, state: 'awaiting_approval', createdAt: now, updatedAt: later },
+      { id: 'agent-run-work-config-02', projectId: fixtureProjectId, courseId: 'course-physics-2026', purpose: { kind: 'work_configuration', actorId: 'fixture-teacher', environmentId: 'env-workbench', environmentRevision: 3, runtimeKind: 'container' }, state: 'running', createdAt: now, updatedAt: now },
+      { id: 'agent-run-materials-03', projectId: fixtureProjectId, courseId: 'course-physics-2026', purpose: { kind: 'authoring', environmentClass: 'experiment' }, state: 'succeeded', createdAt: now, updatedAt: now },
+    ],
+    page: 1,
+    pageSize: 50,
+    hasMore: false,
+  })
 }
 
 export async function getProject(options?: FixtureOptions): Promise<FixtureResult<ProjectSchema>> {
@@ -525,6 +539,18 @@ export async function listEnvironments(options?: FixtureOptions): Promise<Fixtur
     return fixtureResponse({ items: [], nextCursor: null, snapshotAt: now, snapshotSequence: 'fixture-42' })
   }
 
+  if (activeScene.value.id === 'home-in-progress') {
+    return fixtureResponse({
+      items: [
+        environmentSummary('env-physics-ready', 'ready', '量子材料 · 交互实验环境'),
+        environmentSummary('env-workbench', 'ready', 'Work · 分析工作空间', 'work'),
+        environmentSummary('env-physics-failed', 'failed', '量子材料 · GPU 训练环境'),
+      ],
+      nextCursor: null,
+      snapshotAt: now,
+      snapshotSequence: 'fixture-42',
+    })
+  }
   const environmentId = sceneEnvironmentIds[activeScene.value.id] ?? activeScene.value.environmentId
   const state = currentEnvironmentState()
   const environmentClass = environmentId ? environmentClassFor(environmentId) : undefined
