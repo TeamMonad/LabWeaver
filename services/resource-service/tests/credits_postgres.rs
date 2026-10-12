@@ -11,7 +11,8 @@ use contracts::resource::{
     FixedDecimal, ResourceRequest, ResourceRequestState, ResourceTarget, WorkloadResources,
 };
 use contracts::{
-    ActorId, EventId, PlatformRole, ProjectId, ResourceRequestId, Revision, TaskRunId,
+    ActorId, EnvironmentId, EventId, PlatformRole, ProjectId, ReleaseId, ResourceRequestId,
+    Revision,
 };
 use resource_service::credits::{CreditError, PgCreditStore};
 use resource_service::store::PgResourceStore;
@@ -69,8 +70,10 @@ async fn request(
         requester_id: ActorId::new(),
         course_id: None,
         project_id: project,
-        target: ResourceTarget::Task {
-            task_run_id: TaskRunId::new(),
+        target: ResourceTarget::Environment {
+            environment_id: EnvironmentId::new(),
+            release_id: ReleaseId::new(),
+            release_version: 1,
         },
         requested_resources: WorkloadResources {
             cpu_millicores: 1,
