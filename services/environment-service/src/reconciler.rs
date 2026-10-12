@@ -445,6 +445,7 @@ impl Reconciler {
             .map_err(|_| ReconcileError::ProviderTimeout)?;
         let outcome = result.map_err(ReconcileError::Provider)?;
         if instance.class == EnvironmentClass::Experiment
+            && !instance.has_resource_lease()
             && instance.desired_state != contracts::environment::DesiredEnvironmentState::Deleted
             && let ProviderOutcome::Completed(observation) = &outcome
             && observation.next_state == ObservedEnvironmentState::Stopped
@@ -521,7 +522,7 @@ impl Reconciler {
 }
 
 fn requires_experiment_activation(instance: &EnvironmentInstance, action: ReconcileAction) -> bool {
-    if instance.class != EnvironmentClass::Experiment {
+    if instance.class != EnvironmentClass::Experiment || instance.has_resource_lease() {
         return false;
     }
     matches!(

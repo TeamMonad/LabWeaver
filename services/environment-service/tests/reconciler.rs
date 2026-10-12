@@ -157,8 +157,8 @@ impl EnvironmentProvider for FakeProvider {
 }
 
 fn planned_restart() -> Result<EnvironmentInstance, Box<dyn std::error::Error>> {
-    let current = ready_instance();
-    Ok(plan_command(
+    let current = support::funded_instance(ready_instance());
+    Ok(environment_service::plan_command_authorized(
         &current,
         &LifecycleCommand {
             environment_id: current.id,
@@ -174,6 +174,8 @@ fn planned_restart() -> Result<EnvironmentInstance, Box<dyn std::error::Error>> 
             reset_target: None,
         },
         OperationId::new(),
+        current.operation.lease_authorization.clone(),
+        timestamp("2026-07-14T01:00:00.000Z"),
     )?)
 }
 
@@ -238,7 +240,7 @@ async fn duplicate_binding_and_provider_timeout_fail_closed()
 }
 
 #[tokio::test]
-async fn experiment_resource_fence_wraps_provider_start_and_stop_in_order()
+async fn funded_experiment_start_and_stop_never_activate_a_second_reservation()
 -> Result<(), Box<dyn std::error::Error>> {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::default();
@@ -251,7 +253,8 @@ async fn experiment_resource_fence_wraps_provider_start_and_stop_in_order()
         },
     );
 
-    let mut start = ready_instance();
+    let mut start = support::funded_instance(ready_instance());
+    let reconciler = reconciler.with_runtime_admission(support::runtime_admission(&start));
     start.observed_state = ObservedEnvironmentState::Stopped;
     start.operation.kind = EnvironmentOperationKind::Start;
     start.operation.state = contracts::environment::OperationState::Accepted;
@@ -260,13 +263,10 @@ async fn experiment_resource_fence_wraps_provider_start_and_stop_in_order()
     reconciler
         .execute_once(&start, timestamp("2026-07-14T01:00:01.000Z"))
         .await?;
-    assert_eq!(
-        *events.lock().expect("event mutex"),
-        vec!["activate", "provider_start"]
-    );
+    assert_eq!(*events.lock().expect("event mutex"), vec!["provider_start"]);
 
     events.lock().expect("event mutex").clear();
-    let mut stop = ready_instance();
+    let mut stop = support::funded_instance(ready_instance());
     stop.observed_state = ObservedEnvironmentState::Stopping;
     stop.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
     stop.operation.kind = EnvironmentOperationKind::Stop;
@@ -276,22 +276,19 @@ async fn experiment_resource_fence_wraps_provider_start_and_stop_in_order()
     reconciler
         .execute_once(&stop, timestamp("2026-07-14T01:00:01.000Z"))
         .await?;
-    assert_eq!(
-        *events.lock().expect("event mutex"),
-        vec!["provider_stop", "suspend"]
-    );
+    assert_eq!(*events.lock().expect("event mutex"), vec!["provider_stop"]);
     Ok(())
 }
 
 #[tokio::test]
-async fn experiment_reset_and_recovered_provision_require_resource_activation()
+async fn funded_experiment_reset_and_recovery_reuse_original_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(RecordingProvider {
         events: Arc::clone(&events),
     }))?;
-    let mut instance = ready_instance();
+    let mut instance = support::funded_instance(ready_instance());
     instance.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
     instance.observed_state = ObservedEnvironmentState::Provisioning;
     instance.operation.kind = EnvironmentOperationKind::Reset;
@@ -319,10 +316,7 @@ async fn experiment_reset_and_recovered_provision_require_resource_activation()
     reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
         .await?;
-    assert_eq!(
-        *events.lock().expect("event mutex"),
-        vec!["activate", "provider_other"]
-    );
+    assert_eq!(*events.lock().expect("event mutex"), vec!["provider_other"]);
 
     events.lock().expect("event mutex").clear();
     instance.operation.kind = EnvironmentOperationKind::Retry;
@@ -330,10 +324,7 @@ async fn experiment_reset_and_recovered_provision_require_resource_activation()
     reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
         .await?;
-    assert_eq!(
-        *events.lock().expect("event mutex"),
-        vec!["activate", "provider_other"]
-    );
+    assert_eq!(*events.lock().expect("event mutex"), vec!["provider_other"]);
 
     events.lock().expect("event mutex").clear();
     instance.operation.kind = EnvironmentOperationKind::Create;
@@ -342,10 +333,7 @@ async fn experiment_reset_and_recovered_provision_require_resource_activation()
     reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
         .await?;
-    assert_eq!(
-        *events.lock().expect("event mutex"),
-        vec!["activate", "provider_other"]
-    );
+    assert_eq!(*events.lock().expect("event mutex"), vec!["provider_other"]);
     Ok(())
 }
 

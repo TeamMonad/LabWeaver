@@ -24,6 +24,11 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "environment_funded_handoff.rs"]
+mod funded_handoff;
+#[path = "runtime_authorization_lease.rs"]
+mod lease_cases;
+
 async fn progress(
     pool: &PgPool,
     state: PlatformConfigurationStatus,
@@ -185,7 +190,7 @@ pub(super) async fn assert_bindings_after_publication(
     pool: &PgPool,
     control: &ControlService,
     _approval: &AuthoringApproval,
-    _candidate: &EnvironmentCandidate,
+    candidate: &EnvironmentCandidate,
     release: &EnvironmentTemplateRelease,
     now: UtcTimestamp,
 ) -> TestResult {
@@ -290,6 +295,123 @@ pub(super) async fn assert_bindings_after_publication(
     assert_eq!(binding.basis, RuntimeAdmissionBasis::RestrictedBaseline);
     assert!(binding.permissions.capabilities.is_empty());
     assert!(!binding.permissions.privileged);
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner("synthetic-environment".into());
+    for (index, unit) in [
+        contracts::resource::ResourceBillingUnit::CpuMillicoreSecond,
+        contracts::resource::ResourceBillingUnit::MemoryByteSecond,
+        contracts::resource::ResourceBillingUnit::StorageByteSecond,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .create_rate(
+                &format!("runtime-funded-rate-{index}"),
+                &contracts::http::CreateResourceRateRequest {
+                    builder_binding: None,
+                    unit,
+                    gpu_mode: None,
+                    gpu_class: None,
+                    unit_quantity: if index == 0 { 1000 } else { 1 },
+                    unit_price: contracts::resource::Money {
+                        amount: contracts::resource::FixedDecimal::parse(if index == 0 {
+                            "0.010000"
+                        } else {
+                            "0.000000"
+                        })?,
+                        currency: "CREDITS".into(),
+                    },
+                    effective_from: UtcTimestamp::from_utc(now.get() - time::Duration::hours(1))?,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    resource_service::credits::PgCreditStore::new(pool.clone())
+        .admin(
+            "runtime-funds",
+            ActorId::new(),
+            &[PlatformRole::PlatformAdmin],
+            &contracts::resource::credits::CreditAdminOperation::Grant {
+                project_id: request.project_id,
+                amount: contracts::resource::FixedDecimal::parse("1000.000000")?,
+                reason: "synthetic integration allowance".into(),
+            },
+        )
+        .await?;
+    store
+        .create("runtime-create", &request, "runtime-create")
+        .await?;
+    let resource_approval = ResourceApproval {
+        runtime_authorization: Some(binding.clone()),
+        id: ResourceApprovalId::new(),
+        request_id: request.id,
+        request_revision: request.revision,
+        approver_id: ActorId::new(),
+        provider_binding: match &candidate.spec.runtime {
+            contracts::authoring::EnvironmentRuntimeSpec::Container {
+                provider_binding, ..
+            }
+            | contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
+                provider_binding,
+                ..
+            } => provider_binding.clone(),
+        },
+        approved_resources: resources.clone(),
+        approved_duration_seconds: 600,
+        reason: "approve immutable configuration".to_owned(),
+        valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
+        created_at: now,
+    };
+    let allocation = PendingAllocation {
+        claim: CapacityClaim {
+            id: CapacityClaimId::new(),
+            request_id: request.id,
+            approval_id: resource_approval.id,
+            provider_binding: resource_approval.provider_binding.clone(),
+            workload_resources: resources.clone(),
+            quota_resources: resources,
+            gpu_allocation: None,
+            state: CapacityClaimState::Reserved,
+            revision: Revision::new(1)?,
+        },
+        lease_id: LeaseId::new(),
+    };
+    store
+        .approve(
+            "runtime-approve",
+            request.id,
+            &resource_approval,
+            &allocation,
+            ApprovalPolicy {
+                min_duration_seconds: 60,
+                max_duration_seconds: 3600,
+            },
+            "runtime-approve",
+        )
+        .await?;
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT contract FROM resource.resource_approvals WHERE approval_id=$1")
+            .bind(resource_approval.id.as_uuid())
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(
+        serde_json::from_value::<ResourceApproval>(stored)?.runtime_authorization,
+        Some(binding.clone())
+    );
+    let allocated = store.load(request.id).await?;
+    assert_eq!(
+        resource_service::runtime_authorization::current_authorization(pool, &allocated).await?,
+        binding
+    );
+    let allocated = Box::pin(lease_cases::assert_original_lease_chain(
+        pool,
+        &store,
+        &resource_approval,
+        &allocation,
+    ))
+    .await?;
     Ok(())
 }
 

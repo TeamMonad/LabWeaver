@@ -139,10 +139,19 @@ impl ExperimentResourceAllocator for CountingGpuAllocator {
             applied: true,
         })
     }
+    async fn resolve_credit_grant(
+        &self,
+        lease: &contracts::environment::EnvironmentLeaseAuthorization,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        ResourceUsageClientError,
+    > {
+        support::credit_grant_for_lease(lease)
+    }
 }
 
 #[tokio::test]
-async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
+async fn public_create_waits_for_original_handoff_without_second_allocation()
 -> Result<(), Box<dyn Error>> {
     let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
     let database_url = format!(
@@ -248,7 +257,7 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(first.0, StatusCode::ACCEPTED);
+    assert_eq!(first.0, StatusCode::CONFLICT);
     let replay = send(
         &api,
         Method::POST,
@@ -261,11 +270,12 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
         Some("api-create-gpu-replay"),
     )
     .await?;
-    assert_eq!(replay.0, StatusCode::ACCEPTED);
-    assert_eq!(replay.1["operationId"], first.1["operationId"]);
-    assert_eq!(replay.1["environmentId"], first.1["environmentId"]);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
-    assert_eq!(release_count.load(Ordering::SeqCst), 0);
+    assert_eq!(replay.0, StatusCode::CONFLICT);
+    assert_eq!(
+        first.1["diagnosticCode"],
+        "LW_ENVIRONMENT_ALLOCATION_PENDING"
+    );
+    assert_eq!(replay.1["diagnosticCode"], first.1["diagnosticCode"]);
 
     let mut changed_label = body.clone();
     changed_label["displayLabel"] = json!("different label");
@@ -282,7 +292,6 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
     )
     .await?;
     assert_eq!(conflict.0, StatusCode::CONFLICT);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
 
     let other_actor = send(
         &api,

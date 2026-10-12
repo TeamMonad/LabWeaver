@@ -190,38 +190,35 @@ impl MeteringState {
         {
             return Err(EnvironmentStoreError::MeteringInvalid);
         }
-        match instance.class {
-            contracts::authoring::EnvironmentClass::Work => {
-                let authorization = instance
-                    .operation
-                    .lease_authorization
-                    .as_ref()
-                    .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
-                if !matches!(
-                    &self.target,
-                    contracts::resource::ResourceUsageTarget::ResourceRequest {
-                        request_id,
-                        lease_id: Some(target_lease_id),
-                    } if *request_id == authorization.resource_request_id
-                        && Some(*target_lease_id) == self.lease_id
-                        && Some(*target_lease_id) == instance.lease_id
-                ) {
-                    return Err(EnvironmentStoreError::MeteringInvalid);
-                }
+        if instance.has_resource_lease() {
+            let authorization = instance
+                .operation
+                .lease_authorization
+                .as_ref()
+                .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
+            if !matches!(
+                &self.target,
+                contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id,
+                    lease_id: Some(target_lease_id),
+                } if *request_id == authorization.resource_request_id
+                    && Some(*target_lease_id) == self.lease_id
+                    && Some(*target_lease_id) == instance.lease_id
+            ) {
+                return Err(EnvironmentStoreError::MeteringInvalid);
             }
-            contracts::authoring::EnvironmentClass::Experiment => {
-                if self.lease_id.is_some()
-                    || self.lease_revision.is_some()
-                    || self.capacity_binding.is_some()
-                    || !matches!(
-                        &self.target,
-                        contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
-                            environment_id,
-                        } if *environment_id == instance.id
-                    )
-                {
-                    return Err(EnvironmentStoreError::MeteringInvalid);
-                }
+        } else {
+            if self.lease_id.is_some()
+                || self.lease_revision.is_some()
+                || self.capacity_binding.is_some()
+                || !matches!(
+                    &self.target,
+                    contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                        environment_id,
+                    } if *environment_id == instance.id
+                )
+            {
+                return Err(EnvironmentStoreError::MeteringInvalid);
             }
         }
         self.approved_resources
@@ -265,13 +262,10 @@ pub(crate) async fn initialize(
     transaction: &mut Transaction<'_, Postgres>,
     instance: &EnvironmentInstance,
 ) -> Result<(), EnvironmentStoreError> {
-    let contract = match instance.class {
-        contracts::authoring::EnvironmentClass::Work => {
-            serde_json::to_value(MeteringState::from_authorization(instance)?)?
-        }
-        contracts::authoring::EnvironmentClass::Experiment => {
-            serde_json::to_value(MeteringState::from_experiment(instance)?)?
-        }
+    let contract = if instance.has_resource_lease() {
+        serde_json::to_value(MeteringState::from_authorization(instance)?)?
+    } else {
+        serde_json::to_value(MeteringState::from_experiment(instance)?)?
     };
     sqlx::query(
         "INSERT INTO environment.resource_metering_state (environment_id, contract) \
@@ -1233,20 +1227,40 @@ impl ResourceUsageClient {
         path: &str,
         body: &T,
     ) -> Result<reqwest::Response, ResourceUsageClientError> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        self.token_client
-            .bearer_auth(&mut headers)
-            .await
-            .map_err(|_| ResourceUsageClientError::TokenExchange)?;
-        let response = self
+        let request = self
             .client
             .post(
                 self.base_uri
                     .join(path)
                     .map_err(|_| ResourceUsageClientError::Configuration)?,
             )
+            .json(body);
+        self.send_request(request).await
+    }
+
+    pub(crate) async fn get_json(
+        &self,
+        path: &str,
+    ) -> Result<reqwest::Response, ResourceUsageClientError> {
+        let request = self.client.get(
+            self.base_uri
+                .join(path)
+                .map_err(|_| ResourceUsageClientError::Configuration)?,
+        );
+        self.send_request(request).await
+    }
+
+    async fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ResourceUsageClientError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        self.token_client
+            .bearer_auth(&mut headers)
+            .await
+            .map_err(|_| ResourceUsageClientError::TokenExchange)?;
+        let response = request
             .headers(headers)
-            .json(body)
             .send()
             .await
             .map_err(|_| ResourceUsageClientError::Transport)?;

@@ -25,7 +25,7 @@ fn projection() -> ReleasePublished {
         "network":{"mode":"deny_all"},
         "entries":[{"name":"web","protocol":"http","servicePort":8080}],
         "security":{
-            "userPolicy":"non_root_required",
+            "runAsUser":65534,
             "rootFilesystemPolicy":"read_only_required",
             "privilegeEscalationPolicy":"deny",
             "publicExposurePolicy":"deny",
@@ -115,6 +115,16 @@ fn original_release_purpose_does_not_depend_on_course_or_caller_kind()
         handoff.class_for_release(&published)?,
         EnvironmentClass::Experiment
     );
+    let mut course_handoff = handoff.clone();
+    course_handoff.project_id = contracts::ProjectId::new();
+    assert_eq!(
+        course_handoff.class_for_release(&published)?,
+        EnvironmentClass::Experiment
+    );
+    let mut no_course = published.clone();
+    no_course.release.course_id = None;
+    course_handoff.course_id = None;
+    assert!(course_handoff.class_for_release(&no_course).is_err());
     published.environment_spec.class = EnvironmentClass::Work;
     assert_eq!(
         handoff.class_for_release(&published)?,

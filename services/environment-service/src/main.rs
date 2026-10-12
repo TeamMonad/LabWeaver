@@ -211,13 +211,18 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
     let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
         .map_err(|_| MainError::Configuration)?
         .with_namespace_profile(namespace_profile.clone());
+    let runtime_admission = environment_service::EnvironmentRuntimeAdmission::from_env(
+        environment_service::PgReleaseProjectionStore::new(pool.clone()),
+    )
+    .await?;
     match kind {
         RuntimeKind::Container => {
             let terminal = terminal.ok_or(MainError::Configuration)?;
             let executor = FencedContainerExecutor::new(
                 PgContainerExecutorFenceStore::new(pool).with_namespace_profile(namespace_profile),
                 backend,
-            );
+            )
+            .with_runtime_admission(runtime_admission);
             let server = NatsContainerExecutorServer::new(
                 nats,
                 deployment.nats.container_request_subject,
@@ -259,7 +264,8 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                 PgKubeVirtExecutorFenceStore::new(pool),
                 backend,
                 instance,
-            );
+            )
+            .with_runtime_admission(runtime_admission);
             executor.prepare_startup().await?;
             let server = NatsKubeVirtExecutorServer::new(
                 nats,
@@ -369,6 +375,8 @@ fn read_secret(path: &str) -> Result<String, MainError> {
 
 #[derive(Debug, thiserror::Error)]
 enum MainError {
+    #[error(transparent)]
+    ResourceUsage(#[from] environment_service::ResourceUsageClientError),
     #[error("LW_ENVIRONMENT_CONFIG_INVALID")]
     Configuration,
     #[error("LW_ENVIRONMENT_SCHEMA_UNAVAILABLE")]

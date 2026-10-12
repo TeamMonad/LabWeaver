@@ -965,6 +965,7 @@ impl PgKubeVirtExecutorFenceStore {
         &self,
         envelope: &KubeVirtExecutorRequestEnvelope,
         instance: &KubeVirtExecutionInstance,
+        runtime_gate: Result<(), crate::RuntimeAdmissionError>,
     ) -> Result<KubeVirtExecutorAdmission, KubeVirtExecutorFenceError> {
         validate_kubevirt_executor_request(envelope)?;
         let fence = &envelope.fence;
@@ -1037,6 +1038,7 @@ impl PgKubeVirtExecutorFenceStore {
             {
                 return Err(KubeVirtExecutorFenceError::IdentityMismatch);
             }
+            runtime_gate?;
             sqlx::query(
                 "UPDATE environment.kubevirt_executor_fences SET highest_generation=$2, \
                  operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
@@ -1068,6 +1070,7 @@ impl PgKubeVirtExecutorFenceStore {
             if authority_now >= fence.deadline_at.get() {
                 return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
             }
+            runtime_gate?;
             let admitted = sqlx::query(
                 "INSERT INTO environment.kubevirt_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
@@ -1166,6 +1169,7 @@ struct ActiveKubeVirtExecution {
 pub struct FencedKubeVirtExecutor<B> {
     store: PgKubeVirtExecutorFenceStore,
     backend: B,
+    runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
     instance: KubeVirtExecutionInstance,
     active: Mutex<std::collections::BTreeMap<Uuid, ActiveKubeVirtExecution>>,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -1181,10 +1185,17 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         Self {
             store,
             backend,
+            runtime_admission: None,
             instance,
             active: Mutex::new(std::collections::BTreeMap::new()),
             shutdown: tokio::sync::watch::channel(false).0,
         }
+    }
+
+    #[must_use]
+    pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
+        self.runtime_admission = Some(admission);
+        self
     }
 
     /// Called once before listening, after the production PID1/PodSpec startup check.
@@ -1285,7 +1296,33 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         &self,
         envelope: &KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
-        match self.store.admit(envelope, &self.instance).await {
+        let runtime_gate = if match &envelope.request {
+            KubeVirtExecutorRequest::Apply { plan }
+            | KubeVirtExecutorRequest::Start { plan }
+            | KubeVirtExecutorRequest::Restart { plan } => !plan.resources.is_empty(),
+            _ => false,
+        } && matches!(
+            envelope.fence.action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            crate::runtime_admission::executor_authorization(
+                self.runtime_admission.as_ref(),
+                self.store.pool.clone(),
+                envelope.fence.environment_id,
+                envelope.fence.deadline_at,
+            )
+            .await
+        } else {
+            Ok(())
+        };
+        match self
+            .store
+            .admit(envelope, &self.instance, runtime_gate)
+            .await
+        {
             Ok(KubeVirtExecutorAdmission::Replay(value)) => serde_json::from_value(value)
                 .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch),
             Err(KubeVirtExecutorFenceError::InProgress) => Ok(KubeVirtExecutorResponse::Pending),
@@ -1570,6 +1607,10 @@ fn validate_kubevirt_executor_request(
 
 const fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> ProviderFailure {
     match error {
+        KubeVirtExecutorFenceError::RuntimeAdmission(error) => ProviderFailure {
+            code: ProviderFailureCode::Rejected,
+            retryable: error.retryable(),
+        },
         KubeVirtExecutorFenceError::InProgress
         | KubeVirtExecutorFenceError::Database(_)
         | KubeVirtExecutorFenceError::Transport => unavailable(),
@@ -1602,6 +1643,8 @@ const fn kubevirt_action_name(action: ReconcileAction) -> &'static str {
 
 #[derive(Debug, thiserror::Error)]
 pub enum KubeVirtExecutorFenceError {
+    #[error(transparent)]
+    RuntimeAdmission(#[from] crate::RuntimeAdmissionError),
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CONFIGURATION_INVALID")]
     ConfigurationInvalid,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_IDENTITY_MISMATCH")]
@@ -3169,41 +3212,37 @@ fn approved_resources(
     instance: &EnvironmentInstance,
     projection: &ReleasePublished,
 ) -> Result<(u32, u64, u64, Option<GpuAllocation>), ReleaseProjectionError> {
-    match instance.class {
-        contracts::authoring::EnvironmentClass::Experiment => {
-            let resources = &projection.environment_spec.resources;
-            Ok((
-                resources.cpu_millicores,
-                resources.memory_bytes,
-                resources.storage_bytes,
-                experiment_gpu_allocation(instance, projection)?,
-            ))
+    if !instance.has_resource_lease() {
+        let resources = &projection.environment_spec.resources;
+        Ok((
+            resources.cpu_millicores,
+            resources.memory_bytes,
+            resources.storage_bytes,
+            experiment_gpu_allocation(instance, projection)?,
+        ))
+    } else {
+        let authorization = instance
+            .operation
+            .lease_authorization
+            .as_ref()
+            .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+        if authorization.project_id != instance.project_id
+            || authorization.course_id != instance.course_id
+            || authorization.owner_actor_id != instance.owner_id
+            || Some(authorization.lease_id) != instance.lease_id
+            || Some(authorization.capacity_binding.as_str()) != instance.capacity_binding.as_deref()
+        {
+            return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        contracts::authoring::EnvironmentClass::Work => {
-            let authorization = instance
-                .operation
-                .lease_authorization
-                .as_ref()
-                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
-            if authorization.project_id != instance.project_id
-                || authorization.course_id != instance.course_id
-                || authorization.owner_actor_id != instance.owner_id
-                || Some(authorization.lease_id) != instance.lease_id
-                || Some(authorization.capacity_binding.as_str())
-                    != instance.capacity_binding.as_deref()
-            {
-                return Err(ReleaseProjectionError::IdentityMismatch);
-            }
-            authorization
-                .validate()
-                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
-            Ok((
-                authorization.approved_resources.cpu_millicores,
-                authorization.approved_resources.memory_bytes,
-                authorization.approved_resources.storage_bytes,
-                authorization.gpu_allocation.clone(),
-            ))
-        }
+        authorization
+            .validate()
+            .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+        Ok((
+            authorization.approved_resources.cpu_millicores,
+            authorization.approved_resources.memory_bytes,
+            authorization.approved_resources.storage_bytes,
+            authorization.gpu_allocation.clone(),
+        ))
     }
 }
 

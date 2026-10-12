@@ -444,7 +444,9 @@ impl ResourceEnvironmentHandoff {
             .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
         if projection.release.id != self.release_id
             || projection.release.version != self.release_version
-            || projection.release.project_id != self.project_id
+            || (projection.release.project_id != self.project_id
+                && (projection.environment_spec.class == EnvironmentClass::Work
+                    || self.course_id.is_none()))
             || projection.release.course_id != self.course_id
         {
             return Err(EnvironmentError::InvalidResourceHandoff);
@@ -1239,6 +1241,12 @@ pub struct EnvironmentInstance {
 }
 
 impl EnvironmentInstance {
+    /// Funding is bound to the original Resource lease, independently of Work/Experiment class.
+    #[must_use]
+    pub const fn has_resource_lease(&self) -> bool {
+        self.lease_id.is_some()
+    }
+
     /// Validates aggregate invariants without consulting provider state.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.display_label.trim().is_empty()
@@ -1295,7 +1303,7 @@ impl EnvironmentInstance {
         }
         match self.class {
             EnvironmentClass::Experiment
-                if self.lease_id.is_some() || self.capacity_binding.is_some() =>
+                if self.lease_id.is_none() && self.capacity_binding.is_some() =>
             {
                 return Err(EnvironmentError::InvalidAggregate);
             }
@@ -1311,6 +1319,13 @@ impl EnvironmentInstance {
                 return Err(EnvironmentError::LeaseRequired);
             }
             _ => {}
+        }
+        if self.has_resource_lease()
+            && (self.operation.lease_authorization.is_none()
+                || self.gpu_allocation.is_some()
+                || self.resource_reservation_released)
+        {
+            return Err(EnvironmentError::LeaseAuthorizationRequired);
         }
         if self.resource_reservation_released
             && (self.class != EnvironmentClass::Experiment
@@ -1343,7 +1358,7 @@ impl EnvironmentInstance {
             validate_reset_target(self, target)?;
         }
         if let Some(authorization) = &self.operation.lease_authorization
-            && (self.class != EnvironmentClass::Work
+            && (self.lease_id.is_none()
                 || Some(authorization.lease_id) != self.lease_id
                 || authorization.environment_id != self.id
                 || authorization.project_id != self.project_id
