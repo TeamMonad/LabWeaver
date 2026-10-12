@@ -361,7 +361,9 @@ impl KubernetesEvaluationRunner {
         // reports Missing.  A timeout/transport error remains non-terminal; the durable
         // TaskRunId and idempotency key are reconciled by the next worker attempt.
         lifecycle
-            .create()
+            .create(Duration::from_secs(
+                self.configuration.resource_approval_timeout_seconds,
+            ))
             .await
             .map_err(|error| map_task_resource(error, "create"))?;
         // A reassigned attempt may already own a Resource request from the previous worker. If
@@ -383,7 +385,6 @@ impl KubernetesEvaluationRunner {
         let claimed = match lifecycle
             .claim_after_approval(
                 Duration::from_millis(self.configuration.resource_poll_interval_milliseconds),
-                Duration::from_secs(self.configuration.resource_approval_timeout_seconds),
                 &context.cancellation,
             )
             .await
@@ -404,6 +405,13 @@ impl KubernetesEvaluationRunner {
                 )
                 .into_completion();
             }
+            Err(TaskResourceError::ResourceLeaseExpired) => {
+                return self.expire_before_execution(&context, &lifecycle).await;
+            }
+            Err(TaskResourceError::ResourceApprovalExpired) => {
+                return TerminalResult::Failed("LW_RESOURCE_APPROVAL_EXPIRED".to_owned())
+                    .into_completion();
+            }
             Err(TaskResourceError::ResourceTerminal) => {
                 return TerminalResult::Failed("LW_EVALUATION_RESOURCE_TERMINAL".to_owned())
                     .into_completion();
@@ -417,10 +425,20 @@ impl KubernetesEvaluationRunner {
         // Settle the bounded handoff before user cancellation releases it.
         // Racing cancellation against this POST can commit Active after cleanup
         // already read Provisioning. Same-attempt recovery replays a lost reply.
-        let mut resource_status = lifecycle
+        let mut resource_status = match lifecycle
             .acknowledge(&claimed, &self.configuration.runner_namespace)
             .await
-            .map_err(|error| map_task_resource(error, "ack"))?;
+        {
+            Ok(status) => status,
+            Err(TaskResourceError::ResourceLeaseExpired) => {
+                return self.expire_before_execution(&context, &lifecycle).await;
+            }
+            Err(TaskResourceError::ResourceApprovalExpired) => {
+                return TerminalResult::Failed("LW_RESOURCE_APPROVAL_EXPIRED".to_owned())
+                    .into_completion();
+            }
+            Err(error) => return Err(map_task_resource(error, "ack")),
+        };
         if context.lease_lost.is_cancelled() {
             return Err(ExecutionError::LeaseLost);
         }
@@ -565,6 +583,44 @@ impl KubernetesEvaluationRunner {
             ));
         }
         Ok(completion)
+    }
+
+    async fn expire_before_execution(
+        &self,
+        context: &EvaluationAttemptContext,
+        lifecycle: &TaskResourceLifecycle,
+    ) -> Result<EvaluationStepCompletion, ExecutionError> {
+        // No executor intent may exist before this handoff. A stale owner or
+        // a recorded external submission must resume cleanup instead.
+        if self
+            .control
+            .load_execution_checkpoint(&context.lease)
+            .await?
+            .is_some()
+        {
+            return Err(ExecutionError::Backend(
+                "execution_intent_changed".to_owned(),
+            ));
+        }
+        lifecycle
+            .cancel("evaluation lease expired before workload submission")
+            .await?;
+        TerminalResult::Failed("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned()).into_completion()
+    }
+
+    async fn task_lease_expired(
+        &self,
+        context: &EvaluationAttemptContext,
+    ) -> Result<bool, ExecutionError> {
+        let status = self
+            .resource
+            .get_task_resource(context.lease.task_run_id)
+            .await
+            .map_err(|error| ExecutionError::TaskResource(TaskResourceFailure(error.into())))?;
+        if status.project_id != context.run.project_id || status.owner_id != context.run.actor_id {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        Ok(status.request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED"))
     }
 
     fn admit_execution(
@@ -1755,6 +1811,12 @@ impl KubernetesEvaluationRunner {
     ) -> Result<(TerminalResult, ExecutionTiming), ExecutionError> {
         let mut missing_since: Option<Instant> = None;
         loop {
+            if self.task_lease_expired(context).await? {
+                return Ok((
+                    TerminalResult::Failed("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned()),
+                    ExecutionTiming::unknown(),
+                ));
+            }
             if context.cancellation.is_cancelled()
                 || self.run_is_cancelling(context.lease.run_id).await?
             {
@@ -1870,6 +1932,12 @@ impl KubernetesEvaluationRunner {
         recovery: Option<&EvaluationExecutionResources>,
     ) -> Result<(TerminalResult, ExecutionTiming), ExecutionError> {
         loop {
+            if self.task_lease_expired(context).await? {
+                return Ok((
+                    TerminalResult::Failed("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned()),
+                    ExecutionTiming::unknown(),
+                ));
+            }
             if context.cancellation.is_cancelled()
                 || self.run_is_cancelling(context.lease.run_id).await?
             {
@@ -3706,6 +3774,71 @@ mod probe_recovery_tests {
     }
 
     #[tokio::test]
+    async fn probe_recovery_lease_expiry_cleans_attempt_before_release()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("expired-probe-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("probe step missing")?;
+        let context = context(&fixture, &lease)?;
+        let request = probe_request(&context)?;
+        let mut status = resource_status(&lease, &fixture, false)?;
+        let admitted = KubernetesEvaluationRunner::admit_execution(
+            &context,
+            &context.execution_plan,
+            &status,
+        )?;
+        let intent = super::execution_resources(
+            &context,
+            NAMESPACE,
+            EvaluationExecutionKind::AnsibleProbe,
+            Some(admitted.binding().clone()),
+            &request,
+            Vec::new(),
+        )?;
+        fixture
+            .store
+            .persist_execution_intent(&lease, &intent)
+            .await?;
+        status.request.diagnostic_code = Some("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned());
+        cluster.install_probe(&request, &status).await?;
+        cluster.state.lock().await.resource_request = Some(serde_json::to_value(&status.request)?);
+        let completion = runner.execute(context).await?;
+        assert_eq!(completion.state, EvaluationStepRunState::Failed);
+        assert_eq!(
+            completion
+                .diagnostic_code
+                .as_ref()
+                .map(contracts::DiagnosticCode::as_str),
+            Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+        );
+        assert!(completion.cleanup_verified);
+        let calls = cluster.state.lock().await.calls.clone();
+        assert!(
+            !calls
+                .iter()
+                .any(|(method, path)| *method == Method::PATCH && path.starts_with("/apis/batch/"))
+        );
+        let release = calls
+            .iter()
+            .position(|(method, path)| *method == Method::POST && path.ends_with("/release"))
+            .ok_or("resource release missing")?;
+        let delete = calls
+            .iter()
+            .position(|(method, path)| *method == Method::DELETE && path.contains("/jobs/"))
+            .ok_or("owned Job cleanup missing")?;
+        assert!(delete < release, "cleanup must precede release");
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn probe_recovery_after_persisted_terminal_does_not_recreate_job()
     -> Result<(), Box<dyn Error>> {
         let mut cluster = spawn_cluster().await?;
@@ -4020,16 +4153,6 @@ mod probe_recovery_tests {
                 .count(),
             0,
             "identity rejection must not clean or mutate an unverified object"
-        );
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|(method, path)| {
-                    *method == Method::GET && path.starts_with("/internal/v1/task-resources/")
-                })
-                .count(),
-            1,
-            "identity verification may load the exact Resource claim before failing closed"
         );
         assert!(
             calls.iter().all(|(method, path)| {

@@ -749,6 +749,9 @@ async fn create_task_resource(
     Json(input): Json<InternalCreateTaskResourceRequest>,
 ) -> Result<Response, ResourceApiError> {
     let idempotency_key = required_header(&headers, "idempotency-key")?;
+    if !(1..=3_600_000).contains(&input.approval_timeout_milliseconds) {
+        return Err(ResourceApiError::Invalid);
+    }
     let now = state.store.current_time().await?;
     let request = ResourceRequest {
         id: ResourceRequestId::new(),
@@ -770,7 +773,12 @@ async fn create_task_resource(
     };
     let stored = state
         .store
-        .create(&idempotency_key, &request, context.trace_id())
+        .create_task(
+            &idempotency_key,
+            &request,
+            input.approval_timeout_milliseconds,
+            context.trace_id(),
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(stored)).into_response())
 }

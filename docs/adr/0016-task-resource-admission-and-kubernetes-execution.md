@@ -43,7 +43,7 @@ Evaluation 域内的统一 backend 负责 Job 创建、namespace/workload identi
 
 业务结果先持久化，再清理执行对象，最后释放 Resource。`cleanup` 返回 `Confirmed`、`Pending` 或 `Unknown`；只有 `Confirmed` 才能确认释放，`Unknown` 不得改写为 Released。Job 消失、Worker 失联、HTTP 请求成功或删除请求发出都不表示资源已释放。已持久化 terminal result 的尝试在 Job 已删除时恢复只做清理确认，不重新执行。
 
-Issue #200 补充：审批超时用 `Reviewing` revision 条件取消与批准事务竞争；批准先提交则继续原尝试，不能清理批准后再返回审批超时。claim/ack 在用户取消时先等待有界调用返回，再清理同一授权。丢失 ack/release 响应时查询并重放原操作；重放不增加事件、延长租约或绕过 namespace/revision fence。worker 租约丢失将恢复交给新 owner，不能进入用户取消路径。Resource 普通 retry 不接受 Task 目标；业务重试生成新的 TaskRunId。
+Issue #200 补充：Resource 首次创建持久化批准等待期限，后台、查询与批准事务用数据库时钟和请求锁处理过期；同 TaskRunId 的恢复保留原期限与失败诊断。批准先提交则继续原尝试，不能清理批准后再返回审批超时。交接前的过期批准可以原子释放；已交接租约过期只标记清理原因，执行方确认清理后才释放容量。claim/ack 在用户取消时先等待有界调用返回，再清理同一授权。丢失 ack/release 响应时查询并重放原操作；重放不增加事件、延长租约或绕过 namespace/revision fence。worker 租约丢失将恢复交给新 owner，不能进入用户取消路径。Resource 普通 retry 不接受 Task 目标；业务重试生成新的 TaskRunId。
 
 ### 孤儿 workload
 

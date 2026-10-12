@@ -10,7 +10,9 @@ Resource 保存批准的资源规格、容量保留、租约、用量、费率�
 
 Agent 生成与 Evaluation 执行共享 `TaskResourceLifecycle`。同一次尝试在恢复时复用 `TaskRunId`、申请、claim 和租约；业务重试在确认旧尝试清理后创建新的 `TaskRunId`。Resource 的普通申请重试接口拒绝 Task 目标，防止旧授权复活。业务领域保留历史尝试及失败原因。
 
-等待期限到达时，执行方只对读到的 `Reviewing` revision 提交条件取消。取消事务先提交才返回审批超时。批准事务先提交时，条件取消返回冲突，执行方重新查询并继续同一次尝试，不释放该批准。批准在取消之后到达时，原 revision 已失效，Resource 拒绝批准。
+Resource 在首次创建事务中用数据库时钟保存批准等待期限。内部创建字段 `approvalTimeoutMilliseconds` 为 1 至 3,600,000 毫秒；同 TaskRunId 的重放和配置变化不延长期限。Resource 的后台、任务查询和批准事务检查这个期限。期限先到且申请仍为 `Reviewing` 时，Resource 原子取消申请、保存 `LW_TASK_RESOURCE_APPROVAL_TIMEOUT` 并发出事件。执行方重启或丢失超时回复后仍读取这个原诊断。批准事务先提交时，执行方继续同一次尝试；迟到批准不能复活已取消申请。
+
+批准的 `validUntil` 与等待期限不同。交接前批准失效时，Resource 原子释放 Reserved/Provisioning 的容量和 Allocating 租约，保存 `LW_RESOURCE_APPROVAL_EXPIRED`。已交接的租约过期时，Resource 保存 `LW_RESOURCE_TASK_LEASE_EXPIRED`，保留容量占用；Agent/Evaluation 停止尝试并通过现有清理路径确认对象消失后释放。恢复记录已有执行绑定时，即使提交回复丢失，也须先查询和清理对象。
 
 用户取消与 worker 租约丢失分开处理。用户取消要求当前 worker 完成清理；租约丢失停止旧 worker 的处理，由新 worker 恢复同一次尝试。旧 worker 不得把失去执行权解释成用户取消并释放新 worker 正在使用的授权。执行方等待有界 claim/ack 响应后处理用户取消；响应不明时保留任务并查询原记录。
 
@@ -27,7 +29,7 @@ Agent 生成与 Evaluation 执行共享 `TaskResourceLifecycle`。同一次尝�
 
 ack 重放只接受相同 namespace、有效 Active 租约和当前或原交接 revision。release 重放只接受原释放操作的两个 revision。其他 namespace、旧尝试、过期租约和不匹配的 revision 返回冲突。审批等待失败不写成学生程序零分；实际程序结果继续由 Evaluation 确定。
 
-项目 Credits 账户及自动预占/准入由后续账务任务交付。现有预算提醒不能被描述为 Credits 授权，本次修复保留现有人工审批路径。
+项目 Credits 账户与原子预占由 #209 交付；估价、用量/限额与不确定用量期限由 #210 交付。#200 的自动准入需接这两个正式接口。现有预算提醒不能被描述为 Credits 授权，本次修复保留现有人工审批路径。
 
 ## 分配与释放
 

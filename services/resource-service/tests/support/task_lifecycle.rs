@@ -37,6 +37,7 @@ struct Faults {
     lose_release_reply: Arc<AtomicBool>,
     cancel_after_ack: Arc<AtomicBool>,
     cancel_after_claim: Arc<AtomicBool>,
+    lose_request_reply: Arc<AtomicBool>,
     cancellation: CancellationToken,
 }
 
@@ -46,6 +47,12 @@ async fn inject_fault(State(faults): State<Faults>, request: Request, next: Next
     let response = next.run(request).await;
     if !response.status().is_success() {
         return response;
+    }
+    if method == Method::GET
+        && path.ends_with("/request")
+        && faults.lose_request_reply.swap(false, Ordering::SeqCst)
+    {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     if method == Method::GET
         && path.ends_with("/request")
@@ -128,6 +135,7 @@ impl Fixture {
             lose_release_reply: Arc::new(AtomicBool::new(false)),
             cancel_after_ack: Arc::new(AtomicBool::new(false)),
             cancel_after_claim: Arc::new(AtomicBool::new(false)),
+            lose_request_reply: Arc::new(AtomicBool::new(false)),
             cancellation: CancellationToken::new(),
         };
         let state = resource_service::api::ResourceApiState::new(store)
@@ -236,11 +244,7 @@ impl Fixture {
     async fn wait_for_claim(&self) -> TestResult<TaskResourceStatus> {
         Ok(self
             .lifecycle
-            .claim_after_approval(
-                Duration::from_millis(1),
-                Duration::from_millis(1),
-                &self.faults.cancellation,
-            )
+            .claim_after_approval(Duration::from_millis(1), &self.faults.cancellation)
             .await?)
     }
 
@@ -251,6 +255,145 @@ impl Fixture {
                 .await?,
         )
     }
+
+    async fn expire_wait(&self) -> TestResult {
+        sqlx::query("UPDATE resource.resource_requests SET approval_deadline_at=created_at+interval '1 millisecond' WHERE task_run_id=$1")
+            .bind(self.task_run_id.as_uuid()).execute(&self.pool).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn restart_and_changed_configuration_keep_first_deadline_and_lost_timeout_cause() -> TestResult
+{
+    let fixture = Fixture::start().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    let deadline: time::OffsetDateTime = sqlx::query_scalar(
+        "SELECT approval_deadline_at FROM resource.resource_requests WHERE request_id=$1",
+    )
+    .bind(request.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let recovered = fixture.lifecycle.clone();
+    recovered.create(Duration::from_hours(1)).await?;
+    let replayed_deadline: time::OffsetDateTime = sqlx::query_scalar(
+        "SELECT approval_deadline_at FROM resource.resource_requests WHERE request_id=$1",
+    )
+    .bind(request.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        deadline, replayed_deadline,
+        "recovery/configuration changes cannot extend the first wait"
+    );
+    fixture.expire_wait().await?;
+    fixture
+        .faults
+        .lose_request_reply
+        .store(true, Ordering::SeqCst);
+    assert!(
+        fixture.wait_for_claim().await.is_err(),
+        "the first timeout reply is lost after its commit"
+    );
+    let restarted_store = PgResourceStore::new(fixture.pool.clone());
+    let timeout = restarted_store
+        .load_task_request(fixture.task_run_id)
+        .await?;
+    assert_eq!(timeout.state, ResourceRequestState::Cancelled);
+    assert_eq!(
+        timeout.diagnostic_code.as_deref(),
+        Some("LW_TASK_RESOURCE_APPROVAL_TIMEOUT")
+    );
+    let events = fixture.event_count().await?;
+    recovered.create(Duration::from_secs(30)).await?;
+    assert!(matches!(
+        recovered
+            .claim_after_approval(Duration::from_millis(1), &CancellationToken::new())
+            .await,
+        Err(TaskResourceError::ResourceApprovalTimeout)
+    ));
+    assert_eq!(fixture.event_count().await?, events);
+    assert!(!restarted_store.expire_pending_task_once().await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_approval_releases_before_handoff_and_cannot_be_revived() -> TestResult {
+    for claim_first in [false, true] {
+        let fixture = Fixture::start().await?;
+        let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+        approve(&fixture.faults.store, &request).await?;
+        let claimed = if claim_first {
+            Some(fixture.wait_for_claim().await?)
+        } else {
+            None
+        };
+        sqlx::query("UPDATE resource.resource_approvals SET valid_until=created_at+interval '1 millisecond' WHERE request_id=$1")
+            .bind(request.id.as_uuid()).execute(&fixture.pool).await?;
+        if let Some(claimed) = claimed {
+            assert!(matches!(
+                fixture
+                    .lifecycle
+                    .acknowledge(&claimed, "labweaver-evaluation")
+                    .await,
+                Err(TaskResourceError::ResourceApprovalExpired)
+            ));
+        } else {
+            assert!(fixture.faults.store.expire_pending_task_once().await?);
+        }
+        let released = fixture.lifecycle.load_status().await?;
+        assert!(released.cleanup_confirmed);
+        assert_eq!(
+            released.request.diagnostic_code.as_deref(),
+            Some("LW_RESOURCE_APPROVAL_EXPIRED")
+        );
+        let events = fixture.event_count().await?;
+        sqlx::query("UPDATE resource.resource_approvals SET valid_until=clock_timestamp()+interval '1 hour' WHERE request_id=$1")
+            .bind(request.id.as_uuid()).execute(&fixture.pool).await?;
+        assert!(matches!(
+            fixture
+                .lifecycle
+                .claim_after_approval(Duration::from_millis(1), &CancellationToken::new())
+                .await,
+            Err(TaskResourceError::ResourceApprovalExpired)
+        ));
+        fixture
+            .lifecycle
+            .cancel("cancel after expired grant cleanup")
+            .await?;
+        assert_eq!(fixture.event_count().await?, events);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_expiry_cancels_pending_but_keeps_approval_that_already_won() -> TestResult {
+    let fixture = Fixture::start().await?;
+    fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    fixture.expire_wait().await?;
+    let restarted_store = PgResourceStore::new(fixture.pool.clone());
+    assert!(restarted_store.expire_pending_task_once().await?);
+    assert_eq!(
+        restarted_store
+            .load_task_request(fixture.task_run_id)
+            .await?
+            .state,
+        ResourceRequestState::Cancelled
+    );
+    assert!(!restarted_store.expire_pending_task_once().await?);
+
+    let approved = Fixture::start().await?;
+    let request = approved.lifecycle.create(Duration::from_secs(30)).await?;
+    approve(&approved.faults.store, &request).await?;
+    approved.expire_wait().await?;
+    assert!(!approved.faults.store.expire_pending_task_once().await?);
+    let claimed = approved.wait_for_claim().await?;
+    let active = approved
+        .lifecycle
+        .acknowledge(&claimed, "labweaver-evaluation")
+        .await?;
+    assert!(approved.lifecycle.release(&active).await?.cleanup_confirmed);
+    Ok(())
 }
 
 async fn approve(
@@ -303,7 +446,7 @@ async fn approve(
 async fn approval_committed_after_stale_review_read_continues_same_task() -> TestResult {
     for client_id in [RESOURCE_EVALUATION_CLIENT_ID, RESOURCE_AGENT_CLIENT_ID] {
         let fixture = Fixture::start_for_client(client_id).await?;
-        let request = fixture.lifecycle.create().await?;
+        let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
         fixture
             .faults
             .approve_after_review_read
@@ -335,7 +478,7 @@ async fn approval_committed_after_stale_review_read_continues_same_task() -> Tes
 #[tokio::test]
 async fn cancellation_during_claim_settles_and_releases_the_committed_claim() -> TestResult {
     let fixture = Fixture::start().await?;
-    let request = fixture.lifecycle.create().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
     approve(&fixture.faults.store, &request).await?;
     fixture
         .faults
@@ -358,7 +501,7 @@ async fn cancellation_during_claim_settles_and_releases_the_committed_claim() ->
 #[tokio::test]
 async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResult {
     let fixture = Fixture::start().await?;
-    let request = fixture.lifecycle.create().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
     approve(&fixture.faults.store, &request).await?;
     let claimed = fixture.wait_for_claim().await?;
     let active = fixture
@@ -390,7 +533,14 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
             .is_err(),
         "an earlier Active snapshot cannot admit an expired lease"
     );
-    assert_eq!(fixture.event_count().await?, events);
+    assert_eq!(fixture.event_count().await?, events + 1);
+    let pending_cleanup = fixture.lifecycle.load_status().await?;
+    assert!(!pending_cleanup.cleanup_confirmed);
+    assert_eq!(
+        pending_cleanup.request.diagnostic_code.as_deref(),
+        Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+    );
+    assert_eq!(fixture.event_count().await?, events + 1);
     assert!(fixture.lifecycle.release(&active).await?.cleanup_confirmed);
     Ok(())
 }
@@ -398,7 +548,9 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
 #[tokio::test]
 async fn waiting_timeout_fences_late_approval_and_never_allocates() -> TestResult {
     let fixture = Fixture::start().await?;
-    let request = fixture.lifecycle.create().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    sqlx::query("UPDATE resource.resource_requests SET approval_deadline_at=created_at+interval '1 millisecond' WHERE task_run_id=$1")
+        .bind(fixture.task_run_id.as_uuid()).execute(&fixture.pool).await?;
     assert!(
         matches!(fixture.wait_for_claim().await, Err(error) if matches!(error.downcast_ref::<TaskResourceError>(), Some(TaskResourceError::ResourceApprovalTimeout)))
     );
@@ -413,11 +565,15 @@ async fn waiting_timeout_fences_late_approval_and_never_allocates() -> TestResul
     );
     assert!(approve(&fixture.faults.store, &request).await.is_err());
     assert!(
-        fixture.lifecycle.create().await.is_ok(),
+        fixture
+            .lifecycle
+            .create(Duration::from_secs(30))
+            .await
+            .is_ok(),
         "a lost create reply is replayable without reviving the request"
     );
     assert!(
-        matches!(fixture.wait_for_claim().await, Err(error) if matches!(error.downcast_ref::<TaskResourceError>(), Some(TaskResourceError::ResourceTerminal)))
+        matches!(fixture.wait_for_claim().await, Err(error) if matches!(error.downcast_ref::<TaskResourceError>(), Some(TaskResourceError::ResourceApprovalTimeout)))
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM resource.capacity_claims")
         .fetch_one(&fixture.pool)
@@ -429,7 +585,7 @@ async fn waiting_timeout_fences_late_approval_and_never_allocates() -> TestResul
 #[tokio::test]
 async fn committed_ack_and_release_with_lost_replies_replay_without_new_events() -> TestResult {
     let fixture = Fixture::start().await?;
-    let request = fixture.lifecycle.create().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
     approve(&fixture.faults.store, &request).await?;
     let claimed = fixture.wait_for_claim().await?;
     fixture.faults.lose_ack_reply.store(true, Ordering::SeqCst);
@@ -481,7 +637,7 @@ async fn committed_ack_and_release_with_lost_replies_replay_without_new_events()
 #[tokio::test]
 async fn cancellation_after_approval_and_committed_ack_converges_with_retry() -> TestResult {
     let fixture = Fixture::start().await?;
-    let request = fixture.lifecycle.create().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
     approve(&fixture.faults.store, &request).await?;
     let claimed = fixture.wait_for_claim().await?;
     fixture

@@ -77,6 +77,13 @@
   "additionalProperties": false,
   "description": "Evaluation-owned request for a new one-shot task resource reservation.\n\nResource derives the requester and task target from this immutable command in one database\ntransaction. The route is service-authenticated and never accepts a browser delegation.",
   "properties": {
+    "approvalTimeoutMilliseconds": {
+      "description": "Approval wait captured once by Resource using its database clock.\nSame-attempt recovery keeps the original deadline.",
+      "format": "uint64",
+      "maximum": 3600000,
+      "minimum": 1,
+      "type": "integer"
+    },
     "courseId": {
       "anyOf": [
         {
@@ -114,7 +121,8 @@
     "ownerId",
     "requestKey",
     "resources",
-    "durationSeconds"
+    "durationSeconds",
+    "approvalTimeoutMilliseconds"
   ],
   "title": "InternalCreateTaskResourceRequest",
   "type": "object"

@@ -135,6 +135,8 @@ cargo xtask package-validate \
 
 ### 3.3 迁移边界
 
+Resource 任务协议要求资源迁移 `0015_task_approval_deadline.sql`。升级前先查询并取消没有记录等待期限的旧 Reviewing Task 申请，再确认没有此类待审批行。旧记录没有可信等待期限，迁移不补造期限，任务读取和批准以 `LW_RESOURCE_TASK_APPROVAL_DEADLINE_MISSING` 拒绝继续。保留原申请与历史；不要清空业务 schema。同步更新 Resource、Agent 和 Evaluation，内部任务创建须携带 `approvalTimeoutMilliseconds`。
+
 `migrations/catalog.yaml` 是迁移目录唯一真源。每个业务 schema 的在线 migration ledger 必须是该目录的有序前缀，新增迁移只能追加。部署失败时先读取服务诊断和 ledger，不能删表、清空 schema 或手工改 migration 状态来绕过校验。数据库迁移前向执行；需要数据恢复时使用经批准的数据库恢复方案，不把 Helm 回滚当作数据库回滚。
 
 ## 4. 增量部署和回滚
