@@ -88,6 +88,12 @@ Resource 在现有 `ResourceApproval` 内保存 `runtimeAuthorization`。它绑�
 
 未验证策略或授权输入不可用返回 503。无实际教师批准、成员范围不符或超出平台允许范围返回 403。旧绑定或配置不匹配返回 409。停止与恢复仍检查对象动作；恢复过程若创建新实例，#207 必须重新检查新准入。
 
+Resource 提供 `current_environment_authorization(pool, request_id, expected_lease_id)`，供内部 Environment resolver 读取原批准的执行依据。Work 传入已有 lease ID；Experiment 可从原 request ID 查到该请求的唯一 lease。读取要求 request 和 lease 已 active、lease 与原批准均未过期或撤销，claim 属于该 request 且仍在有效分配阶段。它沿 lease→claim→claim.approval_id 读取精确原批准，不选择另一份“最新批准”。不会写入新批准或分配资源。
+
+返回的 `CurrentEnvironmentAuthorization` 仅是本次已验证事实，包含原 `RuntimeAuthorizationBinding`、现有 `EnvironmentLeaseAuthorization`、approval ID/截止时间、provider binding 和同一已验证 `PlatformConfigurationVersion`。request/target、项目、课程、owner、release ID/version、容量和配置身份来自原事实。内部 resolver 必须逐项比对实际对象，使用原 target.environmentId，不能内部生成新 ID 后复用批准。执行截止时间同时受 lease.expiresAt 和 approvalValidUntil 限制。
+
+内部 resolver 从该返回版本的 runtime_policy 读取默认 UID 和特权落点，不能随后读取另一版本来拼接授权。它由 #207 提供，并沿现有 Environment 服务认证边界调用；公开 GET 不替代服务身份。`LW_RUNTIME_LEASE_NOT_ACTIVE` 返回 409，表示租约尚未分配完成、已失效或原链不可用。此读取不把原容量批准升级为额外权限。
+
 ## 交付边界
 
 这份契约定义项目动作和当前成员撤权。运行策略的唯一类型由 #203 的 `platform_configuration.rs` 提供。#207 负责将获准配置落实到创建、启动、重启和实例替换。成员动作不能代替平台允许清单、配置版本或运行批准。
