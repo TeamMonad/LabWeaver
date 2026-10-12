@@ -14,7 +14,7 @@
 
 `93-platform-application.yml` 在载入 Bundle 派生的 vars 后读取 `platform_application_versions_lock_file`。该路径指向 Bundle 的版本锁。已有部署入口未指定该字段时，仍读取仓库的 `deploy/versions.lock.yml`。这保留现有调用者，不能证明它们已经采用加密入口。
 
-本切片不改变服务鉴权、集群权限、安装操作或账务。基础设施 inventory 和旧凭据签发入口尚未迁入。服务启动时仍执行现有配置类型的业务校验。本工具复用两个现有对象渲染器，校验输入、版本和各服务的既有 NATS 权限。
+可选 infrastructure profile 将静态 inventory 和凭据文件引用纳入同一目录。xtask 使用派生 inventory，缺少 infrastructure 时明确失败，不从另一份环境配置补值。旧凭据签发工具继续签发，Bundle 不另写 CA、NATS 或身份签发器。服务启动时仍执行现有配置类型的业务校验。本工具复用两个现有对象渲染器，校验输入、版本和各服务的既有 NATS 权限。
 
 ## 前提
 
@@ -108,6 +108,50 @@ application:
 Resource values 仅启用 resource-service，并保留现有 Resource API egress 所有权。共享 identity proxy、默认拒绝和其他平台对象仍归主 release。未提供 Access seed 时，角色不执行其 SQL，也不导入或清空已有身份。提供旧 seed 时保留原冲突检测。
 
 单文件上限沿用现有渲染器的 1 MiB。整个输入最多 512 个文件、64 MiB。工具不压缩 tar，避免解密后的压缩展开。加密文件上限包含有限的归档开销。超限时拆除无用输入，不要绕过校验。
+
+## 同一目录中的基础设施输入
+
+添加可选 `infrastructure` 字段。该字段包含下列三个键；未使用的秘密文件设为 `null`。
+
+```yaml
+infrastructure:
+  inventoryFile: config/inventory.yaml
+  vaultPasswordFile: null
+  identitySecretFile: secrets/identity-bootstrap.yaml
+```
+
+`inventoryFile` 使用 Ansible 静态 YAML inventory，顶层只有 `all`，组内使用 `vars`、`hosts`、`children`。不要将 Vault/Jinja 模板作为另一份配置真源。下列片段只展示引用方法，不能直接安装集群：
+
+```yaml
+all:
+  vars:
+    ansible_user: deployment-user
+    ansible_ssh_private_key_file:
+      file: secrets/deployment-ssh-key
+    platform_foundation_bundle:
+      file: secrets/foundation-objects.yaml
+    platform_buildkit_bundle:
+      file: secrets/buildkit-objects.yaml
+    platform_buildkit_client_files:
+      ca.crt: {file: secrets/build-executor-client/ca.crt}
+      tls.crt: {file: secrets/build-executor-client/tls.crt}
+      tls.key: {file: secrets/build-executor-client/tls.key}
+  children:
+    control_plane:
+      hosts:
+        control-plane:
+          ansible_host: 192.0.2.7
+```
+
+inventory 的 `file` 引用只接受 `secrets/` 文件。密码类值必须使用 `secret` 引用，派生值使用 Ansible `!unsafe`。SSH 私钥、凭据文件、`*_kubeconfig_path` 和 `*_bundle` 必须使用文件引用。普通远端路径仍按既有角色解释，控制器文件引用不能用作远端 kubeconfig 路径。不能覆盖派生版本锁和身份 locator 摘要，也不能从 inventory 或环境变量关闭 SSH 主机密钥检查。控制器仍须已有获准的 SSH known_hosts；Bundle 不建立持久认证配置。
+
+`vaultPasswordFile` 只供仍需读取既有 Vault 输入的消费者使用。未指定时，执行环境不继承其他 Vault 密码文件；xtask 不查找 `.vault-password`。本 profile 的静态 inventory 使用已经解密的引用值，不再需要第二份 Vault 仓库。
+
+`identitySecretFile` 使用原 identity 角色的 bootstrap YAML。工具派生摘要和本地 locator 标记，角色在受限控制器目录读取 `0600` 文件，并继续使用现有字段校验。无需把该 locator 预先复制到路由器。未指定时，identity playbook 因缺少 locator 明确失败。其旧非 Bundle 调用者继续使用原 root locator。
+
+解密执行提供 `LABWEAVER_BUNDLE_INVENTORY_FILE`、`ANSIBLE_INVENTORY` 和仓库的 `ANSIBLE_CONFIG`。有 Vault 密码时提供 `LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE` 与 `ANSIBLE_VAULT_PASSWORD_FILE`；有身份文件时提供 `LABWEAVER_IDENTITY_SECRET_LOCATOR`。Ansible 本地临时文件及 locator 读取临时目录位于受限运行目录，不依赖控制器主目录。执行环境清除外部日志路径覆盖。所有路径仅在同步消费者运行期间有效。
+
+Cluster network、identity、verify、admin tools、foundation、Harbor、sandbox runtime 和 BuildKit 的文件 lookup 使用派生 `labweaver_versions_lock_file`。应用与 Resource 继续使用自身派生的锁路径。角色中的其他结构、镜像版本约束、命名空间和权限规则仍执行原校验。本入口不将 bootstrap 改成安全升级，也不自动采用共享集群。
 
 ## 验证和加密
 
@@ -274,8 +318,38 @@ Resource values 仅启用 resource-service，并保留现有 Resource API egress
 
 轮换 age 身份时，使用旧身份在受限执行目录打开旧文件。用新接收者调用 `seal`，源目录取 `LW_BUNDLE_ROOT`。新文件验证成功后，再按组织的密钥恢复规则退役旧身份。本工具不删除或轮换用户身份文件。
 
+## 准备隔离恢复验收
+
+`tools/prepare_bundle_acceptance.py` 在 Bundle `exec` 内生成验收清单，不连接集群。它只输出配置 JSON，Secret、SSH key、Vault 密码和 age 身份均不进入清单。输出文件使用 `0600`，已存在的文件不会被覆盖。
+
+用新解密目录恢复实际归档，再生成清单：
+
+```sh
+python tools/deployment_bundle.py exec \
+  --archive installation-r7.age --identity .private/operator-age-key.txt \
+  -- python tools/prepare_bundle_acceptance.py \
+  --namespace lw-bundle-203-unique-run --output .private/acceptance/restore.yaml
+```
+
+输出路径须在 Bundle 临时目录之外。namespace 必须以 `lw-bundle-203-` 开头，并与应用及 Resource 目标不同。工具从同一版本锁的 `test_images.busybox` 选择固定摘要镜像；缺少该镜像时明确失败，不另给镜像默认值。
+
+使用合成凭据验证入口时，运行测试 fixture 命令。它使用 Control 同源默认值和未保存的零 revision 首装请求，新建合成 age 身份、完整归档和隔离恢复目录，完成真实 age 加解密及同一 Rust 类型校验，输出清单后清理所有临时秘密：
+
+```sh
+python tests/ansible/prepare_bundle_acceptance_fixture.py \
+  --namespace lw-bundle-203-unique-run --output .private/acceptance/synthetic.yaml
+```
+
+该入口需要前述 age、Python 依赖和 xtask。清单包含一个 Namespace、ResourceQuota、NetworkPolicy、ConfigMap 和 Job。Namespace 使用 restricted Pod Security；Pod 默认拒绝网络、禁用服务账户 token、非 root、drop ALL、只读根文件系统。没有 PVC、hostPath、hostNetwork、GPU、Secret 或集群角色。Job 读取已恢复且经过类型校验的配置，核对挂载后的实际字节摘要。成功输出 `BUNDLE_RESTORE_SMOKE_OK`。
+
+执行端需要一个全新 namespace 名称、Linux amd64 节点、锁定 BusyBox 镜像的拉取能力和已有 CNI NetworkPolicy 支持。Pod 请求50m CPU、64Mi 内存、16Mi 临时存储，上限250m CPU、128Mi 内存、64Mi 临时存储；namespace 配额限制2个 Pod、1个 Job、1个 ConfigMap、0个 Secret/PVC。整个 namespace 的 CPU/内存上限分别为1核和512Mi。无需新增长期凭据或扩大平台服务权限。
+
+单独获准的集群验证线程先核对已有负载、上下文和 namespace 未存在，再使用 `kubectl create -f` 创建清单；不要用 apply 覆盖已有对象。读取 Job 终态和上述日志标记，记录实际调度、镜像拉取、Pod Security 与清理结果。失败或部分创建时保留错误和已创建对象清单，由执行端只清理本次拥有的对象。本工具不创建或删除远端资源。
+
+此入口验证控制器恢复、配置挂载和隔离 Job。六服务空环境安装、真实身份签发、数据库迁移、入口证书、镜像 Registry 与浏览器流程仍需要专门的隔离安装窗口和获准依赖。现有 foundation/identity/Harbor 角色含固定 namespace 或共享对象；不能将它们直接用于已有集群的本验收 namespace。不要将此 Job 成功记录为完整安装或用户旅程通过。
+
 ## 当前未完成范围
 
-管理版本、离线首装请求和 Resource profile 已进入同一加密目录。基础设施 inventory 与旧凭据签发路径仍需归并。7天/30天/24h/1h/60秒的服务消费者、管理界面的本分支集成与真实后端浏览器流程、实际执行观察器仍需完成。本切片没有放宽 namespace Pod Security，也没有落实 #207 的实际运行授权或执行位置。
+管理版本、离线首装请求、Resource profile 和静态基础设施 inventory/凭据引用已进入同一加密目录。旧 PKI/NATS 签发 workspace、Harbor/公网入口的远端 root locator 和实际安装步骤仍需逐项整合；这些入口不会在本地恢复时自动执行。7天/30天/24h/1h/60秒的服务消费者、管理界面的本分支集成与真实后端浏览器流程、实际执行观察器仍需完成。本切片没有落实 #207 的实际运行授权或执行位置。隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。
 
 剩余范围仍属于 #203 和明确的下游消费者。公共契约已由父线程协调，生成 SDK 从 `crates/contracts` 产生。不要用本地加密或状态测试替代实际授权、执行位置和前后端验收。

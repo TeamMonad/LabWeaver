@@ -234,6 +234,94 @@ def _value_references(value: Any, references: set[str]) -> None:
         raise BundleError("LW_BUNDLE_TEMPLATE_FORBIDDEN")
 
 
+INFRASTRUCTURE_DERIVED = (
+    {
+        "labweaver_versions_lock_file",
+        "identity_secret_locator_controller",
+        "identity_secret_locator_sha256",
+        "identity_secret_locator_controller_tmp",
+    }
+    | RESERVED_VARIABLES
+    | RESOURCE_RESERVED
+)
+
+
+def _inventory_references(value: Any, references: set[str]) -> None:
+    if isinstance(value, dict):
+        if set(value) == {"file"}:
+            references.add(_relative(value["file"], "secrets"))
+            return
+        if set(value) == {"secret"}:
+            references.add(_relative(value["secret"], "secrets"))
+            return
+        for key, item in value.items():
+            if not isinstance(key, str) or key in INFRASTRUCTURE_DERIVED:
+                raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
+            if key in {
+                "ansible_ssh_args",
+                "ansible_ssh_common_args",
+                "ansible_ssh_extra_args",
+                "ansible_host_key_checking",
+                "ansible_ssh_host_key_checking",
+            }:
+                # Host-key policy remains in the repository's Ansible configuration.
+                raise BundleError("LW_BUNDLE_SSH_OVERRIDE_FORBIDDEN")
+            file_key = key in {
+                "ansible_ssh_private_key_file",
+                "ansible_private_key_file",
+            } or key.endswith(("_credentials_file", "_kubeconfig_path", "_bundle"))
+            if file_key and not (isinstance(item, dict) and set(item) == {"file"}):
+                raise BundleError("LW_BUNDLE_CREDENTIAL_FILE_REFERENCE_REQUIRED")
+            if SECRET_FIELD.search(key) and not (
+                isinstance(item, dict) and set(item) == {"secret"}
+            ):
+                raise BundleError("LW_BUNDLE_SECRET_REFERENCE_REQUIRED")
+            _inventory_references(item, references)
+    elif isinstance(value, list):
+        for item in value:
+            _inventory_references(item, references)
+    elif isinstance(value, str) and ("{{" in value or "{%" in value):
+        raise BundleError("LW_BUNDLE_TEMPLATE_FORBIDDEN")
+
+
+def _infrastructure_model(
+    model: dict[str, Any], files: dict[str, bytes], references: set[str]
+) -> None:
+    infrastructure = _exact(
+        model["infrastructure"],
+        {"inventoryFile", "vaultPasswordFile", "identitySecretFile"},
+    )
+    inventory_file = _relative(infrastructure["inventoryFile"], "config")
+    references.add(inventory_file)
+    if inventory_file not in files:
+        raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
+    inventory = _document(files[inventory_file])
+    if not isinstance(inventory, dict) or set(inventory) != {"all"}:
+        raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
+    _inventory_group(inventory["all"])
+    _inventory_references(inventory, references)
+    for name in ("vaultPasswordFile", "identitySecretFile"):
+        if infrastructure[name] is not None:
+            references.add(_relative(infrastructure[name], "secrets"))
+
+
+def _inventory_group(group: Any) -> None:
+    if not isinstance(group, dict) or set(group) - {"vars", "hosts", "children"}:
+        raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
+    for key in ("vars", "hosts", "children"):
+        entries = group.get(key, {})
+        if not isinstance(entries, dict) or any(
+            not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name)
+            for name in entries
+        ):
+            raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
+    for variables in group.get("hosts", {}).values():
+        if variables is not None and not isinstance(variables, dict):
+            raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
+    for child in group.get("children", {}).values():
+        _inventory_group(child)
+
+
 def _configuration_version(
     payload: bytes, *, initial: bool = False, defaults: bool = False
 ) -> dict[str, Any]:
@@ -470,7 +558,7 @@ def load_bundle(
     if MODEL_FILE not in files:
         raise BundleError("LW_BUNDLE_MODEL_MISSING")
     document = _document(files[MODEL_FILE])
-    optional = {"resource", "configurationMode"}
+    optional = {"resource", "configurationMode", "infrastructure"}
     model = _exact(
         document,
         {
@@ -541,6 +629,8 @@ def load_bundle(
         raise BundleError("LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT")
     if "resource" in model:
         _resource_model(model, files, references)
+    if "infrastructure" in model:
+        _infrastructure_model(model, files, references)
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _settings(model, files)
@@ -684,6 +774,32 @@ def derive_bundle(
     )
     if "resource" in model:
         _derive_resource(root, output / "resource", model, files)
+    if "infrastructure" in model:
+        infrastructure = model["infrastructure"]
+        inventory = _resolve_values(
+            _document(files[infrastructure["inventoryFile"]]), root, files
+        )
+        variables = inventory["all"].setdefault("vars", {})
+        variables["labweaver_versions_lock_file"] = str(
+            root / model["versions"]["lockFile"]
+        )
+        variables["identity_secret_locator_controller"] = (
+            infrastructure["identitySecretFile"] is not None
+        )
+        variables["identity_secret_locator_controller_tmp"] = str(
+            output / "infrastructure/ansible-remote-tmp"
+        )
+        if infrastructure["identitySecretFile"] is not None:
+            variables["identity_secret_locator_sha256"] = (
+                "sha256:"
+                + hashlib.sha256(
+                    files[infrastructure["identitySecretFile"]]
+                ).hexdigest()
+            )
+        _write(
+            output / "infrastructure/inventory.yaml",
+            yaml.dump(inventory, Dumper=AnsibleDumper, sort_keys=True).encode(),
+        )
     return {
         "revision": model["revision"],
         "applicationObjectsSha256": digest,
@@ -1115,6 +1231,19 @@ def main() -> int:
                         "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE",
                         "LABWEAVER_PLATFORM_CONFIGURATION_UPDATE_FILE",
                         "LABWEAVER_RESOURCE_VARS_FILE",
+                        "LABWEAVER_BUNDLE_INVENTORY_FILE",
+                        "LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE",
+                        "LABWEAVER_IDENTITY_SECRET_LOCATOR",
+                        "ANSIBLE_INVENTORY",
+                        "ANSIBLE_VAULT_PASSWORD_FILE",
+                        "ANSIBLE_VAULT_IDENTITY_LIST",
+                        "ANSIBLE_PRIVATE_KEY_FILE",
+                        "ANSIBLE_HOST_KEY_CHECKING",
+                        "ANSIBLE_SSH_HOST_KEY_CHECKING",
+                        "ANSIBLE_SSH_ARGS",
+                        "ANSIBLE_SSH_COMMON_ARGS",
+                        "ANSIBLE_SSH_EXTRA_ARGS",
+                        "ANSIBLE_LOG_PATH",
                     ):
                         environment.pop(key, None)
                     setting_key = (
@@ -1129,6 +1258,40 @@ def main() -> int:
                         environment["LABWEAVER_RESOURCE_VARS_FILE"] = str(
                             rendered / "resource/ansible-vars.yaml"
                         )
+                    model, _ = load_bundle(root)
+                    if "infrastructure" in model:
+                        infrastructure = model["infrastructure"]
+                        environment["ANSIBLE_CONFIG"] = str(
+                            Path(__file__).resolve().parents[1]
+                            / "deploy/ansible/ansible.cfg"
+                        )
+                        environment["ANSIBLE_LOCAL_TEMP"] = str(
+                            _private_directory(
+                                rendered / "infrastructure/ansible-local-tmp",
+                                create=True,
+                            )
+                        )
+                        environment["LABWEAVER_BUNDLE_INVENTORY_FILE"] = str(
+                            rendered / "infrastructure/inventory.yaml"
+                        )
+                        environment["ANSIBLE_INVENTORY"] = environment[
+                            "LABWEAVER_BUNDLE_INVENTORY_FILE"
+                        ]
+                        for field, variable in (
+                            (
+                                "vaultPasswordFile",
+                                "LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE",
+                            ),
+                            ("identitySecretFile", "LABWEAVER_IDENTITY_SECRET_LOCATOR"),
+                        ):
+                            if infrastructure[field] is not None:
+                                environment[variable] = str(
+                                    root / infrastructure[field]
+                                )
+                        if "LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE" in environment:
+                            environment["ANSIBLE_VAULT_PASSWORD_FILE"] = environment[
+                                "LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE"
+                            ]
                     # A consumer can read secrets. Do not forward its stdout/stderr to ordinary logs.
                     _consume(command, environment)
         print(json.dumps(metadata, sort_keys=True))

@@ -2,9 +2,9 @@
 - name: Bind the locked Harbor chart and image identities
   ansible.builtin.set_fact:
     harbor_chart_archive_sha256: >-
-      sha256:{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.chart_archive_sha256 |
+      sha256:{{ (lookup('file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml).harbor.chart_archive_sha256 |
       regex_replace('^sha256:', '') }}
-    harbor_locked_images: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.images }}"
+    harbor_locked_images: "{{ (lookup('file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml).harbor.images }}"
 
 - name: Require explicit Harbor configuration
   ansible.builtin.assert:
