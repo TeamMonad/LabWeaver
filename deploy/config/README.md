@@ -1,5 +1,15 @@
 # Deployment configuration bundle
 
+The portable application Bundle uses one `config/bundle.yaml` model and encrypts its
+complete directory with age. See [the encrypted Bundle procedure](../../docs/deployment/encrypted-bundle.md)
+for validation, file references, derived inputs, recovery and the current scope.
+Do not edit the derived ConfigMap/Secret, Helm values or Ansible vars.
+
+The layout below is the existing object renderer's input contract. The encrypted
+entrypoint reuses that renderer internally. Existing local development and credential
+issuance callers still use the primitive renderer until their deployment entrypoints
+adopt the portable Bundle.
+
 `platform-bundle-manifest.json` is the exact ConfigMap and Secret input contract for the
 application deployment. Prepare values only under an ignored private
 directory using this layout:
