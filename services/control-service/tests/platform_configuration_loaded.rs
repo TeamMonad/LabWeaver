@@ -212,44 +212,6 @@ async fn progress(
     Ok(state)
 }
 
-fn actual_bundle(
-    version: &PlatformConfigurationVersion,
-    root: &Path,
-) -> TestResult<(Vec<u8>, LoadedConfiguration)> {
-    std::fs::create_dir_all(root.join(".private"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            root.join(".private"),
-            std::fs::Permissions::from_mode(0o700),
-        )?;
-    }
-    let input = root.join(".private/version.json");
-    write(&input, &serde_json::to_vec(version)?)?;
-    let output = root.join(".private/loaded");
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let result = std::process::Command::new("python3")
-        .arg(repository.join("tests/ansible/prepare_loaded_configuration_fixture.py"))
-        .arg("--version")
-        .arg(&input)
-        .arg("--output")
-        .arg(&output)
-        .output()?;
-    if !result.status.success() {
-        return Err(
-            "actual synthetic Bundle producer failed; inspect local test environment".into(),
-        );
-    }
-    assert!(result.stdout.is_empty());
-    let cipher = std::fs::read(output.join("synthetic.age"))?;
-    let loaded = LoadedConfiguration::load(
-        &output.join("platform-configuration.json"),
-        &output.join("platform-configuration-source.json"),
-    )?;
-    Ok((cipher, loaded))
-}
-
 /// Executed explicitly in CI with age, Python/PyYAML, Helm and the built Rust validator.
 #[tokio::test]
 #[ignore = "requires the actual Bundle producer toolchain"]
@@ -284,7 +246,7 @@ async fn actual_bundle_load_is_required_for_success_and_failure_keeps_effective(
     )
     .await?;
     let temporary = tempfile::tempdir()?;
-    let (cipher, loaded) = actual_bundle(
+    let (cipher, loaded) = configuration_common::actual_loaded_bundle(
         initial.desired.as_ref().ok_or("no desired")?,
         &temporary.path().join("first"),
     )?;
@@ -307,7 +269,7 @@ async fn actual_bundle_load_is_required_for_success_and_failure_keeps_effective(
     ));
     assert_eq!(configuration::get(&pool).await?, state);
 
-    let (_other_cipher, wrong_source) = actual_bundle(
+    let (_other_cipher, wrong_source) = configuration_common::actual_loaded_bundle(
         state.desired.as_ref().ok_or("no desired")?,
         &temporary.path().join("other-cipher"),
     )?;
@@ -396,7 +358,7 @@ async fn actual_bundle_load_is_required_for_success_and_failure_keeps_effective(
     )
     .await?;
     assert_eq!(state.applied.as_ref(), Some(&effective));
-    let (next_cipher, next_loaded) = actual_bundle(
+    let (next_cipher, next_loaded) = configuration_common::actual_loaded_bundle(
         state.desired.as_ref().ok_or("no desired")?,
         &temporary.path().join("second"),
     )?;

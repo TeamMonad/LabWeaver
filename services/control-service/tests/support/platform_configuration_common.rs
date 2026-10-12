@@ -6,42 +6,6 @@ use contracts::{ArtifactRef, PolicyId, Revision, UtcTimestamp};
 use control_service::{ContainerBuildPolicy, ControlConfig, EvaluationRuntimePolicy};
 use persistence_sqlx::Sha256Digest;
 
-/// Synthetic deployment-input boundary for state-machine tests. The separate loaded
-/// integration target uses the actual age/Bundle producer rather than this receipt fixture.
-pub(super) fn loaded(
-    version: &contracts::platform_configuration::PlatformConfigurationVersion,
-    encrypted_bundle_sha256: &str,
-) -> Result<control_service::platform_configuration::LoadedConfiguration, Box<dyn std::error::Error>>
-{
-    let directory = tempfile::tempdir()?;
-    let version_file = directory.path().join("version.json");
-    let source_file = directory.path().join("source.json");
-    std::fs::write(&version_file, serde_json::to_vec(version)?)?;
-    std::fs::write(
-        &source_file,
-        serde_json::to_vec(&serde_json::json!({
-            "apiVersion":"deploy.labweaver.io/loaded-source/v1",
-            "desiredRevision":version.revision,
-            "configurationSha256":version.configuration_sha256,
-            "encryptedBundleSha256":encrypted_bundle_sha256,
-            "installation":{"namespace":"synthetic-control", "releaseName":"synthetic"}
-        }))?,
-    )?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for file in [&version_file, &source_file] {
-            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))?;
-        }
-    }
-    Ok(
-        control_service::platform_configuration::LoadedConfiguration::load(
-            &version_file,
-            &source_file,
-        )?,
-    )
-}
-
 pub(super) struct NoObjects;
 #[async_trait]
 impl ImmutableObjectStore for NoObjects {
@@ -174,4 +138,58 @@ pub(super) fn ciphertext() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         return Err("synthetic age encryption failed".into());
     }
     Ok(std::fs::read(archive)?)
+}
+
+/// Full age/Bundle producer reused by actual loading and consumer integration targets.
+#[allow(
+    dead_code,
+    reason = "other targets reuse the shared fixture without executing the full Bundle producer"
+)]
+pub(super) fn actual_loaded_bundle(
+    version: &contracts::platform_configuration::PlatformConfigurationVersion,
+    root: &std::path::Path,
+) -> Result<
+    (
+        Vec<u8>,
+        control_service::platform_configuration::LoadedConfiguration,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    std::fs::create_dir_all(root.join(".private"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.join(".private"),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+    }
+    let input = root.join(".private/version.json");
+    std::fs::write(&input, serde_json::to_vec(version)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let output = root.join(".private/loaded");
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let result = std::process::Command::new("python3")
+        .arg(repository.join("tests/ansible/prepare_loaded_configuration_fixture.py"))
+        .arg("--version")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .output()?;
+    if !result.status.success() {
+        return Err(
+            "actual synthetic Bundle producer failed; inspect local test environment".into(),
+        );
+    }
+    assert!(result.stdout.is_empty());
+    let cipher = std::fs::read(output.join("synthetic.age"))?;
+    let loaded = control_service::platform_configuration::LoadedConfiguration::load(
+        &output.join("platform-configuration.json"),
+        &output.join("platform-configuration-source.json"),
+    )?;
+    Ok((cipher, loaded))
 }
