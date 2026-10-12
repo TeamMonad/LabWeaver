@@ -1454,7 +1454,7 @@ async fn buildkit_history_once(
         .into_inner();
     let mut found = None;
     while let Some(event) = stream.message().await.map_err(|_| execution_unknown())? {
-        let Some(record) = event.record else {
+        let Some(mut record) = event.record else {
             continue;
         };
         if !history_identity_matches(&record, context, tagged) {
@@ -1467,7 +1467,8 @@ async fn buildkit_history_once(
             != bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryEventType::Complete as i32
             || record.completed_at.is_none()
         {
-            return Ok(None);
+            // Preserve observed partial history; it cannot establish a terminal interval.
+            record.completed_at = None;
         }
         found = Some(record);
     }
@@ -1510,7 +1511,10 @@ fn history_usage(
         }
     } else {
         BuildUsageMeasurement::Unknown {
-            reason: "history lacks valid millisecond start/end bounds".into(),
+            reason: format!(
+                "history {} lacks valid millisecond start/end bounds; observed start={:?}, finish={:?}",
+                record.r#ref, record.created_at, record.completed_at
+            ),
         }
     }
 }
@@ -2867,5 +2871,44 @@ mod tests {
             shutdown.cancel();
             server.await.expect("server join").expect("server stop");
         }
+    }
+    #[test]
+    fn observed_history_time_keeps_fractional_milliseconds_and_missing_bounds_visible() {
+        use bollard_buildkit_proto::google::protobuf::Timestamp;
+        use contracts::resource::build_costing::BuildUsageMeasurement;
+        let (_, _, mut record) = history_fixture();
+        record.created_at = Some(Timestamp {
+            seconds: 100,
+            nanos: 250_000_000,
+        });
+        record.completed_at = Some(Timestamp {
+            seconds: 101,
+            nanos: 750_000_000,
+        });
+        let BuildUsageMeasurement::Known {
+            started_at,
+            finished_at,
+            ..
+        } = history_usage(&record)
+        else {
+            panic!("known exact bounds");
+        };
+        assert_eq!(
+            (finished_at.get() - started_at.get()).whole_milliseconds(),
+            1500
+        );
+        record.completed_at = None;
+        let BuildUsageMeasurement::Unknown { reason } = history_usage(&record) else {
+            panic!("missing completion stays unknown");
+        };
+        assert!(reason.contains("250000000"));
+        record.completed_at = Some(Timestamp {
+            seconds: 100,
+            nanos: 250_000_001,
+        });
+        let BuildUsageMeasurement::Unknown { reason } = history_usage(&record) else {
+            panic!("submillisecond bounds retained without invented zero charge");
+        };
+        assert!(reason.contains("250000001"));
     }
 }

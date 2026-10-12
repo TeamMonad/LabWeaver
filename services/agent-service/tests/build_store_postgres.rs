@@ -47,6 +47,7 @@ use testcontainers_modules::postgres::Postgres;
 
 mod support;
 use support::apply_agent_migrations;
+use support::build_billing::BuildBillingFixture;
 
 #[derive(Clone)]
 struct SlowProvider {
@@ -455,10 +456,16 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
         .connect(&url)
         .await?;
     apply_agent_migrations(&pool).await?;
-    let command = build_command()?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    billing
+        .synthetic_tariff("buildkit-primary-v1", "0.000000")
+        .await?;
+    let mut command = build_command()?;
+    command.request.max_duration_milliseconds = 60_000;
     let deadline = add_time(database_now(&pool).await?, time::Duration::minutes(1))?;
     let calls = Arc::new(AtomicUsize::new(0));
     let lease_one = uuid::Uuid::new_v4();
+    billing.seed_command(&command, 1, lease_one).await?;
     let first = build_executor_envelope(
         &command,
         1,
@@ -472,6 +479,7 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
             calls: calls.clone(),
         },
     )
+    .with_billing_client(billing.client.clone())
     .execute(first.clone())
     .await?;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -483,11 +491,13 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
             calls: calls.clone(),
         },
     )
+    .with_billing_client(billing.client.clone())
     .execute(first)
     .await?;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let lease_two = uuid::Uuid::new_v4();
+    billing.seed_command(&command, 2, lease_two).await?;
     let second = build_executor_envelope(
         &command,
         2,
@@ -500,7 +510,8 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
         CountingBuildExecutor {
             calls: calls.clone(),
         },
-    );
+    )
+    .with_billing_client(billing.client.clone());
     executor.execute(second).await?;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
@@ -541,11 +552,13 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
     ));
 
     // Build cleanup tombstones only the failed attempt; a strictly newer lease may retry.
+    let lease_three = uuid::Uuid::new_v4();
+    billing.seed_command(&command, 3, lease_three).await?;
     executor
         .execute(build_executor_envelope(
             &command,
             3,
-            uuid::Uuid::new_v4(),
+            lease_three,
             BuildProviderStage::EnsurePrivateProject,
             deadline,
         ))
@@ -840,20 +853,29 @@ async fn executor_cleanup_signals_exact_active_build_and_unknown_stop_keeps_fenc
         ))
         .await?;
     apply_agent_migrations(&pool).await?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    billing
+        .synthetic_tariff("buildkit-primary-v1", "0.000000")
+        .await?;
     for confirmed in [true, false] {
-        let command = build_command()?;
+        let mut command = build_command()?;
+        command.request.max_duration_milliseconds = 10_000;
         let deadline = add_time(database_now(&pool).await?, time::Duration::seconds(10))?;
         let lease = uuid::Uuid::new_v4();
+        billing.seed_command(&command, 1, lease).await?;
         let started = tokio_util::sync::CancellationToken::new();
         let stopped = tokio_util::sync::CancellationToken::new();
-        let executor = Arc::new(FencedBuildExecutor::new(
-            PgBuildExecutorFenceStore::new(pool.clone()),
-            CancellableBuildExecutor {
-                started: started.clone(),
-                stopped: stopped.clone(),
-                confirmed,
-            },
-        ));
+        let executor = Arc::new(
+            FencedBuildExecutor::new(
+                PgBuildExecutorFenceStore::new(pool.clone()),
+                CancellableBuildExecutor {
+                    started: started.clone(),
+                    stopped: stopped.clone(),
+                    confirmed,
+                },
+            )
+            .with_billing_client(billing.client.clone()),
+        );
         let build =
             build_executor_envelope(&command, 1, lease, BuildProviderStage::Build, deadline);
         let active = executor.clone();
@@ -1026,13 +1048,16 @@ async fn terminal_late_build_cleanup_preserves_failure_and_replays_completed_cle
         ))
         .await?;
     apply_agent_migrations(&pool).await?;
-    let command = build_command()?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    billing
+        .synthetic_tariff("buildkit-primary-v1", "0.000000")
+        .await?;
+    let mut command = build_command()?;
+    command.request.max_duration_milliseconds = 10_000;
     let store = PgBuildStore::new(pool.clone());
     store
         .accept_command("agent-build-command-v1", &command_event(command.clone())?)
         .await?;
-    sqlx::query("UPDATE agent.build_commands SET state='failed',attempt=1,diagnostic_code='LW_AGENT_BUILD_CLEANUP_FAILED',retryable=false,cleanup_verified=false,completed_at=clock_timestamp() WHERE build_request_id=$1")
-        .bind(command.request.id.as_uuid()).execute(&pool).await?;
     let identity = Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes());
     sqlx::query("INSERT INTO agent.build_executor_artifacts(build_request_id,build_identity,repository,project_name,repository_name,candidate_tag,digest) VALUES($1,$2,$3,'labweaver-system',$6,$4,$5)")
         .bind(command.request.id.as_uuid()).bind(identity.to_string()).bind(&command.request.output_repository)
@@ -1044,21 +1069,23 @@ async fn terminal_late_build_cleanup_preserves_failure_and_replays_completed_cle
             pool: pool.clone(),
             cleanups: cleanups.clone(),
         },
-    );
-    let deadline = add_time(
-        database_now(&pool).await?,
-        time::Duration::milliseconds(500),
-    )?;
+    )
+    .with_billing_client(billing.client.clone());
+    let deadline = add_time(database_now(&pool).await?, time::Duration::seconds(5))?;
+    let token = uuid::Uuid::new_v4();
+    billing.seed_command(&command, 1, token).await?;
     executor
         .execute(build_executor_envelope(
             &command,
             1,
-            uuid::Uuid::new_v4(),
+            token,
             BuildProviderStage::Build,
             deadline,
         ))
         .await?;
-    tokio::time::sleep(Duration::from_millis(550)).await;
+    sqlx::query("UPDATE agent.build_commands SET state='failed',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,attempt=1,diagnostic_code='LW_AGENT_BUILD_CLEANUP_FAILED',retryable=false,cleanup_verified=false,completed_at=clock_timestamp() WHERE build_request_id=$1")
+        .bind(command.request.id.as_uuid()).execute(&pool).await?;
+    wait_for_compute_deadline(&pool, deadline).await?;
     let worker = BuildWorker::new(
         store,
         BuildPipeline::new(
@@ -1190,6 +1217,13 @@ async fn terminal_cleanup_fixture(
     Box<dyn std::error::Error>,
 > {
     use agent_service::build_pipeline::{BuildFailureCode, BuildPipelineError};
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    let rate_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource.resource_rates WHERE builder_binding='buildkit-primary-v1')").fetch_one(pool).await?;
+    if !rate_exists {
+        billing
+            .synthetic_tariff("buildkit-primary-v1", "0.000000")
+            .await?;
+    }
     let command = build_command()?;
     let store = PgBuildStore::new(pool.clone());
     store
@@ -1210,7 +1244,8 @@ async fn terminal_cleanup_fixture(
     let executor = FencedBuildExecutor::new(
         PgBuildExecutorFenceStore::new(pool.clone()),
         backend.clone(),
-    );
+    )
+    .with_billing_client(billing.client.clone());
     executor
         .execute(build_executor_envelope(
             &command,
@@ -1595,6 +1630,10 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
         ))
         .await?;
     apply_agent_migrations(&pool).await?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    billing
+        .synthetic_tariff("buildkit-primary-v1", "0.000000")
+        .await?;
     let tls = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
     let key = rustls::pki_types::PrivateKeyDer::Pkcs8(tls.signing_key.serialize_der().into());
     let config = rustls::ServerConfig::builder()
@@ -1728,17 +1767,20 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
         BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::Cancelled),
         "cancelled pre-build read never reaches unavailable object storage or solve"
     );
+    command.request.max_duration_milliseconds = 5_000;
     PgBuildStore::new(pool.clone())
         .accept_command("agent-build-command-v1", &command_event(command.clone())?)
         .await?;
     let deadline = add_time(database_now(&pool).await?, time::Duration::seconds(5))?;
     let lease = uuid::Uuid::new_v4();
+    billing.seed_command(&command, 1, lease).await?;
     let first = FencedBuildExecutor::new(
         PgBuildExecutorFenceStore::new(pool.clone()),
         CountingBuildExecutor {
             calls: Arc::new(AtomicUsize::new(0)),
         },
-    );
+    )
+    .with_billing_client(billing.client.clone());
     first
         .execute(build_executor_envelope(
             &command,
@@ -1749,7 +1791,8 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
         ))
         .await?;
     let production =
-        FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool.clone()), backend);
+        FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool.clone()), backend)
+            .with_billing_client(billing.client.clone());
     let response = production
         .execute(build_executor_envelope(
             &command,
@@ -1778,6 +1821,7 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
         manifest_mode.store(mode, Ordering::SeqCst);
         let before = manifest_calls.load(Ordering::SeqCst);
         let mut next = build_command()?;
+        next.request.max_duration_milliseconds = 5_000;
         next.request.output_repository = command.request.output_repository.clone();
         *expected_tag.lock().expect("expected owned candidate") = format!(
             "candidate-{}",
@@ -1798,6 +1842,7 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
             .accept_command("agent-build-command-v1", &command_event(next.clone())?)
             .await?;
         let lease = uuid::Uuid::new_v4();
+        billing.seed_command(&next, 1, lease).await?;
         let deadline = add_time(database_now(&pool).await?, time::Duration::seconds(5))?;
         first
             .execute(build_executor_envelope(&next, 1, lease, stage, deadline))
@@ -1871,6 +1916,10 @@ async fn cancellation_and_completion_use_one_terminal_fence()
         ))
         .await?;
     apply_agent_migrations(&pool).await?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    billing
+        .synthetic_tariff("buildkit-primary-v1", "0.000000")
+        .await?;
     let store = PgBuildStore::new(pool.clone());
     // External registry completion is represented by the existing executor fixture. Its
     // actual fenced cleanup persists the receipt; a pipeline return alone is insufficient.
@@ -1920,7 +1969,8 @@ async fn cancellation_and_completion_use_one_terminal_fence()
                     pool: pool.clone(),
                     cleanups: Arc::new(AtomicUsize::new(0)),
                 },
-            );
+            )
+            .with_billing_client(billing.client.clone());
             executor
                 .execute(build_executor_envelope(
                     &command,
@@ -2028,5 +2078,401 @@ async fn cancellation_and_completion_use_one_terminal_fence()
                 .is_none()
         );
     }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct MeteredBoundary {
+    executions: Arc<AtomicUsize>,
+    queries: Arc<AtomicUsize>,
+    measurement: Arc<tokio::sync::Mutex<contracts::resource::build_costing::BuildUsageMeasurement>>,
+}
+#[async_trait]
+impl BuildExecutorBackend for MeteredBoundary {
+    async fn execute(
+        &self,
+        _: &BuildProviderRequestContext,
+        request: &BuildExecutorRequest,
+        _: &tokio_util::sync::CancellationToken,
+    ) -> BuildExecutorResponse {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        if let BuildExecutorRequest::Cleanup {
+            build_request_id,
+            identity,
+            ..
+        } = request
+        {
+            return BuildExecutorResponse::Cleaned {
+                build_request_id: *build_request_id,
+                build_identity: *identity,
+            };
+        }
+        BuildExecutorResponse::Failed {
+            failure: BuildProviderFailure {
+                code: BuildProviderFailureCode::ExecutionUnknown,
+                retryable: false,
+            },
+        }
+    }
+    async fn query_build_usage(
+        &self,
+        _: &BuildProviderRequestContext,
+        _: &BuildExecutorRequest,
+    ) -> contracts::resource::build_costing::BuildUsageMeasurement {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        self.measurement.lock().await.clone()
+    }
+}
+
+#[tokio::test]
+async fn real_resource_tls_build_admission_unknown_release_and_late_history_never_reexecute()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::{FixedDecimal, build_costing::BuildUsageMeasurement};
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    let mut command = build_command()?;
+    command.request.max_duration_milliseconds = 60_000;
+    let token = uuid::Uuid::new_v4();
+    billing.seed_command(&command, 1, token).await?;
+    let now = database_now(&pool).await?;
+    let envelope = build_executor_envelope(
+        &command,
+        1,
+        token,
+        BuildProviderStage::Build,
+        add_time(now, time::Duration::seconds(50))?,
+    );
+    let executions = Arc::new(AtomicUsize::new(0));
+    let queries = Arc::new(AtomicUsize::new(0));
+    let measurement = Arc::new(tokio::sync::Mutex::new(BuildUsageMeasurement::Unknown {
+        reason: "synthetic external BuildKit history reply missing".into(),
+    }));
+    let executor = Arc::new(
+        FencedBuildExecutor::new(
+            PgBuildExecutorFenceStore::new(pool.clone()),
+            MeteredBoundary {
+                executions: executions.clone(),
+                queries: queries.clone(),
+                measurement: measurement.clone(),
+            },
+        )
+        .with_billing_client(billing.client.clone()),
+    );
+    assert!(matches!(
+        executor.execute(envelope.clone()).await,
+        Err(BuildExecutorFenceError::Billing(_))
+    ));
+    billing
+        .synthetic_tariff("buildkit-primary-v1", "2.000000")
+        .await?;
+    // 60 seconds costs 120; seed_command granted only 100 synthetic Credits.
+    assert!(matches!(
+        executor.execute(envelope.clone()).await,
+        Err(BuildExecutorFenceError::Billing(_))
+    ));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    let holds: i64 = sqlx::query_scalar("SELECT count(*) FROM resource.credit_holds")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(holds, 0);
+    billing
+        .credits
+        .admin(
+            &uuid::Uuid::new_v4().to_string(),
+            ActorId::new(),
+            &[contracts::PlatformRole::PlatformAdmin],
+            &contracts::resource::credits::CreditAdminOperation::Grant {
+                project_id: command.request.project_id,
+                amount: FixedDecimal::parse("100.000000")?,
+                reason: "isolated build allowance".into(),
+            },
+        )
+        .await?;
+    // Actual NATS fault injection: execute once and drop its reply. The provider sends only a read-only query afterwards.
+    use futures_util::StreamExt as _;
+    let nats = testcontainers::GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(testcontainers::core::ContainerPort::Tcp(4222))
+        .with_wait_for(testcontainers::core::WaitFor::message_on_stderr(
+            "Server is ready",
+        ))
+        .start()
+        .await?;
+    let nats_client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let mut subscription = nats_client.subscribe("synthetic.build.execute").await?;
+    nats_client.flush().await?;
+    let server_client = nats_client.clone();
+    let server_executor = executor.clone();
+    let wire_requests = Arc::new(AtomicUsize::new(0));
+    let wire_server_requests = wire_requests.clone();
+    let server = tokio::spawn(async move {
+        while let Some(message) = subscription.next().await {
+            let request: BuildExecutorRequestEnvelope =
+                serde_json::from_slice(&message.payload).expect("actual envelope");
+            let query = request.query_only;
+            wire_server_requests.fetch_add(1, Ordering::SeqCst);
+            let response = server_executor
+                .execute(request)
+                .await
+                .expect("funded executor");
+            if query {
+                server_client
+                    .publish(
+                        message.reply.expect("query reply"),
+                        serde_json::to_vec(&response).expect("response").into(),
+                    )
+                    .await
+                    .expect("query publish");
+            }
+        }
+    });
+    let envelope = build_executor_envelope(
+        &command,
+        1,
+        token,
+        BuildProviderStage::Build,
+        add_time(database_now(&pool).await?, time::Duration::seconds(2))?,
+    );
+    let provider = agent_service::build_provider::NatsBuildSupplyChainProvider::new(
+        nats_client,
+        "synthetic.build.execute".into(),
+        "buildkit-primary-v1".into(),
+        "harbor-primary-v1".into(),
+        Duration::from_secs(5),
+    )
+    .expect("validated NATS test provider");
+    let failure = provider
+        .build_candidate(
+            &envelope.context,
+            &command,
+            BuildIdentity(Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
+        )
+        .await
+        .expect_err("unknown lost reply remains unknown");
+    assert_eq!(failure.code, BuildProviderFailureCode::ExecutionUnknown);
+    assert_eq!(wire_requests.load(Ordering::SeqCst), 2);
+    let expired = provider
+        .build_candidate(
+            &envelope.context,
+            &command,
+            BuildIdentity(Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
+        )
+        .await
+        .expect_err("expired original is queried, never executed");
+    assert_eq!(expired.code, BuildProviderFailureCode::ExecutionUnknown);
+    assert_eq!(wire_requests.load(Ordering::SeqCst), 3);
+    server.abort();
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let original = billing
+        .client
+        .get_build_cost(command.request.id, 1, token)
+        .await?
+        .ok_or("grant")?;
+    assert_eq!(
+        original.estimate.total.amount,
+        FixedDecimal::parse("120.000000")?
+    );
+    assert!(original.first_unknown_observation.is_some());
+    let deadline = original
+        .hold
+        .reconciliation_due_at
+        .ok_or("unknown deadline")?;
+    let mut query = envelope.clone();
+    query.query_only = true;
+    executor.execute(query.clone()).await?;
+    assert_eq!(
+        billing
+            .client
+            .get_build_cost(command.request.id, 1, token)
+            .await?
+            .ok_or("grant")?
+            .hold
+            .reconciliation_due_at,
+        Some(deadline)
+    );
+    // Move only the synthetic unknown observation clock; production expires from the first fact.
+    sqlx::query("UPDATE resource.credit_holds SET unknown_since=date_trunc('milliseconds',clock_timestamp()-interval '2 hours'),reconciliation_due_at=date_trunc('milliseconds',clock_timestamp()-interval '1 hour') WHERE hold_id=$1").bind(original.hold.id).execute(&pool).await?;
+    assert_eq!(billing.credits.expire_unknown_once().await?, 1);
+    assert_eq!(
+        billing
+            .credits
+            .account(command.request.project_id)
+            .await?
+            .reserved,
+        FixedDecimal::zero()
+    );
+    *measurement.lock().await = BuildUsageMeasurement::Known {
+        history_ref: "synthetic/exact-original-build-history".into(),
+        started_at: add_time(now, time::Duration::seconds(-3))?,
+        finished_at: add_time(now, time::Duration::milliseconds(-1_750))?,
+    };
+    // The mutable native workflow fence may already point at cleanup/new generation. Cost lookup uses its preserved original grant.
+    sqlx::query("UPDATE agent.build_executor_fences SET highest_generation=2,lease_token=$2,tombstone_generation=2,last_stage='cleanup',last_stage_rank=5,last_response='{}' WHERE build_request_id=$1").bind(command.request.id.as_uuid()).bind(uuid::Uuid::new_v4()).execute(&pool).await?;
+    executor.execute(query.clone()).await?;
+    let settled = billing
+        .client
+        .get_build_cost(command.request.id, 1, token)
+        .await?
+        .ok_or("settled")?;
+    assert_eq!(
+        settled
+            .charged_total
+            .as_ref()
+            .ok_or("actual charge")?
+            .amount,
+        FixedDecimal::parse("2.500000")?
+    );
+    assert_eq!(
+        billing
+            .credits
+            .account(command.request.project_id)
+            .await?
+            .platform_absorbed,
+        FixedDecimal::parse("2.500000")?
+    );
+    assert_eq!(
+        billing
+            .credits
+            .account(command.request.project_id)
+            .await?
+            .balance,
+        FixedDecimal::parse("200.000000")?
+    );
+    executor.execute(query).await?;
+    assert_eq!(
+        billing
+            .client
+            .get_build_cost(command.request.id, 1, token)
+            .await?
+            .ok_or("settled")?,
+        settled
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert!(queries.load(Ordering::SeqCst) >= 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn known_original_history_unlocks_cleanup_without_publishing_or_rebuilding()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::{FixedDecimal, build_costing::BuildUsageMeasurement};
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    billing
+        .synthetic_tariff("buildkit-primary-v1", "1.000000")
+        .await?;
+    let mut command = build_command()?;
+    command.request.max_duration_milliseconds = 10_000;
+    let token = uuid::Uuid::new_v4();
+    billing.seed_command(&command, 1, token).await?;
+    let now = database_now(&pool).await?;
+    let envelope = build_executor_envelope(
+        &command,
+        1,
+        token,
+        BuildProviderStage::Build,
+        add_time(now, time::Duration::seconds(8))?,
+    );
+    let executions = Arc::new(AtomicUsize::new(0));
+    let measurement = Arc::new(tokio::sync::Mutex::new(BuildUsageMeasurement::Unknown {
+        reason: "external history not yet observable".into(),
+    }));
+    let executor = FencedBuildExecutor::new(
+        PgBuildExecutorFenceStore::new(pool.clone()),
+        MeteredBoundary {
+            executions: executions.clone(),
+            queries: Arc::new(AtomicUsize::new(0)),
+            measurement: measurement.clone(),
+        },
+    )
+    .with_billing_client(billing.client.clone());
+    executor.execute(envelope.clone()).await?;
+    let receipt: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT last_response FROM agent.build_executor_fences WHERE build_request_id=$1",
+    )
+    .bind(command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(receipt.is_none());
+    *measurement.lock().await = BuildUsageMeasurement::Known {
+        history_ref: "synthetic/confirmed-original-terminal".into(),
+        started_at: add_time(now, time::Duration::seconds(-2))?,
+        finished_at: add_time(now, time::Duration::milliseconds(-750))?,
+    };
+    let mut query = envelope;
+    query.query_only = true;
+    assert!(
+        matches!(executor.execute(query.clone()).await?.response,BuildExecutorResponse::Failed { failure } if failure.code==BuildProviderFailureCode::ExecutionUnknown)
+    );
+    let cleanup = build_executor_envelope(
+        &command,
+        1,
+        token,
+        BuildProviderStage::Cleanup,
+        query.context.deadline_at,
+    );
+    assert!(matches!(
+        executor.execute(cleanup.clone()).await?.response,
+        BuildExecutorResponse::Cleaned { .. }
+    ));
+    executor.execute(query).await?;
+    let receipt: serde_json::Value = sqlx::query_scalar(
+        "SELECT last_response FROM agent.build_executor_fences WHERE build_request_id=$1",
+    )
+    .bind(command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(receipt["status"], "cleaned");
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        2,
+        "one build and one cleanup"
+    );
+    let artifacts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM agent.build_executor_artifacts WHERE build_request_id=$1",
+    )
+    .bind(command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(artifacts, 0);
+    assert_eq!(
+        billing
+            .credits
+            .account(command.request.project_id)
+            .await?
+            .balance,
+        FixedDecimal::parse("98.750000")?
+    );
+    assert_eq!(
+        billing
+            .credits
+            .account(command.request.project_id)
+            .await?
+            .reserved,
+        FixedDecimal::zero()
+    );
     Ok(())
 }

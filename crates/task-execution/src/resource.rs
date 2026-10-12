@@ -381,7 +381,14 @@ impl ResourceClient {
                 else {
                     return Err(ResourceClientError::Transport);
                 };
-                if input.authorize_execution && !record.execution_authorized {
+                if record.hold.state != contracts::resource::credits::CreditHoldState::Pending
+                    || record.hold.measurement_unknown
+                    || record.hold.expired_unknown_at.is_some()
+                    || record.hold.remaining.scaled() < record.estimate.total.amount.scaled()
+                    || record.execution_deadline != Some(input.execution_deadline)
+                    || record.stage_request_id.as_deref() != Some(input.stage_request_id.as_str())
+                    || (input.authorize_execution && !record.execution_authorized)
+                {
                     return Err(ResourceClientError::Transport);
                 }
                 return Ok(record);
@@ -391,6 +398,8 @@ impl ResourceClient {
         let record: contracts::resource::build_costing::BuildCostRecord = decode_response(&bytes)?;
         if record.build_request_id != input.build_request_id
             || record.attempt != input.attempt
+            || record.execution_deadline != Some(input.execution_deadline)
+            || record.stage_request_id.as_deref() != Some(input.stage_request_id.as_str())
             || (input.authorize_execution && !record.execution_authorized)
         {
             return Err(ResourceClientError::ResponseInvalid);
@@ -444,6 +453,23 @@ impl ResourceClient {
             return Err(ResourceClientError::ResponseInvalid);
         }
         Ok(record)
+    }
+
+    /// Claims at most 25 due original grants; the server persists bounded query pacing.
+    pub async fn claim_build_cost_reconciliations(
+        &self,
+    ) -> Result<Vec<contracts::resource::build_costing::BuildCostReconciliation>, ResourceClientError>
+    {
+        let bytes = self
+            .execute(
+                Method::GET,
+                "internal/v1/build-cost-reconciliations",
+                None,
+                None,
+                NotFound::Request,
+            )
+            .await?;
+        decode_response(&bytes)
     }
 
     fn encode_request<T: Serialize>(&self, request: &T) -> Result<Vec<u8>, ResourceClientError> {

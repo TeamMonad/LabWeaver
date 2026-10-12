@@ -375,6 +375,13 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
             .await;
         let project = match project {
             Ok(project) => project,
+            Err(mut error)
+                if error.code
+                    == BuildFailureCode::Provider(BuildProviderFailureCode::FundingRejected) =>
+            {
+                error.cleanup_verified = true;
+                return Err(error);
+            }
             Err(error) => {
                 return Err(self
                     .cleanup(command.request.id, identity, fence, error)
@@ -675,6 +682,7 @@ pub enum BuildProviderFailureCode {
     TimedOut,
     Cancelled,
     ExecutionUnknown,
+    FundingRejected,
     Rejected,
     IdentityMismatch,
     OutputInvalid,
@@ -689,6 +697,7 @@ impl BuildProviderFailure {
             BuildProviderFailureCode::Cancelled => "LW_AGENT_BUILD_CANCELLED",
             BuildProviderFailureCode::ExecutionUnknown => "LW_AGENT_BUILD_EXECUTION_UNKNOWN",
             BuildProviderFailureCode::Unavailable => "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+            BuildProviderFailureCode::FundingRejected => "LW_AGENT_BUILD_FUNDING_REJECTED",
             BuildProviderFailureCode::Rejected => "LW_AGENT_BUILD_REJECTED",
             BuildProviderFailureCode::IdentityMismatch => {
                 "LW_AGENT_BUILD_PROVIDER_IDENTITY_MISMATCH"
@@ -758,6 +767,9 @@ impl BuildFailureCode {
             Self::Cancelled => "LW_AGENT_BUILD_CANCELLED",
             Self::Provider(BuildProviderFailureCode::Unavailable) => {
                 "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE"
+            }
+            Self::Provider(BuildProviderFailureCode::FundingRejected) => {
+                "LW_AGENT_BUILD_FUNDING_REJECTED"
             }
             Self::Provider(BuildProviderFailureCode::Rejected) => "LW_AGENT_BUILD_REJECTED",
             Self::Provider(BuildProviderFailureCode::IdentityMismatch) => {

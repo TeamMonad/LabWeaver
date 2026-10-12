@@ -1376,6 +1376,15 @@ async fn internal_service_auth(
 }
 
 fn internal_route_permission(path: &str) -> Option<&'static str> {
+    if path == "/internal/v1/build-cost-admissions"
+        || path == "/internal/v1/build-cost-reconciliations"
+        || path.starts_with("/internal/v1/build-costs/")
+    {
+        return Some("resource.credits.hold");
+    }
+    if path == "/internal/v1/build-cost-observations" {
+        return Some("resource.usage.record");
+    }
     if path == "/internal/v1/credits/holds" || path == "/internal/v1/credits/estimated-holds" {
         return Some("resource.credits.hold");
     }

@@ -33,6 +33,10 @@ pub(super) fn internal_routes() -> Router<ResourceApiState> {
             get(record),
         )
         .route("/internal/v1/build-cost-observations", post(observe))
+        .route(
+            "/internal/v1/build-cost-reconciliations",
+            get(reconciliations),
+        )
 }
 fn owner(
     state: &ResourceApiState,
@@ -104,6 +108,20 @@ async fn observe(
         state
             .store
             .observe_build_cost(&identity.client_id, &input)
+            .await?,
+    ))
+}
+
+async fn reconciliations(
+    State(state): State<ResourceApiState>,
+    Extension(identity): Extension<auth::ServiceIdentity>,
+) -> Result<Json<Vec<contracts::resource::build_costing::BuildCostReconciliation>>, ResourceApiError>
+{
+    owner(&state, &identity)?;
+    Ok(Json(
+        state
+            .store
+            .claim_build_cost_reconciliations(&identity.client_id)
             .await?,
     ))
 }

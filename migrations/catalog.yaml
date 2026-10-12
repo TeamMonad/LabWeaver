@@ -146,11 +146,11 @@ domains:
         file: agent/0019_build_executor_import_stage.sql
         sha256: 40c1d4af53c76be4e02b0cdcd040b7b4995ca41ca3666c5383339aaa5c3a139b
       - id: 20
-        file: agent/0020_resource_build_authority_read.sql
-        sha256: 5871e7a300ffad5d00f63a775986209595eadd5fca6d44671ba5babcce130210
-      - id: 20
         file: agent/0020_unified_usage_payload_target.sql
         sha256: 8621e4c4ace464ed258103eb2bab16452b295667726f67e6cb43fe3e4cfa6329
+      - id: 21
+        file: agent/0021_resource_build_authority_read.sql
+        sha256: d0a2ed8ede540f6df2620df505b9c594895e0d2945d48a1de536cc7e4a9a829a
   - name: evaluation
     migrations:
       - id: 1
@@ -238,4 +238,4 @@ domains:
         sha256: d68bca4b08afd1d1fb3d5ce07a7f72221a290eab4988f30ed261b8759d4bccd0
       - id: 19
         file: resource/0019_build_metering.sql
-        sha256: eee00f379a353648c3044984109fb6dacfc01b3510ff5ef17d16718ce88ccd4c
+        sha256: 3429e29240d69fae733faf7a7e87810039a421145b8d8f357efab85939410012

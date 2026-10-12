@@ -30,7 +30,7 @@ Resource 保存项目账户、预占和不可变账目。金额使用现有 Fixe
 | listProjectCreditHolds | GET /api/v1/projects/{projectId}/credits/holds | 同上 |
 | createCreditAdminOperation | POST /api/v1/resource/credits/operations | 平台管理员 |
 
-两个列表使用 `page` 与 `pageSize`。默认 25，最大 100。响应含 `hasMore`。账目按创建时间和 ID 倒序排列。预占含 requestId、付款项目、业务键和调用服务身份。
+两个列表使用 `page` 与 `pageSize`。默认 25，最大 100。响应含 `hasMore`。账目按创建时间和 ID 倒序排列。预占含真实业务目标、付款项目、业务键和调用服务身份。
 
 管理员写操作必须提供 `Idempotency-Key` 和非空 reason。角色由签名身份提供，不从请求体读取。
 
@@ -125,3 +125,24 @@ Resource使用数据库UTC毫秒时间保存首次未知事实的 `unknownSince`
 迟到的已确认费用全部由平台承担，不重新冻结或扣收项目余额。已知结算入口本身检查期限，并在同一账务事务先执行到期释放；它不能依赖后台循环恰好先处理。原eventId换重试键也只入账一次。在期限前已核实并结算的费用保持正常规则，不因后来的时钟边界重新退款或收费。
 
 Resource现有后台循环每次最多处理100个候选，重启或重复处理不重复释放。释放、已知核实和账目遵守账户先于预占的锁顺序。报价和完整价格配置均不因本期限修改。模型价格、全部模型/BuildKit/环境消费入口和预留产品仍按剩余验收推进。
+
+## BuildKit 构建费用
+
+Dockerfile 构建使用 `build_second`，费率还必须指定真实 `builderBinding`。`unitQuantity` 表示价格对应的构建秒数，费用单位为 `CREDITS`。现有 BuildKit 没有执行请求中的 CPU/内存上限，因此这些声明不能换算为已使用的 CPU/内存时。没有匹配费率时拒绝新构建；本功能不写入默认费率或初始余额。
+
+| 操作 | 接口 | 调用范围 |
+| --- | --- | --- |
+| estimateProjectBuildCost | POST /api/v1/projects/{projectId}/build-cost-estimate | 当前项目成员或平台管理员 |
+| getProjectBuildCost | GET /api/v1/projects/{projectId}/build-costs/{buildRequestId}/attempts/{attempt} | 同上 |
+| admitBuildCost | POST /internal/v1/build-cost-admissions | 已配置 Agent，resource.credits.hold |
+| getBuildCost | GET /internal/v1/build-costs/{buildRequestId}/attempts/{attempt}?leaseToken={leaseToken} | 同上，原 nonce |
+| observeBuildCost | POST /internal/v1/build-cost-observations | 已配置 Agent，resource.usage.record |
+| claimBuildCostReconciliations | GET /internal/v1/build-cost-reconciliations | 已配置 Agent，resource.credits.hold |
+
+估价输入是 `builderBinding`、`maxDurationMilliseconds` 和 `from`。执行预占从 Agent 已保存的真实 BuildRequest 取得项目、builder 和最大时长，拒绝旧 attempt、不同 nonce、失效租约或已取消任务。Resource 在自己的 SQLx 事务内提交估价快照、真实 BuildRequest/attempt 预占和执行授权；Agent 随后在自己的本地事务再次检查取消与执行 fence，事务外才调用 BuildKit。这是跨进程准入协议，两端不是一个远端原子事务。
+
+每个 hold 具有一个真实目标：`requestId` 或 `buildRequestId` + `buildAttempt`。构建 hold 的 `requestId` 为 null，不伪造 ResourceRequest、Task 或 Environment。构建记录保留执行截止时间、原 stage 身份、估价、用量与费用明细。预占以 build/attempt 去重，并校验不可变命令、截止时间和 nonce；观察按业务身份去重，允许 Unknown 后报告 Known，不能更改已结算事实。
+
+实际费用取唯一且身份匹配的 BuildKit history 的起止时间，以毫秒分子、`quantityDivisor=1000` 计算，跨版本按边界分段，和估价共用精确计价函数。缺失边界或低于当前毫秒精度的区间保留待核实状态和观察到的原时间，不补零。已知时间遇到缺失历史费率时保留时间事实，费用继续待核实；管理员补齐覆盖后按原事实重试。
+
+丢失执行响应后只查询原 stage，不能重放 Solve。未知事实首次出现后一小时释放剩余预占，重试不延长；迟到的已知费用和超过预占的尾部由平台承担。原构建费用可在清理或新 attempt 后查询和结算，查询不能恢复工作流或发布镜像。Resource 到期维护不依赖 NATS Outbox；Agent 每轮最多读取 25 条到期原 grant，服务端为同条查询保留一分钟间隔。未知记录和费用待核实状态在资金释放后仍保留。

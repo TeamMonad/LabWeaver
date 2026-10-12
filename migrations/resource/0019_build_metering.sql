@@ -43,6 +43,10 @@ CREATE FUNCTION resource.build_metering_immutable_identity() RETURNS trigger LAN
 BEGIN
  IF (NEW.build_request_id,NEW.attempt,NEW.project_id,NEW.owner_client_id,NEW.lease_token,NEW.command,NEW.estimate,NEW.hold_id,NEW.created_at)
  IS DISTINCT FROM (OLD.build_request_id,OLD.attempt,OLD.project_id,OLD.owner_client_id,OLD.lease_token,OLD.command,OLD.estimate,OLD.hold_id,OLD.created_at)
+ OR (OLD.execution_deadline IS NOT NULL AND NEW.execution_deadline IS DISTINCT FROM OLD.execution_deadline)
+ OR (OLD.build_stage_request_id IS NOT NULL AND NEW.build_stage_request_id IS DISTINCT FROM OLD.build_stage_request_id)
+ OR (OLD.execution_authorized AND NOT NEW.execution_authorized)
+ OR (OLD.measurement->>'state'='known' AND NEW.measurement IS DISTINCT FROM OLD.measurement)
  OR (OLD.first_unknown_observation IS NOT NULL AND NEW.first_unknown_observation IS DISTINCT FROM OLD.first_unknown_observation)
  OR (OLD.charged_total IS NOT NULL AND (NEW.charged_total,NEW.charged_lines,NEW.measurement) IS DISTINCT FROM (OLD.charged_total,OLD.charged_lines,OLD.measurement)) THEN
   RAISE EXCEPTION 'LW_BUILD_COST_IMMUTABLE';

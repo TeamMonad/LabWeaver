@@ -1219,6 +1219,229 @@ export type AuthorizationDecisionSchemaRevision = number;
 export type AuthorizationDecisionSchemaUtcTimestamp = string;
 
 /**
+ * BuildCostEstimateRequest
+ */
+export type BuildCostEstimateRequestSchema = {
+    builderBinding: string;
+    from: BuildCostEstimateRequestSchemaUtcTimestamp;
+    maxDurationMilliseconds: number;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type BuildCostEstimateRequestSchemaUtcTimestamp = string;
+
+/**
+ * BuildCostEstimate
+ */
+export type BuildCostEstimateSchema = {
+    input: BuildCostEstimateRequest;
+    lines: Array<ResourceChargeLine>;
+    projectId: BuildCostEstimateSchemaProjectId;
+    total: Money;
+    until: BuildCostEstimateSchemaUtcTimestamp;
+};
+
+export type BuildCostEstimateRequest = {
+    builderBinding: string;
+    from: BuildCostEstimateSchemaUtcTimestamp;
+    maxDurationMilliseconds: number;
+};
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type FixedDecimal = string;
+
+/**
+ * A fixed-precision amount with an explicit ISO-4217-like currency code.
+ */
+export type Money = {
+    amount: FixedDecimal;
+    currency: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type BuildCostEstimateSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type RateId = string;
+
+/**
+ * Resource dimension used by a versioned rate card.
+ */
+export type ResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+
+/**
+ * One immutable line in a calculated charge.
+ */
+export type ResourceChargeLine = {
+    amount: Money;
+    quantity: number;
+    quantityDivisor?: 1 | 1000;
+    rateId: RateId;
+    rateRevision: BuildCostEstimateSchemaRevision;
+    unit: ResourceBillingUnit;
+    unitPrice: Money;
+    unitQuantity: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type BuildCostEstimateSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type BuildCostEstimateSchemaUtcTimestamp = string;
+
+/**
+ * BuildCostRecord
+ */
+export type BuildCostRecordSchema = {
+    attempt: number;
+    buildRequestId: BuildCostRecordSchemaBuildRequestId;
+    chargedLines?: Array<BuildCostRecordSchemaResourceChargeLine> | null;
+    chargedTotal?: BuildCostRecordSchemaMoney | null;
+    estimate: BuildCostEstimate;
+    executionAuthorized: boolean;
+    executionDeadline?: BuildCostRecordSchemaUtcTimestamp | null;
+    firstUnknownObservation?: BuildUsageMeasurement | null;
+    hold: CreditHold;
+    measurement?: BuildUsageMeasurement | null;
+    stageRequestId?: string | null;
+};
+
+export type BuildCostEstimate = {
+    input: BuildCostRecordSchemaBuildCostEstimateRequest;
+    lines: Array<BuildCostRecordSchemaResourceChargeLine>;
+    projectId: BuildCostRecordSchemaProjectId;
+    total: BuildCostRecordSchemaMoney;
+    until: BuildCostRecordSchemaUtcTimestamp;
+};
+
+export type BuildCostRecordSchemaBuildCostEstimateRequest = {
+    builderBinding: string;
+    from: BuildCostRecordSchemaUtcTimestamp;
+    maxDurationMilliseconds: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type BuildCostRecordSchemaBuildRequestId = string;
+
+/**
+ * A provider history observation. Missing bounds remain unknown.
+ */
+export type BuildUsageMeasurement = {
+    finishedAt: BuildCostRecordSchemaUtcTimestamp;
+    historyRef: string;
+    startedAt: BuildCostRecordSchemaUtcTimestamp;
+    state: 'known';
+} | {
+    reason: string;
+    state: 'unknown';
+} | {
+    reason: string;
+    state: 'not_started';
+};
+
+export type CreditHold = {
+    amount: BuildCostRecordSchemaFixedDecimal;
+    buildAttempt?: number | null;
+    buildRequestId?: BuildCostRecordSchemaBuildRequestId | null;
+    businessKey: string;
+    createdAt: BuildCostRecordSchemaUtcTimestamp;
+    expiredUnknownAt?: BuildCostRecordSchemaUtcTimestamp | null;
+    id: string;
+    measurementUnknown: boolean;
+    ownerClientId: string;
+    projectId: BuildCostRecordSchemaProjectId;
+    reason?: string | null;
+    reconciliationDueAt?: BuildCostRecordSchemaUtcTimestamp | null;
+    remaining: BuildCostRecordSchemaFixedDecimal;
+    requestId?: ResourceRequestId | null;
+    state: CreditHoldState;
+    unknownSince?: BuildCostRecordSchemaUtcTimestamp | null;
+};
+
+export type CreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type BuildCostRecordSchemaFixedDecimal = string;
+
+/**
+ * A fixed-precision amount with an explicit ISO-4217-like currency code.
+ */
+export type BuildCostRecordSchemaMoney = {
+    amount: BuildCostRecordSchemaFixedDecimal;
+    currency: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type BuildCostRecordSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type BuildCostRecordSchemaRateId = string;
+
+/**
+ * Resource dimension used by a versioned rate card.
+ */
+export type BuildCostRecordSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+
+/**
+ * One immutable line in a calculated charge.
+ */
+export type BuildCostRecordSchemaResourceChargeLine = {
+    amount: BuildCostRecordSchemaMoney;
+    quantity: number;
+    quantityDivisor?: 1 | 1000;
+    rateId: BuildCostRecordSchemaRateId;
+    rateRevision: BuildCostRecordSchemaRevision;
+    unit: BuildCostRecordSchemaResourceBillingUnit;
+    unitPrice: BuildCostRecordSchemaMoney;
+    unitQuantity: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type BuildCostRecordSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type BuildCostRecordSchemaUtcTimestamp = string;
+
+/**
  * CandidateApproval
  *
  * Human decision bound to an exact candidate and dependency identity.
@@ -1422,16 +1645,16 @@ export type ConsoleCapabilitySchemaUtcTimestamp = string;
  * CreditAccount
  */
 export type CreditAccountSchema = {
-    available: FixedDecimal;
-    balance: FixedDecimal;
+    available: CreditAccountSchemaFixedDecimal;
+    balance: CreditAccountSchemaFixedDecimal;
     currency: string;
-    pending: FixedDecimal;
-    platformAbsorbed: FixedDecimal;
+    pending: CreditAccountSchemaFixedDecimal;
+    platformAbsorbed: CreditAccountSchemaFixedDecimal;
     projectId: CreditAccountSchemaProjectId;
-    reserved: FixedDecimal;
+    reserved: CreditAccountSchemaFixedDecimal;
     revision: CreditAccountSchemaRevision;
-    spent: FixedDecimal;
-    unknown: FixedDecimal;
+    spent: CreditAccountSchemaFixedDecimal;
+    unknown: CreditAccountSchemaFixedDecimal;
     unknownCount: number;
 };
 
@@ -1443,7 +1666,7 @@ export type CreditAccountSchema = {
  * internal scaled representation is available to Resource arithmetic without
  * introducing a database-specific decimal dependency into the contracts crate.
  */
-export type FixedDecimal = string;
+export type CreditAccountSchemaFixedDecimal = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -1500,13 +1723,20 @@ export type CreditAdminOperationSchemaProjectId = string;
  */
 export type CreditHoldPageSchema = {
     hasMore: boolean;
-    items: Array<CreditHold>;
+    items: Array<CreditHoldPageSchemaCreditHold>;
     page: number;
     pageSize: number;
 };
 
-export type CreditHold = {
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type CreditHoldPageSchemaBuildRequestId = string;
+
+export type CreditHoldPageSchemaCreditHold = {
     amount: CreditHoldPageSchemaFixedDecimal;
+    buildAttempt?: number | null;
+    buildRequestId?: CreditHoldPageSchemaBuildRequestId | null;
     businessKey: string;
     createdAt: CreditHoldPageSchemaUtcTimestamp;
     expiredUnknownAt?: CreditHoldPageSchemaUtcTimestamp | null;
@@ -1517,12 +1747,12 @@ export type CreditHold = {
     reason?: string | null;
     reconciliationDueAt?: CreditHoldPageSchemaUtcTimestamp | null;
     remaining: CreditHoldPageSchemaFixedDecimal;
-    requestId: ResourceRequestId;
-    state: CreditHoldState;
+    requestId?: CreditHoldPageSchemaResourceRequestId | null;
+    state: CreditHoldPageSchemaCreditHoldState;
     unknownSince?: CreditHoldPageSchemaUtcTimestamp | null;
 };
 
-export type CreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
+export type CreditHoldPageSchemaCreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
 
 /**
  * Canonical signed decimal with exactly six fractional digits.
@@ -1542,7 +1772,7 @@ export type CreditHoldPageSchemaProjectId = string;
 /**
  * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
  */
-export type ResourceRequestId = string;
+export type CreditHoldPageSchemaResourceRequestId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -3897,7 +4127,7 @@ export type CreateProjectRequestSchemaCourseId = string;
  * Administrator adjustment appended to an existing calculated charge.
  */
 export type CreateResourceAdjustmentRequestSchema = {
-    amount: Money;
+    amount: CreateResourceAdjustmentRequestSchemaMoney;
     reason: string;
 };
 
@@ -3914,7 +4144,7 @@ export type CreateResourceAdjustmentRequestSchemaFixedDecimal = string;
 /**
  * A fixed-precision amount with an explicit ISO-4217-like currency code.
  */
-export type Money = {
+export type CreateResourceAdjustmentRequestSchemaMoney = {
     amount: CreateResourceAdjustmentRequestSchemaFixedDecimal;
     currency: string;
 };
@@ -3925,11 +4155,12 @@ export type Money = {
  * Administrator-created immutable rate version.
  */
 export type CreateResourceRateRequestSchema = {
+    builderBinding?: string | null;
     effectiveFrom: CreateResourceRateRequestSchemaUtcTimestamp;
     effectiveUntil?: CreateResourceRateRequestSchemaUtcTimestamp | null;
     gpuClass?: string | null;
     gpuMode?: CreateResourceRateRequestSchemaGpuAllocationMode | null;
-    unit: ResourceBillingUnit;
+    unit: CreateResourceRateRequestSchemaResourceBillingUnit;
     unitPrice: CreateResourceRateRequestSchemaMoney;
     /**
      * Number of base usage units represented by `unit_price`.
@@ -3966,7 +4197,7 @@ export type CreateResourceRateRequestSchemaMoney = {
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type CreateResourceRateRequestSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -10024,7 +10255,7 @@ export type ResourceChargeSchema = {
     createdAt: ResourceChargeSchemaUtcTimestamp;
     diagnosticCode?: string | null;
     id: ChargeId;
-    lines: Array<ResourceChargeLine>;
+    lines: Array<ResourceChargeSchemaResourceChargeLine>;
     projectId: ResourceChargeSchemaProjectId;
     settlement: UsageSettlementState;
     total: ResourceChargeSchemaMoney;
@@ -10072,21 +10303,21 @@ export type ResourceChargeSchemaProjectId = string;
 /**
  * Strongly typed UUIDv7 identifier for `RateId`.
  */
-export type RateId = string;
+export type ResourceChargeSchemaRateId = string;
 
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * One immutable line in a calculated charge.
  */
-export type ResourceChargeLine = {
+export type ResourceChargeSchemaResourceChargeLine = {
     amount: ResourceChargeSchemaMoney;
     quantity: number;
     quantityDivisor?: 1 | 1000;
-    rateId: RateId;
+    rateId: ResourceChargeSchemaRateId;
     rateRevision: ResourceChargeSchemaRevision;
     unit: ResourceChargeSchemaResourceBillingUnit;
     unitPrice: ResourceChargeSchemaMoney;
@@ -10200,7 +10431,7 @@ export type ResourceCostEstimateSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * One immutable line in a calculated charge.
@@ -10301,6 +10532,7 @@ export type ResourceLeaseSchemaUtcTimestamp = string;
  * Immutable versioned unit price. A later rate never mutates a prior charge.
  */
 export type ResourceRateSchema = {
+    builderBinding?: string | null;
     effectiveFrom: ResourceRateSchemaUtcTimestamp;
     effectiveUntil?: ResourceRateSchemaUtcTimestamp | null;
     gpuClass?: string | null;
@@ -10349,7 +10581,7 @@ export type ResourceRateSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceRateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type ResourceRateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -14559,6 +14791,142 @@ export type GetProjectAuthoringApprovalResponses = {
 };
 
 export type GetProjectAuthoringApprovalResponse = GetProjectAuthoringApprovalResponses[keyof GetProjectAuthoringApprovalResponses];
+
+export type EstimateProjectBuildCostData = {
+    body: BuildCostEstimateRequestSchema;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/build-cost-estimate';
+};
+
+export type EstimateProjectBuildCostErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type EstimateProjectBuildCostError = EstimateProjectBuildCostErrors[keyof EstimateProjectBuildCostErrors];
+
+export type EstimateProjectBuildCostResponses = {
+    /**
+     * Successful response
+     */
+    200: BuildCostEstimateSchema;
+};
+
+export type EstimateProjectBuildCostResponse = EstimateProjectBuildCostResponses[keyof EstimateProjectBuildCostResponses];
+
+export type GetProjectBuildCostData = {
+    body?: never;
+    path: {
+        projectId: string;
+        buildRequestId: string;
+        attempt: number;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/build-costs/{buildRequestId}/attempts/{attempt}';
+};
+
+export type GetProjectBuildCostErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectBuildCostError = GetProjectBuildCostErrors[keyof GetProjectBuildCostErrors];
+
+export type GetProjectBuildCostResponses = {
+    /**
+     * Successful response
+     */
+    200: BuildCostRecordSchema;
+};
+
+export type GetProjectBuildCostResponse = GetProjectBuildCostResponses[keyof GetProjectBuildCostResponses];
 
 export type GetProjectCandidateBuildData = {
     body?: never;
