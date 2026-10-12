@@ -3,6 +3,7 @@
 {{- if $configuration.enabled }}
 {{- $input := $configuration }}
 {{- $managedControl := and (eq $name "control-service") $root.Values.managedControlConfiguration }}
+{{- $environmentAuthority := and (has $name (list "container-executor" "kubevirt-executor")) $root.Values.environmentExecutorAuthority }}
 {{- if $root.Values.workloadInputs }}
 {{- if not (hasKey $root.Values.workloadInputs $name) }}
 {{- fail (printf "workloadInputs.%s is required" $name) }}
@@ -185,6 +186,9 @@ spec:
           resources:
             {{- toYaml (default $root.Values.resources $configuration.resources) | nindent 12 }}
           volumeMounts:
+            {{- if $environmentAuthority }}
+            - {name: environment-authority, mountPath: /etc/labweaver/environment-authority, readOnly: true}
+            {{- end }}
             {{- if $managedControl }}
             - {name: managed-runtime, mountPath: /run/labweaver/managed-configuration, readOnly: true}
             {{- end }}
@@ -205,6 +209,18 @@ spec:
             - {name: object-store-nginx, mountPath: /etc/nginx/labweaver-conf.d, readOnly: true}
             {{- end }}
       volumes:
+        {{- if $environmentAuthority }}
+        - name: environment-authority
+          projected:
+            defaultMode: 0440
+            sources:
+              {{- range $root.Values.environmentExecutorAuthority.secretSources }}
+              - secret:
+                  name: {{ .name | quote }}
+                  items:
+                    {{- toYaml .items | nindent 20 }}
+              {{- end }}
+        {{- end }}
         {{- if $managedControl }}
         - name: managed-input
           configMap:
