@@ -432,6 +432,7 @@ async fn tls_h2_rst_drops_cancel_handler_during_plain_begin_without_poisoning_po
         .fetch_one(&fixture.writer)
         .await?;
     let state = Arc::new(AgentApiState {
+        resource: None,
         store: PostgresAgentRunStore::new(fixture.writer.clone()),
         build_store: PgBuildStore::new(fixture.writer.clone()),
         generated_artifacts: GeneratedArtifactStore::new(fixture.writer.clone()),
