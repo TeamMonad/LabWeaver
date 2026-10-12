@@ -24,10 +24,12 @@ import yaml
 
 try:
     import render_platform_bundle as objects
+    import render_resource_bundle as resource_objects
 except ModuleNotFoundError as error:
     if error.name != "render_platform_bundle":
         raise
     from tools import render_platform_bundle as objects
+    from tools import render_resource_bundle as resource_objects
 
 API_VERSION = "deploy.labweaver.io/bundle/v1"
 MODEL_FILE = "config/bundle.yaml"
@@ -40,6 +42,22 @@ DEFAULT_MANIFEST = (
 WORKLOADS_FILE = (
     Path(__file__).resolve().parents[1] / "deploy/helm/labweaver/values.yaml"
 )
+RESOURCE_MANIFEST = (
+    Path(__file__).resolve().parents[1] / "deploy/config/resource-bundle-manifest.json"
+)
+RESOURCE_RESERVED = {
+    "resource_application_namespace",
+    "resource_application_release_name",
+    "resource_application_configuration_bundle",
+    "resource_application_configuration_manifest",
+    "resource_application_values_file",
+    "resource_application_versions_lock_file",
+    "resource_application_package_manifest",
+    "resource_application_access_seed_file",
+    "resource_application_vars_file",
+    "resource_application_reviewed_vars",
+    "resource_application_workloads",
+}
 RESERVED_VARIABLES = {
     "platform_application_namespace",
     "platform_application_release_name",
@@ -216,7 +234,9 @@ def _value_references(value: Any, references: set[str]) -> None:
         raise BundleError("LW_BUNDLE_TEMPLATE_FORBIDDEN")
 
 
-def _configuration_version(payload: bytes) -> dict[str, Any]:
+def _configuration_version(
+    payload: bytes, *, initial: bool = False, defaults: bool = False
+) -> dict[str, Any]:
     """Use Control's Rust contract and canonical digest, without a second policy parser."""
     target = Path(
         os.environ.get("CARGO_TARGET_DIR", WORKLOADS_FILE.parents[3] / "target")
@@ -226,7 +246,11 @@ def _configuration_version(payload: bytes) -> dict[str, Any]:
     )
     try:
         result = subprocess.run(
-            [str(tool), "bundle-configuration"],
+            [
+                str(tool),
+                "bundle-configuration",
+                *(["--defaults"] if defaults else ["--initial"] if initial else []),
+            ],
             input=payload,
             capture_output=True,
             timeout=30,
@@ -241,6 +265,7 @@ def _configuration_version(payload: bytes) -> dict[str, Any]:
             "LW_BUNDLE_CONFIGURATION_DIGEST_MISMATCH",
             "LW_BUNDLE_CONFIGURATION_LIMIT",
             "LW_BUNDLE_CONFIGURATION_IO_FAILED",
+            "LW_BUNDLE_INITIAL_REVISION_INVALID",
         ):
             if diagnostic.encode() in result.stderr:
                 code = diagnostic
@@ -252,9 +277,11 @@ def _configuration_version(payload: bytes) -> dict[str, Any]:
 
 
 def _workload_inputs(
-    application: dict[str, Any], manifest: dict[str, Any]
+    application: dict[str, Any], manifest: dict[str, Any], names: set[str] | None = None
 ) -> dict[str, Any]:
     workloads = _document(WORKLOADS_FILE.read_bytes())["workloads"]
+    if names is not None:
+        workloads = {name: workloads[name] for name in names}
     inputs = _exact(application["workloadInputs"], set(workloads))
     overrides = application["helmValues"].get("workloads", {})
     if not isinstance(overrides, dict) or set(overrides) - set(workloads):
@@ -323,6 +350,118 @@ def _workload_inputs(
     return result
 
 
+def _settings(model: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
+    mode = model.get("configurationMode", "managed_version")
+    if not isinstance(mode, str) or mode not in {"managed_version", "initial_settings"}:
+        raise BundleError("LW_BUNDLE_CONFIGURATION_INVALID")
+    document = _configuration_version(
+        files[model["configurationFile"]], initial=mode == "initial_settings"
+    )
+    if mode == "initial_settings":
+        if model["revision"] != 1:
+            raise BundleError("LW_BUNDLE_INITIAL_REVISION_INVALID")
+        return {
+            "configuration": document["request"]["configuration"],
+            "configurationSha256": document["configurationSha256"],
+            "request": document["request"],
+            "configurationMode": mode,
+        }
+    if document["revision"] != model["revision"]:
+        raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
+    return dict(document, configurationMode=mode)
+
+
+def _resource_model(
+    model: dict[str, Any], files: dict[str, bytes], references: set[str]
+) -> None:
+    profile = _exact(
+        model["resource"],
+        {
+            "target",
+            "packageFile",
+            "accessSeedFile",
+            "natsIssuer",
+            "configMaps",
+            "secrets",
+            "helmValues",
+            "ansibleVariables",
+            "workloadInputs",
+        },
+    )
+    target = _exact(profile["target"], {"namespace", "releaseName"})
+    if any(
+        not isinstance(v, str) or not objects.DNS_LABEL.fullmatch(v)
+        for v in target.values()
+    ):
+        raise BundleError("LW_BUNDLE_TARGET_INVALID")
+    if target == model["target"]:
+        raise BundleError("LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT")
+    if not isinstance(profile["natsIssuer"], str) or not re.fullmatch(
+        r"A[A-Z2-7]{55}", profile["natsIssuer"]
+    ):
+        raise BundleError("LW_BUNDLE_RESOURCE_ISSUER_REQUIRED")
+    references.add(_relative(profile["packageFile"], "versions"))
+    if profile["accessSeedFile"] is not None:
+        references.add(_relative(profile["accessSeedFile"], "config"))
+    manifest = resource_objects.load_manifest(RESOURCE_MANIFEST)
+    for group, prefix in (("configMaps", "config"), ("secrets", "secrets")):
+        bindings = _exact(profile[group], set(manifest[group]))
+        for name, keys in manifest[group].items():
+            for ref in _exact(bindings[name], set(keys)).values():
+                references.add(_relative(ref, prefix))
+    if not isinstance(profile["helmValues"], dict) or not isinstance(
+        profile["ansibleVariables"], dict
+    ):
+        raise BundleError("LW_BUNDLE_MODEL_INVALID")
+    if {"deploymentIdentity", "images", "workloadInputs"} & set(profile["helmValues"]):
+        raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
+    if any(
+        not isinstance(profile["helmValues"].get(key, {}), dict)
+        for key in ("network", "internalIdentityProxy")
+    ):
+        raise BundleError("LW_BUNDLE_MODEL_INVALID")
+    for key in profile["ansibleVariables"]:
+        if not key.startswith("resource_application_") or key in RESOURCE_RESERVED:
+            raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
+    _value_references(profile["ansibleVariables"], references)
+    helm_references: set[str] = set()
+    _value_references(profile["helmValues"], helm_references)
+    if helm_references:
+        raise BundleError("LW_BUNDLE_HELM_SECRET_FORBIDDEN")
+    overrides = profile["helmValues"].get("workloads", {})
+    if not isinstance(overrides, dict) or set(overrides) - {"resource-service"}:
+        raise BundleError("LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT")
+    resource_override = overrides.get("resource-service", {})
+    if not isinstance(resource_override, dict) or "enabled" in resource_override:
+        raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
+    validation = dict(
+        profile,
+        helmValues=dict(
+            profile["helmValues"],
+            workloads={"resource-service": dict(resource_override, enabled=True)},
+        ),
+    )
+    _workload_inputs(validation, manifest, {"resource-service"})
+    package_name = profile["packageFile"]
+    if package_name not in files:
+        raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
+    package = _document(files[package_name])
+    if (
+        not isinstance(package, dict)
+        or package.get("schema_version") != "platform-image-package-manifest.v2"
+        or package.get("profile") != "resource"
+        or not isinstance(package.get("images"), list)
+        or len(package["images"]) != 1
+        or not isinstance(package["images"][0], dict)
+        or package["images"][0].get("component") != "resource-service"
+        or not isinstance(package["images"][0].get("reference"), str)
+        or not re.fullmatch(
+            r"[^\s@]+@sha256:[0-9a-f]{64}", package["images"][0]["reference"]
+        )
+    ):
+        raise BundleError("LW_BUNDLE_VERSIONS_INVALID")
+
+
 def load_bundle(
     root: Path, manifest_path: Path = DEFAULT_MANIFEST
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -330,8 +469,10 @@ def load_bundle(
     files = _files(_private_directory(root))
     if MODEL_FILE not in files:
         raise BundleError("LW_BUNDLE_MODEL_MISSING")
+    document = _document(files[MODEL_FILE])
+    optional = {"resource", "configurationMode"}
     model = _exact(
-        _document(files[MODEL_FILE]),
+        document,
         {
             "apiVersion",
             "revision",
@@ -340,7 +481,8 @@ def load_bundle(
             "docs",
             "application",
             "configurationFile",
-        },
+        }
+        | (set(document) & optional if isinstance(document, dict) else set()),
     )
     if (
         model["apiVersion"] != API_VERSION
@@ -389,11 +531,19 @@ def load_bundle(
     _value_references(application["helmValues"], helm_references)
     if helm_references:
         raise BundleError("LW_BUNDLE_HELM_SECRET_FORBIDDEN")
+    overrides = application["helmValues"].get("workloads", {})
+    if not isinstance(overrides, dict):
+        raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
+    resource_override = overrides.get("resource-service", {})
+    if not isinstance(resource_override, dict) or resource_override.get(
+        "enabled", False
+    ):
+        raise BundleError("LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT")
+    if "resource" in model:
+        _resource_model(model, files, references)
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
-    version = _configuration_version(files[model["configurationFile"]])
-    if version["revision"] != model["revision"]:
-        raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
+    _settings(model, files)
     _workload_inputs(application, manifest)
     lock = _document(files[versions["lockFile"]])
     package = _document(files[versions["packageFile"]])
@@ -498,10 +648,17 @@ def derive_bundle(
         for image in package["images"]
     }
     values["deploymentIdentity"] = {"configurationBundleSha256": digest}
-    version = _configuration_version(files[model["configurationFile"]])
+    version = _settings(model, files)
     _write(
         output / "platform-configuration.json",
-        json.dumps(version, sort_keys=True).encode(),
+        json.dumps(
+            (
+                version["request"]
+                if "request" in version
+                else {k: v for k, v in version.items() if k != "configurationMode"}
+            ),
+            sort_keys=True,
+        ).encode(),
     )
     values_output = output / "helm-values.yaml"
     _write(values_output, yaml.safe_dump(values, sort_keys=True).encode())
@@ -525,12 +682,85 @@ def derive_bundle(
         output / "ansible-vars.yaml",
         yaml.dump(variables, Dumper=AnsibleDumper, sort_keys=True).encode(),
     )
+    if "resource" in model:
+        _derive_resource(root, output / "resource", model, files)
     return {
         "revision": model["revision"],
         "applicationObjectsSha256": digest,
         "files": len(files),
         "managedConfigurationSha256": version["configurationSha256"],
+        "configurationMode": version["configurationMode"],
     }
+
+
+def _derive_resource(
+    root: Path, output: Path, model: dict[str, Any], files: dict[str, bytes]
+) -> None:
+    profile = model["resource"]
+    manifest = resource_objects.load_manifest(RESOURCE_MANIFEST)
+    manifest["namespace"] = profile["target"]["namespace"]
+    manifest_output = output / "object-manifest.json"
+    _write(manifest_output, json.dumps(manifest, sort_keys=True).encode())
+    inputs = output / "object-inputs"
+    for group, directory in (("configMaps", "configmaps"), ("secrets", "secrets")):
+        for name, bindings in profile[group].items():
+            for key, ref in bindings.items():
+                _write(inputs / directory / name / key, files[ref])
+    payload = resource_objects.render(manifest_output, inputs, profile["natsIssuer"])
+    bundle_output = output / "application.yaml"
+    _write(bundle_output, payload)
+    shutil.rmtree(inputs)
+    workloads = _document(WORKLOADS_FILE.read_bytes())["workloads"]
+    overrides = profile["helmValues"].get("workloads", {})
+    values = dict(profile["helmValues"])
+    values["workloads"] = {
+        name: dict(overrides.get(name, {}), enabled=name == "resource-service")
+        for name in workloads
+    }
+    values["workloadInputs"] = profile["workloadInputs"]
+    values["images"] = {
+        "resource_service": _document(files[profile["packageFile"]])["images"][0][
+            "reference"
+        ]
+    }
+    values["deploymentIdentity"] = {
+        "configurationBundleSha256": "sha256:" + hashlib.sha256(payload).hexdigest()
+    }
+    values["internalIdentityProxy"] = dict(
+        values.get("internalIdentityProxy", {}), enabled=False
+    )
+    values["network"] = dict(
+        values.get("network", {}),
+        defaultDenyEnabled=False,
+        cdiCloneSourcePolicyEnabled=False,
+        ciliumIngressPolicyEnabled=False,
+        resourceKubernetesApiCiliumPolicyEnabled=True,
+    )
+    values_output = output / "helm-values.yaml"
+    _write(values_output, yaml.safe_dump(values, sort_keys=True).encode())
+    variables = _resolve_values(profile["ansibleVariables"], root, files)
+    variables.update(
+        {
+            "resource_application_namespace": profile["target"]["namespace"],
+            "resource_application_release_name": profile["target"]["releaseName"],
+            "resource_application_versions_lock_file": str(
+                root / model["versions"]["lockFile"]
+            ),
+            "resource_application_package_manifest": str(root / profile["packageFile"]),
+            "resource_application_access_seed_file": (
+                str(root / profile["accessSeedFile"])
+                if profile["accessSeedFile"] is not None
+                else ""
+            ),
+            "resource_application_configuration_manifest": str(manifest_output),
+            "resource_application_configuration_bundle": str(bundle_output),
+            "resource_application_values_file": str(values_output),
+        }
+    )
+    _write(
+        output / "ansible-vars.yaml",
+        yaml.dump(variables, Dumper=AnsibleDumper, sort_keys=True).encode(),
+    )
 
 
 def _private_file(path: Path) -> bytes:
@@ -575,6 +805,31 @@ def export_settings(version_file: Path, output: Path) -> dict[str, Any]:
     }
 
 
+def initialize_settings(settings_file: Path | None, output: Path) -> dict[str, Any]:
+    """Prepare unsaved settings. Only the real administrator API caller can create history."""
+    payload = (
+        json.dumps(
+            {
+                "expectedRevision": 0,
+                "configuration": _document(_private_file(settings_file)),
+            }
+        ).encode()
+        if settings_file
+        else b""
+    )
+    document = _configuration_version(
+        payload, initial=settings_file is not None, defaults=settings_file is None
+    )
+    _publish_private(
+        output.absolute(), json.dumps(document["request"], sort_keys=True).encode()
+    )
+    return {
+        "configurationMode": "initial_settings",
+        "expectedRevision": 0,
+        "managedConfigurationSha256": document["configurationSha256"],
+    }
+
+
 def import_settings(
     archive: Path, identity: Path, runtime: Path, expected_revision: int, output: Path
 ) -> dict[str, Any]:
@@ -583,7 +838,7 @@ def import_settings(
         raise BundleError("LW_BUNDLE_VERSION_INVALID")
     with opened_bundle(archive, identity, runtime) as (root, _rendered, metadata):
         model, files = load_bundle(root)
-        version = _configuration_version(files[model["configurationFile"]])
+        version = _settings(model, files)
         request = {
             "expectedRevision": expected_revision,
             "configuration": version["configuration"],
@@ -614,7 +869,7 @@ def seal_bundle(
 ) -> dict[str, Any]:
     """Encrypt the entire validated portable directory. Never replace an existing archive."""
     model, files = load_bundle(root, manifest_path)
-    version = json.loads(files[model["configurationFile"]])
+    version = _settings(model, files)
     if not recipients or any(
         not re.fullmatch(r"age1[0-9a-z]+", recipient) for recipient in recipients
     ):
@@ -675,6 +930,7 @@ def seal_bundle(
         "files": len(files),
         "managedConfigurationSha256": version["configurationSha256"],
         "encryptedBundleSha256": ciphertext_digest.hexdigest(),
+        "configurationMode": version["configurationMode"],
     }
 
 
@@ -801,6 +1057,11 @@ def main() -> int:
     restore.add_argument("--identity", type=Path, required=True)
     restore.add_argument("--expected-revision", type=int, required=True)
     restore.add_argument("--output", type=Path, required=True)
+    initialize = subcommands.add_parser("settings-init")
+    initial_source = initialize.add_mutually_exclusive_group(required=True)
+    initial_source.add_argument("--defaults", action="store_true")
+    initial_source.add_argument("--settings-file", type=Path)
+    initialize.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     previous = {
         sig: signal.signal(sig, _interrupt) for sig in (signal.SIGINT, signal.SIGTERM)
@@ -832,6 +1093,8 @@ def main() -> int:
                 arguments.expected_revision,
                 arguments.output,
             )
+        elif arguments.operation == "settings-init":
+            metadata = initialize_settings(arguments.settings_file, arguments.output)
         else:
             with opened_bundle(
                 arguments.archive, arguments.identity, arguments.runtime
@@ -847,18 +1110,41 @@ def main() -> int:
                         LABWEAVER_APPLICATION_VARS_FILE=str(
                             rendered / "ansible-vars.yaml"
                         ),
-                        LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE=str(
-                            rendered / "platform-configuration.json"
-                        ),
                     )
+                    for key in (
+                        "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE",
+                        "LABWEAVER_PLATFORM_CONFIGURATION_UPDATE_FILE",
+                        "LABWEAVER_RESOURCE_VARS_FILE",
+                    ):
+                        environment.pop(key, None)
+                    setting_key = (
+                        "LABWEAVER_PLATFORM_CONFIGURATION_UPDATE_FILE"
+                        if metadata["configurationMode"] == "initial_settings"
+                        else "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE"
+                    )
+                    environment[setting_key] = str(
+                        rendered / "platform-configuration.json"
+                    )
+                    if (rendered / "resource/ansible-vars.yaml").is_file():
+                        environment["LABWEAVER_RESOURCE_VARS_FILE"] = str(
+                            rendered / "resource/ansible-vars.yaml"
+                        )
                     # A consumer can read secrets. Do not forward its stdout/stderr to ordinary logs.
                     _consume(command, environment)
         print(json.dumps(metadata, sort_keys=True))
         return 0
-    except (BundleError, objects.BundleError, OSError, KeyboardInterrupt) as error:
+    except (
+        BundleError,
+        objects.BundleError,
+        resource_objects.BundleError,
+        OSError,
+        KeyboardInterrupt,
+    ) as error:
         diagnostic = (
             str(error)
-            if isinstance(error, (BundleError, objects.BundleError))
+            if isinstance(
+                error, (BundleError, objects.BundleError, resource_objects.BundleError)
+            )
             else "LW_BUNDLE_IO_FAILED"
         )
         print(diagnostic, file=sys.stderr)

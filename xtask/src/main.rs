@@ -50,7 +50,14 @@ enum Command {
     PackagePrepare,
     PackageValidate(PackageValidateArgs),
     /// Validate one Control-owned configuration version from stdin. Output contains no secrets.
-    BundleConfiguration,
+    BundleConfiguration {
+        /// Validate an unsaved first-install update request, with expected revision zero.
+        #[arg(long, conflicts_with = "defaults")]
+        initial: bool,
+        /// Emit the same initial template as Control, without inventing version history.
+        #[arg(long)]
+        defaults: bool,
+    },
     #[command(subcommand)]
     Contracts(ContractsCommand),
 }
@@ -277,7 +284,9 @@ fn main() -> ExitCode {
 )]
 fn run(cli: Cli) -> Result<(), AppError> {
     match cli.command {
-        Command::BundleConfiguration => bundle_configuration::run(),
+        Command::BundleConfiguration { initial, defaults } => {
+            bundle_configuration::run(initial, defaults)
+        }
         Command::Format => run_cargo("format", ["fmt", "--all", "--", "--check"]),
         Command::Lint => run_cargo(
             "lint",
