@@ -147,6 +147,7 @@
             severity="error"
             @retry="packageUpload.retry"
           />
+          <UploadRecoveryStatus :state="packageUpload.state" :has-session="packageUpload.session !== null" @cancel="packageUpload.cancel" />
           <div class="package-upload-actions">
             <button type="button" class="filled-button" :disabled="!canUploadPackage" @click="packageUpload.createSession">
               {{ packageUploadButtonLabel }}
@@ -310,6 +311,7 @@ import { RouterLink, routeLocationKey, routerKey } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import UploadRecoveryStatus from '@/components/common/UploadRecoveryStatus.vue'
 import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import WorkTemplateAuthoringView from '@/views/researcher/WorkTemplateAuthoringView.vue'
 import { approveProjectWorkConfigurationRun, getActiveProjectLlmPolicy, getProjectWorkConfigurationPlan } from '@/generated/contracts'
@@ -369,7 +371,7 @@ const templateRouteReleaseId = computed(() => (
 const policy = ref<AsyncState<ProjectLlmEgressPolicySchema>>({ kind: 'idle' })
 const policyRevision = computed(() => policy.value.kind === 'success' ? policy.value.data.revision : undefined)
 const courseIdRef = computed(() => selectedProject.value?.courseId ?? null)
-const packageUpload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef)
+const packageUpload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef, undefined, { recoveryScope: 'work-software' })
 const workEnvironments = useProjectWorkEnvironments(projectIdRef)
 const selectedEnvironment = computed(() => workEnvironments.environments.kind === 'success' ? workEnvironments.environments.data.find((environment) => environment.id === selectedEnvironmentId.value) ?? null : null)
 const plan = ref<AsyncState<WorkConfigurationPlanViewSchema>>({ kind: 'idle' })
@@ -381,7 +383,7 @@ const packageId = computed(() => uploadedPackage.value?.id ?? '')
 const packageRevision = computed(() => uploadedPackage.value?.revision ?? 0)
 let packageRestoreKey: string | null = null
 const canUploadPackage = computed(() => {
-  const ready = packageUpload.state.kind === 'ready' || packageUpload.state.kind === 'error'
+  const ready = ['ready', 'error', 'needs-files', 'cancelled'].includes(packageUpload.state.kind)
   return Boolean(selectedProject.value && ready && packageUpload.files.length > 0 && policyRevision.value !== undefined)
 })
 const packageUploadButtonLabel = computed(() => {
@@ -390,6 +392,7 @@ const packageUploadButtonLabel = computed(() => {
     case 'uploading': return '上传中…'
     case 'completing': return '确认归档…'
     case 'loading': return '读取已归档材料包…'
+    case 'needs-files': return '继续上传'
     default: return '上传材料包'
   }
 })

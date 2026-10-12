@@ -1,8 +1,10 @@
 import { reactive, ref, watch, type Ref } from 'vue'
 import {
+  cancelProjectProblemPackageUpload,
   completeProjectProblemPackageUpload,
   createProjectProblemPackageUpload,
   getProjectProblemPackage,
+  getProjectProblemPackageUpload,
 } from '@/generated/contracts'
 import type {
   ProblemPackageRetentionChoice,
@@ -10,7 +12,7 @@ import type {
   ProblemPackageUploadSessionSchema,
 } from '@/generated/contracts'
 import { formatBytes, idempotencyKey, ifMatch } from '@/utils/format'
-import { putFileWithProgress } from '@/utils/upload'
+import { isPreconditionFailed, putFileWithProgress } from '@/utils/upload'
 import { extractProblemDetails, makeDiagnostic } from '@/types/async'
 
 export type UploadFile = {
@@ -32,7 +34,30 @@ export type PackageUploadState =
   | { kind: 'uploading' }
   | { kind: 'completing' }
   | { kind: 'done'; package: ProblemPackageSchema }
+  /** A pending upload was found after a refresh; the same files must be chosen again. */
+  | { kind: 'needs-files'; missing: string[] }
+  | { kind: 'cancelling' }
+  | { kind: 'cancelled' }
   | { kind: 'error'; diagnostic: ReturnType<typeof makeDiagnostic> }
+
+/** Keys and revision of one upload operation, persisted so a refresh can resume it. */
+type UploadIntent = {
+  projectId: string
+  /** Files, course and retention the intent was created for. */
+  fingerprint: string
+  createKey: string
+  uploadId?: string
+  completeKey?: string
+  completeRevision?: number
+  cancelKey?: string
+}
+
+const UPLOAD_INTENT_STORAGE_PREFIX = 'labweaver:problem-package-upload:'
+
+export type ProblemPackageUploadOptions = {
+  /** Persist the intent under this scope so a refresh resumes the same upload. */
+  recoveryScope?: string
+}
 
 /** Project-scoped package upload using the current session/target contract. */
 export function useProjectProblemPackageUpload(
@@ -40,11 +65,14 @@ export function useProjectProblemPackageUpload(
   policyRevision: Ref<number | undefined>,
   courseId: Ref<string | null | undefined>,
   retentionChoice: Ref<ProblemPackageRetentionChoice> = ref('finite'),
+  options: ProblemPackageUploadOptions = {},
 ) {
   const files = ref<UploadFile[]>([])
   const session = ref<ProblemPackageUploadSessionSchema | null>(null)
   const state = ref<PackageUploadState>({ kind: 'idle' })
   let loadGeneration = 0
+  let intent: UploadIntent | null = null
+  const transfers = new Set<AbortController>()
 
   async function addDirectoryItems(items: DataTransferItemList | null) {
     if (!items) return
@@ -111,7 +139,12 @@ export function useProjectProblemPackageUpload(
       progress: 0,
     }))
     files.value = preparedFiles
-    session.value = null
+    // Choosing the same files again continues a recovered upload; anything
+    // else is a new operation with a new intent.
+    if (!(intent?.uploadId && intent.fingerprint === fingerprintOf(preparedFiles))) {
+      session.value = null
+      if (intent && !intent.uploadId) writeIntent(null)
+    }
     state.value = preparedFiles.length > 0 ? { kind: 'ready' } : { kind: 'idle' }
   }
 
@@ -119,20 +152,35 @@ export function useProjectProblemPackageUpload(
     loadGeneration += 1
     files.value = files.value.filter((file) => file.path !== path)
     session.value = null
+    if (intent && !intent.uploadId) writeIntent(null)
     state.value = files.value.length > 0 ? { kind: 'ready' } : { kind: 'idle' }
   }
 
-  function clear() {
+  function reset() {
     loadGeneration += 1
+    abortTransfers()
     files.value = []
     session.value = null
+    intent = null
     state.value = { kind: 'idle' }
+  }
+
+  /** Forget the current selection and its recorded intent (an explicit user action). */
+  function clear() {
+    const id = projectId.value
+    reset()
+    const key = id ? storageKey(id) : null
+    if (key) {
+      try { window.sessionStorage.removeItem(key) } catch { /* storage unavailable */ }
+    }
   }
 
   watch(projectId, (id, previousId) => {
     if (id === previousId) return
-    clear()
-  })
+    // Another project's recorded intent stays stored so returning resumes it.
+    reset()
+    if (options.recoveryScope) void resume()
+  }, { immediate: Boolean(options.recoveryScope) })
 
   /**
    * Restore an already completed package from the project-scoped API.
@@ -190,23 +238,120 @@ export function useProjectProblemPackageUpload(
     return true
   }
 
+  // ---- Stable intent -------------------------------------------------------
+  //
+  // One user operation keeps one create key, one completion key + first
+  // If-Match, and one cancel key, so a lost response is replayed instead of
+  // minting a second intent. The intent is persisted per project and scope so
+  // a refresh can query the original upload instead of starting over.
+
+  function fingerprintOf(list: UploadFile[]): string {
+    const filesPart = list.map((file) => `${file.path}\u0000${file.sizeBytes}\u0000${file.mediaType}`).join('\u0001')
+    return `${courseId.value ?? ''}|${retentionChoice.value}|${filesPart}`
+  }
+
+  function storageKey(id: string): string | null {
+    return options.recoveryScope ? `${UPLOAD_INTENT_STORAGE_PREFIX}${options.recoveryScope}:${id}` : null
+  }
+
+  function readIntent(id: string): UploadIntent | null {
+    const key = storageKey(id)
+    if (!key) return null
+    try {
+      const raw = window.sessionStorage.getItem(key)
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as Partial<UploadIntent>
+      if (parsed.projectId !== id || typeof parsed.createKey !== 'string' || typeof parsed.fingerprint !== 'string') return null
+      return parsed as UploadIntent
+    } catch {
+      return null
+    }
+  }
+
+  function writeIntent(next: UploadIntent | null) {
+    intent = next
+    const id = next?.projectId ?? projectId.value
+    if (!id) return
+    const key = storageKey(id)
+    if (!key) return
+    try {
+      if (next) window.sessionStorage.setItem(key, JSON.stringify(next))
+      else window.sessionStorage.removeItem(key)
+    } catch {
+      // Storage may be unavailable (private mode, quota). The in-memory intent
+      // still protects retries on this page; only refresh recovery is lost.
+    }
+  }
+
+  function updateIntent(patch: Partial<UploadIntent>) {
+    if (intent) writeIntent({ ...intent, ...patch })
+  }
+
+  function abortTransfers() {
+    for (const controller of transfers) controller.abort()
+    transfers.clear()
+  }
+
+  function errorState(code: string, message: string, retryable: boolean): PackageUploadState {
+    return { kind: 'error', diagnostic: makeDiagnostic(code, message, retryable) }
+  }
+
+  function problemState(error: unknown, fallbackCode: string, fallbackMessage: string): PackageUploadState {
+    const problem = extractProblemDetails(error)
+    return errorState(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
+  }
+
+  /** Terminal sessions are never revived; the next start creates a new intent. */
+  function terminalState(upload: ProblemPackageUploadSessionSchema): PackageUploadState | null {
+    switch (upload.state) {
+      case 'expired':
+        return errorState(upload.terminalDiagnostic ?? 'LW_PACKAGE_UPLOAD_EXPIRED', '上传会话已过期。请重新上传材料包。', false)
+      case 'cancelled':
+        return { kind: 'cancelled' }
+      case 'failed':
+        return errorState(upload.terminalDiagnostic ?? 'LW_PACKAGE_UPLOAD_FAILED', '材料包校验失败，没有发布任何文件。请检查文件后重新上传。', false)
+      default:
+        return null
+    }
+  }
+
+  function filesMatchSession(upload: ProblemPackageUploadSessionSchema): boolean {
+    return upload.files.length === files.value.length
+      && files.value.every((file) => upload.files.some((sessionFile) => sessionFile.path === file.path && sessionFile.sizeBytes === file.sizeBytes))
+  }
+
+  function isCurrent(generation: number, id: string) {
+    return generation === loadGeneration && projectId.value === id
+  }
+
   async function createSession() {
     const id = projectId.value
     const revision = policyRevision.value
     if (!id || revision === undefined) {
-      state.value = { kind: 'error', diagnostic: makeDiagnostic('UPLOAD_NOT_READY', '项目或策略版本缺失，无法创建上传会话。', false) }
+      state.value = errorState('UPLOAD_NOT_READY', '项目或策略版本缺失，无法创建上传会话。', false)
       return
     }
     if (files.value.length === 0) {
-      state.value = { kind: 'error', diagnostic: makeDiagnostic('UPLOAD_EMPTY', '请至少选择一个文件。', false) }
+      state.value = errorState('UPLOAD_EMPTY', '请至少选择一个文件。', false)
       return
     }
 
     const generation = ++loadGeneration
+    const fingerprint = fingerprintOf(files.value)
+    // An unfinished upload for exactly these files is continued, not recreated.
+    if (intent?.uploadId && intent.projectId === id && intent.fingerprint === fingerprint) {
+      await reconcile(intent.uploadId, generation, id)
+      return
+    }
+    if (!intent || intent.projectId !== id || intent.fingerprint !== fingerprint || intent.uploadId) {
+      writeIntent({ projectId: id, fingerprint, createKey: idempotencyKey() })
+    }
+    const createKey = intent!.createKey
+
     state.value = { kind: 'creating' }
     const result = await createProjectProblemPackageUpload({
       path: { projectId: id },
-      headers: { 'Idempotency-Key': idempotencyKey() },
+      headers: { 'Idempotency-Key': createKey },
       body: {
         projectId: id,
         ...(courseId.value ? { courseId: courseId.value } : {}),
@@ -215,76 +360,237 @@ export function useProjectProblemPackageUpload(
         retentionChoice: retentionChoice.value,
       },
     })
-    if (generation !== loadGeneration || projectId.value !== id) return
+    if (!isCurrent(generation, id)) return
     if (result.error) {
-      const problem = extractProblemDetails(result.error)
-      state.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'UPLOAD_SESSION_FAILED', problem?.detail ?? '创建上传会话失败', problem?.retryable ?? true) }
+      // The create key stays: a retry replays the same request, and a 409 is
+      // reported rather than answered with a second intent.
+      state.value = problemState(result.error, 'UPLOAD_SESSION_FAILED', '创建上传会话失败。重试会重发同一个创建请求。')
       return
     }
     session.value = result.data
-    await uploadFiles(result.data, generation, id)
+    updateIntent({ uploadId: result.data.id })
+    await continueSession(result.data, generation, id)
+  }
+
+  /** Read the original upload, then continue from what the server confirms. */
+  async function reconcile(uploadId: string, generation: number, id: string): Promise<void> {
+    state.value = { kind: 'loading', message: '正在查询上传进度…' }
+    const result = await getProjectProblemPackageUpload({ path: { projectId: id, uploadId } })
+    if (!isCurrent(generation, id)) return
+    if (result.error) {
+      const problem = extractProblemDetails(result.error)
+      if (problem?.status === 404) {
+        writeIntent(null)
+        session.value = null
+        state.value = errorState(problem.diagnosticCode ?? 'UPLOAD_SESSION_NOT_FOUND', '找不到原上传会话。请重新上传材料包。', false)
+        return
+      }
+      state.value = problemState(result.error, 'UPLOAD_SESSION_QUERY_FAILED', '暂时无法查询上传进度。重试会继续查询同一个上传会话。')
+      return
+    }
+    session.value = result.data
+    await continueSession(result.data, generation, id)
+  }
+
+  async function continueSession(upload: ProblemPackageUploadSessionSchema, generation: number, id: string) {
+    if (!isCurrent(generation, id)) return
+    if (upload.state === 'completed' && upload.completedPackage) {
+      finish(upload.completedPackage)
+      return
+    }
+    const terminal = terminalState(upload)
+    if (terminal) {
+      writeIntent(null)
+      session.value = null
+      state.value = terminal
+      return
+    }
+    if (upload.state === 'completing') {
+      // Recover the original completion request with the server's key and revision.
+      if (upload.completionIdempotencyKey && upload.completionExpectedRevision != null) {
+        updateIntent({ completeKey: upload.completionIdempotencyKey, completeRevision: upload.completionExpectedRevision })
+      }
+      await complete(generation, id, upload)
+      return
+    }
+    // pending: only the files the server has not confirmed are sent.
+    const uploaded = new Set(upload.uploadedPaths)
+    for (const file of files.value) {
+      if (uploaded.has(file.path)) {
+        file.status = 'done'
+        file.progress = 100
+      }
+    }
+    const missing = upload.files.map((file) => file.path).filter((path) => !uploaded.has(path))
+    if (missing.length > 0 && !filesMatchSession(upload)) {
+      // After a refresh the browser no longer holds the files.
+      state.value = { kind: 'needs-files', missing }
+      return
+    }
+    await uploadFiles(upload, generation, id)
   }
 
   async function uploadFiles(uploadSession: ProblemPackageUploadSessionSchema, generation: number, id: string) {
-    if (generation !== loadGeneration || projectId.value !== id) return
+    if (!isCurrent(generation, id)) return
     state.value = { kind: 'uploading' }
+    const uploaded = new Set(uploadSession.uploadedPaths)
+    let preconditionFailed = false
     await Promise.all(uploadSession.uploadTargets.map(async (target) => {
       const file = files.value.find((entry) => entry.path === target.path)
-      if (!file || file.status === 'done') return
+      if (!file || file.status === 'done' || uploaded.has(target.path)) return
       file.status = 'uploading'
+      file.error = undefined
+      const controller = new AbortController()
+      transfers.add(controller)
       try {
-        await putFileWithProgress(file.file, target.uploadUrl, target.requiredHeaders, (progress) => { file.progress = progress })
+        await putFileWithProgress(file.file, target.uploadUrl, target.requiredHeaders, (progress) => { file.progress = progress }, controller.signal)
         file.status = 'done'
       } catch (error) {
+        if (controller.signal.aborted) {
+          file.status = 'pending'
+          return
+        }
+        if (isPreconditionFailed(error)) preconditionFailed = true
         file.status = 'error'
         file.error = error instanceof Error ? error.message : String(error)
+      } finally {
+        transfers.delete(controller)
       }
     }))
 
-    if (generation !== loadGeneration || projectId.value !== id) return
-    const failed = files.value.filter((file) => file.status === 'error')
-    if (failed.length > 0) {
-      state.value = { kind: 'error', diagnostic: makeDiagnostic('UPLOAD_OBJECT_FAILED', `以下文件上传失败：${failed.map((file) => file.path).join(', ')}`, true) }
+    const afterTransfers = state.value as PackageUploadState
+    if (!isCurrent(generation, id) || afterTransfers.kind === 'cancelling' || afterTransfers.kind === 'cancelled') return
+    if (preconditionFailed) {
+      // Objects are never overwritten; a 412 means the server may already hold
+      // it. Ask the session instead of guessing.
+      for (const file of files.value) if (file.status === 'error') file.status = 'pending'
+      await reconcile(uploadSession.id, generation, id)
       return
     }
-    await complete(generation, id)
+    const failed = files.value.filter((file) => file.status === 'error')
+    if (failed.length > 0) {
+      state.value = errorState('UPLOAD_OBJECT_FAILED', `以下文件上传失败：${failed.map((file) => file.path).join(', ')}。重试会先查询上传会话，只补传缺失文件。`, true)
+      return
+    }
+    await complete(generation, id, uploadSession)
   }
 
   async function retry() {
-    const current = session.value
-    const matchesCurrentFiles = current !== null
-      && current.files.length === files.value.length
-      && files.value.every((file) => current.files.some((sessionFile) => sessionFile.path === file.path))
-    if (current && matchesCurrentFiles) {
-      const id = projectId.value
-      if (!id) return
-      const generation = ++loadGeneration
-      await uploadFiles(current, generation, id)
-    }
-    else {
-      session.value = null
-      await createSession()
-    }
-  }
-
-  async function complete(generation: number, id: string) {
-    const uploadId = session.value?.id
-    const current = session.value
-    if (generation !== loadGeneration || projectId.value !== id || !uploadId || !current) return
-    state.value = { kind: 'completing' }
-    const result = await completeProjectProblemPackageUpload({
-      path: { projectId: id, uploadId },
-      headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(current.revision) },
-      body: {},
-    })
-    if (generation !== loadGeneration || projectId.value !== id) return
-    if (result.error) {
-      const problem = extractProblemDetails(result.error)
-      state.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'UPLOAD_COMPLETE_FAILED', problem?.detail ?? '完成材料包上传失败', problem?.retryable ?? true) }
+    const id = projectId.value
+    if (!id) return
+    const generation = ++loadGeneration
+    const uploadId = intent?.projectId === id ? intent.uploadId : undefined
+    if (uploadId && intent?.fingerprint === fingerprintOf(files.value)) {
+      await reconcile(uploadId, generation, id)
       return
     }
-    state.value = { kind: 'done', package: result.data }
+    if (uploadId && files.value.length === 0) {
+      await reconcile(uploadId, generation, id)
+      return
+    }
+    await createSession()
   }
 
-  return reactive({ files, session, state, addFiles, addDirectoryItems, removeFile, clear, loadPackage, createSession, retry, formatBytes })
+  async function complete(generation: number, id: string, upload: ProblemPackageUploadSessionSchema, allowRequery = true) {
+    if (!isCurrent(generation, id)) return
+    if (!intent?.completeKey || intent.completeRevision == null) {
+      updateIntent({ completeKey: idempotencyKey(), completeRevision: upload.revision })
+    }
+    const completeKey = intent?.completeKey ?? idempotencyKey()
+    const completeRevision = intent?.completeRevision ?? upload.revision
+    state.value = { kind: 'completing' }
+    const result = await completeProjectProblemPackageUpload({
+      path: { projectId: id, uploadId: upload.id },
+      headers: { 'Idempotency-Key': completeKey, 'If-Match': ifMatch(completeRevision) },
+      body: {},
+    })
+    if (!isCurrent(generation, id)) return
+    if (result.error) {
+      const problem = extractProblemDetails(result.error)
+      if (allowRequery && (problem === undefined || problem.status === 412)) {
+        // Lost response or stale revision: the session decides what happened.
+        state.value = { kind: 'loading', message: '正在确认归档结果…' }
+        const queried = await getProjectProblemPackageUpload({ path: { projectId: id, uploadId: upload.id } })
+        if (!isCurrent(generation, id)) return
+        if (!queried.error) {
+          session.value = queried.data
+          if (queried.data.state === 'pending') {
+            // Completion was never accepted: keep the key, follow the new revision once.
+            updateIntent({ completeRevision: queried.data.revision })
+            await complete(generation, id, queried.data, false)
+            return
+          }
+          await continueSession(queried.data, generation, id)
+          return
+        }
+      }
+      state.value = problemState(result.error, 'UPLOAD_COMPLETE_FAILED', '确认归档失败。重试会先查询上传会话，再沿用原完成请求。')
+      return
+    }
+    finish(result.data)
+  }
+
+  function finish(pkg: ProblemPackageSchema) {
+    writeIntent(null)
+    state.value = { kind: 'done', package: pkg }
+  }
+
+  /** Cancel the current upload: latest If-Match, stable cancel key, stop local PUTs. */
+  async function cancel() {
+    const id = projectId.value
+    const uploadId = intent?.projectId === id ? intent?.uploadId : session.value?.id
+    abortTransfers()
+    if (!id || !uploadId) {
+      // Nothing was created on the server; just forget the local intent.
+      ++loadGeneration
+      writeIntent(null)
+      session.value = null
+      state.value = files.value.length > 0 ? { kind: 'ready' } : { kind: 'idle' }
+      return
+    }
+    const generation = ++loadGeneration
+    if (!intent?.cancelKey) updateIntent({ cancelKey: idempotencyKey() })
+    const cancelKey = intent?.cancelKey ?? idempotencyKey()
+    state.value = { kind: 'cancelling' }
+    const latest = await getProjectProblemPackageUpload({ path: { projectId: id, uploadId } })
+    if (!isCurrent(generation, id)) return
+    if (latest.error) {
+      state.value = problemState(latest.error, 'UPLOAD_CANCEL_FAILED', '暂时无法读取上传会话，取消未提交。')
+      return
+    }
+    if (latest.data.state !== 'pending' && latest.data.state !== 'completing') {
+      await continueSession(latest.data, generation, id)
+      return
+    }
+    const result = await cancelProjectProblemPackageUpload({
+      path: { projectId: id, uploadId },
+      headers: { 'Idempotency-Key': cancelKey, 'If-Match': ifMatch(latest.data.revision) },
+    })
+    if (!isCurrent(generation, id)) return
+    if (result.error) {
+      state.value = problemState(result.error, 'UPLOAD_CANCEL_FAILED', '取消上传失败。重试会沿用同一个取消请求。')
+      return
+    }
+    session.value = null
+    if (result.data.state === 'completed' && result.data.completedPackage) {
+      finish(result.data.completedPackage)
+      return
+    }
+    writeIntent(null)
+    state.value = { kind: 'cancelled' }
+  }
+
+  /** Resume an upload this page started before a refresh, if one is recorded. */
+  async function resume(): Promise<void> {
+    const id = projectId.value
+    if (!id) return
+    const recorded = readIntent(id)
+    if (!recorded) return
+    intent = recorded
+    if (!recorded.uploadId) return
+    const generation = ++loadGeneration
+    await reconcile(recorded.uploadId, generation, id)
+  }
+
+  return reactive({ files, session, state, addFiles, addDirectoryItems, removeFile, clear, loadPackage, createSession, retry, cancel, resume, formatBytes })
 }
