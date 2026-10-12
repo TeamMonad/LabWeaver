@@ -9,6 +9,8 @@ import HomeView from '@/views/HomeView.vue'
 import TeacherOverviewView from '@/views/teacher/TeacherOverviewView.vue'
 import LabListView from '@/views/teacher/LabListView.vue'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
+import ResultListView from '@/views/student/ResultListView.vue'
+import ResultDetailView from '@/views/student/ResultDetailView.vue'
 import ResourceRequestView from '@/views/researcher/ResourceRequestView.vue'
 import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
 import ResourceApprovalView from '@/views/admin/ResourceApprovalView.vue'
@@ -29,7 +31,8 @@ const routePage = computed(() => {
   if (route.path.startsWith('/student/environments')) return EnvironmentEntryView
   if (route.path.startsWith('/student/labs')) return FixtureUnsupportedRoute
   if (route.path.startsWith('/student/ssh-keys')) return FixtureUnsupportedRoute
-  if (route.path.startsWith('/student/results')) return FixtureUnsupportedRoute
+  if (route.path.startsWith('/student/results/')) return ResultDetailView
+  if (route.path === '/student/results') return ResultListView
   if (route.path.startsWith('/researcher/resources')) return ResourceRequestView
   if (route.path.startsWith('/researcher/workspaces')) return WorkspaceListView
   if (route.path.startsWith('/researcher/environments')) return EnvironmentEntryView

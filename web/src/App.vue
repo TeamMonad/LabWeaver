@@ -185,6 +185,29 @@ textarea:focus-visible,
   outline-offset: 2px;
 }
 
+/*
+ * Press feedback on pointer-down: :active applies as soon as the pointer goes
+ * down, before click fires on release, so slow networks still feel responsive.
+ */
+button:not(:disabled),
+a[href],
+[role='option'],
+summary {
+  transition-property: transform, background-color, border-color, box-shadow, color, opacity;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+button:not(:disabled):active,
+a[href].filled-button:active,
+a[href].outlined-button:active,
+a[href].text-button:active,
+a[href].drawer-item:active,
+[role='option']:active {
+  transform: scale(0.97);
+  transition-duration: 60ms;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

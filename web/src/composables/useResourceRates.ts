@@ -21,7 +21,7 @@ interface EndResourceRateIntent {
 
 function diagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true)
+  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true, problem)
 }
 
 function resourceRateLabel(rate: ResourceRateSchema | undefined): string {

@@ -34,6 +34,8 @@
           <DiagnosticBanner
             v-if="withdrawalOutcome"
             :code="withdrawalOutcome.code"
+            :request-id="withdrawalOutcome.requestId"
+            :next-step="withdrawalOutcome.nextStep"
             :message="withdrawalOutcome.message"
             :retryable="withdrawalOutcome.retryable"
             :severity="withdrawalOutcome.code.includes('FAILED') || withdrawalOutcome.code.includes('CONFLICT') ? 'error' : 'info'"
@@ -228,6 +230,7 @@ async function confirmWithdrawal() {
         problem?.diagnosticCode ?? 'RELEASE_WITHDRAW_FAILED',
         problem?.detail ?? '撤回环境模板失败',
         problem?.retryable ?? true,
+        problem,
       )
       return
     }
@@ -242,6 +245,7 @@ async function confirmWithdrawal() {
       problem?.diagnosticCode ?? 'RELEASE_WITHDRAW_FAILED',
       problem?.detail ?? '撤回环境模板失败',
       problem?.retryable ?? true,
+      problem,
     )
   } finally {
     withdrawalInFlight.value = false

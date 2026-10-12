@@ -87,6 +87,7 @@ function errorDiagnostic(error: unknown): DiagnosticViewModel {
     problem?.diagnosticCode ?? 'PROJECT_WORK_ENVIRONMENTS_LOAD_FAILED',
     problem?.detail ?? '加载 Work 环境失败',
     problem?.retryable ?? true,
+    problem,
   )
 }
 
