@@ -113,8 +113,17 @@ impl ImmutableObjectStore for FakeObjects {
         _: &str,
         expected: &ArtifactRef,
     ) -> Result<VerifiedObjectFile, ObjectStoreError> {
-        std::thread::sleep(self.file_write_delay);
-        VerifiedObjectFile::from_bytes(expected.clone(), &self.bytes)
+        let expected = expected.clone();
+        let bytes = self.bytes.clone();
+        let delay = self.file_write_delay;
+        // The byte adapter creates, writes, fsyncs and hashes a temporary file. Keep that work
+        // off the single-thread test runtime so HTTP status reads and lease renewal can run.
+        tokio::task::spawn_blocking(move || {
+            std::thread::sleep(delay);
+            VerifiedObjectFile::from_bytes(expected, &bytes)
+        })
+        .await
+        .map_err(|_| ObjectStoreError::ObjectUnavailable)?
     }
 
     async fn freeze_current(

@@ -30,11 +30,11 @@ use support::{FakeObjects, FakeRegistry, apply_agent_migrations};
 
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
+static TELEMETRY: OnceLock<()> = OnceLock::new();
+
 // The production importer admits one import per process before it distinguishes OCI and VM
 // archives. Keep fixture jobs serial within this integration binary as well, so an unrelated
 // import cannot leave a terminal-state assertion waiting behind the shared admission gate.
-static TELEMETRY: OnceLock<()> = OnceLock::new();
-
 static IMPORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Verified OCI layout archive plus the identity the importer must derive from it.
@@ -264,7 +264,11 @@ async fn spawn_api(
         objects: Arc::clone(&state.objects),
         worker_id: "import-test".to_owned(),
         lease_duration: std::time::Duration::from_secs(10),
-        poll_interval: std::time::Duration::from_millis(10),
+        // run_import starts a fresh worker for one already queued job. Its first tick is
+        // immediate. Do not start an unrelated idle claim before abort/join at the terminal
+        // observation: cancelling BEGIN can leave a pooled connection in a server transaction.
+        // Polling recovery and cancellation are exercised in platform_image_jobs_postgres.
+        poll_interval: std::time::Duration::from_mins(1),
     };
     let router = router(state).layer(axum::middleware::from_fn(inject_control_identity));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -301,6 +305,7 @@ impl Drop for ImportApi {
 
 async fn enqueue_import(
     api: &ImportApi,
+    case: &'static str,
     request: serde_json::Value,
 ) -> Result<InternalPlatformImageImportJobStatus, Box<dyn std::error::Error>> {
     let upload_id = UploadSessionId::new();
@@ -327,7 +332,7 @@ async fn enqueue_import(
     while let Some(chunk) = enqueued.chunk().await? {
         assert!(
             body.len() + chunk.len() <= 16 * 1024,
-            "import enqueue response exceeds fixture bound"
+            "import enqueue response exceeds fixture bound: case={case}"
         );
         body.extend_from_slice(&chunk);
     }
@@ -350,14 +355,18 @@ async fn enqueue_import(
     assert_eq!(
         status,
         StatusCode::ACCEPTED,
-        "enqueue response: json_content_type={json_content_type}, json_object={}, diagnostic={diagnostic:?}",
+        "enqueue response: case={case}, json_content_type={json_content_type}, json_object={}, diagnostic={diagnostic:?}",
         response_json
             .as_ref()
             .is_some_and(serde_json::Value::is_object)
     );
     let initial: InternalPlatformImageImportJobStatus = serde_json::from_slice(&body)?;
-    assert_eq!(initial.upload_id, upload_id);
-    assert_eq!(initial.state, PlatformImageImportJobState::Queued);
+    assert_eq!(initial.upload_id, upload_id, "case={case}");
+    assert_eq!(
+        initial.state,
+        PlatformImageImportJobState::Queued,
+        "case={case}"
+    );
     Ok(initial)
 }
 
@@ -378,7 +387,7 @@ async fn run_import(
         "import case={case} phase=fixture_admission elapsed_ms={}",
         started.elapsed().as_millis()
     );
-    let initial = enqueue_import(api, request).await?;
+    let initial = enqueue_import(api, case, request).await?;
     eprintln!(
         "import case={case} phase=enqueued upload_id={} elapsed_ms={}",
         initial.upload_id,
@@ -442,8 +451,8 @@ async fn wait_for_import(
     if !matches!(result, Ok(Ok(()))) {
         // Database clock decides lease validity. Never select the token or private request.
         let facts = tokio::time::timeout(std::time::Duration::from_secs(1),
-            sqlx::query_as::<_, (bool, bool, Option<i64>, i64)>(
-                "SELECT lease_token IS NOT NULL, COALESCE(lease_expires_at>clock_timestamp(),false), \
+            sqlx::query_as::<_, (String, i64, bool, bool, Option<i64>, i64)>(
+                "SELECT state, revision, lease_token IS NOT NULL, COALESCE(lease_expires_at>clock_timestamp(),false), \
                  (extract(epoch FROM lease_expires_at-clock_timestamp())*1000)::bigint, \
                  (extract(epoch FROM clock_timestamp()-updated_at)*1000)::bigint \
                  FROM agent.platform_image_import_jobs WHERE upload_id=$1"
@@ -451,9 +460,9 @@ async fn wait_for_import(
         ).await;
         match facts {
             Ok(Ok(facts)) => eprintln!(
-                "import case={case} lease_facts=(present,valid,remaining_ms,updated_age_ms) {facts:?}"
+                "import case={case} job_facts=(state,revision,lease_present,lease_valid,remaining_ms,updated_age_ms) {facts:?}"
             ),
-            _ => eprintln!("import case={case} lease_facts=unavailable"),
+            _ => eprintln!("import case={case} job_facts=unavailable"),
         }
     }
     worker.abort();
