@@ -1,10 +1,32 @@
 {
   "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
     "CreditHold": {
       "additionalProperties": false,
       "properties": {
         "amount": {
           "$ref": "#/$defs/FixedDecimal"
+        },
+        "buildAttempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "businessKey": {
           "type": "string"
@@ -55,7 +77,14 @@
           "$ref": "#/$defs/FixedDecimal"
         },
         "requestId": {
-          "$ref": "#/$defs/ResourceRequestId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "state": {
           "$ref": "#/$defs/CreditHoldState"
@@ -74,7 +103,6 @@
       "required": [
         "id",
         "projectId",
-        "requestId",
         "businessKey",
         "ownerClientId",
         "amount",
@@ -150,7 +178,8 @@
         "cpu_millicore_second",
         "memory_byte_second",
         "storage_byte_second",
-        "gpu_unit_second"
+        "gpu_unit_second",
+        "build_second"
       ],
       "type": "string"
     },

@@ -170,9 +170,6 @@ domains:
         file: agent/0019_build_executor_import_stage.sql
         sha256: 40c1d4af53c76be4e02b0cdcd040b7b4995ca41ca3666c5383339aaa5c3a139b
       - id: 20
-        file: agent/0020_resource_build_authority_read.sql
-        sha256: 5871e7a300ffad5d00f63a775986209595eadd5fca6d44671ba5babcce130210
-      - id: 20
         file: agent/0020_unified_usage_payload_target.sql
         sha256: 8621e4c4ace464ed258103eb2bab16452b295667726f67e6cb43fe3e4cfa6329
       - id: 21

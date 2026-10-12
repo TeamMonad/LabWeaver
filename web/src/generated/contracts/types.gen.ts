@@ -816,10 +816,6 @@ export type AuthoringApproval = {
     projectId: AuthoringApprovalPublicationStatusSchemaProjectId;
     reason: string;
     revision: AuthoringApprovalPublicationStatusSchemaRevision;
-    /**
-     * Course teacher authority captured in the same Control approval transaction.
-     */
-    teacherScope?: CourseTeacherApprovalScope | null;
 };
 
 /**
@@ -845,15 +841,6 @@ export type AuthoringApprovalPublicationStatusSchemaCandidateId = string;
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type AuthoringApprovalPublicationStatusSchemaCourseId = string;
-
-/**
- * Captured by Control while the verified teacher and current course instructor are checked.
- */
-export type CourseTeacherApprovalScope = {
-    actorId: AuthoringApprovalPublicationStatusSchemaActorId;
-    courseId: AuthoringApprovalPublicationStatusSchemaCourseId;
-    membershipRevision: AuthoringApprovalPublicationStatusSchemaRevision;
-};
 
 /**
  * Stable machine-readable diagnostic code.
@@ -1018,10 +1005,6 @@ export type AuthoringApprovalSchema = {
     projectId: AuthoringApprovalSchemaProjectId;
     reason: string;
     revision: AuthoringApprovalSchemaRevision;
-    /**
-     * Course teacher authority captured in the same Control approval transaction.
-     */
-    teacherScope?: AuthoringApprovalSchemaCourseTeacherApprovalScope | null;
 };
 
 /**
@@ -1048,15 +1031,6 @@ export type AuthoringApprovalSchemaCandidateId = string;
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type AuthoringApprovalSchemaCourseId = string;
-
-/**
- * Captured by Control while the verified teacher and current course instructor are checked.
- */
-export type AuthoringApprovalSchemaCourseTeacherApprovalScope = {
-    actorId: AuthoringApprovalSchemaActorId;
-    courseId: AuthoringApprovalSchemaCourseId;
-    membershipRevision: AuthoringApprovalSchemaRevision;
-};
 
 /**
  * Immutable build and deployment identity that must match every run using the release.
@@ -1340,42 +1314,227 @@ export type AuthorizationDecisionSchemaRevision = number;
 export type AuthorizationDecisionSchemaUtcTimestamp = string;
 
 /**
- * AvailableObjectActions
- *
- * Current actions for the authenticated actor. It is advisory and never replaces a write check.
+ * BuildCostEstimateRequest
  */
-export type AvailableObjectActionsSchema = {
-    actions: Array<ObjectAction>;
-    actorId: AvailableObjectActionsSchemaActorId;
-    membershipRevision: AvailableObjectActionsSchemaRevision;
-    projectId: AvailableObjectActionsSchemaProjectId;
-    validUntil: AvailableObjectActionsSchemaUtcTimestamp;
+export type BuildCostEstimateRequestSchema = {
+    builderBinding: string;
+    from: BuildCostEstimateRequestSchemaUtcTimestamp;
+    maxDurationMilliseconds: number;
 };
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type AvailableObjectActionsSchemaActorId = string;
-
-/**
- * An operation on an object. Platform identity alone does not grant these operations.
- */
-export type ObjectAction = 'browse' | 'archive' | 'edit' | 'start' | 'stop' | 'configure_agent' | 'grant_access' | 'manage_members' | 'view_costs' | 'request_runtime_permissions' | 'approve_runtime_permissions' | 'manage_runtime_policy';
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type AvailableObjectActionsSchemaProjectId = string;
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type AvailableObjectActionsSchemaRevision = number;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
-export type AvailableObjectActionsSchemaUtcTimestamp = string;
+export type BuildCostEstimateRequestSchemaUtcTimestamp = string;
+
+/**
+ * BuildCostEstimate
+ */
+export type BuildCostEstimateSchema = {
+    input: BuildCostEstimateRequest;
+    lines: Array<ResourceChargeLine>;
+    projectId: BuildCostEstimateSchemaProjectId;
+    total: Money;
+    until: BuildCostEstimateSchemaUtcTimestamp;
+};
+
+export type BuildCostEstimateRequest = {
+    builderBinding: string;
+    from: BuildCostEstimateSchemaUtcTimestamp;
+    maxDurationMilliseconds: number;
+};
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type FixedDecimal = string;
+
+/**
+ * A fixed-precision amount with an explicit ISO-4217-like currency code.
+ */
+export type Money = {
+    amount: FixedDecimal;
+    currency: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type BuildCostEstimateSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type RateId = string;
+
+/**
+ * Resource dimension used by a versioned rate card.
+ */
+export type ResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+
+/**
+ * One immutable line in a calculated charge.
+ */
+export type ResourceChargeLine = {
+    amount: Money;
+    quantity: number;
+    quantityDivisor?: 1 | 1000;
+    rateId: RateId;
+    rateRevision: BuildCostEstimateSchemaRevision;
+    unit: ResourceBillingUnit;
+    unitPrice: Money;
+    unitQuantity: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type BuildCostEstimateSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type BuildCostEstimateSchemaUtcTimestamp = string;
+
+/**
+ * BuildCostRecord
+ */
+export type BuildCostRecordSchema = {
+    attempt: number;
+    buildRequestId: BuildCostRecordSchemaBuildRequestId;
+    chargedLines?: Array<BuildCostRecordSchemaResourceChargeLine> | null;
+    chargedTotal?: BuildCostRecordSchemaMoney | null;
+    estimate: BuildCostEstimate;
+    executionAuthorized: boolean;
+    executionDeadline?: BuildCostRecordSchemaUtcTimestamp | null;
+    firstUnknownObservation?: BuildUsageMeasurement | null;
+    hold: CreditHold;
+    measurement?: BuildUsageMeasurement | null;
+    stageRequestId?: string | null;
+};
+
+export type BuildCostEstimate = {
+    input: BuildCostRecordSchemaBuildCostEstimateRequest;
+    lines: Array<BuildCostRecordSchemaResourceChargeLine>;
+    projectId: BuildCostRecordSchemaProjectId;
+    total: BuildCostRecordSchemaMoney;
+    until: BuildCostRecordSchemaUtcTimestamp;
+};
+
+export type BuildCostRecordSchemaBuildCostEstimateRequest = {
+    builderBinding: string;
+    from: BuildCostRecordSchemaUtcTimestamp;
+    maxDurationMilliseconds: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type BuildCostRecordSchemaBuildRequestId = string;
+
+/**
+ * A provider history observation. Missing bounds remain unknown.
+ */
+export type BuildUsageMeasurement = {
+    finishedAt: BuildCostRecordSchemaUtcTimestamp;
+    historyRef: string;
+    startedAt: BuildCostRecordSchemaUtcTimestamp;
+    state: 'known';
+} | {
+    reason: string;
+    state: 'unknown';
+} | {
+    reason: string;
+    state: 'not_started';
+};
+
+export type CreditHold = {
+    amount: BuildCostRecordSchemaFixedDecimal;
+    buildAttempt?: number | null;
+    buildRequestId?: BuildCostRecordSchemaBuildRequestId | null;
+    businessKey: string;
+    createdAt: BuildCostRecordSchemaUtcTimestamp;
+    expiredUnknownAt?: BuildCostRecordSchemaUtcTimestamp | null;
+    id: string;
+    measurementUnknown: boolean;
+    ownerClientId: string;
+    projectId: BuildCostRecordSchemaProjectId;
+    reason?: string | null;
+    reconciliationDueAt?: BuildCostRecordSchemaUtcTimestamp | null;
+    remaining: BuildCostRecordSchemaFixedDecimal;
+    requestId?: ResourceRequestId | null;
+    state: CreditHoldState;
+    unknownSince?: BuildCostRecordSchemaUtcTimestamp | null;
+};
+
+export type CreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type BuildCostRecordSchemaFixedDecimal = string;
+
+/**
+ * A fixed-precision amount with an explicit ISO-4217-like currency code.
+ */
+export type BuildCostRecordSchemaMoney = {
+    amount: BuildCostRecordSchemaFixedDecimal;
+    currency: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type BuildCostRecordSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type BuildCostRecordSchemaRateId = string;
+
+/**
+ * Resource dimension used by a versioned rate card.
+ */
+export type BuildCostRecordSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+
+/**
+ * One immutable line in a calculated charge.
+ */
+export type BuildCostRecordSchemaResourceChargeLine = {
+    amount: BuildCostRecordSchemaMoney;
+    quantity: number;
+    quantityDivisor?: 1 | 1000;
+    rateId: BuildCostRecordSchemaRateId;
+    rateRevision: BuildCostRecordSchemaRevision;
+    unit: BuildCostRecordSchemaResourceBillingUnit;
+    unitPrice: BuildCostRecordSchemaMoney;
+    unitQuantity: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type BuildCostRecordSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type BuildCostRecordSchemaUtcTimestamp = string;
 
 /**
  * CandidateApproval
@@ -1578,175 +1737,19 @@ export type ConsoleCapabilitySchemaRevision = number;
 export type ConsoleCapabilitySchemaUtcTimestamp = string;
 
 /**
- * CourseMembershipPage
- */
-export type CourseMembershipPageSchema = {
-    hasMore: boolean;
-    items: Array<CourseMembershipView>;
-    page: number;
-    pageSize: number;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type CourseMembershipPageSchemaActorId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type CourseMembershipPageSchemaCourseId = string;
-
-/**
- * Course-local role grant with revision and expiry.
- */
-export type CourseMembership = {
-    /**
-     * Actor scope.
-     */
-    actorId: CourseMembershipPageSchemaActorId;
-    /**
-     * Course scope.
-     */
-    courseId: CourseMembershipPageSchemaCourseId;
-    /**
-     * Optional hard expiry.
-     */
-    expiresAt?: CourseMembershipPageSchemaUtcTimestamp | null;
-    /**
-     * Control-owned course responsibility, independent of platform identity.
-     */
-    objectRole?: CourseObjectRole;
-    /**
-     * Monotonic authorization revision.
-     */
-    revision: CourseMembershipPageSchemaRevision;
-    /**
-     * Role permitted by this course.
-     */
-    role: CourseMembershipPageSchemaPlatformRole;
-    /**
-     * Current lifecycle state.
-     */
-    state: MembershipState;
-};
-
-export type CourseMembershipView = {
-    displayName?: string | null;
-    membership: CourseMembership;
-    username?: string | null;
-};
-
-/**
- * Course responsibility does not change the actor's verified platform identity.
- */
-export type CourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
-
-/**
- * Authoritative membership state owned by Control Service.
- */
-export type MembershipState = 'active' | 'suspended' | 'revoked';
-
-/**
- * Base role asserted by the configured OIDC issuer.
- */
-export type CourseMembershipPageSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type CourseMembershipPageSchemaRevision = number;
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CourseMembershipPageSchemaUtcTimestamp = string;
-
-/**
- * CourseMembership
- *
- * Course-local role grant with revision and expiry.
- */
-export type CourseMembershipSchema = {
-    /**
-     * Actor scope.
-     */
-    actorId: CourseMembershipSchemaActorId;
-    /**
-     * Course scope.
-     */
-    courseId: CourseMembershipSchemaCourseId;
-    /**
-     * Optional hard expiry.
-     */
-    expiresAt?: CourseMembershipSchemaUtcTimestamp | null;
-    /**
-     * Control-owned course responsibility, independent of platform identity.
-     */
-    objectRole?: CourseMembershipSchemaCourseObjectRole;
-    /**
-     * Monotonic authorization revision.
-     */
-    revision: CourseMembershipSchemaRevision;
-    /**
-     * Role permitted by this course.
-     */
-    role: CourseMembershipSchemaPlatformRole;
-    /**
-     * Current lifecycle state.
-     */
-    state: CourseMembershipSchemaMembershipState;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type CourseMembershipSchemaActorId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type CourseMembershipSchemaCourseId = string;
-
-/**
- * Course responsibility does not change the actor's verified platform identity.
- */
-export type CourseMembershipSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
-
-/**
- * Authoritative membership state owned by Control Service.
- */
-export type CourseMembershipSchemaMembershipState = 'active' | 'suspended' | 'revoked';
-
-/**
- * Base role asserted by the configured OIDC issuer.
- */
-export type CourseMembershipSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type CourseMembershipSchemaRevision = number;
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CourseMembershipSchemaUtcTimestamp = string;
-
-/**
  * CreditAccount
  */
 export type CreditAccountSchema = {
-    available: FixedDecimal;
-    balance: FixedDecimal;
+    available: CreditAccountSchemaFixedDecimal;
+    balance: CreditAccountSchemaFixedDecimal;
     currency: string;
-    pending: FixedDecimal;
-    platformAbsorbed: FixedDecimal;
+    pending: CreditAccountSchemaFixedDecimal;
+    platformAbsorbed: CreditAccountSchemaFixedDecimal;
     projectId: CreditAccountSchemaProjectId;
-    reserved: FixedDecimal;
+    reserved: CreditAccountSchemaFixedDecimal;
     revision: CreditAccountSchemaRevision;
-    spent: FixedDecimal;
-    unknown: FixedDecimal;
+    spent: CreditAccountSchemaFixedDecimal;
+    unknown: CreditAccountSchemaFixedDecimal;
     unknownCount: number;
 };
 
@@ -1758,7 +1761,7 @@ export type CreditAccountSchema = {
  * internal scaled representation is available to Resource arithmetic without
  * introducing a database-specific decimal dependency into the contracts crate.
  */
-export type FixedDecimal = string;
+export type CreditAccountSchemaFixedDecimal = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -1815,13 +1818,20 @@ export type CreditAdminOperationSchemaProjectId = string;
  */
 export type CreditHoldPageSchema = {
     hasMore: boolean;
-    items: Array<CreditHold>;
+    items: Array<CreditHoldPageSchemaCreditHold>;
     page: number;
     pageSize: number;
 };
 
-export type CreditHold = {
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type CreditHoldPageSchemaBuildRequestId = string;
+
+export type CreditHoldPageSchemaCreditHold = {
     amount: CreditHoldPageSchemaFixedDecimal;
+    buildAttempt?: number | null;
+    buildRequestId?: CreditHoldPageSchemaBuildRequestId | null;
     businessKey: string;
     createdAt: CreditHoldPageSchemaUtcTimestamp;
     expiredUnknownAt?: CreditHoldPageSchemaUtcTimestamp | null;
@@ -1832,12 +1842,12 @@ export type CreditHold = {
     reason?: string | null;
     reconciliationDueAt?: CreditHoldPageSchemaUtcTimestamp | null;
     remaining: CreditHoldPageSchemaFixedDecimal;
-    requestId: CreditHoldPageSchemaResourceRequestId;
-    state: CreditHoldState;
+    requestId?: CreditHoldPageSchemaResourceRequestId | null;
+    state: CreditHoldPageSchemaCreditHoldState;
     unknownSince?: CreditHoldPageSchemaUtcTimestamp | null;
 };
 
-export type CreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
+export type CreditHoldPageSchemaCreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
 
 /**
  * Canonical signed decimal with exactly six fractional digits.
@@ -3402,25 +3412,12 @@ export type GpuCatalogEntrySchemaGpuCatalogEntryId = string;
 export type GpuCatalogEntrySchemaRevision = number;
 
 /**
- * AcceptMembershipInvitation
- */
-export type AcceptMembershipInvitationSchema = {
-    expectedRevision: AcceptMembershipInvitationSchemaRevision;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type AcceptMembershipInvitationSchemaRevision = number;
-
-/**
  * AddProjectMembershipRequest
  *
  * Access-owned membership grant for one Project actor.
  */
 export type AddProjectMembershipRequestSchema = {
     expiresAt?: AddProjectMembershipRequestSchemaUtcTimestamp | null;
-    objectRole: ProjectObjectRole;
     role: AddProjectMembershipRequestSchemaPlatformRole;
     /**
      * Exact issuer username resolved by Access before the membership
@@ -3434,11 +3431,6 @@ export type AddProjectMembershipRequestSchema = {
  * Base role asserted by the configured OIDC issuer.
  */
 export type AddProjectMembershipRequestSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
-
-/**
- * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
- */
-export type ProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -4189,26 +4181,6 @@ export type CreateAgentRunRequestSchemaProjectId = string;
 export type CreateAgentRunRequestSchemaRevision = number;
 
 /**
- * CreateCourseMembershipInvitation
- */
-export type CreateCourseMembershipInvitationSchema = {
-    expiresAt: CreateCourseMembershipInvitationSchemaUtcTimestamp;
-    membershipExpiresAt?: CreateCourseMembershipInvitationSchemaUtcTimestamp | null;
-    objectRole: CreateCourseMembershipInvitationSchemaCourseObjectRole;
-    username: string;
-};
-
-/**
- * Course responsibility does not change the actor's verified platform identity.
- */
-export type CreateCourseMembershipInvitationSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CreateCourseMembershipInvitationSchemaUtcTimestamp = string;
-
-/**
  * CreateEnvironmentRequest
  */
 export type CreateEnvironmentRequestSchema = {
@@ -4399,28 +4371,6 @@ export type CreateProblemPackageUploadRequestSchemaProjectId = string;
 export type CreateProblemPackageUploadRequestSchemaRevision = number;
 
 /**
- * CreateProjectMembershipInvitation
- *
- * The recipient must use this exact campus username. Access resolves it before forwarding.
- */
-export type CreateProjectMembershipInvitationSchema = {
-    expiresAt: CreateProjectMembershipInvitationSchemaUtcTimestamp;
-    membershipExpiresAt?: CreateProjectMembershipInvitationSchemaUtcTimestamp | null;
-    objectRole: CreateProjectMembershipInvitationSchemaProjectObjectRole;
-    username: string;
-};
-
-/**
- * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
- */
-export type CreateProjectMembershipInvitationSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CreateProjectMembershipInvitationSchemaUtcTimestamp = string;
-
-/**
  * CreateProjectRequest
  *
  * Browser request for a new independent or course-associated project.
@@ -4442,7 +4392,7 @@ export type CreateProjectRequestSchemaCourseId = string;
  * Administrator adjustment appended to an existing calculated charge.
  */
 export type CreateResourceAdjustmentRequestSchema = {
-    amount: Money;
+    amount: CreateResourceAdjustmentRequestSchemaMoney;
     reason: string;
 };
 
@@ -4459,7 +4409,7 @@ export type CreateResourceAdjustmentRequestSchemaFixedDecimal = string;
 /**
  * A fixed-precision amount with an explicit ISO-4217-like currency code.
  */
-export type Money = {
+export type CreateResourceAdjustmentRequestSchemaMoney = {
     amount: CreateResourceAdjustmentRequestSchemaFixedDecimal;
     currency: string;
 };
@@ -4470,11 +4420,12 @@ export type Money = {
  * Administrator-created immutable rate version.
  */
 export type CreateResourceRateRequestSchema = {
+    builderBinding?: string | null;
     effectiveFrom: CreateResourceRateRequestSchemaUtcTimestamp;
     effectiveUntil?: CreateResourceRateRequestSchemaUtcTimestamp | null;
     gpuClass?: string | null;
     gpuMode?: CreateResourceRateRequestSchemaGpuAllocationMode | null;
-    unit: ResourceBillingUnit;
+    unit: CreateResourceRateRequestSchemaResourceBillingUnit;
     unitPrice: CreateResourceRateRequestSchemaMoney;
     /**
      * Number of base usage units represented by `unit_price`.
@@ -4511,7 +4462,7 @@ export type CreateResourceRateRequestSchemaMoney = {
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type CreateResourceRateRequestSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -10270,155 +10221,6 @@ export type LogoutBrowserSessionResponseSchema = {
 };
 
 /**
- * MembershipInvitationPage
- */
-export type MembershipInvitationPageSchema = {
-    hasMore: boolean;
-    items: Array<MembershipInvitation>;
-    page: number;
-    pageSize: number;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type MembershipInvitationPageSchemaActorId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type MembershipInvitationPageSchemaCourseId = string;
-
-/**
- * Course responsibility does not change the actor's verified platform identity.
- */
-export type MembershipInvitationPageSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
-
-export type MembershipInvitation = {
-    acceptedMembershipRevision?: MembershipInvitationPageSchemaRevision | null;
-    createdAt: MembershipInvitationPageSchemaUtcTimestamp;
-    createdBy: MembershipInvitationPageSchemaActorId;
-    expiresAt: MembershipInvitationPageSchemaUtcTimestamp;
-    id: MembershipInvitationId;
-    membershipExpiresAt?: MembershipInvitationPageSchemaUtcTimestamp | null;
-    recipientActorId: MembershipInvitationPageSchemaActorId;
-    revision: MembershipInvitationPageSchemaRevision;
-    scope: MembershipInvitationScope;
-    state: MembershipInvitationState;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `MembershipInvitationId`.
- */
-export type MembershipInvitationId = string;
-
-/**
- * Proposed responsibility. Acceptance does not create any unrelated membership.
- */
-export type MembershipInvitationScope = {
-    kind: 'project';
-    objectRole: MembershipInvitationPageSchemaProjectObjectRole;
-    projectId: MembershipInvitationPageSchemaProjectId;
-} | {
-    courseId: MembershipInvitationPageSchemaCourseId;
-    kind: 'course';
-    objectRole: MembershipInvitationPageSchemaCourseObjectRole;
-};
-
-export type MembershipInvitationState = 'pending' | 'accepted' | 'revoked' | 'expired';
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type MembershipInvitationPageSchemaProjectId = string;
-
-/**
- * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
- */
-export type MembershipInvitationPageSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type MembershipInvitationPageSchemaRevision = number;
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type MembershipInvitationPageSchemaUtcTimestamp = string;
-
-/**
- * MembershipInvitation
- */
-export type MembershipInvitationSchema = {
-    acceptedMembershipRevision?: MembershipInvitationSchemaRevision | null;
-    createdAt: MembershipInvitationSchemaUtcTimestamp;
-    createdBy: MembershipInvitationSchemaActorId;
-    expiresAt: MembershipInvitationSchemaUtcTimestamp;
-    id: MembershipInvitationSchemaMembershipInvitationId;
-    membershipExpiresAt?: MembershipInvitationSchemaUtcTimestamp | null;
-    recipientActorId: MembershipInvitationSchemaActorId;
-    revision: MembershipInvitationSchemaRevision;
-    scope: MembershipInvitationSchemaMembershipInvitationScope;
-    state: MembershipInvitationSchemaMembershipInvitationState;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type MembershipInvitationSchemaActorId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type MembershipInvitationSchemaCourseId = string;
-
-/**
- * Course responsibility does not change the actor's verified platform identity.
- */
-export type MembershipInvitationSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
-
-/**
- * Strongly typed UUIDv7 identifier for `MembershipInvitationId`.
- */
-export type MembershipInvitationSchemaMembershipInvitationId = string;
-
-/**
- * Proposed responsibility. Acceptance does not create any unrelated membership.
- */
-export type MembershipInvitationSchemaMembershipInvitationScope = {
-    kind: 'project';
-    objectRole: MembershipInvitationSchemaProjectObjectRole;
-    projectId: MembershipInvitationSchemaProjectId;
-} | {
-    courseId: MembershipInvitationSchemaCourseId;
-    kind: 'course';
-    objectRole: MembershipInvitationSchemaCourseObjectRole;
-};
-
-export type MembershipInvitationSchemaMembershipInvitationState = 'pending' | 'accepted' | 'revoked' | 'expired';
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type MembershipInvitationSchemaProjectId = string;
-
-/**
- * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
- */
-export type MembershipInvitationSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type MembershipInvitationSchemaRevision = number;
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type MembershipInvitationSchemaUtcTimestamp = string;
-
-/**
  * OrganizationUserPage
  *
  * Bounded organization-directory search result.
@@ -11153,10 +10955,6 @@ export type ProjectMembershipSchema = {
      */
     expiresAt?: ProjectMembershipSchemaUtcTimestamp | null;
     /**
-     * Project action responsibilities, independent of the verified platform role.
-     */
-    objectRole?: ProjectMembershipSchemaProjectObjectRole;
-    /**
      * Project scope.
      */
     projectId: ProjectMembershipSchemaProjectId;
@@ -11171,7 +10969,7 @@ export type ProjectMembershipSchema = {
     /**
      * Current lifecycle state.
      */
-    state: ProjectMembershipSchemaMembershipState;
+    state: MembershipState;
     /**
      * Issuer username, present on project membership views when identity
      * metadata is available.  Authorization snapshots leave this unset.
@@ -11190,9 +10988,9 @@ export type ProjectMembershipSchemaActorId = string;
 export type ProjectMembershipSchemaCourseId = string;
 
 /**
- * Authoritative membership state owned by Control Service.
+ * Authoritative membership state owned by Access Service.
  */
-export type ProjectMembershipSchemaMembershipState = 'active' | 'suspended' | 'revoked';
+export type MembershipState = 'active' | 'suspended' | 'revoked';
 
 /**
  * Base role asserted by the configured OIDC issuer.
@@ -11203,11 +11001,6 @@ export type ProjectMembershipSchemaPlatformRole = 'teacher' | 'student' | 'platf
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type ProjectMembershipSchemaProjectId = string;
-
-/**
- * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
- */
-export type ProjectMembershipSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -11371,8 +11164,8 @@ export type ResourceChargeSchema = {
     courseId?: ResourceChargeSchemaCourseId | null;
     createdAt: ResourceChargeSchemaUtcTimestamp;
     diagnosticCode?: string | null;
-    id: ResourceChargeSchemaChargeId;
-    lines: Array<ResourceChargeLine>;
+    id: ChargeId;
+    lines: Array<ResourceChargeSchemaResourceChargeLine>;
     projectId: ResourceChargeSchemaProjectId;
     settlement: UsageSettlementState;
     total: ResourceChargeSchemaMoney;
@@ -11425,16 +11218,16 @@ export type ResourceChargeSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * One immutable line in a calculated charge.
  */
-export type ResourceChargeLine = {
+export type ResourceChargeSchemaResourceChargeLine = {
     amount: ResourceChargeSchemaMoney;
     quantity: number;
     quantityDivisor?: 1 | 1000;
-    rateId: RateId;
+    rateId: ResourceChargeSchemaRateId;
     rateRevision: ResourceChargeSchemaRevision;
     unit: ResourceChargeSchemaResourceBillingUnit;
     unitPrice: ResourceChargeSchemaMoney;
@@ -11548,7 +11341,7 @@ export type ResourceCostEstimateSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * One immutable line in a calculated charge.
@@ -11649,6 +11442,7 @@ export type ResourceLeaseSchemaUtcTimestamp = string;
  * Immutable versioned unit price. A later rate never mutates a prior charge.
  */
 export type ResourceRateSchema = {
+    builderBinding?: string | null;
     effectiveFrom: ResourceRateSchemaUtcTimestamp;
     effectiveUntil?: ResourceRateSchemaUtcTimestamp | null;
     gpuClass?: string | null;
@@ -11697,7 +11491,7 @@ export type ResourceRateSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceRateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+export type ResourceRateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -12050,136 +11844,6 @@ export type ResourceUsagePageSchemaUsageSettlementState = 'pending' | 'settled' 
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ResourceUsagePageSchemaUtcTimestamp = string;
-
-/**
- * RuntimeAuthorizationBinding
- *
- * Part of the existing immutable ResourceApproval, with no independent approval lifecycle.
- */
-export type RuntimeAuthorizationBindingSchema = {
-    basis: RuntimeAdmissionBasis;
-    configuration: RuntimeConfigurationIdentity;
-    courseId?: RuntimeAuthorizationBindingSchemaCourseId | null;
-    permissions: RuntimeAuthorizationBindingSchemaRuntimePreauthorization;
-    /**
-     * This is the verified applied platform version, never the candidate's LLM policy revision.
-     */
-    platformConfigurationRevision: RuntimeAuthorizationBindingSchemaRevision;
-    platformConfigurationSha256: string;
-    projectId: RuntimeAuthorizationBindingSchemaProjectId;
-    requestGeneration: number;
-    requestId: RuntimeAuthorizationBindingSchemaResourceRequestId;
-    target: RuntimeAuthorizationBindingSchemaResourceTarget;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type RuntimeAuthorizationBindingSchemaActorId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ApprovalId`.
- */
-export type RuntimeAuthorizationBindingSchemaApprovalId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type RuntimeAuthorizationBindingSchemaCandidateId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type RuntimeAuthorizationBindingSchemaCourseId = string;
-
-/**
- * Captured by Control while the verified teacher and current course instructor are checked.
- */
-export type RuntimeAuthorizationBindingSchemaCourseTeacherApprovalScope = {
-    actorId: RuntimeAuthorizationBindingSchemaActorId;
-    courseId: RuntimeAuthorizationBindingSchemaCourseId;
-    membershipRevision: RuntimeAuthorizationBindingSchemaRevision;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `EnvironmentId`.
- */
-export type RuntimeAuthorizationBindingSchemaEnvironmentId = string;
-
-/**
- * Linux capability names from the kernel UAPI. `ALL` is never an addition.
- */
-export type RuntimeAuthorizationBindingSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type RuntimeAuthorizationBindingSchemaProjectId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ReleaseId`.
- */
-export type RuntimeAuthorizationBindingSchemaReleaseId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
- */
-export type RuntimeAuthorizationBindingSchemaResourceRequestId = string;
-
-/**
- * Immutable identity of a Resource request's target.
- */
-export type RuntimeAuthorizationBindingSchemaResourceTarget = {
-    environmentId: RuntimeAuthorizationBindingSchemaEnvironmentId;
-    kind: 'environment';
-    releaseId: RuntimeAuthorizationBindingSchemaReleaseId;
-    releaseVersion: number;
-} | {
-    kind: 'task';
-    taskRunId: RuntimeAuthorizationBindingSchemaTaskRunId;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type RuntimeAuthorizationBindingSchemaRevision = number;
-
-export type RuntimeAdmissionBasis = 'restricted_baseline' | 'project_preauthorization' | 'course_preauthorization';
-
-/**
- * Control-owned immutable configuration identity. Clients cannot supply a replacement digest.
- */
-export type RuntimeConfigurationIdentity = {
-    authoringApprovalId?: RuntimeAuthorizationBindingSchemaApprovalId | null;
-    authoringProjectId: RuntimeAuthorizationBindingSchemaProjectId;
-    candidateId: RuntimeAuthorizationBindingSchemaCandidateId;
-    candidateRevision: RuntimeAuthorizationBindingSchemaRevision;
-    configurationSha256: string;
-    courseId?: RuntimeAuthorizationBindingSchemaCourseId | null;
-    teacherScope?: RuntimeAuthorizationBindingSchemaCourseTeacherApprovalScope | null;
-};
-
-export type RuntimeAuthorizationBindingSchemaRuntimePreauthorization = {
-    capabilities: Array<RuntimeAuthorizationBindingSchemaLinuxCapability>;
-    privileged: boolean;
-    scope: RuntimeAuthorizationBindingSchemaRuntimePreauthorizationScope;
-};
-
-/**
- * Object scope for a runtime preauthorization, never a builder authorization.
- */
-export type RuntimeAuthorizationBindingSchemaRuntimePreauthorizationScope = {
-    kind: 'project';
-    projectId: RuntimeAuthorizationBindingSchemaProjectId;
-} | {
-    courseId: RuntimeAuthorizationBindingSchemaCourseId;
-    kind: 'course';
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `TaskRunId`.
- */
-export type RuntimeAuthorizationBindingSchemaTaskRunId = string;
 
 /**
  * SshPublicKey
@@ -14267,288 +13931,6 @@ export type GetActiveCourseLlmPolicyResponses = {
 
 export type GetActiveCourseLlmPolicyResponse = GetActiveCourseLlmPolicyResponses[keyof GetActiveCourseLlmPolicyResponses];
 
-export type ListCourseMembershipInvitationsData = {
-    body?: never;
-    path: {
-        courseId: string;
-    };
-    query?: {
-        page?: number;
-        pageSize?: number;
-    };
-    url: '/api/v1/courses/{courseId}/member-invitations';
-};
-
-export type ListCourseMembershipInvitationsErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type ListCourseMembershipInvitationsError = ListCourseMembershipInvitationsErrors[keyof ListCourseMembershipInvitationsErrors];
-
-export type ListCourseMembershipInvitationsResponses = {
-    /**
-     * Successful response
-     */
-    200: MembershipInvitationPageSchema;
-};
-
-export type ListCourseMembershipInvitationsResponse = ListCourseMembershipInvitationsResponses[keyof ListCourseMembershipInvitationsResponses];
-
-export type CreateCourseMembershipInvitationData = {
-    body: CreateCourseMembershipInvitationSchema;
-    headers: {
-        'Idempotency-Key': string;
-    };
-    path: {
-        courseId: string;
-    };
-    query?: never;
-    url: '/api/v1/courses/{courseId}/member-invitations';
-};
-
-export type CreateCourseMembershipInvitationErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type CreateCourseMembershipInvitationError = CreateCourseMembershipInvitationErrors[keyof CreateCourseMembershipInvitationErrors];
-
-export type CreateCourseMembershipInvitationResponses = {
-    /**
-     * Successful response
-     */
-    201: MembershipInvitationSchema;
-};
-
-export type CreateCourseMembershipInvitationResponse = CreateCourseMembershipInvitationResponses[keyof CreateCourseMembershipInvitationResponses];
-
-export type ListCourseMembershipsData = {
-    body?: never;
-    path: {
-        courseId: string;
-    };
-    query?: {
-        page?: number;
-        pageSize?: number;
-    };
-    url: '/api/v1/courses/{courseId}/members';
-};
-
-export type ListCourseMembershipsErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type ListCourseMembershipsError = ListCourseMembershipsErrors[keyof ListCourseMembershipsErrors];
-
-export type ListCourseMembershipsResponses = {
-    /**
-     * Successful response
-     */
-    200: CourseMembershipPageSchema;
-};
-
-export type ListCourseMembershipsResponse = ListCourseMembershipsResponses[keyof ListCourseMembershipsResponses];
-
-export type RemoveCourseMembershipData = {
-    body: RemoveProjectMembershipRequestSchema;
-    headers: {
-        'Idempotency-Key': string;
-        'If-Match': string;
-    };
-    path: {
-        courseId: string;
-        actorId: string;
-    };
-    query?: never;
-    url: '/api/v1/courses/{courseId}/members/{actorId}';
-};
-
-export type RemoveCourseMembershipErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type RemoveCourseMembershipError = RemoveCourseMembershipErrors[keyof RemoveCourseMembershipErrors];
-
-export type RemoveCourseMembershipResponses = {
-    /**
-     * Successful response
-     */
-    200: CourseMembershipSchema;
-};
-
-export type RemoveCourseMembershipResponse = RemoveCourseMembershipResponses[keyof RemoveCourseMembershipResponses];
-
 export type ListOrganizationUsersData = {
     body?: never;
     path?: never;
@@ -15993,283 +15375,6 @@ export type DeleteSshPublicKeyResponses = {
 
 export type DeleteSshPublicKeyResponse = DeleteSshPublicKeyResponses[keyof DeleteSshPublicKeyResponses];
 
-export type ListIncomingMembershipInvitationsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        page?: number;
-        pageSize?: number;
-    };
-    url: '/api/v1/member-invitations';
-};
-
-export type ListIncomingMembershipInvitationsErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type ListIncomingMembershipInvitationsError = ListIncomingMembershipInvitationsErrors[keyof ListIncomingMembershipInvitationsErrors];
-
-export type ListIncomingMembershipInvitationsResponses = {
-    /**
-     * Successful response
-     */
-    200: MembershipInvitationPageSchema;
-};
-
-export type ListIncomingMembershipInvitationsResponse = ListIncomingMembershipInvitationsResponses[keyof ListIncomingMembershipInvitationsResponses];
-
-export type GetMembershipInvitationData = {
-    body?: never;
-    path: {
-        invitationId: string;
-    };
-    query?: never;
-    url: '/api/v1/member-invitations/{invitationId}';
-};
-
-export type GetMembershipInvitationErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type GetMembershipInvitationError = GetMembershipInvitationErrors[keyof GetMembershipInvitationErrors];
-
-export type GetMembershipInvitationResponses = {
-    /**
-     * Successful response
-     */
-    200: MembershipInvitationSchema;
-};
-
-export type GetMembershipInvitationResponse = GetMembershipInvitationResponses[keyof GetMembershipInvitationResponses];
-
-export type AcceptMembershipInvitationData = {
-    body: AcceptMembershipInvitationSchema;
-    headers: {
-        'Idempotency-Key': string;
-        'If-Match': string;
-    };
-    path: {
-        invitationId: string;
-    };
-    query?: never;
-    url: '/api/v1/member-invitations/{invitationId}/accept';
-};
-
-export type AcceptMembershipInvitationErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type AcceptMembershipInvitationError = AcceptMembershipInvitationErrors[keyof AcceptMembershipInvitationErrors];
-
-export type AcceptMembershipInvitationResponses = {
-    /**
-     * Successful response
-     */
-    200: MembershipInvitationSchema;
-};
-
-export type AcceptMembershipInvitationResponse = AcceptMembershipInvitationResponses[keyof AcceptMembershipInvitationResponses];
-
-export type RevokeMembershipInvitationData = {
-    body: RemoveProjectMembershipRequestSchema;
-    headers: {
-        'Idempotency-Key': string;
-        'If-Match': string;
-    };
-    path: {
-        invitationId: string;
-    };
-    query?: never;
-    url: '/api/v1/member-invitations/{invitationId}/revoke';
-};
-
-export type RevokeMembershipInvitationErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type RevokeMembershipInvitationError = RevokeMembershipInvitationErrors[keyof RevokeMembershipInvitationErrors];
-
-export type RevokeMembershipInvitationResponses = {
-    /**
-     * Successful response
-     */
-    200: MembershipInvitationSchema;
-};
-
-export type RevokeMembershipInvitationResponse = RevokeMembershipInvitationResponses[keyof RevokeMembershipInvitationResponses];
-
 export type ListProjectsData = {
     body?: never;
     path?: never;
@@ -17315,16 +16420,16 @@ export type GetProjectAuthoringApprovalResponses = {
 
 export type GetProjectAuthoringApprovalResponse = GetProjectAuthoringApprovalResponses[keyof GetProjectAuthoringApprovalResponses];
 
-export type GetProjectAvailableActionsData = {
-    body?: never;
+export type EstimateProjectBuildCostData = {
+    body: BuildCostEstimateRequestSchema;
     path: {
         projectId: string;
     };
     query?: never;
-    url: '/api/v1/projects/{projectId}/available-actions';
+    url: '/api/v1/projects/{projectId}/build-cost-estimate';
 };
 
-export type GetProjectAvailableActionsErrors = {
+export type EstimateProjectBuildCostErrors = {
     /**
      * RFC 9457 problem detail
      */
@@ -17371,16 +16476,85 @@ export type GetProjectAvailableActionsErrors = {
     503: ProblemDetails;
 };
 
-export type GetProjectAvailableActionsError = GetProjectAvailableActionsErrors[keyof GetProjectAvailableActionsErrors];
+export type EstimateProjectBuildCostError = EstimateProjectBuildCostErrors[keyof EstimateProjectBuildCostErrors];
 
-export type GetProjectAvailableActionsResponses = {
+export type EstimateProjectBuildCostResponses = {
     /**
      * Successful response
      */
-    200: AvailableObjectActionsSchema;
+    200: BuildCostEstimateSchema;
 };
 
-export type GetProjectAvailableActionsResponse = GetProjectAvailableActionsResponses[keyof GetProjectAvailableActionsResponses];
+export type EstimateProjectBuildCostResponse = EstimateProjectBuildCostResponses[keyof EstimateProjectBuildCostResponses];
+
+export type GetProjectBuildCostData = {
+    body?: never;
+    path: {
+        projectId: string;
+        buildRequestId: string;
+        attempt: number;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/build-costs/{buildRequestId}/attempts/{attempt}';
+};
+
+export type GetProjectBuildCostErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectBuildCostError = GetProjectBuildCostErrors[keyof GetProjectBuildCostErrors];
+
+export type GetProjectBuildCostResponses = {
+    /**
+     * Successful response
+     */
+    200: BuildCostRecordSchema;
+};
+
+export type GetProjectBuildCostResponse = GetProjectBuildCostResponses[keyof GetProjectBuildCostResponses];
 
 export type GetProjectCandidateBuildData = {
     body?: never;
@@ -19052,146 +18226,6 @@ export type GetOwnProjectEvaluationTaskProgressResponses = {
 };
 
 export type GetOwnProjectEvaluationTaskProgressResponse = GetOwnProjectEvaluationTaskProgressResponses[keyof GetOwnProjectEvaluationTaskProgressResponses];
-
-export type ListProjectMembershipInvitationsData = {
-    body?: never;
-    path: {
-        projectId: string;
-    };
-    query?: {
-        page?: number;
-        pageSize?: number;
-    };
-    url: '/api/v1/projects/{projectId}/member-invitations';
-};
-
-export type ListProjectMembershipInvitationsErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type ListProjectMembershipInvitationsError = ListProjectMembershipInvitationsErrors[keyof ListProjectMembershipInvitationsErrors];
-
-export type ListProjectMembershipInvitationsResponses = {
-    /**
-     * Successful response
-     */
-    200: MembershipInvitationPageSchema;
-};
-
-export type ListProjectMembershipInvitationsResponse = ListProjectMembershipInvitationsResponses[keyof ListProjectMembershipInvitationsResponses];
-
-export type CreateProjectMembershipInvitationData = {
-    body: CreateProjectMembershipInvitationSchema;
-    headers: {
-        'Idempotency-Key': string;
-    };
-    path: {
-        projectId: string;
-    };
-    query?: never;
-    url: '/api/v1/projects/{projectId}/member-invitations';
-};
-
-export type CreateProjectMembershipInvitationErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type CreateProjectMembershipInvitationError = CreateProjectMembershipInvitationErrors[keyof CreateProjectMembershipInvitationErrors];
-
-export type CreateProjectMembershipInvitationResponses = {
-    /**
-     * Successful response
-     */
-    201: MembershipInvitationSchema;
-};
-
-export type CreateProjectMembershipInvitationResponse = CreateProjectMembershipInvitationResponses[keyof CreateProjectMembershipInvitationResponses];
 
 export type ListProjectMembershipsData = {
     body?: never;
@@ -21155,73 +20189,6 @@ export type RetryResourceRequestResponses = {
 };
 
 export type RetryResourceRequestResponse = RetryResourceRequestResponses[keyof RetryResourceRequestResponses];
-
-export type GetResourceRuntimeAuthorizationData = {
-    body?: never;
-    path: {
-        requestId: string;
-    };
-    query?: never;
-    url: '/api/v1/resource-requests/{requestId}/runtime-authorization';
-};
-
-export type GetResourceRuntimeAuthorizationErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type GetResourceRuntimeAuthorizationError = GetResourceRuntimeAuthorizationErrors[keyof GetResourceRuntimeAuthorizationErrors];
-
-export type GetResourceRuntimeAuthorizationResponses = {
-    /**
-     * Successful response
-     */
-    200: RuntimeAuthorizationBindingSchema;
-};
-
-export type GetResourceRuntimeAuthorizationResponse = GetResourceRuntimeAuthorizationResponses[keyof GetResourceRuntimeAuthorizationResponses];
 
 export type CreateCreditAdminOperationData = {
     body: CreditAdminOperationSchema;

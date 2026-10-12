@@ -392,6 +392,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::build_costing::BuildCostRecord
     );
     document!(
+        "schemas/contracts/v1/build-cost-reconciliation.schema.json",
+        crate::resource::build_costing::BuildCostReconciliation
+    );
+    document!(
         "schemas/contracts/v1/build-usage-measurement.schema.json",
         crate::resource::build_costing::BuildUsageMeasurement
     );
@@ -1489,6 +1493,20 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ]);
         }
         parameters.extend(environment_management_parameters(operation.operation_id));
+        if operation.operation_id == "getBuildCost" {
+            parameters.push(json!({"name":"leaseToken","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if matches!(
+            operation.operation_id,
+            "getBuildCost" | "getProjectBuildCost"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "attempt" {
+                    parameter["schema"] =
+                        json!({"type":"integer","minimum":1,"maximum":2_147_483_647});
+                }
+            }
+        }
         if operation.operation_id == "streamProjectEvents" {
             let stream_cursor_schema = json!({
                 "type":"string",
@@ -2330,6 +2348,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listProjectCreditHolds" => contract_ref("credit-hold-page"),
         "getProjectCredits" => contract_ref("credit-account"),
         "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
+        "claimBuildCostReconciliations" => {
+            json!({"type":"array","items":contract_ref("build-cost-reconciliation")})
+        }
         "estimateProjectBuildCost" => contract_ref("build-cost-estimate"),
         "getProjectBuildCost" | "getBuildCost" | "admitBuildCost" | "observeBuildCost" => {
             contract_ref("build-cost-record")

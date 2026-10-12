@@ -2258,6 +2258,11 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0019_build_metering.sql"
+    ))
+    .execute(&pool)
+    .await?;
     let store = PgResourceStore::new(pool.clone());
     let resolve_request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
@@ -4348,6 +4353,11 @@ async fn migrated_pool()
     .await?;
     sqlx::raw_sql(include_str!(
         "../../../migrations/resource/0018_unknown_usage_deadline.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0019_build_metering.sql"
     ))
     .execute(&pool)
     .await?;

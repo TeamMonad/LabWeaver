@@ -90,10 +90,20 @@ pub struct BuildCostRecord {
     pub build_request_id: BuildRequestId,
     pub attempt: u32,
     pub execution_authorized: bool,
+    pub execution_deadline: Option<UtcTimestamp>,
+    pub stage_request_id: Option<String>,
     pub estimate: BuildCostEstimate,
     pub hold: super::credits::CreditHold,
     pub measurement: Option<BuildUsageMeasurement>,
     pub first_unknown_observation: Option<BuildUsageMeasurement>,
     pub charged_lines: Option<Vec<ResourceChargeLine>>,
     pub charged_total: Option<Money>,
+}
+
+/// Bounded read-only reconciliation work; the original command and grant fence remain authoritative.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildCostReconciliation {
+    pub admission: BuildCostAdmissionRequest,
+    pub command: crate::events::AgentBuildRequested,
 }

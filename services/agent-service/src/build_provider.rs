@@ -70,13 +70,17 @@ impl NatsBuildSupplyChainProvider {
         }
         let context = bind_build_executor_request(*context, &request)?;
         let request_body_for_query = request.clone();
+        let query_only = context.stage == BuildProviderStage::Build
+            && context.deadline_at.get() <= time::OffsetDateTime::now_utc();
         let payload = serde_json::to_vec(&BuildExecutorRequestEnvelope {
             context,
             request,
-            query_only: false,
+            query_only,
         })
         .map_err(|_| output_invalid())?;
-        let timeout = if matches!(
+        let timeout = if query_only {
+            self.request_timeout
+        } else if matches!(
             context.stage,
             BuildProviderStage::Build | BuildProviderStage::Import
         ) {
@@ -90,6 +94,7 @@ impl NatsBuildSupplyChainProvider {
         let request = async_nats::Request::new()
             .timeout(Some(timeout))
             .payload(payload.into());
+        let mut queried = query_only;
         let message = match self
             .client
             .send_request(self.subject.clone(), request)
@@ -97,9 +102,10 @@ impl NatsBuildSupplyChainProvider {
         {
             Ok(message) => message,
             Err(_) if matches!(context.stage, BuildProviderStage::Build) => {
+                queried = true;
                 let query_payload = serde_json::to_vec(&BuildExecutorRequestEnvelope {
                     context,
-                    request: request_body_for_query,
+                    request: request_body_for_query.clone(),
                     query_only: true,
                 })
                 .map_err(|_| output_invalid())?;
@@ -130,6 +136,44 @@ impl NatsBuildSupplyChainProvider {
             || response.stage_request_id != context.stage_request_id
         {
             return Err(identity_mismatch());
+        }
+        if !queried
+            && context.stage == BuildProviderStage::Build
+            && matches!(&response.response, BuildExecutorResponse::Failed { failure } if matches!(failure.code, BuildProviderFailureCode::ExecutionUnknown | BuildProviderFailureCode::Unavailable))
+        {
+            let payload = serde_json::to_vec(&BuildExecutorRequestEnvelope {
+                context,
+                request: request_body_for_query,
+                query_only: true,
+            })
+            .map_err(|_| output_invalid())?;
+            let message = self
+                .client
+                .send_request(
+                    self.subject.clone(),
+                    async_nats::Request::new()
+                        .timeout(Some(self.request_timeout))
+                        .payload(payload.into()),
+                )
+                .await
+                .map_err(|_| BuildProviderFailure {
+                    code: BuildProviderFailureCode::ExecutionUnknown,
+                    retryable: false,
+                })?;
+            if message.payload.len() > MAX_RESPONSE_BYTES {
+                return Err(output_invalid());
+            }
+            let original: BuildExecutorResponseEnvelope =
+                serde_json::from_slice(&message.payload).map_err(|_| output_invalid())?;
+            if original.protocol_version != context.protocol_version
+                || original.build_request_id != context.build_request_id
+                || original.fence_generation != context.fence_generation
+                || original.stage != context.stage
+                || original.stage_request_id != context.stage_request_id
+            {
+                return Err(identity_mismatch());
+            }
+            return Ok(original.response);
         }
         Ok(response.response)
     }
@@ -406,13 +450,42 @@ impl PgBuildExecutorFenceStore {
     ) -> Result<Option<Value>, BuildExecutorFenceError> {
         Ok(sqlx::query_scalar("SELECT last_response FROM agent.build_executor_fences WHERE build_request_id=$1 AND highest_generation=$2 AND lease_token=$3 AND last_request_id=$4 AND deadline_at=$5").bind(context.build_request_id.as_uuid()).bind(i32::try_from(context.fence_generation).map_err(|_|BuildExecutorFenceError::IdentityMismatch)?).bind(context.lease_token).bind(context.stage_request_id.to_string()).bind(context.deadline_at.get()).fetch_optional(&self.pool).await?.flatten())
     }
-    async fn verify_query_identity(
+    async fn preflight(
         &self,
-        context: BuildProviderRequestContext,
+        envelope: &BuildExecutorRequestEnvelope,
     ) -> Result<(), BuildExecutorFenceError> {
-        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent.build_executor_fences WHERE build_request_id=$1 AND highest_generation=$2 AND lease_token=$3 AND deadline_at=$4)").bind(context.build_request_id.as_uuid()).bind(i32::try_from(context.fence_generation).map_err(|_|BuildExecutorFenceError::IdentityMismatch)?).bind(context.lease_token).bind(context.deadline_at.get()).fetch_one(&self.pool).await?;
-        if !exists {
-            return Err(BuildExecutorFenceError::IdentityMismatch);
+        let c = envelope.context;
+        if c.deadline_at.get() <= time::OffsetDateTime::now_utc() {
+            return Err(BuildExecutorFenceError::DeadlineExceeded);
+        }
+
+        let row = sqlx::query("SELECT highest_generation,lease_token,tombstone_generation,last_stage_rank,last_response,deadline_at FROM agent.build_executor_fences WHERE build_request_id=$1").bind(c.build_request_id.as_uuid()).fetch_optional(&self.pool).await?;
+        if let Some(row) = row {
+            let generation = u32::try_from(row.try_get::<i32, _>("highest_generation")?)
+                .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?;
+            if c.fence_generation < generation {
+                return Err(BuildExecutorFenceError::StaleGeneration);
+            }
+            if c.fence_generation == generation
+                && (row.try_get::<uuid::Uuid, _>("lease_token")? != c.lease_token
+                    || row.try_get::<time::OffsetDateTime, _>("deadline_at")?
+                        != c.deadline_at.get())
+            {
+                return Err(BuildExecutorFenceError::IdentityMismatch);
+            }
+            if row.try_get::<Option<Value>, _>("last_response")?.is_none() {
+                return Err(BuildExecutorFenceError::InProgress);
+            }
+            if c.fence_generation == generation
+                && (row.try_get::<Option<i32>, _>("tombstone_generation")?
+                    == Some(
+                        i32::try_from(generation)
+                            .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?,
+                    )
+                    || build_stage_rank(c.stage) < row.try_get::<i16, _>("last_stage_rank")?)
+            {
+                return Err(BuildExecutorFenceError::Tombstoned);
+            }
         }
         Ok(())
     }
@@ -449,6 +522,27 @@ impl PgBuildExecutorFenceStore {
         .bind(context.build_request_id.as_uuid())
         .fetch_optional(&mut *transaction)
         .await?;
+        if let BuildExecutorRequest::EnsurePrivateProject { command, .. }
+        | BuildExecutorRequest::Build { command, .. } = &envelope.request
+        {
+            let live = sqlx::query("SELECT command,state,attempt,lease_token,lease_expires_at,cancellation_requested FROM agent.build_commands WHERE build_request_id=$1 FOR UPDATE").bind(context.build_request_id.as_uuid()).fetch_optional(&mut *transaction).await?.ok_or(BuildExecutorFenceError::IdentityMismatch)?;
+            if live.try_get::<Value, _>("command")?
+                != serde_json::to_value(command)
+                    .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?
+                || live.try_get::<String, _>("state")? != "running"
+                || live.try_get::<i32, _>("attempt")?
+                    != i32::try_from(context.fence_generation)
+                        .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?
+                || live.try_get::<Option<uuid::Uuid>, _>("lease_token")?
+                    != Some(context.lease_token)
+                || live
+                    .try_get::<Option<time::OffsetDateTime>, _>("lease_expires_at")?
+                    .is_none_or(|t| t <= authority_now)
+                || live.try_get::<bool, _>("cancellation_requested")?
+            {
+                return Err(BuildExecutorFenceError::IdentityMismatch);
+            }
+        }
         let stage_rank = build_stage_rank(context.stage);
         if let Some(row) = current {
             let highest_generation = u32::try_from(row.try_get::<i32, _>("highest_generation")?)
@@ -655,6 +749,10 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
         self
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "funding, native fence, execution and joined cleanup share this ordered boundary"
+    )]
     pub async fn execute(
         &self,
         envelope: BuildExecutorRequestEnvelope,
@@ -663,12 +761,18 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
         if envelope.query_only {
             return self.query_original(&envelope).await;
         }
-        if let Some(value) = self.store.cached_response(envelope.context).await? {
-            return self.response_envelope(
+        if let Some(value) = self.store.cached_response(envelope.context).await?
+            && !(envelope.context.stage == BuildProviderStage::Cleanup
+                && retryable_cleanup_response(&value))
+        {
+            return Ok(Self::response_envelope(
                 envelope.context,
                 serde_json::from_value(value)
                     .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?,
-            );
+            ));
+        }
+        if envelope.context.stage != BuildProviderStage::Cleanup {
+            self.store.preflight(&envelope).await?;
         }
         if let BuildExecutorRequest::EnsurePrivateProject { command, identity }
         | BuildExecutorRequest::Build { command, identity } = &envelope.request
@@ -728,7 +832,33 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
                 .map_err(|_| BuildExecutorFenceError::InProgress)?;
             }
         }
-        let response = match self.store.admit(&envelope).await? {
+        let admission = self.store.admit(&envelope).await;
+        if matches!(
+            admission,
+            Err(BuildExecutorFenceError::IdentityMismatch
+                | BuildExecutorFenceError::DeadlineExceeded)
+        ) && matches!(
+            envelope.request,
+            BuildExecutorRequest::EnsurePrivateProject { .. } | BuildExecutorRequest::Build { .. }
+        ) && let Some(client) = &self.billing
+        {
+            // The local cancellation/deadline fence rejected before any external execution.
+            let _ = client
+                .observe_build_cost(
+                    &contracts::resource::build_costing::ObserveBuildCostRequest {
+                        build_request_id: envelope.context.build_request_id,
+                        attempt: envelope.context.fence_generation,
+                        lease_token: envelope.context.lease_token,
+                        measurement:
+                            contracts::resource::build_costing::BuildUsageMeasurement::NotStarted {
+                                reason: "local build fence rejected before external execution"
+                                    .into(),
+                            },
+                    },
+                )
+                .await;
+        }
+        let response = match admission? {
             BuildExecutorAdmission::Execute(remaining) => {
                 let active = ActiveBuild {
                     context: envelope.context,
@@ -752,11 +882,14 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
                         execution.await
                     }
                 };
-                if envelope.context.stage == BuildProviderStage::Build {
+                let observed = if envelope.context.stage == BuildProviderStage::Build {
                     self.report_history(envelope.context, &envelope.request)
-                        .await?;
-                }
-                let unconfirmed = matches!(&response, BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::ExecutionUnknown);
+                        .await
+                } else {
+                    Ok(false)
+                };
+                let unconfirmed = matches!(&response, BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::ExecutionUnknown)
+                    && !observed.as_ref().is_ok_and(|confirmed| *confirmed);
                 let complete = if unconfirmed {
                     Ok(())
                 } else {
@@ -768,6 +901,7 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
                     .remove(&envelope.context.build_request_id);
                 active.joined.cancel();
                 complete?;
+                observed?;
                 response
             }
             BuildExecutorAdmission::Replay(value) => serde_json::from_value(value)
@@ -783,30 +917,43 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
         })
     }
     fn response_envelope(
-        &self,
         context: BuildProviderRequestContext,
         response: BuildExecutorResponse,
-    ) -> Result<BuildExecutorResponseEnvelope, BuildExecutorFenceError> {
-        Ok(BuildExecutorResponseEnvelope {
+    ) -> BuildExecutorResponseEnvelope {
+        BuildExecutorResponseEnvelope {
             protocol_version: context.protocol_version,
             build_request_id: context.build_request_id,
             fence_generation: context.fence_generation,
             stage: context.stage,
             stage_request_id: context.stage_request_id,
             response,
-        })
+        }
     }
     async fn report_history(
         &self,
         context: BuildProviderRequestContext,
         request: &BuildExecutorRequest,
-    ) -> Result<(), BuildExecutorFenceError> {
+    ) -> Result<bool, BuildExecutorFenceError> {
         let client = self
             .billing
             .as_ref()
             .ok_or(BuildExecutorFenceError::ConfigurationInvalid)?;
-        let measurement = self.backend.query_build_usage(&context, request).await;
-        client
+        let original = client
+            .get_build_cost(
+                context.build_request_id,
+                context.fence_generation,
+                context.lease_token,
+            )
+            .await
+            .map_err(BuildExecutorFenceError::Billing)?
+            .ok_or(BuildExecutorFenceError::IdentityMismatch)?;
+        let measurement = match original.measurement {
+            Some(
+                known @ contracts::resource::build_costing::BuildUsageMeasurement::Known { .. },
+            ) => known,
+            _ => self.backend.query_build_usage(&context, request).await,
+        };
+        let record = client
             .observe_build_cost(
                 &contracts::resource::build_costing::ObserveBuildCostRequest {
                     build_request_id: context.build_request_id,
@@ -817,25 +964,64 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
             )
             .await
             .map_err(BuildExecutorFenceError::Billing)?;
-        Ok(())
+        Ok(matches!(
+            record.measurement,
+            Some(contracts::resource::build_costing::BuildUsageMeasurement::Known { .. })
+        ))
     }
     async fn query_original(
         &self,
         envelope: &BuildExecutorRequestEnvelope,
     ) -> Result<BuildExecutorResponseEnvelope, BuildExecutorFenceError> {
         if let Some(value) = self.store.cached_response(envelope.context).await? {
-            return self.response_envelope(
+            if envelope.context.stage == BuildProviderStage::Build {
+                self.report_history(envelope.context, &envelope.request)
+                    .await?;
+            }
+            return Ok(Self::response_envelope(
                 envelope.context,
                 serde_json::from_value(value)
                     .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?,
-            );
+            ));
         }
-        self.store.verify_query_identity(envelope.context).await?;
-        if envelope.context.stage == BuildProviderStage::Build {
-            self.report_history(envelope.context, &envelope.request)
-                .await?;
+        if envelope.context.stage != BuildProviderStage::Build {
+            return Err(BuildExecutorFenceError::IdentityMismatch);
         }
-        self.response_envelope(
+        let client = self
+            .billing
+            .as_ref()
+            .ok_or(BuildExecutorFenceError::ConfigurationInvalid)?;
+        let record = client
+            .get_build_cost(
+                envelope.context.build_request_id,
+                envelope.context.fence_generation,
+                envelope.context.lease_token,
+            )
+            .await
+            .map_err(BuildExecutorFenceError::Billing)?
+            .ok_or(BuildExecutorFenceError::IdentityMismatch)?;
+        if record.execution_deadline != Some(envelope.context.deadline_at)
+            || record.stage_request_id.as_deref()
+                != Some(envelope.context.stage_request_id.to_string().as_str())
+        {
+            return Err(BuildExecutorFenceError::IdentityMismatch);
+        }
+        if self
+            .report_history(envelope.context, &envelope.request)
+            .await?
+        {
+            // A trustworthy terminal interval proves the physical attempt ended. Keep its result unknown,
+            // permit exact-fence cleanup, and never replace cleanup/a newer generation or publish an artifact.
+            let response = serde_json::to_value(BuildExecutorResponse::Failed {
+                failure: BuildProviderFailure {
+                    code: BuildProviderFailureCode::ExecutionUnknown,
+                    retryable: false,
+                },
+            })
+            .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?;
+            sqlx::query("UPDATE agent.build_executor_fences SET last_response=$6,updated_at=clock_timestamp() WHERE build_request_id=$1 AND highest_generation=$2 AND lease_token=$3 AND last_request_id=$4 AND deadline_at=$5 AND last_stage='build' AND last_response IS NULL AND tombstone_generation IS NULL").bind(envelope.context.build_request_id.as_uuid()).bind(i32::try_from(envelope.context.fence_generation).map_err(|_|BuildExecutorFenceError::IdentityMismatch)?).bind(envelope.context.lease_token).bind(envelope.context.stage_request_id.to_string()).bind(envelope.context.deadline_at.get()).bind(response).execute(&self.store.pool).await?;
+        }
+        Ok(Self::response_envelope(
             envelope.context,
             BuildExecutorResponse::Failed {
                 failure: BuildProviderFailure {
@@ -843,7 +1029,7 @@ impl<B: BuildExecutorBackend> FencedBuildExecutor<B> {
                     retryable: false,
                 },
             },
-        )
+        ))
     }
 }
 
@@ -952,51 +1138,48 @@ async fn reconcile_build_observations<B: BuildExecutorBackend + 'static>(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        let row=sqlx::query("UPDATE agent.build_executor_fences SET updated_at=clock_timestamp() WHERE build_request_id=(SELECT build_request_id FROM agent.build_executor_fences WHERE last_stage='build' AND last_response IS NULL AND updated_at<clock_timestamp()-interval '10 seconds' ORDER BY updated_at LIMIT 1) RETURNING build_request_id,highest_generation,lease_token,last_request_id,deadline_at").fetch_optional(&executor.store.pool).await?;
-        let Some(row) = row else {
+        let Some(client) = &executor.billing else {
             continue;
         };
-        let id: uuid::Uuid = row.try_get("build_request_id")?;
-        let command: Option<serde_json::Value> = sqlx::query_scalar(
-            "SELECT command FROM agent.build_commands WHERE build_request_id=$1",
-        )
-        .bind(id)
-        .fetch_optional(&executor.store.pool)
-        .await?;
-        let Some(command) = command else {
-            continue;
+        let grants = match client.claim_build_cost_reconciliations().await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(event="agent.build_cost.query_failed",diagnostic_code=%error,outcome="will_query_again");
+                continue;
+            }
         };
-        let command: AgentBuildRequested = serde_json::from_value(command)
-            .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?;
-        let context = BuildProviderRequestContext {
-            protocol_version: crate::build_pipeline::BUILD_EXECUTOR_PROTOCOL_VERSION,
-            build_request_id: command.request.id,
-            fence_generation: u32::try_from(row.try_get::<i32, _>("highest_generation")?)
-                .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?,
-            lease_token: row.try_get("lease_token")?,
-            stage: BuildProviderStage::Build,
-            stage_request_id: row
-                .try_get::<String, _>("last_request_id")?
-                .parse()
-                .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?,
-            deadline_at: contracts::UtcTimestamp::from_utc(row.try_get("deadline_at")?)
-                .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?,
-        };
-        let request = BuildExecutorRequest::Build {
-            identity: BuildIdentity(Sha256Digest::of_bytes(
-                command.request.id.as_uuid().as_bytes(),
-            )),
-            command,
-        };
-        if let Err(error) = executor
-            .query_original(&BuildExecutorRequestEnvelope {
+        for grant in grants {
+            let request = BuildExecutorRequest::Build {
+                identity: BuildIdentity(Sha256Digest::of_bytes(
+                    grant.command.request.id.as_uuid().as_bytes(),
+                )),
+                command: grant.command,
+            };
+            let context = BuildProviderRequestContext {
+                protocol_version: crate::build_pipeline::BUILD_EXECUTOR_PROTOCOL_VERSION,
+                build_request_id: grant.admission.build_request_id,
+                fence_generation: grant.admission.attempt,
+                lease_token: grant.admission.lease_token,
+                stage: BuildProviderStage::Build,
+                stage_request_id: grant
+                    .admission
+                    .stage_request_id
+                    .parse()
+                    .map_err(|_| BuildExecutorFenceError::IdentityMismatch)?,
+                deadline_at: grant.admission.execution_deadline,
+            };
+            let envelope = BuildExecutorRequestEnvelope {
                 context,
                 request,
                 query_only: true,
-            })
-            .await
-        {
-            tracing::warn!(event="agent.build_cost.query_failed",build_request_id=%context.build_request_id,diagnostic_code=%error,outcome="will_query_again");
+            };
+            if let Err(error) = validate_executor_request(&envelope) {
+                tracing::warn!(event="agent.build_cost.query_invalid",diagnostic_code=%error);
+                continue;
+            }
+            if let Err(error) = executor.query_original(&envelope).await {
+                tracing::warn!(event="agent.build_cost.query_failed",build_request_id=%context.build_request_id,diagnostic_code=%error,outcome="will_query_again");
+            }
         }
     }
 }
@@ -1009,8 +1192,17 @@ const fn executor_failure(error: &BuildExecutorFenceError) -> BuildProviderFailu
             code: BuildProviderFailureCode::Unavailable,
             retryable: true,
         },
+        BuildExecutorFenceError::Billing(
+            task_execution::resource::ResourceClientError::Denied
+            | task_execution::resource::ResourceClientError::Conflict
+            | task_execution::resource::ResourceClientError::Rejected
+            | task_execution::resource::ResourceClientError::RequestMissing,
+        ) => BuildProviderFailure {
+            code: BuildProviderFailureCode::FundingRejected,
+            retryable: false,
+        },
         BuildExecutorFenceError::Billing(_) => BuildProviderFailure {
-            code: BuildProviderFailureCode::Rejected,
+            code: BuildProviderFailureCode::ExecutionUnknown,
             retryable: false,
         },
         BuildExecutorFenceError::IdentityMismatch => BuildProviderFailure {
