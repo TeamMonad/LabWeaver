@@ -4,8 +4,6 @@
     clippy::too_many_lines,
     reason = "test fixtures keep transport setup explicit"
 )]
-use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
-use async_trait::async_trait;
 use auth::{
     ServiceAuthConfig, ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenVerifier,
     TransportSecurityMode, no_redirect_http_client,
@@ -17,24 +15,20 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::{
-    ActorId, ArtifactRef, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    PlatformRole, PolicyId, Revision, UtcTimestamp,
+    ActorId, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest, PlatformRole,
+    Revision,
 };
+use control_service::ControlService;
 use control_service::api::{ApiState, authenticated_router};
 use control_service::clients::{
     AccessClient, AgentClient, EnvironmentClient, EvaluationClient, ServiceHttpClientConfig,
-};
-use control_service::{
-    ContainerBuildPolicy, ControlConfig, ControlService, EvaluationRuntimePolicy,
 };
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
     service::TowerToHyperService,
 };
-use persistence_sqlx::Sha256Digest;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -46,6 +40,8 @@ use sqlx::PgPool;
 use std::{collections::BTreeSet, io::Cursor, sync::Arc};
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_rustls::TlsAcceptor;
+
+use super::configuration_common::{NoObjects, config};
 
 const SERVICE_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsibGFid2VhdmVyLWFjY2VzcyIsImxhYndlYXZlci1hZ2VudCIsImxhYndlYXZlci1lbnZpcm9ubWVudCIsImxhYndlYXZlci1ldmFsdWF0aW9uIl19.signature";
 #[derive(Deserialize)]
@@ -87,9 +83,16 @@ pub(super) struct HttpFixture {
     _access: TlsServiceHandle,
     _temporary: tempfile::TempDir,
     key: String,
+    state: Arc<ApiState>,
 }
 impl HttpFixture {
     pub async fn new(pool: PgPool) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_loaded(pool, None).await
+    }
+    pub async fn with_loaded(
+        pool: PgPool,
+        loaded: Option<control_service::platform_configuration::LoadedConfiguration>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let admin = ActorId::new();
         let other_actor = ActorId::new();
         let (ca, leaf, key, jwk) = tls_material()?;
@@ -126,8 +129,13 @@ impl HttpFixture {
             )
             .await?,
         );
+        let control = ControlService::new(pool, Arc::new(NoObjects), config()?)?;
+        let control = match loaded {
+            Some(loaded) => control.with_loaded_platform_configuration(loaded),
+            None => control,
+        };
         let state = Arc::new(ApiState {
-            control: ControlService::new(pool, Arc::new(NoObjects), config()?)?,
+            control,
             access: AccessClient::new_authenticated(endpoint.clone(), Arc::clone(&tokens))?,
             agent: AgentClient::new_authenticated(endpoint.clone(), Arc::clone(&tokens))?,
             environment: EnvironmentClient::new_authenticated(
@@ -146,7 +154,29 @@ impl HttpFixture {
             _access: access,
             _temporary: temporary,
             key,
+            state,
         })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "only replica integration targets fork the shared fixture"
+    )]
+    pub fn replica(
+        &self,
+        pool: PgPool,
+        loaded: control_service::platform_configuration::LoadedConfiguration,
+    ) -> Result<Router, Box<dyn std::error::Error>> {
+        let state = Arc::new(ApiState {
+            control: ControlService::new(pool, Arc::new(NoObjects), config()?)?
+                .with_loaded_platform_configuration(loaded),
+            access: self.state.access.clone(),
+            agent: self.state.agent.clone(),
+            environment: self.state.environment.clone(),
+            evaluation: self.state.evaluation.clone(),
+            service_token_verifier: Arc::clone(&self.state.service_token_verifier),
+        });
+        Ok(authenticated_router(&state, &state.service_token_verifier))
     }
     pub fn token(
         &self,
@@ -186,102 +216,6 @@ async fn access_decision(
         diagnostic_code: None,
     }))
 }
-struct NoObjects;
-#[async_trait]
-impl ImmutableObjectStore for NoObjects {
-    async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
-        Err(ObjectStoreError::ObjectUnavailable)
-    }
-    fn binding(&self) -> &'static str {
-        "unused-fixture"
-    }
-    async fn presign_upload(
-        &self,
-        _: &str,
-        _: u64,
-        _: &str,
-        _: UtcTimestamp,
-    ) -> Result<PresignedUpload, ObjectStoreError> {
-        Err(ObjectStoreError::ObjectUnavailable)
-    }
-    async fn read_verified(
-        &self,
-        _: &str,
-        _: &ArtifactRef,
-    ) -> Result<VerifiedObject, ObjectStoreError> {
-        Err(ObjectStoreError::ObjectUnavailable)
-    }
-    async fn freeze_current(
-        &self,
-        _: &str,
-        _: u64,
-        _: &str,
-    ) -> Result<VerifiedObject, ObjectStoreError> {
-        Err(ObjectStoreError::ObjectUnavailable)
-    }
-}
-
-fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
-    Ok(ControlConfig {
-        package_object_prefix: "problem-packages".to_owned(),
-        upload_ttl_seconds: 900,
-        completion_lease_seconds: 300,
-        max_package_files: 100,
-        max_package_bytes: 1_048_576,
-        retention_policy_id: PolicyId::new(),
-        retention_seconds: 86_400,
-        sse_retention_seconds: 3_600,
-        trust_revision: Revision::new(1)?,
-        image_policy_id: PolicyId::new(),
-        image_policy_revision: Revision::new(1)?,
-        environment_schema_sha256: Sha256Digest::of_bytes(b"environment"),
-        evaluation_schema_sha256: Sha256Digest::of_bytes(b"evaluation"),
-        container_build: ContainerBuildPolicy {
-            builder_binding: "buildkit-primary-v1".to_owned(),
-            output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
-            dockerfile_path: "Dockerfile".to_owned(),
-            runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
-            network: BuildNetworkPolicy::DenyAll,
-            max_duration_milliseconds: 600_000,
-            max_cpu_millicores: 2_000,
-            max_memory_bytes: 2_147_483_648,
-        },
-        virtual_machine_bases: control_service::VirtualMachineBaseCatalog {
-            provider_binding: "kubevirt-primary-v1".to_owned(),
-            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
-            max_bases: 8,
-            max_capacity_bytes: 137_438_953_472,
-            bases: vec![control_service::VirtualMachineBasePolicy {
-                artifact_id: contracts::ImageArtifactId::new(),
-                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
-                    binding: "ubuntu-24.04-v1".to_owned(),
-                    source_registry_digest: concat!(
-                        "docker://quay.io/containerdisks/ubuntu@",
-                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-                    )
-                    .to_owned(),
-                    capacity_bytes: 10_737_418_240,
-                },
-                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
-            }],
-        },
-        evaluation_runtime: EvaluationRuntimePolicy {
-            provider_binding: "evaluation-primary-v1".to_owned(),
-            runner_image: format!("runner@sha256:{}", "a".repeat(64)),
-        },
-        llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
-            models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
-                model: "fixture-provider-v1".to_owned(),
-                label: "Fixture model".to_owned(),
-            }],
-            default_model: "fixture-provider-v1".to_owned(),
-            runtime_binding: "claude-code-test".to_owned(),
-            claude_code_version: "2.1.207".to_owned(),
-            max_in_flight_per_worker: 2,
-        },
-    })
-}
-
 fn service_config(base_url: &reqwest::Url, ca_path: &std::path::Path) -> ServiceHttpClientConfig {
     ServiceHttpClientConfig {
         base_url: base_url.clone(),

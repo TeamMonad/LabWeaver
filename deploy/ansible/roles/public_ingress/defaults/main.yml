@@ -30,6 +30,9 @@ public_ingress_acme_issuer: labweaver-acme
 public_ingress_acme_email: ""
 public_ingress_acme_server: https://acme-v02.api.letsencrypt.org/directory
 public_ingress_cloudflare_token_locator: /var/lib/labweaver/.private/tls/cloudflare.env
+public_ingress_cloudflare_locator_controller: false
+public_ingress_cloudflare_locator_sha256: ""
+public_ingress_cloudflare_locator_controller_tmp: ""
 public_ingress_cloudflare_token_key: CLOUDFLARE_API_TOKEN
 public_ingress_cloudflare_secret_name: labweaver-cloudflare-api-token
 

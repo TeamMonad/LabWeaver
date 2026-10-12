@@ -90,6 +90,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::platform_configuration::PlatformConfigurationBundle
     );
     document!(
+        "schemas/contracts/v1/control-configuration-replica-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationReplicaObservation
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-deployment-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationDeploymentObservation
+    );
+    document!(
         "schemas/contracts/v1/http/register-platform-configuration-bundle-request.schema.json",
         crate::platform_configuration::RegisterPlatformConfigurationBundleRequest
     );
@@ -1208,6 +1216,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             operation.operation_id,
             "getPlatformConfigurationVersion"
                 | "getPlatformConfigurationBundle"
+                | "getLoadedPlatformConfiguration"
                 | "registerPlatformConfigurationBundle"
         ) {
             for parameter in &mut parameters {
@@ -1405,6 +1414,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
                 "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
                 "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+                "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+                "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
                 "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
                 "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
                 "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
@@ -1617,11 +1628,11 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
         ApiSurface::Public => {
             paths.insert(
                 "/auth/login".to_owned(),
-                json!({"get":{"operationId":"beginOidcLogin","summary":"Begin OIDC Authorization Code + PKCE login","security":[],"parameters":[{"name":"return_to","in":"query","required":false,"schema":{"type":"string"}}],"responses":{"302":{"description":"Redirect to the configured OIDC provider"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"beginOidcLogin","summary":"Begin OIDC Authorization Code + PKCE login","description":"Creates a short-lived single-use login transaction and a Secure, HttpOnly, host-only cookie unique to this transaction. Navigate in the browser; retain cookies for the callback.","security":[],"parameters":[{"name":"return_to","in":"query","required":false,"description":"Portal path beginning with one slash, including optional query and fragment. External URLs, network paths, backslashes and control characters are rejected. Omission uses the configured portal destination.","schema":{"type":"string","minLength":1,"maxLength":2048}}],"responses":{"307":{"description":"Redirect to the configured OIDC provider with the transaction cookie"},"400":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/auth/callback".to_owned(),
-                json!({"get":{"operationId":"completeOidcLogin","summary":"Complete the one-time OIDC callback","security":[],"parameters":[{"name":"code","in":"query","required":true,"schema":{"type":"string","minLength":1}},{"name":"state","in":"query","required":true,"schema":{"type":"string","minLength":1}}],"responses":{"302":{"description":"Session established and redirected to the allowlisted return URL"},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"completeOidcLogin","summary":"Complete the one-time OIDC callback","description":"Requires the initiating browser's transaction cookie. Wrong-browser requests cannot consume the transaction. Matching callbacks consume it once and clear only that cookie, including provider refusal or exchange failure. Responses are not cached.","security":[],"parameters":[{"name":"code","in":"query","required":false,"schema":{"type":"string","minLength":1}},{"name":"state","in":"query","required":true,"schema":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[A-Za-z0-9_-]{64}$"}},{"name":"error","in":"query","required":false,"description":"Provider refusal; replaces code and consumes only a browser-bound transaction.","schema":{"type":"string"}}],"responses":{"307":{"description":"Session established and redirected to the validated same-origin portal path"},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/auth/backchannel-logout".to_owned(),
@@ -1981,6 +1992,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
         "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
         "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
+        "getLoadedPlatformConfiguration" => {
+            contract_ref("control-configuration-replica-observation")
+        }
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")

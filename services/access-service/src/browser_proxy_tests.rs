@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use auth::{CreateBffSession, ServiceTokenClient, ServiceTokenClientConfig};
+use auth::{CreateBffSession, ServiceTokenClient, ServiceTokenClientConfig, create_bff_session};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -30,6 +30,12 @@ use tokio::{
 use url::Url;
 
 use super::*;
+
+#[path = "oidc_login_tests.rs"]
+mod oidc_login_tests;
+
+#[path = "platform_configuration_browser_tests.rs"]
+mod platform_configuration_browser_tests;
 
 #[path = "../tests/support/mod.rs"]
 mod support;
@@ -599,6 +605,216 @@ async fn state_with_environment(
         nats: nats_boundary(tasks).await?,
     });
     Ok((state, authority.requests))
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn oidc_wrong_browser_cannot_consume_login_transaction() -> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let (state, _) = Box::pin(state(pool, Uuid::now_v7(), &mut tasks)).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let login = client.get(format!("{base}/auth/login")).send().await?;
+    assert_eq!(login.status(), StatusCode::TEMPORARY_REDIRECT);
+    let authorization = Url::parse(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .ok_or("missing authorization redirect")?
+            .to_str()?,
+    )?;
+    let returned_state = authorization
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .ok_or("missing authorization state")?
+        .1
+        .into_owned();
+    let set_cookie = login
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("login did not issue transaction cookie")?
+        .to_str()?
+        .to_owned();
+    for attribute in [
+        "__Host-labweaver_oidc_",
+        "; Path=/",
+        "; Secure",
+        "; HttpOnly",
+        "; SameSite=Lax",
+        "; Max-Age=300",
+    ] {
+        assert!(set_cookie.contains(attribute));
+    }
+    assert_eq!(
+        login
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .ok_or("missing cache policy")?,
+        "no-store"
+    );
+    let cookie = set_cookie.split(';').next().ok_or("missing cookie pair")?;
+    let cookie_name = cookie.split_once('=').ok_or("missing cookie value")?.0;
+    let rejected = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[("state", returned_state.as_str()), ("code", "invalid")])
+        .send()
+        .await?;
+    let consumed: bool = sqlx::query_scalar(
+        "SELECT consumed_at IS NOT NULL FROM access.oidc_transactions WHERE state_sha256=$1",
+    )
+    .bind(Sha256Digest::of_bytes(returned_state.as_bytes()).to_string())
+    .fetch_one(&state.pool)
+    .await?;
+    assert!(
+        !consumed,
+        "a browser without transaction proof consumed another browser's login"
+    );
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        rejected.json::<Value>().await?,
+        json!({"diagnosticCode": "LW_AUTH_OIDC_BROWSER_REJECTED"})
+    );
+    // A forged cookie with the correct transaction name is still not browser proof.
+    let rejected = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[("state", returned_state.as_str()), ("code", "invalid")])
+        .header(header::COOKIE, format!("{cookie_name}={returned_state}"))
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        rejected.json::<Value>().await?,
+        json!({"diagnosticCode": "LW_AUTH_OIDC_BROWSER_REJECTED"})
+    );
+    // Start another tab, then reject the first at the identity provider.
+    let other = client.get(format!("{base}/auth/login")).send().await?;
+    let other_cookie = other
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("missing second tab cookie")?
+        .to_str()?
+        .split(';')
+        .next()
+        .ok_or("invalid cookie")?;
+    assert_ne!(
+        cookie.split_once('=').map(|p| p.0),
+        other_cookie.split_once('=').map(|p| p.0)
+    );
+    let refused = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[
+            ("state", returned_state.as_str()),
+            ("error", "access_denied"),
+        ])
+        .header(header::COOKIE, format!("{cookie}; {other_cookie}"))
+        .send()
+        .await?;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let cleared = refused
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("missing cookie cleanup")?
+        .to_str()?;
+    assert!(cleared.starts_with(&format!("{cookie_name}=")) && cleared.contains("Max-Age=0"));
+    assert_eq!(
+        refused.headers().get_all(header::SET_COOKIE).iter().count(),
+        1
+    );
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access.oidc_transactions WHERE consumed_at IS NULL",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    assert_eq!(live, 1, "provider refusal invalidated a different tab");
+    let replay = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[("state", returned_state.as_str()), ("code", "invalid")])
+        .header(header::COOKIE, cookie)
+        .send()
+        .await?;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        replay.json::<Value>().await?,
+        json!({"diagnosticCode": "LW_AUTH_OIDC_STATE_REJECTED"})
+    );
+    for target in [
+        "//attacker.invalid/",
+        "/\\attacker.invalid/",
+        "https://attacker.invalid/",
+    ] {
+        let response = client
+            .get(format!("{base}/auth/login"))
+            .query(&[("return_to", target)])
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+    }
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM access.oidc_transactions")
+        .fetch_one(&state.pool)
+        .await?;
+    assert_eq!(
+        total, 2,
+        "invalid return target created an orphan login transaction"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn session_cookie_headers_support_http2_and_reject_duplicates() -> Result<(), Box<dyn Error>>
+{
+    // The parser needs configuration only; it never connects to this lazy pool.
+    let pool = PgPoolOptions::new().connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")?;
+    let mut tasks = Tasks(Vec::new());
+    let (state, _) = Box::pin(state(pool, Uuid::now_v7(), &mut tasks)).await?;
+    let session_id = Uuid::now_v7();
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_static("__Host-labweaver_oidc_other=pending"),
+    );
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{}={session_id}",
+            state.deployment.browser.session_cookie_name
+        ))?,
+    );
+    assert_eq!(
+        cookie_session_id(&state, &headers),
+        Some(session_id),
+        "HTTP/2 can split independent cookies into separate fields"
+    );
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{}={session_id}",
+            state.deployment.browser.session_cookie_name
+        ))?,
+    );
+    assert!(
+        cookie_session_id(&state, &headers).is_none(),
+        "duplicate session cookies must not choose a value"
+    );
+    Ok(())
 }
 
 #[tokio::test]

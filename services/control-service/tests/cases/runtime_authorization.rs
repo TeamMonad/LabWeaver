@@ -33,6 +33,12 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[allow(
+    dead_code,
+    reason = "reuse the actual encrypted Bundle fixture without duplicating its non-business helpers"
+)]
+#[path = "../support/platform_configuration_common.rs"]
+mod configuration_fixture;
 #[path = "environment_funded_handoff.rs"]
 mod funded_handoff;
 #[path = "runtime_authorization_lease.rs"]
@@ -40,6 +46,7 @@ mod lease_cases;
 
 async fn progress(
     pool: &PgPool,
+    loaded: &configuration::LoadedConfiguration,
     state: PlatformConfigurationStatus,
     apply_stage: Stage,
     now: UtcTimestamp,
@@ -49,10 +56,12 @@ async fn progress(
     let desired = configuration::get_version(pool, apply.desired_revision).await?;
     Ok(configuration::report(
         pool,
+        Some(loaded),
         "synthetic-runtime-policy-executor",
         apply.id,
         &ReportPlatformConfigurationApplyRequest {
             expected_revision: apply.revision,
+            control_replica_observations: None,
             stage: apply_stage,
             failure_reason: None,
             observed_configuration_sha256: (apply_stage == Stage::Succeeded)
@@ -66,47 +75,19 @@ async fn progress(
     .await?)
 }
 
-fn encrypted_fixture() -> TestResult<Vec<u8>> {
-    let temporary = tempfile::tempdir()?;
-    let identity = temporary.path().join("synthetic-identity");
-    let archive = temporary.path().join("synthetic.age");
-    let generated = std::process::Command::new("age-keygen")
-        .arg("-o")
-        .arg(&identity)
-        .output()?;
-    if !generated.status.success() {
-        return Err("synthetic age key generation failed".into());
-    }
-    let recipient = std::process::Command::new("age-keygen")
-        .arg("-y")
-        .arg(&identity)
-        .output()?;
-    if !recipient.status.success() {
-        return Err("synthetic recipient lookup failed".into());
-    }
-    let plaintext = temporary.path().join("synthetic-plaintext");
-    std::fs::write(&plaintext, b"synthetic-only runtime admission settings")?;
-    let encrypted = std::process::Command::new("age")
-        .arg("-r")
-        .arg(String::from_utf8(recipient.stdout)?.trim())
-        .arg("-o")
-        .arg(&archive)
-        .arg(&plaintext)
-        .output()?;
-    if !encrypted.status.success() {
-        return Err("synthetic age encryption failed".into());
-    }
-    Ok(std::fs::read(archive)?)
-}
-
 async fn begin(
     pool: &PgPool,
     state: PlatformConfigurationStatus,
     now: UtcTimestamp,
     key: &str,
-) -> TestResult<PlatformConfigurationStatus> {
+) -> TestResult<(
+    PlatformConfigurationStatus,
+    configuration::LoadedConfiguration,
+)> {
     let desired = state.desired.as_ref().ok_or("no desired")?;
-    let cipher = encrypted_fixture()?;
+    let version = configuration::get_version(pool, desired.revision).await?;
+    let directory = tempfile::tempdir()?;
+    let (cipher, loaded) = configuration_fixture::actual_loaded_bundle(&version, directory.path())?;
     let state = configuration::register_bundle(
         pool,
         ActorId::new(),
@@ -123,7 +104,7 @@ async fn begin(
         now,
     )
     .await?;
-    Ok(configuration::request_apply(
+    let state = configuration::request_apply(
         pool,
         ActorId::new(),
         &ApplyPlatformConfigurationRequest {
@@ -133,7 +114,8 @@ async fn begin(
         &IdempotencyKey::parse(key)?,
         now,
     )
-    .await?)
+    .await?;
+    Ok((state, loaded))
 }
 
 async fn verified(
@@ -142,7 +124,7 @@ async fn verified(
     now: UtcTimestamp,
     prefix: &str,
 ) -> TestResult<PlatformConfigurationStatus> {
-    let mut state = begin(pool, state, now, &format!("{prefix}-apply")).await?;
+    let (mut state, loaded) = begin(pool, state, now, &format!("{prefix}-apply")).await?;
     for (index, stage) in [
         Stage::Validating,
         Stage::Applying,
@@ -152,7 +134,15 @@ async fn verified(
     .into_iter()
     .enumerate()
     {
-        state = progress(pool, state, stage, now, &format!("{prefix}-phase-{index}")).await?;
+        state = progress(
+            pool,
+            &loaded,
+            state,
+            stage,
+            now,
+            &format!("{prefix}-phase-{index}"),
+        )
+        .await?;
     }
     Ok(state)
 }
@@ -508,7 +498,7 @@ pub(super) async fn assert_bindings_after_publication(
         resolve_binding(pool, &cross).await,
         Err(RuntimeBindingError::ScopeDenied)
     ));
-    let state = begin(
+    let (state, loaded) = begin(
         pool,
         configuration::get(pool).await?,
         now,
@@ -517,6 +507,7 @@ pub(super) async fn assert_bindings_after_publication(
     .await?;
     let state = progress(
         pool,
+        &loaded,
         state,
         Stage::Validating,
         now,
@@ -525,6 +516,7 @@ pub(super) async fn assert_bindings_after_publication(
     .await?;
     let state = progress(
         pool,
+        &loaded,
         state,
         Stage::Applying,
         now,

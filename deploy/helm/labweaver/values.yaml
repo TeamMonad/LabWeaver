@@ -55,6 +55,10 @@ sshGatewayService:
 # in workloads. Do not edit a generated Bundle values file.
 workloadInputs: {}
 
+# Filled only by the authenticated encrypted Bundle opening path.
+managedControlConfiguration: {}
+environmentExecutorAuthority: {}
+
 workloads:
   control-service:
     enabled: true

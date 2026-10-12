@@ -123,6 +123,27 @@ class BundleProfileTests(unittest.TestCase):
         )
         return request
 
+    def test_resource_allowlist_and_oidc_source_match_executor_owner(self) -> None:
+        profile = self.resource()
+        original = copy.deepcopy(profile)
+        for field, value in (
+            ("LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID", "another-client"),
+            ("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS", "labweaver-access"),
+            ("LABWEAVER_SERVICE_AUDIENCE", "another-audience"),
+            ("LABWEAVER_SERVICE_OIDC_ISSUER", "https://another.invalid/"),
+            ("LABWEAVER_SERVICE_OIDC_CA", "/tmp/other.pem"),
+        ):
+            with self.subTest(field=field):
+                self.fixture.model["resource"] = copy.deepcopy(original)
+                self.fixture.model["resource"]["workloadInputs"]["resource-service"][
+                    "env"
+                ][field] = value
+                self.fixture.save_model()
+                with self.assertRaisesRegex(
+                    bundle.BundleError, "LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT"
+                ):
+                    bundle.load_bundle(self.fixture.root)
+
     def test_first_install_defaults_are_unsaved_and_restore_as_the_existing_update(
         self,
     ) -> None:

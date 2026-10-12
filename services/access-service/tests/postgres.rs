@@ -11,6 +11,103 @@ mod support;
 use support::apply_access_migrations;
 
 #[tokio::test]
+async fn oidc_binding_is_checked_before_atomic_consumption_and_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_access_migrations(&pool).await?;
+    let key_ring = auth::KeyRing::parse(
+        "test-key".to_owned(),
+        &format!(
+            "test-key:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+        ),
+    )?;
+    let first = auth::OidcTransaction::generate()?;
+    let second = auth::OidcTransaction::generate()?;
+    let now = OffsetDateTime::now_utc();
+    for transaction in [&first, &second] {
+        let id = Uuid::now_v7();
+        let encrypted = key_ring.encrypt(&serde_json::to_vec(transaction)?, id.as_bytes())?;
+        sqlx::query("INSERT INTO access.oidc_transactions (transaction_id,state_sha256,encrypted_payload,encryption_key_id,expires_at) VALUES ($1,$2,$3,$4,$5)")
+            .bind(id).bind(persistence_sqlx::Sha256Digest::of_bytes(transaction.state.as_bytes()).to_string())
+            .bind(encrypted.payload).bind(encrypted.key_id).bind(now + Duration::minutes(5))
+            .execute(&pool).await?;
+    }
+    assert!(matches!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &first.state,
+            &second.browser_binding,
+            now
+        )
+        .await,
+        Err(auth::RepositoryError::Transaction(
+            auth::OidcTransactionError::BrowserBindingMismatch
+        ))
+    ));
+    // Concurrent callbacks for one transaction can have only one winner.
+    let (a, b) = tokio::join!(
+        auth::consume_oidc_transaction(&pool, &key_ring, &first.state, &first.browser_binding, now),
+        auth::consume_oidc_transaction(&pool, &key_ring, &first.state, &first.browser_binding, now)
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert!(matches!(
+        if a.is_ok() { b } else { a },
+        Err(auth::RepositoryError::StateRejected)
+    ));
+    // Completing one tab leaves the other transaction usable.
+    assert_eq!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &second.state,
+            &second.browser_binding,
+            now
+        )
+        .await?,
+        second
+    );
+    assert!(matches!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &second.state,
+            &second.browser_binding,
+            now
+        )
+        .await,
+        Err(auth::RepositoryError::StateRejected)
+    ));
+    let expired = auth::OidcTransaction::generate()?;
+    let id = Uuid::now_v7();
+    let encrypted = key_ring.encrypt(&serde_json::to_vec(&expired)?, id.as_bytes())?;
+    sqlx::query("INSERT INTO access.oidc_transactions (transaction_id,state_sha256,encrypted_payload,encryption_key_id,expires_at) VALUES ($1,$2,$3,$4,$5)")
+        .bind(id).bind(persistence_sqlx::Sha256Digest::of_bytes(expired.state.as_bytes()).to_string())
+        .bind(encrypted.payload).bind(encrypted.key_id).bind(now + Duration::seconds(1))
+        .execute(&pool).await?;
+    assert!(matches!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &expired.state,
+            &expired.browser_binding,
+            now + Duration::seconds(1)
+        )
+        .await,
+        Err(auth::RepositoryError::StateRejected)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "one migrated PostgreSQL instance proves interacting schema, fencing, and authorization invariants"

@@ -98,7 +98,33 @@ JSON 使用 `application/json`。高级 YAML 使用 `application/yaml`。两个�
 
 执行报告使用尝试自身的 `expectedRevision` 和对应 `If-Match`，而非 aggregate 的 revision。执行者首次报告后绑定其客户端身份。其他执行者、迟到报告、乱序阶段和不同请求的幂等键复用均会失败。
 
-正常阶段为 `requested`、`validating`、`applying`、`verifying`、`succeeded`。执行者不能直接从 requested 报告 succeeded。成功报告必须同时匹配原 desired 的 canonical JSON 摘要和原加密 Bundle 摘要，才更新 applied、验证时间和 Bundle 观察值。
+正常阶段为 `requested`、`validating`、`applying`、`verifying`、`succeeded`。执行者不能直接从 requested 报告 succeeded。成功报告必须同时匹配原 desired 的 canonical JSON 摘要和原加密 Bundle 摘要，且与 Control 本进程实际加载的快照一致，才更新 applied、验证时间和 Bundle 观察值。没有加载快照、旧进程仍加载旧版或密文来源不同时返回 `LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH`；复制请求中的摘要不能通过。
+
+### Control 启动加载
+
+Bundle `exec` 对同一次 age 输入制作有上限的私有快照，计算实际密文摘要，再认证解密和验证目录。对于 `managed_version`，它生成非秘密的 `platform-configuration-source.json`，记录原 revision、设置摘要、实际密文摘要及原 Bundle 的 namespace/releaseName。仅解析或渲染目录不会生成此来源文件。未保存的 `initial_settings` 也不会产生已加载版本事实。
+
+`exec` 为消费者设置 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，并清除同名环境覆盖。Control 启动入口在连接外部依赖前读取这两个普通 `0600` 文件，拒绝符号链接、未知或重复字段、超限和不匹配绑定。它复用原 Rust 类型校验，并从实际读取的设置重算 canonical 摘要。两个变量必须同时存在；均不存在时，服务仍可读取、编辑和报告失败，但不能接受新的成功报告。
+
+Control 将读取结果固定在同一服务实例中。修改投影文件或保存新的 desired 不会替换运行进程的快照。加载新版本需通过获准路径启动替换实例；读取失败不会修改旧实例或数据库中的最后验证版本。原内部 report 从该实例读取快照，HTTP body 不能设置它。成功报告丢失响应时，相同幂等请求仍返回原结果；旧结果回放不触发再次应用。
+
+来源文件是获准部署路径交付的非秘密输入，不是签名证书或实际节点/namespace 的运行观察。该检查只闭合 Control 的加载与数据库发布边界。#199 的运行准入消费者继续从同一已验证 applied 记录读取策略；其授权、成员和 ResourceApproval 规则不变。其他服务、实际实例和安装位置仍需执行者独立验证。来源文件或命令退出成功本身不足以提交完整部署成功报告。
+
+Helm 现在从认证打开后的同一 Bundle values 生成不可变 Control 配置 ConfigMap。Pod 使用同一 Control 摘要镜像的初始化命令，读取一个 AtomicWriter 代次的两文件，校验派生 checksum 与类型绑定，复制为自有普通 `0600` 文件。主进程只读挂载该受限 emptyDir，并取得真实 Pod name/namespace/UID。没有新镜像、服务、RBAC、网络规则或 Secret 来源。直接渲染与首装请求保留原范围，不产生认证加载挂载。
+
+初始化失败或更换投影不会覆盖已有 runtime/current。原样重试可复用；不同输入需新 Pod 的受限目录。缩容、扩容和版本变化应修改原 Bundle，重新登记并执行；禁止独立手改派生副本数或加载路径。Control 启动拒绝缺少、多项不完整或跨来源 namespace 的 Pod 身份。
+
+### Control 副本观察
+
+`getLoadedPlatformConfiguration` 是内部只读 `GET /internal/v1/platform-configuration/loaded`。它复用 `control.platform_configuration.apply` 权限及原 Access 网关拒绝规则，默认客户端白名单和权限配置不变。响应包含本进程固定的 Pod 身份、启动 instanceId、revision、实际设置与原密文摘要、读取时间，设置 `Cache-Control: no-store`。文件变化不会改变该进程的响应；重启产生新的 instanceId。
+
+原 report 增加可选 `controlReplicaObservations`：当前 Deployment UID/generation、预期副本数、namespace/releaseName及各实际进程响应。Pod 模式和多副本模式须完整提供；原生本地单实例的既有范围保持。字段缺失时序列化省略，保持原幂等请求摘要。内部七参数调用签名不变。
+
+成功还须满足同 Bundle 派生副本数、唯一 Pod UID/name/instanceId、全部 revision/settings/ciphertext一致，观察不早于该尝试且不超过30秒，接收进程自己的 Pod UID与当前启动 instanceId在证据中。缺副本、重复身份、旧版、错来源、跨 namespace、陈旧观察或重启前接收实例证据均拒绝。失败仍保留最后验证的 applied 与原失败历史；没有额外副本表或生命周期。
+
+获准原执行者用只读工具[收集实际副本](../deployment/encrypted-bundle.md#control-挂载与副本观察)，在观察前后读取 Deployment/ReplicaSet/Pod并核代次、归属和活跃集合，逐个从实际 Pod地址取得HTTPS响应。Ready、命令退出或重复访问负载均衡入口不能替代完整观察。角色须已有这些读取权限、Control Pod网络路径、现有TLS CA和原apply权限；工具不配置真实凭据、授予权限或修改网络。
+
+外部执行者负责 roster 和每个 peer 读回的真实性。报告接收者核对完整性、时限及自身实际快照，不能独立证明别的 Pod 在读取后的每一时刻都保持该状态。观察是一次有时限的事实，后续漂移仍需实际重新观察；不新增长期监控状态机。
 
 执行期间允许管理员保存新 desired。当前尝试仍绑定原 desired。原尝试成功后，applied 指向原版本，新 desired 继续保留为未应用期望。
 
@@ -135,4 +161,42 @@ Grok 可将版本 API 的完整 JSON 交给获准导出操作。归档选择使�
 
 首装可用 Bundle 的 `settings-init` 准备未保存配置。它复用本接口的初始模板与完整请求，expectedRevision 为0，不制造作者或配置历史。真实管理员首次提交后，Control 才创建 desired 版本。已有配置时必须比较当前值，不能把首装流程用于覆盖或重置。
 
-尚未完成的范围：管理界面与真实后端浏览器验证、旧PKI/NATS签发workspace及远端locator归并、实际部署观察器、默认值消费者，以及 #207 运行授权与执行边界。#203 保持开放。
+## 本地浏览器集成验证
+
+仓库提供生成 SDK 到真实 Control HTTP 路由和临时 PostgreSQL 的目标测试。它使用现有签名服务鉴权 fixture，仅在外部 issuer 和 Access 授权决策边界使用合成依赖。浏览器上传实际 age 密文 `File`，检查摘要、版本冲突、幂等回放、权限拒绝、应用请求及失败历史。测试不执行部署，不覆盖 Access 会话/CSRF 或管理员页面。
+
+1. 安装 Rust、Node 22、Web 的锁定依赖、age 1.3.2 和可用的 Docker。
+2. 在 `web` 目录运行 `pnpm exec playwright install chromium`。已有 Chromium 时，可通过 `LABWEAVER_TEST_CHROMIUM` 指定可执行文件。
+3. 在仓库根目录运行 `cargo test -p control-service --test platform_configuration browser_sdk_registers_real_ciphertext_and_reads_durable_failure --locked -- --ignored --exact --test-threads=1`。
+
+测试在 loopback 随机端口启动 Control 与 Vite，不连接共享集群。临时目录保存合成身份、密文和浏览器输入，并在测试结束时清理。测试只回报有界诊断，不输出 Token、私钥或请求正文。Playwright CI 单独运行此目标；普通 Rust 测试将其标为 ignored，不能将 ignored 计作通过。
+
+### 原生登录和 CSRF
+
+另一个目标从真实 Keycloak 表单进入 Access HTTPS 门户。它使用实际 BFF 会话、CSRF、流式转发、Control API 和 PostgreSQL。Access 与 Control 的服务 JWT 也由临时 Keycloak 服务账户签发，服务客户端校验临时 CA。测试账户和密钥均为合成输入；测试结束后回收容器和临时目录。
+
+1. 准备上述依赖。
+2. 运行 `cargo test -p access-service --bin access-service browser_proxy_tests::platform_configuration_browser_tests::chromium_login_and_csrf_reach_real_platform_configuration --locked -- --ignored --exact --test-threads=1`。
+3. 核对登录、缺失或错误 CSRF、错误 Origin、非管理员、实际文件登记、刷新与退出结果。测试使用明确标记的 SDK 页面，不将测试页面称作产品控制台。
+
+管理员 App 另有独立目标。在包含管理员配置页面的 Web 工作树上，将 `LABWEAVER_TEST_WEB_ROOT` 设为该工作树的 `web` 绝对路径，然后运行 `cargo test -p access-service --bin access-service browser_proxy_tests::platform_configuration_browser_tests::chromium_login_and_csrf_reach_platform_configuration_page --locked -- --ignored --exact --test-threads=1`。它从受保护路由开始，经过原生登录后操作实际页面；不注入服务 Token、手造会话 Cookie 或替换配置 API。
+
+`LABWEAVER_TEST_CHROMIUM` 可指定已有 Chromium。默认截图保存在测试临时目录中；需要保留时，将 `LABWEAVER_TEST_BROWSER_EVIDENCE_DIR` 设为测试专用输出目录。截图不包含密码、Token 或解密身份。CI 显式运行原生 SDK/BFF 目标；App 目标需要已组合的 Web 源码，普通 Rust 的 ignored 不表示通过。
+
+测试 Keycloak 使用固定发行版和独立 CA，JVM heap 为128–512MiB。该限制只用于临时测试实例，配置方式见 [Keycloak 容器说明](https://www.keycloak.org/server/containers#_specifying_different_memory_settings)。此目标不连接共享集群，不执行部署或产生 applied 成功事实。
+
+### 实际 Bundle 加载验证
+
+准备 age、Helm 3.21.3、Python/PyYAML 和本仓库的 `cargo build -p xtask --locked`。然后运行：
+
+```sh
+cargo test -p control-service --test platform_configuration_loaded \
+  actual_bundle_load_is_required_for_success_and_failure_keeps_effective \
+  --locked -- --ignored --exact --test-threads=1
+```
+
+该目标使用新生成的合成 age 身份与完整 Bundle，执行原解密和派生入口，再由实际 Control API 和 PostgreSQL 保存结果。它验证未加载、另一份密文、旧进程、文件变化、失败保留最后验证版本与重试。外部 JWT issuer/Access 决策为测试边界；没有真实集群或其他服务的部署观察。CI 显式执行此目标，普通 Rust 的 ignored 不能计作通过。
+
+双副本目标用同一真实 age Bundle、两个实际 Control HTTP路由实例与 PostgreSQL验证完整观察、旧副本、重启、错摘要及失败重试。运行 `cargo test -p control-service --test platform_configuration_replicas all_control_replicas_must_report_actual_loaded_source_before_applied --locked -- --ignored --exact --test-threads=1`。CI 显式运行，普通 ignored 不计通过。Kubernetes roster/身份是合成边界，不代表真实集群安装。
+
+尚未完成的范围：旧 PKI/NATS 签发 workspace、实际多节点安装与观察窗口、其他服务的实际部署观察、默认值消费者，以及 #207 运行授权与执行边界。

@@ -119,9 +119,18 @@ Runtime executors require the existing Resource authority client configuration:
 `LABWEAVER_RESOURCE_USAGE_BASE_URI`, `_CA_PATH`, `_AUDIENCE`, `_SCOPES` and
 `_TIMEOUT_MILLISECONDS`, with the shared service OIDC issuer/CA, client ID and secret
 file. They use the same JWT/TLS client as the owner; no fixed principal or new runtime
-grant is introduced. The #203 Bundle/profile owner must bind those existing settings
-and the permitted service identity before deployment. This increment does not edit
-real credentials, service allowlists or cluster permissions.
+grant is introduced. The authenticated Bundle opening path now derives both executors' DB,
+Resource/OIDC/client and NATS endpoint/CA inputs from the existing Environment
+owner's source. Each role retains its own NATS certificate/key/credentials and
+provider subject. Helm mounts only the selected owner keys read-only; conflicting
+executor overrides are rejected. Startup accepts exactly one of NATS `server` or
+absolute `serverFile`, including the shared projected endpoint. The same placement
+profile still mounts to the Environment owner and Container executor.
+
+These bindings do not verify a real Resource allowlist, identity, installed cluster
+or capacity. External-profile client/scopes/CA and the approved operation window
+still require their existing owner. This increment does not edit real credentials,
+service allowlists or cluster permissions.
 
 A fresh authority read happens before the executor's fencing transaction. A new
 compute/storage effect also checks the current operation and generation (and the

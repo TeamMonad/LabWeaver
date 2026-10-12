@@ -50,6 +50,7 @@ pub(super) fn public_routes() -> Router<Arc<ApiState>> {
 
 pub(super) fn internal_routes(state: Arc<ApiState>, verifier: Arc<ServiceTokenVerifier>) -> Router {
     Router::new()
+        .route("/internal/v1/platform-configuration/loaded", get(loaded))
         .route(
             "/internal/v1/platform-configuration/applies/{apply_id}",
             put(report),
@@ -57,6 +58,32 @@ pub(super) fn internal_routes(state: Arc<ApiState>, verifier: Arc<ServiceTokenVe
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(state)
         .layer(middleware::from_fn_with_state(verifier, require_executor))
+}
+
+async fn loaded(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
+    let snapshot = state
+        .control
+        .loaded_platform_configuration
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+                true,
+            )
+        })?;
+    let value = snapshot.observe(now()?).map_err(|_| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+            true,
+        )
+    })?;
+    let mut response = Json(value).into_response();
+    response
+        .headers_mut()
+        .insert("Cache-Control", HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 #[derive(Clone)]
@@ -346,6 +373,7 @@ async fn report(
     fence(&headers, request.expected_revision.get())?;
     let value = configuration::report(
         &state.control.pool,
+        state.control.loaded_platform_configuration.as_deref(),
         &executor.0,
         id,
         &request,

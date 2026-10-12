@@ -2409,11 +2409,15 @@ export const consumeOidcBackchannelLogout = <ThrowOnError extends boolean = fals
 
 /**
  * Complete the one-time OIDC callback
+ *
+ * Requires the initiating browser's transaction cookie. Wrong-browser requests cannot consume the transaction. Matching callbacks consume it once and clear only that cookie, including provider refusal or exchange failure. Responses are not cached.
  */
 export const completeOidcLogin = <ThrowOnError extends boolean = false>(options: Options<CompleteOidcLoginData, ThrowOnError>): RequestResult<unknown, CompleteOidcLoginErrors, ThrowOnError> => (options.client ?? client).get<unknown, CompleteOidcLoginErrors, ThrowOnError>({ url: '/auth/callback', ...options });
 
 /**
  * Begin OIDC Authorization Code + PKCE login
+ *
+ * Creates a short-lived single-use login transaction and a Secure, HttpOnly, host-only cookie unique to this transaction. Navigate in the browser; retain cookies for the callback.
  */
 export const beginOidcLogin = <ThrowOnError extends boolean = false>(options?: Options<BeginOidcLoginData, ThrowOnError>): RequestResult<unknown, BeginOidcLoginErrors, ThrowOnError> => (options?.client ?? client).get<unknown, BeginOidcLoginErrors, ThrowOnError>({ url: '/auth/login', ...options });
 

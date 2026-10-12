@@ -28,6 +28,10 @@ fn configuration_operations_require_global_administrator_or_separate_executor_pe
         operation_contract("reportPlatformConfigurationApply").ok_or("missing executor")?;
     assert_eq!(executor.scope, OperationScopeKind::Service);
     assert_eq!(executor.permission, "control.platform_configuration.apply");
+    let observation =
+        operation_contract("getLoadedPlatformConfiguration").ok_or("missing observation")?;
+    assert_eq!(observation.scope, OperationScopeKind::Service);
+    assert_eq!(observation.permission, executor.permission);
     Ok(())
 }
 
@@ -73,6 +77,11 @@ fn generated_configuration_schema_and_openapi_preserve_required_fields_and_yaml_
             .get("/internal/v1/platform-configuration/applies/{applyId}")
             .is_none()
     );
+    assert!(
+        public["paths"]
+            .get("/internal/v1/platform-configuration/loaded")
+            .is_none()
+    );
     let version =
         &public["paths"]["/api/v1/admin/platform-configuration/versions/{revision}"]["get"];
     assert_eq!(version["parameters"][0]["schema"]["type"], "integer");
@@ -110,5 +119,16 @@ fn generated_configuration_schema_and_openapi_preserve_required_fields_and_yaml_
             .get("encryptedBundleSha256")
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn legacy_report_serialization_keeps_its_original_idempotency_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let legacy = serde_json::json!({"expectedRevision":1,"stage":"validating","failureReason":null,"observedConfigurationSha256":null,"observedEncryptedBundleSha256":null});
+    let request: contracts::platform_configuration::ReportPlatformConfigurationApplyRequest =
+        contracts::parse_strict_json(&serde_json::to_vec(&legacy)?)?;
+    assert!(request.control_replica_observations.is_none());
+    assert_eq!(serde_json::to_value(request)?, legacy);
     Ok(())
 }

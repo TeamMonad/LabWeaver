@@ -34,7 +34,8 @@ struct RuntimeExecutorDeployment {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeExecutorNats {
-    server: String,
+    server: Option<String>,
+    server_file: Option<String>,
     ca_file: String,
     client_certificate_file: String,
     client_private_key_file: String,
@@ -179,7 +180,7 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
         .await?,
     );
     let nats = connect_nats_mtls(
-        &deployment.nats.server,
+        &deployment.nats.read_server()?,
         deployment.nats.ca_file.into(),
         deployment.nats.client_certificate_file.into(),
         deployment.nats.client_private_key_file.into(),
@@ -295,6 +296,16 @@ fn load_runtime_executor_deployment() -> Result<RuntimeExecutorDeployment, MainE
     let path = std::env::var("LABWEAVER_RUNTIME_EXECUTOR_CONFIG_FILE")
         .map_err(|_| MainError::Configuration)?;
     serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| MainError::Configuration)
+}
+
+impl RuntimeExecutorNats {
+    fn read_server(&self) -> Result<String, MainError> {
+        match (&self.server, &self.server_file) {
+            (Some(server), None) if !server.trim().is_empty() => Ok(server.clone()),
+            (None, Some(path)) if std::path::Path::new(path).is_absolute() => read_secret(path),
+            _ => Err(MainError::Configuration),
+        }
+    }
 }
 
 async fn discover_service_verifier() -> Result<Arc<ServiceTokenVerifier>, MainError> {
@@ -419,7 +430,13 @@ mod deployment_contract_tests {
             .expect("runtime executor deployment example must deserialize");
 
         assert!(deployment.database_url_file.starts_with('/'));
-        assert!(deployment.nats.server.starts_with("tls://"));
+        assert!(
+            deployment
+                .nats
+                .read_server()
+                .expect("legacy endpoint")
+                .starts_with("tls://")
+        );
         assert!(deployment.nats.container_request_subject.ends_with(".v1"));
         assert!(deployment.nats.kubevirt_request_subject.ends_with(".v1"));
     }
@@ -432,5 +449,30 @@ mod deployment_contract_tests {
 
         assert!(deployment.database_url_file.starts_with('/'));
         assert_eq!(deployment.server.bind_addr, "0.0.0.0:9451");
+    }
+
+    #[test]
+    fn runtime_executor_reads_secret_endpoint_and_rejects_ambiguous_binding() {
+        let directory = tempfile::tempdir().expect("synthetic directory");
+        let path = directory.path().join("nats-server");
+        std::fs::write(&path, "tls://synthetic.invalid:4222\n").expect("synthetic secret");
+        let example = include_str!("../../../deploy/config/runtime-executor.yaml.example");
+        let mut deployment: RuntimeExecutorDeployment =
+            serde_yaml::from_str(example).expect("example");
+        deployment.nats.server = None;
+        deployment.nats.server_file = Some(path.to_str().expect("path").to_owned());
+        assert_eq!(
+            deployment.nats.read_server().expect("loaded endpoint"),
+            "tls://synthetic.invalid:4222"
+        );
+        deployment.nats.server = Some("tls://other.invalid:4222".to_owned());
+        assert!(deployment.nats.read_server().is_err());
+        deployment.nats.server = None;
+        std::fs::write(&path, "\n").expect("empty secret");
+        assert!(deployment.nats.read_server().is_err());
+        std::fs::remove_file(path).expect("remove synthetic secret");
+        assert!(deployment.nats.read_server().is_err());
+        deployment.nats.server_file = Some("relative/path".to_owned());
+        assert!(deployment.nats.read_server().is_err());
     }
 }

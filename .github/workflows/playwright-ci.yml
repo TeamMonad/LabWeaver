@@ -41,3 +41,49 @@ jobs:
       - name: List Playwright tests
         working-directory: ./web
         run: pnpm test:e2e:list
+
+  platform-configuration-backend:
+    name: platform-configuration-browser-backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Install existing Web dependencies and Chromium
+        working-directory: ./web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+      - name: Install pinned age for synthetic ciphertext
+        run: |
+          curl --fail --location --retry 3 -o /tmp/age.tar.gz https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
+          echo 'cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  /tmp/age.tar.gz' | sha256sum --check
+          tar -xzf /tmp/age.tar.gz -C /tmp age/age age/age-keygen
+          echo /tmp/age >> "$GITHUB_PATH"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the existing Bundle producer dependencies
+        run: |
+          python -m pip install PyYAML==6.0.2
+          mkdir -p "$RUNNER_TEMP/bundle-tools"
+          docker run --rm --entrypoint /bin/sh docker.io/alpine/helm:3.21.3@sha256:35da09ba0716fc7c3cd63b6b31ee380a9c7662e95f29ab0e4ae962420afd315b -c 'cat /usr/bin/helm' > "$RUNNER_TEMP/bundle-tools/helm"
+          chmod 0755 "$RUNNER_TEMP/bundle-tools/helm"
+          echo "$RUNNER_TEMP/bundle-tools" >> "$GITHUB_PATH"
+          cargo build -p xtask --locked
+      - name: Verify actual Bundle loading and failed apply recovery in Control and PostgreSQL
+        run: cargo test -p control-service --test platform_configuration_loaded actual_bundle_load_is_required_for_success_and_failure_keeps_effective --locked -- --ignored --exact --test-threads=1
+      - name: Verify both actual Control replica snapshots before applied
+        run: cargo test -p control-service --test platform_configuration_replicas all_control_replicas_must_report_actual_loaded_source_before_applied --locked -- --ignored --exact --test-threads=1
+      - name: Verify actual Bundle loading in both Environment executor Resource clients
+        run: cargo test -p environment-service --lib metering::bundle_configuration_tests::authenticated_bundle_loads_both_executor_clients --locked -- --ignored --exact --test-threads=1
+      - name: Run generated SDK against real Control and PostgreSQL
+        run: cargo test -p control-service --test platform_configuration browser_sdk_registers_real_ciphertext_and_reads_durable_failure --locked -- --ignored --exact --test-threads=1
+      - name: Run native Keycloak login and Bundle CSRF against actual Access and Control
+        run: cargo test -p access-service --bin access-service browser_proxy_tests::platform_configuration_browser_tests::chromium_login_and_csrf_reach_real_platform_configuration --locked -- --ignored --exact --test-threads=1

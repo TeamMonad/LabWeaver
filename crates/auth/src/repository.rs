@@ -569,6 +569,7 @@ pub async fn consume_oidc_transaction(
     pool: &PgPool,
     key_ring: &KeyRing,
     state: &str,
+    browser_binding: &str,
     now: OffsetDateTime,
 ) -> Result<OidcTransaction, RepositoryError> {
     let hash = hex_sha256(state.as_bytes());
@@ -590,6 +591,7 @@ pub async fn consume_oidc_transaction(
     let plaintext = key_ring.decrypt(&value, id.as_bytes())?;
     let transaction: OidcTransaction = serde_json::from_slice(&plaintext)?;
     transaction.verify_state(Some(state))?;
+    transaction.verify_browser_binding(browser_binding)?;
     sqlx::query("UPDATE access.oidc_transactions SET consumed_at = $2 WHERE transaction_id = $1")
         .bind(id)
         .bind(now)

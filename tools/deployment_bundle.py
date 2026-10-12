@@ -45,6 +45,18 @@ WORKLOADS_FILE = (
 RESOURCE_MANIFEST = (
     Path(__file__).resolve().parents[1] / "deploy/config/resource-bundle-manifest.json"
 )
+ENVIRONMENT_EXECUTOR_SHARED = (
+    "LABWEAVER_SERVICE_OIDC_ISSUER",
+    "LABWEAVER_SERVICE_OIDC_CA",
+    "LABWEAVER_SERVICE_CLIENT_ID",
+    "LABWEAVER_SERVICE_CLIENT_SECRET_FILE",
+    "LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS",
+    "LABWEAVER_RESOURCE_USAGE_BASE_URI",
+    "LABWEAVER_RESOURCE_USAGE_CA_PATH",
+    "LABWEAVER_RESOURCE_USAGE_AUDIENCE",
+    "LABWEAVER_RESOURCE_USAGE_SCOPES",
+    "LABWEAVER_RESOURCE_USAGE_TIMEOUT_MILLISECONDS",
+)
 RESOURCE_RESERVED = {
     "resource_application_namespace",
     "resource_application_release_name",
@@ -234,12 +246,23 @@ def _value_references(value: Any, references: set[str]) -> None:
         raise BundleError("LW_BUNDLE_TEMPLATE_FORBIDDEN")
 
 
+CONTROLLER_LOCATORS = {
+    "harbor_secret_locator_path": "harbor_secret_locator",
+    "public_ingress_cloudflare_token_locator": "public_ingress_cloudflare_locator",
+}
+
 INFRASTRUCTURE_DERIVED = (
     {
         "labweaver_versions_lock_file",
         "identity_secret_locator_controller",
         "identity_secret_locator_sha256",
         "identity_secret_locator_controller_tmp",
+        "harbor_secret_locator_revision",
+    }
+    | {
+        f"{prefix}_{suffix}"
+        for prefix in CONTROLLER_LOCATORS.values()
+        for suffix in ("controller", "sha256", "controller_tmp")
     }
     | RESERVED_VARIABLES
     | RESOURCE_RESERVED
@@ -266,14 +289,21 @@ def _inventory_references(value: Any, references: set[str]) -> None:
             }:
                 # Host-key policy remains in the repository's Ansible configuration.
                 raise BundleError("LW_BUNDLE_SSH_OVERRIDE_FORBIDDEN")
-            file_key = key in {
-                "ansible_ssh_private_key_file",
-                "ansible_private_key_file",
-            } or key.endswith(("_credentials_file", "_kubeconfig_path", "_bundle"))
+            file_key = (
+                key in CONTROLLER_LOCATORS
+                or key
+                in {
+                    "ansible_ssh_private_key_file",
+                    "ansible_private_key_file",
+                }
+                or key.endswith(("_credentials_file", "_kubeconfig_path", "_bundle"))
+            )
             if file_key and not (isinstance(item, dict) and set(item) == {"file"}):
                 raise BundleError("LW_BUNDLE_CREDENTIAL_FILE_REFERENCE_REQUIRED")
-            if SECRET_FIELD.search(key) and not (
-                isinstance(item, dict) and set(item) == {"secret"}
+            if (
+                key not in CONTROLLER_LOCATORS
+                and SECRET_FIELD.search(key)
+                and not (isinstance(item, dict) and set(item) == {"secret"})
             ):
                 raise BundleError("LW_BUNDLE_SECRET_REFERENCE_REQUIRED")
             _inventory_references(item, references)
@@ -320,6 +350,47 @@ def _inventory_group(group: Any) -> None:
             raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
     for child in group.get("children", {}).values():
         _inventory_group(child)
+
+
+def _derive_controller_locators(
+    source: dict[str, Any],
+    inventory: dict[str, Any],
+    files: dict[str, bytes],
+    output: Path,
+) -> None:
+    """Bind existing role locators to the same decrypted inventory, including host overrides."""
+    temporary = str(output / "infrastructure/ansible-remote-tmp")
+
+    def variables(raw: dict[str, Any], derived: dict[str, Any]) -> None:
+        for key, prefix in CONTROLLER_LOCATORS.items():
+            if key not in raw:
+                continue
+            name = raw[key]["file"]
+            digest = "sha256:" + hashlib.sha256(files[name]).hexdigest()
+            derived[f"{prefix}_controller"] = True
+            derived[f"{prefix}_sha256"] = digest
+            derived[f"{prefix}_controller_tmp"] = temporary
+            if key == "harbor_secret_locator_path":
+                derived["harbor_secret_locator_revision"] = digest
+
+    def group(raw: dict[str, Any], derived: dict[str, Any]) -> None:
+        variables(raw.get("vars", {}), derived.setdefault("vars", {}))
+        for name, host in raw.get("hosts", {}).items():
+            if host is not None:
+                variables(host, derived["hosts"][name])
+        for name, child in raw.get("children", {}).items():
+            group(child, derived["children"][name])
+
+    defaults = inventory["all"].setdefault("vars", {})
+    # Absence must fail at the role, rather than fall back to a remote root file.
+    for key, prefix in CONTROLLER_LOCATORS.items():
+        if key not in source["all"].get("vars", {}):
+            defaults[key] = ""
+        defaults[f"{prefix}_controller"] = True
+        defaults[f"{prefix}_sha256"] = ""
+        defaults[f"{prefix}_controller_tmp"] = temporary
+    defaults["harbor_secret_locator_revision"] = ""
+    group(source["all"], inventory["all"])
 
 
 def _configuration_version(
@@ -379,6 +450,14 @@ def _workload_inputs(
         "LABWEAVER_EXECUTOR_POD_NAMESPACE",
         "LABWEAVER_EXECUTOR_POD_UID",
         "LABWEAVER_EXECUTOR_CONTAINER_NAME",
+        "LABWEAVER_CONTROL_POD_NAME",
+        "LABWEAVER_CONTROL_POD_NAMESPACE",
+        "LABWEAVER_CONTROL_POD_UID",
+        "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE",
+        "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE",
+        "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_DIR",
+        "LABWEAVER_PLATFORM_CONFIGURATION_RUNTIME_DIR",
+        "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_SHA256",
     }
     result = {}
     for name, defaults in workloads.items():
@@ -399,7 +478,12 @@ def _workload_inputs(
         if type(configuration.get("enabled")) is not bool:
             raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
         if configuration["enabled"]:
-            if set(defaults.get("env", {})) - set(env) or set(
+            inherited = (
+                set(ENVIRONMENT_EXECUTOR_SHARED)
+                if name in {"container-executor", "kubevirt-executor"}
+                else set()
+            )
+            if set(defaults.get("env", {})) - set(env) - inherited or set(
                 defaults.get("secretEnv", {})
             ) - set(secret_env):
                 raise BundleError("LW_BUNDLE_WORKLOAD_INPUT_MISSING")
@@ -457,6 +541,177 @@ def _settings(model: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
     if document["revision"] != model["revision"]:
         raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
     return dict(document, configurationMode=mode)
+
+
+def _environment_executor_bindings(
+    model: dict[str, Any], files: dict[str, bytes], manifest: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, bytes], dict[str, Any]]:
+    """Bind existing executor startup inputs to the Environment owner's source."""
+    application = model["application"]
+    inputs = _workload_inputs(application, manifest)
+    defaults = _document(WORKLOADS_FILE.read_bytes())["workloads"]
+    overrides = application["helmValues"].get("workloads", {})
+    executors = [
+        name
+        for name in ("container-executor", "kubevirt-executor")
+        if overrides.get(name, {}).get("enabled", defaults[name]["enabled"])
+    ]
+    if not executors:
+        return inputs, {}, {}
+    if not overrides.get("environment-service", {}).get(
+        "enabled", defaults["environment-service"]["enabled"]
+    ):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_OWNER_REQUIRED")
+    owner = inputs["environment-service"]
+    owner_secret = defaults["environment-service"]["secret"]
+    source_secrets = application["secrets"]
+    authority_path = "/etc/labweaver/environment-authority/"
+    required_scopes = {
+        "resource.usage.record",
+        "resource.environment.resolve",
+        "resource.environment.release",
+    }
+    if not required_scopes <= set(
+        owner["env"]["LABWEAVER_RESOURCE_USAGE_SCOPES"].split()
+    ):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID")
+    references = {
+        "database-url": owner["secretEnv"]["LABWEAVER_DATABASE_URL"],
+        "nats-server": owner["secretEnv"]["LABWEAVER_NATS_SERVER"],
+    }
+    for variable, key in (
+        ("LABWEAVER_SERVICE_OIDC_CA", "oidc-ca.pem"),
+        ("LABWEAVER_SERVICE_CLIENT_SECRET_FILE", "service-client-secret"),
+        ("LABWEAVER_RESOURCE_USAGE_CA_PATH", "mtls-ca.pem"),
+        ("LABWEAVER_NATS_CA_PATH", "nats-ca.pem"),
+    ):
+        if owner["env"][variable] != "/etc/labweaver/secrets/" + key:
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID")
+        references[key] = {"secret": owner_secret, "key": key}
+    endpoint_ref = references["nats-server"]
+    try:
+        endpoint = (
+            files[source_secrets[endpoint_ref["secret"]][endpoint_ref["key"]]]
+            .decode()
+            .strip()
+        )
+    except UnicodeError as error:
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID") from error
+    if not endpoint.startswith("tls://") or any(c.isspace() for c in endpoint):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_INVALID")
+    projected: dict[str, list[dict[str, str]]] = {}
+    for target, reference in references.items():
+        projected.setdefault(reference["secret"], []).append(
+            {"key": reference["key"], "path": target}
+        )
+    authority = {
+        "secretSources": [
+            {"name": name, "items": items} for name, items in sorted(projected.items())
+        ]
+    }
+    providers = _document(
+        files[application["configMaps"]["environment-service-config"]["providers.json"]]
+    )
+    if not isinstance(providers, list) or any(
+        not isinstance(p, dict) for p in providers
+    ):
+        raise BundleError("LW_BUNDLE_ENVIRONMENT_EXECUTOR_INVALID")
+    configs = {}
+    for name in executors:
+        source = inputs[name]
+        if {"LABWEAVER_DATABASE_URL", "LABWEAVER_NATS_SERVER"} & (
+            set(source["env"]) | set(source["secretEnv"])
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        env = dict(source["env"])
+        for variable in ENVIRONMENT_EXECUTOR_SHARED:
+            if variable in source["secretEnv"] or (
+                variable in env and env[variable] != owner["env"][variable]
+            ):
+                raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+            env[variable] = owner["env"][variable]
+        for variable, key in (
+            ("LABWEAVER_SERVICE_OIDC_CA", "oidc-ca.pem"),
+            ("LABWEAVER_SERVICE_CLIENT_SECRET_FILE", "service-client-secret"),
+            ("LABWEAVER_RESOURCE_USAGE_CA_PATH", "mtls-ca.pem"),
+        ):
+            env[variable] = authority_path + key
+        inputs[name] = {"env": env, "secretEnv": dict(source["secretEnv"])}
+        executor_secrets = source_secrets[defaults[name]["secret"]]
+        for key in ("database-url", "postgres-ca.pem", "nats-ca.pem"):
+            reference = references.get(key, {"secret": owner_secret, "key": key})
+            if (
+                executor_secrets[key]
+                != source_secrets[reference["secret"]][reference["key"]]
+            ):
+                raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        config_ref = application["configMaps"][defaults[name]["configMap"]][
+            "config.yaml"
+        ]
+        config = _document(files[config_ref])
+        if not isinstance(config, dict) or not isinstance(config.get("nats"), dict):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_EXECUTOR_INVALID")
+        nats = dict(config["nats"])
+        kind, subject_field = (
+            ("container", "containerRequestSubject")
+            if name == "container-executor"
+            else ("kubevirt", "kubevirtRequestSubject")
+        )
+        subjects = {
+            p.get("subject") for p in providers if p.get("providerKind") == kind
+        }
+        if subjects != {nats.get(subject_field)} or not all(
+            isinstance(s, str) and s and not any(c.isspace() for c in s)
+            for s in subjects
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        if config.get("databaseUrlFile") not in (
+            "/etc/labweaver/secrets/database-url",
+            authority_path + "database-url",
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        if not (
+            (nats.get("server") == endpoint and "serverFile" not in nats)
+            or (
+                nats.get("serverFile") == authority_path + "nats-server"
+                and "server" not in nats
+            )
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        for field, key in (
+            ("caFile", "nats-ca.pem"),
+            ("clientCertificateFile", "nats-client.crt"),
+            ("clientPrivateKeyFile", "nats-client.key"),
+            ("credentialsFile", "nats.creds"),
+        ):
+            if nats.get(field) != "/etc/labweaver/secrets/" + key:
+                raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+        nats.pop("server", None)
+        nats["serverFile"] = authority_path + "nats-server"
+        nats["caFile"] = authority_path + "nats-ca.pem"
+        configs[config_ref] = yaml.safe_dump(
+            dict(config, databaseUrlFile=authority_path + "database-url", nats=nats)
+        ).encode()
+    if "resource" in model:
+        resource_env = model["resource"]["workloadInputs"]["resource-service"]["env"]
+        client = owner["env"]["LABWEAVER_SERVICE_CLIENT_ID"]
+        if (
+            resource_env.get("LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID") != client
+            or client
+            not in resource_env.get("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS", "").split(
+                ","
+            )
+            or resource_env.get("LABWEAVER_SERVICE_AUDIENCE")
+            != owner["env"]["LABWEAVER_RESOURCE_USAGE_AUDIENCE"]
+            or resource_env.get("LABWEAVER_SERVICE_OIDC_ISSUER")
+            != owner["env"]["LABWEAVER_SERVICE_OIDC_ISSUER"]
+            or resource_env.get("LABWEAVER_SERVICE_OIDC_CA")
+            != "/etc/labweaver/secrets/oidc-ca.pem"
+            or model["resource"]["secrets"]["resource-service-secrets"]["oidc-ca.pem"]
+            != source_secrets[owner_secret]["oidc-ca.pem"]
+        ):
+            raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
+    return inputs, configs, authority
 
 
 def _resource_model(
@@ -607,9 +862,13 @@ def load_bundle(
         application["ansibleVariables"], dict
     ):
         raise BundleError("LW_BUNDLE_MODEL_INVALID")
-    if {"deploymentIdentity", "images", "workloadInputs"} & set(
-        application["helmValues"]
-    ):
+    if {
+        "deploymentIdentity",
+        "images",
+        "workloadInputs",
+        "managedControlConfiguration",
+        "environmentExecutorAuthority",
+    } & set(application["helmValues"]):
         raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
     for key in application["ansibleVariables"]:
         if not key.startswith("platform_application_") or key in RESERVED_VARIABLES:
@@ -627,6 +886,9 @@ def load_bundle(
         "enabled", False
     ):
         raise BundleError("LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT")
+    control_replicas = overrides.get("control-service", {}).get("replicas", 1)
+    if type(control_replicas) is not int or not 1 <= control_replicas <= 16:
+        raise BundleError("LW_BUNDLE_WORKLOAD_INVALID")
     if "resource" in model:
         _resource_model(model, files, references)
     if "infrastructure" in model:
@@ -635,6 +897,7 @@ def load_bundle(
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _settings(model, files)
     _workload_inputs(application, manifest)
+    _environment_executor_bindings(model, files, manifest)
     lock = _document(files[versions["lockFile"]])
     package = _document(files[versions["packageFile"]])
     if (
@@ -707,7 +970,11 @@ def _resolve_values(value: Any, root: Path, files: dict[str, bytes]) -> Any:
 
 
 def derive_bundle(
-    root: Path, output: Path, manifest_path: Path = DEFAULT_MANIFEST
+    root: Path,
+    output: Path,
+    manifest_path: Path = DEFAULT_MANIFEST,
+    *,
+    _authenticated_ciphertext_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Derive application objects, Helm values and Ansible inputs from the same source."""
     model, files = load_bundle(root, manifest_path)
@@ -716,6 +983,9 @@ def derive_bundle(
     _no_symlink_ancestors(output.absolute())
     output.mkdir(mode=0o700)
     manifest = objects._load_manifest(manifest_path)
+    workload_inputs, executor_configs, executor_authority = (
+        _environment_executor_bindings(model, files, manifest)
+    )
     manifest["namespace"] = model["target"]["namespace"]
     manifest_output = output / "object-manifest.json"
     _write(manifest_output, json.dumps(manifest, sort_keys=True).encode())
@@ -723,7 +993,10 @@ def derive_bundle(
     for group, directory in (("configMaps", "configmaps"), ("secrets", "secrets")):
         for name, bindings in application[group].items():
             for key, ref in bindings.items():
-                _write(inputs / directory / name / key, files[ref])
+                _write(
+                    inputs / directory / name / key,
+                    executor_configs.get(ref, files[ref]),
+                )
     payload = objects.render_bundle(manifest_output, inputs)
     object_output = output / "application.yaml"
     _write(object_output, payload)
@@ -731,7 +1004,9 @@ def derive_bundle(
     shutil.rmtree(inputs)
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     values = dict(application["helmValues"])
-    values["workloadInputs"] = _workload_inputs(application, manifest)
+    values["workloadInputs"] = workload_inputs
+    if executor_authority:
+        values["environmentExecutorAuthority"] = executor_authority
     package = _document(files[model["versions"]["packageFile"]])
     values["images"] = {
         image["component"].replace("-", "_"): image["reference"]
@@ -750,6 +1025,33 @@ def derive_bundle(
             sort_keys=True,
         ).encode(),
     )
+    if (
+        _authenticated_ciphertext_sha256 is not None
+        and version["configurationMode"] == "managed_version"
+    ):
+        source = {
+            "apiVersion": "deploy.labweaver.io/loaded-source/v1",
+            "desiredRevision": model["revision"],
+            "configurationSha256": version["configurationSha256"],
+            "encryptedBundleSha256": _authenticated_ciphertext_sha256,
+            "installation": model["target"],
+            "expectedControlReplicas": application["helmValues"]
+            .get("workloads", {})
+            .get("control-service", {})
+            .get("replicas", 1),
+        }
+        source_payload = json.dumps(source, sort_keys=True).encode()
+        _write(output / "platform-configuration-source.json", source_payload)
+        if (
+            application["helmValues"]
+            .get("workloads", {})
+            .get("control-service", {})
+            .get("enabled", True)
+        ):
+            values["managedControlConfiguration"] = {
+                "versionJson": (output / "platform-configuration.json").read_text(),
+                "sourceJson": source_payload.decode(),
+            }
     values_output = output / "helm-values.yaml"
     _write(values_output, yaml.safe_dump(values, sort_keys=True).encode())
     variables = _resolve_values(application["ansibleVariables"], root, files)
@@ -776,9 +1078,9 @@ def derive_bundle(
         _derive_resource(root, output / "resource", model, files)
     if "infrastructure" in model:
         infrastructure = model["infrastructure"]
-        inventory = _resolve_values(
-            _document(files[infrastructure["inventoryFile"]]), root, files
-        )
+        source_inventory = _document(files[infrastructure["inventoryFile"]])
+        inventory = _resolve_values(source_inventory, root, files)
+        _derive_controller_locators(source_inventory, inventory, files, output)
         variables = inventory["all"].setdefault("vars", {})
         variables["labweaver_versions_lock_file"] = str(
             root / model["versions"]["lockFile"]
@@ -1100,21 +1402,42 @@ def opened_bundle(
             temporary_root
         ) or identity.absolute().is_relative_to(runtime):
             raise BundleError("LW_BUNDLE_IDENTITY_MUST_BE_SEPARATE")
+        ciphertext_path = temporary_root / "source.age"
+        _write(ciphertext_path, b"")
+        encrypted_digest = hashlib.sha256()
+        encrypted_bytes = 0
+        # Hash and decrypt the same bounded snapshot, even if the input path is replaced.
+        with archive.open("rb") as source, ciphertext_path.open("wb") as captured:
+            while chunk := source.read(1024 * 1024):
+                encrypted_bytes += len(chunk)
+                if encrypted_bytes > MAX_ARCHIVE_BYTES:
+                    raise BundleError("LW_BUNDLE_ARCHIVE_INVALID")
+                encrypted_digest.update(chunk)
+                captured.write(chunk)
         archive_path = temporary_root / "source.tar"
         _write(archive_path, b"")
-        with archive_path.open("wb") as plaintext, archive.open("rb") as ciphertext:
+        with archive_path.open("wb") as plaintext, ciphertext_path.open(
+            "rb"
+        ) as ciphertext:
             _age(
                 ["--decrypt", "--identity", str(identity.absolute())],
                 stdin=ciphertext,
                 stdout=plaintext,
             )
+        ciphertext_path.unlink()
         if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
             raise BundleError("LW_BUNDLE_LIMIT_EXCEEDED")
         root = temporary_root / "bundle"
         _extract(archive_path, root)
         archive_path.unlink()
         output = temporary_root / "rendered"
-        metadata = derive_bundle(root, output, manifest_path)
+        metadata = derive_bundle(
+            root,
+            output,
+            manifest_path,
+            _authenticated_ciphertext_sha256=encrypted_digest.hexdigest(),
+        )
+        metadata["encryptedBundleSha256"] = encrypted_digest.hexdigest()
         yield root, output, metadata
 
 
@@ -1229,6 +1552,7 @@ def main() -> int:
                     )
                     for key in (
                         "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE",
+                        "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE",
                         "LABWEAVER_PLATFORM_CONFIGURATION_UPDATE_FILE",
                         "LABWEAVER_RESOURCE_VARS_FILE",
                         "LABWEAVER_BUNDLE_INVENTORY_FILE",
@@ -1254,6 +1578,10 @@ def main() -> int:
                     environment[setting_key] = str(
                         rendered / "platform-configuration.json"
                     )
+                    if metadata["configurationMode"] == "managed_version":
+                        environment["LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE"] = (
+                            str(rendered / "platform-configuration-source.json")
+                        )
                     if (rendered / "resource/ansible-vars.yaml").is_file():
                         environment["LABWEAVER_RESOURCE_VARS_FILE"] = str(
                             rendered / "resource/ansible-vars.yaml"

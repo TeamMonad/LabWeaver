@@ -145,26 +145,8 @@
       harbor_gateway_service_vip.stdout == harbor_gateway_vip
     fail_msg: HARBOR_VIP_CONFLICT
 
-- name: Read the root-only Harbor secret locator on the router
-  ansible.builtin.command:
-    argv:
-      - sudo
-      - -n
-      - cat
-      - "{{ harbor_secret_locator_path }}"
-  check_mode: false
-  delegate_to: "{{ groups['routers'][0] }}"
-  become: false
-  changed_when: false
-  no_log: true
-  register: harbor_secret_locator
-
-- name: Extract required Harbor credentials without logging their values
-  ansible.builtin.set_fact:
-    harbor_admin_password: "{{ harbor_secret_locator.stdout | regex_findall('(?m)^HARBOR_ADMIN_PASSWORD=(.+)$') | first }}"
-    harbor_database_password: "{{ harbor_secret_locator.stdout | regex_findall('(?m)^HARBOR_DATABASE_PASSWORD=(.+)$') | first }}"
-    harbor_redis_password: "{{ harbor_secret_locator.stdout | regex_findall('(?m)^HARBOR_REDIS_PASSWORD=(.+)$') | first }}"
-  no_log: true
+- name: Load Harbor credentials from the configured source
+  ansible.builtin.include_tasks: secret-locator.yml
 
 - name: Create the isolated Harbor namespace
   ansible.builtin.command:

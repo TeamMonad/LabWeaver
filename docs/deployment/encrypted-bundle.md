@@ -1,6 +1,6 @@
 # 加密应用 Bundle
 
-本入口将 [Control 管理设置](../contracts/platform-configuration.md)、应用与 Resource profile 输入、Secret、版本和说明放入同一个加密目录。导入继续使用现有管理员条件更新 API。首装设置可以离线准备，不制造已保存版本。运行权限消费者和基础设施安装仍需接入。#203 保持开放。
+本入口将 [Control 管理设置](../contracts/platform-configuration.md)、应用与 Resource profile 输入、Secret、版本和说明放入同一个加密目录。导入继续使用现有管理员条件更新 API。首装设置可以离线准备，不制造已保存版本。运行权限消费者和基础设施安装仍需接入。
 
 ## 配置归属
 
@@ -88,6 +88,29 @@ application:
 
 主应用 profile 不管理 Resource workload。使用下述 `resource` profile 在同一归档中携带其输入，保留原独立 Helm release 与对象归属。
 
+### Environment owner 与运行执行器共用输入
+
+启用 `container-executor` 或 `kubevirt-executor` 时，必须启用原 `environment-service`。Bundle 从该 owner 的 `workloadInputs` 派生两个执行器的 Resource 地址、受信 CA、audience、scope、timeout，以及已有 service client ID、secret 文件和 OIDC issuer。执行器可省略这些继承字段；旧副本字段只能与 owner 相同。独立值返回 `LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT`。
+
+执行器只读挂载 `/etc/labweaver/environment-authority`。投影仅包含 owner 已声明的 database-url、nats-server、nats-ca.pem、oidc-ca.pem、mtls-ca.pem 和 service-client-secret，不挂载 owner 的其他私钥。owner 的数据库 Secret env 与执行器的 databaseUrlFile 引用同一数据库文件。旧 executor Secret 中的 database-url、postgres-ca.pem、nats-ca.pem 必须引用 owner 同一源文件，防止未使用的旧输入产生歧义。
+
+Bundle 中两个 runtime YAML 的 NATS 输入使用下面的文件引用，不能将 Secret endpoint 复制到 ConfigMap：
+
+```yaml
+nats:
+  serverFile: /etc/labweaver/environment-authority/nats-server
+```
+
+派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。原非 Bundle YAML 仍支持单个 server 字符串；server 与 serverFile 同时提供或均缺失时启动失败。
+
+有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
+
+`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。#207 的执行器启动在原 `EnvironmentRuntimeAdmission::from_env` 路径消费这些输入；需要同时使用包含该读取路径的 Environment 镜像。
+
+CI 显式运行 `metering::bundle_configuration_tests::authenticated_bundle_loads_both_executor_clients`。该测试生成合成 age 密文，通过原解密/派生入口取得文件，让两个消费进程读取同一 PostgreSQL 数据库，并以原 ResourceUsage client 读取 HTTPS 服务。它验证错误 client secret、错误 CA 与日志不含凭据。外部 issuer/token/Resource 响应和投影目录是合成边界；该结果不是 Kubernetes 安装、真实 NATS 身份或资金授权验收。
+
+原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照。它们不会把 Environment 配置渲染或上述本地消费测试当作其他服务已经部署、已加载或已应用的事实。
+
 ## 同一目录中的 Resource profile
 
 在 `config/bundle.yaml` 中添加 `resource`。该字段不建立第二个配置目录或秘密仓库。
@@ -148,6 +171,21 @@ inventory 的 `file` 引用只接受 `secrets/` 文件。密码类值必须使�
 `vaultPasswordFile` 只供仍需读取既有 Vault 输入的消费者使用。未指定时，执行环境不继承其他 Vault 密码文件；xtask 不查找 `.vault-password`。本 profile 的静态 inventory 使用已经解密的引用值，不再需要第二份 Vault 仓库。
 
 `identitySecretFile` 使用原 identity 角色的 bootstrap YAML。工具派生摘要和本地 locator 标记，角色在受限控制器目录读取 `0600` 文件，并继续使用现有字段校验。无需把该 locator 预先复制到路由器。未指定时，identity playbook 因缺少 locator 明确失败。其旧非 Bundle 调用者继续使用原 root locator。
+
+Harbor 和 ACME 公网入口也从同一目录读取 locator。将现有 inventory 变量设为文件引用：
+
+```yaml
+all:
+  vars:
+    harbor_secret_locator_path: {file: secrets/infrastructure.env}
+    public_ingress_cloudflare_token_locator: {file: secrets/infrastructure.env}
+```
+
+两个变量可以引用同一文件，也可以分别引用本目录中的文件。Harbor 要求 `HARBOR_ADMIN_PASSWORD`、`HARBOR_DATABASE_PASSWORD`、`HARBOR_REDIS_PASSWORD` 各出现一次。ACME 要求配置的 token key 出现一次，默认 key 为 `CLOUDFLARE_API_TOKEN`。文件只在受限控制器上读取，不需要预先复制到远端 root 目录。使用 selfsigned 时，公网入口不读取 ACME token。
+
+Bundle 派生 controller 标记、临时目录、SHA-256，以及 Harbor 的 `harbor_secret_locator_revision`。不要在 inventory 中再手填这些字段或使用远端 locator 字符串。角色要求普通 `0600` 文件，先核对摘要，读取后再核对实际字节，并使用 `no_log`。缺失引用不会补读角色的远端默认路径。旧非 Bundle 调用者仍使用原来源。
+
+轮换凭据时只修改引用文件，然后验证并重新加密归档。两个消费者的文件绑定及 Harbor revision 从新字节派生；不用手改多份配置。新的密文需要重新登记，登记仍不表示部署已获准或 applied 已更新。
 
 解密执行提供 `LABWEAVER_BUNDLE_INVENTORY_FILE`、`ANSIBLE_INVENTORY` 和仓库的 `ANSIBLE_CONFIG`。有 Vault 密码时提供 `LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE` 与 `ANSIBLE_VAULT_PASSWORD_FILE`；有身份文件时提供 `LABWEAVER_IDENTITY_SECRET_LOCATOR`。Ansible 本地临时文件及 locator 读取临时目录位于受限运行目录，不依赖控制器主目录。执行环境清除外部日志路径覆盖。所有路径仅在同步消费者运行期间有效。
 
@@ -360,8 +398,41 @@ Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob
 
 此入口验证控制器恢复、配置挂载和隔离 Job。六服务空环境安装、真实身份签发、数据库迁移、入口证书、镜像 Registry 与浏览器流程仍需要专门的隔离安装窗口和获准依赖。现有 foundation/identity/Harbor 角色含固定 namespace 或共享对象，不能直接套用到该测试 namespace。不要将此 Job 成功记录为完整安装或用户旅程通过。
 
-## 当前未完成范围
+## 执行与观察边界
 
-管理版本、离线首装请求、Resource profile 和静态基础设施 inventory/凭据引用已进入同一加密目录。旧 PKI/NATS 签发 workspace、Harbor/公网入口的远端 root locator 和实际安装步骤仍需逐项整合；这些入口不会在本地恢复时自动执行。7天/30天/24h/1h/60秒的服务消费者、管理界面的本分支集成与真实后端浏览器流程、实际执行观察器仍需完成。本切片没有落实 #207 的实际运行授权或执行位置。隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。
+管理版本、离线首装请求、Resource profile、静态 inventory，以及 identity/Harbor/公网入口 locator 使用同一加密目录。PKI/NATS 签发 workspace 和实际安装步骤仍有独立输入，恢复不会自动执行它们。管理配置的保留、提醒、抢占、运行及 builder 策略尚未由全部服务消费。
 
-剩余范围仍属于 #203 和明确的下游消费者。公共契约已由父线程协调，生成 SDK 从 `crates/contracts` 产生。不要用本地加密或状态测试替代实际授权、执行位置和前后端验收。
+`exec` 为管理版本生成私有 `platform-configuration-source.json`。密文摘要来自同一份实际解密输入快照，设置摘要来自原 Rust 类型校验；文件记录 Bundle 的 revision 和 namespace/releaseName。`validate`、直接渲染和未保存的首装请求不产生此加载来源。来源文件不含解密身份或 Secret，并与其他临时派生文件一起清理。
+
+Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，从实际读取的 typed 设置计算摘要，将快照固定在运行实例。原 apply/report 成功路径还要核对该快照与原尝试，不能只复制执行者的两个摘要。保存 desired、修改投影文件和命令退出成功均不会自动更新 applied。旧进程或错密文来源的成功回报被拒绝；失败保留最后验证的版本及待核对状态。具体输入与限制见[Control 启动加载](../contracts/platform-configuration.md#control-启动加载)。
+
+该路径只验证 Control 与数据库消费者。其他配置消费者仍没有完整活动 revision/hash 观察。Bundle 中的目标名称不是实际安装位置证明。执行者仍须独立核对实际实例、位置和其他服务的采用结果，才提交完整 succeeded。缺少这些事实时保留待核对结果，不将来源文件、投影或 rollout 就绪作为完整部署回执。
+
+## Control 挂载与副本观察
+
+认证打开管理版本后，派生 Helm values 包含同一版本和来源的两个 JSON输入。chart只为现有Control部署生成不可变ConfigMap、Pod checksum、初始化复制及主进程只读挂载；别的workload不挂载。初始化使用原Control摘要镜像、原非root身份、drop ALL、只读根文件系统和禁用的服务账户token，不启用新权限或签发身份。
+
+Kubernetes [AtomicWriter](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/volume/util/atomic_writer.go) 用同一代次目录和符号链接发布投影。因此初始化命令固定一个 `..data` 代次，校验字节checksum后写入普通0600文件，保留加载器原有的链接拒绝。主进程的身份来自 [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)；挂载文件改变不会替换已经加载的进程快照。
+
+Control副本数在原Bundle的 `application.helmValues.workloads.control-service.replicas` 配置为1到16，默认1。Source及chart必须一致。不要手改派生值、加载环境路径、Downward身份或ConfigMap数据。任一来源、摘要或必需字段错误会明确失败。
+
+完成已获准部署后，原执行者在 `verifying` 阶段收集一次实际观察：
+
+```sh
+python tools/observe_control_configuration.py \
+  --source-file "$LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE" \
+  --token-file .private/operator/executor.jwt \
+  --ca-file .private/operator/control-ca.pem \
+  --tls-server-name "control-service.$LW_INSTALL_NAMESPACE.svc" \
+  --port 9444 --output .private/observations/control.json
+```
+
+在Bundle `exec` 的消费者命令中执行该工具。输出须在临时目录外；文件原子创建为0600，已存在不覆盖。示例文件由获准操作员提供，工具不生成真实Token或CA。它只调用现有kubectl的Deployment/ReplicaSet/Pod读取和实际Pod的HTTPS GET，不apply、exec Pod、创建身份或变更权限。需要已有读取权限、网络路径和原 `control.platform_configuration.apply` 权限；缺任一条件明确失败，不自动扩权。
+
+工具核对UID/generation、副本数、原Deployment→ReplicaSet→Pod归属、Ready、实际IP与活跃集合。过渡中的旧/终止/额外Pod阻止成功；观察后再次核对代次、集合和容器重启事实。每个响应还须与Source版本和两摘要一致且在30秒内。TLS连接使用实际Pod IP，仍校验原Control Service DNS及现有CA；不跟随重定向或输出Token/原始失败响应。
+
+把输出作为原report的 `controlReplicaObservations`，同时使用原两摘要、attempt ETag和稳定幂等键。完整观察后才提交succeeded。丢失响应时重放同一个请求；重新观察会产生新的时间与实例事实，应先查询attempt，再使用新的幂等键。失败仍报告原有failureReason并保留最后验证版本，不静默覆盖旧effective。
+
+该入口提供代码、本地合成验证及Control副本观察能力。它没有执行真实集群安装，也没有覆盖全部lifecycle/runtime/builder消费者。全安装、实际replica/位置和其他服务的验收仍由唯一获准执行owner安排。
+
+隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。本入口没有落实运行策略的实际对象授权或执行位置。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。
