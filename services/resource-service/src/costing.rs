@@ -238,6 +238,7 @@ pub(crate) async fn estimate_in_transaction(
                     None
                 },
                 if gpu { gpu_mode } else { None },
+                None,
                 &mut lines,
                 &mut currency,
             )

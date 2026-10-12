@@ -982,6 +982,13 @@ impl PgResourceStore {
         input: &CreateResourceRateRequest,
     ) -> Result<ResourceRate, ResourceStoreError> {
         input.unit_price.validate()?;
+        if (input.unit == ResourceBillingUnit::BuildSecond) != input.builder_binding.is_some()
+            || input.builder_binding.as_ref().is_some_and(|b| {
+                b.trim().is_empty() || b.len() > 128 || b.bytes().any(|c| c.is_ascii_whitespace())
+            })
+        {
+            return Err(ResourceStoreError::RateDimensionInvalid);
+        }
         let gpu_unit = input.unit == ResourceBillingUnit::GpuUnitSecond;
         if gpu_unit != (input.gpu_class.is_some() && input.gpu_mode.is_some())
             || input.gpu_class.is_some() != input.gpu_mode.is_some()
@@ -1025,11 +1032,12 @@ impl PgResourceStore {
                     "SELECT COALESCE(MAX(revision),0)::bigint + 1
                      FROM resource.resource_rates
                      WHERE unit=$1 AND gpu_class IS NOT DISTINCT FROM $2
-                       AND gpu_mode IS NOT DISTINCT FROM $3",
+                       AND gpu_mode IS NOT DISTINCT FROM $3 AND builder_binding IS NOT DISTINCT FROM $4",
                 )
                 .bind(&unit)
                 .bind(input.gpu_class.as_deref())
                 .bind(gpu_mode.as_deref())
+                .bind(input.builder_binding.as_deref())
                 .fetch_one(&mut *transaction)
                 .await?;
                 let revision = Revision::new(u64::try_from(revision_i64)?)?;
@@ -1042,6 +1050,7 @@ impl PgResourceStore {
                      WHERE unit=$1 AND gpu_class IS NOT DISTINCT FROM $2
                        AND gpu_mode IS NOT DISTINCT FROM $3
                        AND effective_from < $4 AND effective_until IS NULL
+                       AND builder_binding IS NOT DISTINCT FROM $5
                      ORDER BY effective_from DESC, revision DESC
                      LIMIT 1 FOR UPDATE",
                 )
@@ -1049,6 +1058,7 @@ impl PgResourceStore {
                 .bind(input.gpu_class.as_deref())
                 .bind(gpu_mode.as_deref())
                 .bind(input.effective_from.get())
+                .bind(input.builder_binding.as_deref())
                 .fetch_optional(&mut *transaction)
                 .await?;
                 let previous_open = previous_open
@@ -1075,7 +1085,14 @@ impl PgResourceStore {
                     .bind(previous.id.to_string())
                     .fetch_one(&mut *transaction)
                     .await?;
-                    if settled_after_boundary {
+                    if settled_after_boundary
+                        || crate::build_costing::settled_after_boundary(
+                            &mut transaction,
+                            previous.id,
+                            input.effective_from,
+                        )
+                        .await?
+                    {
                         return Err(ResourceStoreError::RateSettledConflict);
                     }
                 }
@@ -1087,6 +1104,7 @@ impl PgResourceStore {
                             AND effective_from < COALESCE($5, 'infinity'::timestamptz)
                             AND COALESCE(effective_until, 'infinity'::timestamptz) > $4
                             AND ($6::uuid IS NULL OR rate_id <> $6)
+                            AND builder_binding IS NOT DISTINCT FROM $7
                       )",
                 )
                 .bind(&unit)
@@ -1095,6 +1113,7 @@ impl PgResourceStore {
                 .bind(input.effective_from.get())
                 .bind(input.effective_until.map(UtcTimestamp::get))
                 .bind(previous_open.as_ref().map(|rate| rate.id.as_uuid()))
+                .bind(input.builder_binding.as_deref())
                 .fetch_one(&mut *transaction)
                 .await?;
                 if overlap {
@@ -1116,6 +1135,7 @@ impl PgResourceStore {
                     .await?;
                 }
                 let rate = ResourceRate {
+                    builder_binding: input.builder_binding.clone(),
                     id: RateId::new(),
                     revision,
                     unit: input.unit,
@@ -1129,8 +1149,8 @@ impl PgResourceStore {
                 rate.validate().map_err(ResourceStoreError::Contract)?;
                 sqlx::query(
                     "INSERT INTO resource.resource_rates
-                     (rate_id,revision,unit,unit_quantity,gpu_class,gpu_mode,currency,unit_price,effective_from,effective_until,contract)
-                     VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9,$10,$11)",
+                     (rate_id,revision,unit,unit_quantity,gpu_class,gpu_mode,currency,unit_price,effective_from,effective_until,contract,builder_binding)
+                     VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9,$10,$11,$12)",
                 )
                 .bind(rate.id.as_uuid())
                 .bind(i64::try_from(rate.revision.get())?)
@@ -1143,6 +1163,7 @@ impl PgResourceStore {
                 .bind(rate.effective_from.get())
                 .bind(rate.effective_until.map(UtcTimestamp::get))
                 .bind(serde_json::to_value(&rate)?)
+                .bind(rate.builder_binding.as_deref())
                 .execute(&mut *transaction)
                 .await?;
                 let value = serde_json::to_value(&rate)?;
@@ -1228,7 +1249,14 @@ impl PgResourceStore {
                 .bind(rate.id.to_string())
                 .fetch_one(&mut *transaction)
                 .await?;
-                if settled_after_boundary {
+                if settled_after_boundary
+                    || crate::build_costing::settled_after_boundary(
+                        &mut transaction,
+                        rate.id,
+                        input.effective_until,
+                    )
+                    .await?
+                {
                     return Err(ResourceStoreError::RateSettledConflict);
                 }
                 rate.effective_until = Some(input.effective_until);

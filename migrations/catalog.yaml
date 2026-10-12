@@ -233,3 +233,6 @@ domains:
       - id: 18
         file: resource/0018_unknown_usage_deadline.sql
         sha256: d68bca4b08afd1d1fb3d5ce07a7f72221a290eab4988f30ed261b8759d4bccd0
+      - id: 19
+        file: resource/0019_build_metering.sql
+        sha256: 4107df44288a47e759970910cef867ba2622194c76712046bb8fb632fd3f74df

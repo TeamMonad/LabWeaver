@@ -75,6 +75,7 @@ async fn rate(
         .create_rate(
             &Uuid::now_v7().to_string(),
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -729,6 +730,7 @@ async fn task_upper_bound_keeps_approved_gpu_mode_after_catalog_changes() -> Res
             .create_rate(
                 &Uuid::now_v7().to_string(),
                 &CreateResourceRateRequest {
+                    builder_binding: None,
                     unit: ResourceBillingUnit::GpuUnitSecond,
                     unit_quantity: 1,
                     gpu_class: Some(catalog.class.clone()),
