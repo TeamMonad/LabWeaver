@@ -120,6 +120,94 @@ fn ciphertext() -> TestResult<Vec<u8>> {
     Ok(std::fs::read(archive)?)
 }
 
+/// Run explicitly with the Web dependencies and a Playwright Chromium installed.
+/// This uses real Control routes and `PostgreSQL`. The issuer and Access decision
+/// service remain synthetic external dependencies; this is not a BFF/UI test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Node, installed Web dependencies and Playwright Chromium"]
+async fn browser_sdk_registers_real_ciphertext_and_reads_durable_failure() -> TestResult {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let (_container, pool) = database().await?;
+    let fixture = http_fixture::HttpFixture::new(pool.clone()).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let router = fixture.router.clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    let temporary = tempfile::tempdir()?;
+    let cipher = ciphertext()?;
+    let input = temporary.path().join("synthetic-browser-input.json");
+    let contents = serde_json::to_vec(&serde_json::json!({
+        "controlUrl": format!("http://{address}"),
+        "gatewayToken": fixture.token("labweaver-access", "access.control.forward")?,
+        "executorToken": fixture.token("synthetic-executor", "control.platform_configuration.apply")?,
+        "admin": fixture.admin,
+        "otherActor": fixture.other_actor,
+        "session": contracts::BffSessionId::new(),
+        "ciphertext": STANDARD.encode(&cipher),
+        "evidenceDirectory": temporary.path(),
+    }))?;
+    std::fs::write(&input, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = tokio::time::timeout(
+        std::time::Duration::from_mins(3),
+        tokio::process::Command::new("node")
+            .arg("e2e/backend/platform-configuration.mjs")
+            .arg(&input)
+            .current_dir(root.join("web"))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let _ = stop.send(());
+    server.await??;
+    let output = output??;
+    // The script emits bounded diagnostics, never fixture tokens or request bodies.
+    if !output.status.success() {
+        return Err(format!(
+            "browser SDK test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    assert!(String::from_utf8(output.stdout)?.contains("PLATFORM_CONFIGURATION_BROWSER_OK"));
+    let state = configuration::get(&pool).await?;
+    assert!(state.registered_bundle.is_none());
+    assert!(state.applied.is_none());
+    assert_eq!(
+        state.applied_state,
+        contracts::platform_configuration::PlatformConfigurationAppliedState::Unverified
+    );
+    let retry = state.latest_apply.as_ref().ok_or("no browser retry")?;
+    let failed =
+        configuration::get_apply(&pool, retry.previous_apply_id.ok_or("no failed attempt")?)
+            .await?;
+    assert_eq!(failed.stage, Stage::Failed);
+    assert_eq!(failed.failed_stage, Some(Stage::Applying));
+    assert_eq!(
+        failed.encrypted_bundle_sha256,
+        persistence_sqlx::Sha256Digest::of_bytes(&cipher).to_string()
+    );
+    let registrations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM control.platform_configuration_bundles")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(registrations, 1);
+    Ok(())
+}
+
 async fn register(
     pool: &PgPool,
     state: &PlatformConfigurationStatus,
