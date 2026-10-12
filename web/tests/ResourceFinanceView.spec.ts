@@ -4,9 +4,13 @@ import { canonicalRateAmount, equivalentRatePrice, rateVersionState } from '@/ut
 import { navigationGroupsForRoles, navigationTarget } from '@/utils/navigation'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
 import {
+  createCreditAdminOperation,
   createResourceRate,
   endResourceRate,
+  getProjectCredits,
   listEnvironments,
+  listProjectCreditHolds,
+  listProjectCreditLedger,
   listProjectResourceLeases,
   listProjectResourceRequests,
   listProjectResourceUsage,
@@ -18,9 +22,13 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
+    createCreditAdminOperation: vi.fn(),
     createResourceRate: vi.fn(),
     endResourceRate: vi.fn(),
+    getProjectCredits: vi.fn(),
     listEnvironments: vi.fn(),
+    listProjectCreditHolds: vi.fn(),
+    listProjectCreditLedger: vi.fn(),
     listProjectResourceLeases: vi.fn(),
     listProjectResourceRequests: vi.fn(),
     listProjectResourceUsage: vi.fn(),
@@ -64,6 +72,35 @@ const routerMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/client', () => ({ apiClient: api }))
+
+function mockCreditsEmpty() {
+  vi.mocked(getProjectCredits).mockResolvedValue({
+    data: {
+      projectId: 'project-new',
+      currency: 'CREDITS',
+      balance: '0.000000',
+      available: '0.000000',
+      reserved: '0.000000',
+      spent: '0.000000',
+      pending: '0.000000',
+      unknown: '0.000000',
+      unknownCount: 0,
+      platformAbsorbed: '0.000000',
+      revision: 0,
+    },
+    error: undefined,
+  } as never)
+  vi.mocked(listProjectCreditLedger).mockResolvedValue({
+    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    error: undefined,
+  } as never)
+  vi.mocked(listProjectCreditHolds).mockResolvedValue({
+    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    error: undefined,
+  } as never)
+  vi.mocked(createCreditAdminOperation).mockResolvedValue({ data: [], error: undefined } as never)
+}
+
 
 vi.mock('@/composables/useProjects', async () => {
   const { reactive } = await import('vue')
@@ -160,6 +197,7 @@ async function confirmEnd(wrapper: ReturnType<typeof mountView>, cutoff = '2030-
 describe('ResourceFinanceView', () => {
   afterEach(() => { for (const wrapper of mountedViews.splice(0)) wrapper.unmount() })
   beforeEach(() => {
+  mockCreditsEmpty()
     vi.clearAllMocks()
     vi.mocked(createResourceRate).mockReset()
     vi.mocked(endResourceRate).mockReset()
