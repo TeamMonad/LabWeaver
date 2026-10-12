@@ -107,7 +107,9 @@ function asHoldPage(value: unknown): CreditHoldPageSchema {
       !isRecord(item)
       || typeof item.id !== 'string'
       || typeof item.projectId !== 'string'
-      || typeof item.requestId !== 'string'
+      || (item.requestId != null && typeof item.requestId !== 'string')
+      || (item.buildRequestId != null && typeof item.buildRequestId !== 'string')
+      || (item.buildAttempt != null && typeof item.buildAttempt !== 'number')
       || typeof item.businessKey !== 'string'
       || typeof item.ownerClientId !== 'string'
       || typeof item.amount !== 'string'

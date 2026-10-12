@@ -209,6 +209,7 @@
             <option value="cpu_millicore_second">CPU 核心小时</option>
             <option value="memory_byte_second">内存 GiB 小时</option>
             <option value="storage_byte_second">存储 GiB 小时</option>
+            <option value="build_second">构建秒</option>
           </AppSelect>
         </label>
         <label v-if="rateUnit === 'gpu_unit_second'">
@@ -1032,6 +1033,7 @@ function billingUnitLabel(value: ResourceCharge['lines'][number]['unit']) {
     memory_byte_second: '内存',
     storage_byte_second: '存储',
     gpu_unit_second: 'GPU',
+    build_second: '构建',
   } as Record<ResourceCharge['lines'][number]['unit'], string>)[value] ?? value
 }
 

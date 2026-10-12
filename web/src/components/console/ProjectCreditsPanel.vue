@@ -149,7 +149,7 @@
           >
             <div class="charge-main">
               <strong>{{ hold.state }} · 剩余 {{ hold.remaining }} / {{ hold.amount }}</strong>
-              <small>{{ hold.businessKey }} · 申请 {{ hold.requestId }}</small>
+              <small>{{ hold.businessKey }} · {{ hold.requestId ? `申请 ${hold.requestId}` : hold.buildRequestId ? `构建 ${hold.buildRequestId}` : '无资源申请绑定' }}</small>
               <small>{{ formatTimestamp(hold.createdAt) }}</small>
               <template v-if="holdUnknownKind(hold) !== 'none'">
                 <span

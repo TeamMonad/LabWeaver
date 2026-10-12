@@ -106,6 +106,8 @@ export function billingUnitLabel(unit: string): string {
       return '存储 byte·秒'
     case 'gpu_unit_second':
       return 'GPU unit·秒'
+    case 'build_second':
+      return '构建秒'
     default:
       return unit
   }
