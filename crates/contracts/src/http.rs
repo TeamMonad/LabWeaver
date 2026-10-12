@@ -2353,6 +2353,34 @@ macro_rules! op {
 pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
+        Post,
+        "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+        "registerPlatformConfigurationBundle",
+        "platform_configuration:write",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+        "getPlatformConfigurationBundle",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
         Get,
         "/api/v1/admin/platform-configuration",
         "getPlatformConfiguration",

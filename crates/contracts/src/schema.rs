@@ -54,6 +54,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::platform_configuration::PlatformConfigurationApply
     );
     document!(
+        "schemas/contracts/v1/platform-configuration-bundle.schema.json",
+        crate::platform_configuration::PlatformConfigurationBundle
+    );
+    document!(
+        "schemas/contracts/v1/http/register-platform-configuration-bundle-request.schema.json",
+        crate::platform_configuration::RegisterPlatformConfigurationBundleRequest
+    );
+    document!(
         "schemas/contracts/v1/http/update-platform-configuration-request.schema.json",
         crate::platform_configuration::UpdatePlatformConfigurationRequest
     );
@@ -1084,12 +1092,21 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             Method::Delete => "delete",
         };
         let mut parameters = path_parameters(operation.path);
-        if operation.operation_id == "getPlatformConfigurationVersion" {
+        if matches!(
+            operation.operation_id,
+            "getPlatformConfigurationVersion"
+                | "getPlatformConfigurationBundle"
+                | "registerPlatformConfigurationBundle"
+        ) {
             for parameter in &mut parameters {
                 if parameter["name"] == "revision" {
                     parameter["schema"] = json!({"type":"integer","minimum":1,"maximum":9_223_372_036_854_775_807_u64});
                 }
             }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            parameters.push(json!({"name":"expectedRevision","in":"query","required":true,"schema":{"type":"integer","minimum":0,"maximum":9_223_372_036_854_775_807_u64}}));
+            parameters.push(json!({"name":"configurationSha256","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9a-f]{64}$"}}));
         }
         if matches!(
             operation.operation_id,
@@ -1242,6 +1259,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "applyPlatformConfiguration"
                 | "getPlatformConfigurationApply"
                 | "reportPlatformConfigurationApply"
+                | "registerPlatformConfigurationBundle"
+                | "getPlatformConfigurationBundle"
         ) {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_PLATFORM_CONFIGURATION_INVALID",
@@ -1254,6 +1273,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
                 "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
                 "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
                 "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
                 "LW_IDEMPOTENCY_CONFLICT",
                 "LW_OPERATION_IN_PROGRESS"
@@ -1354,6 +1375,14 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 operation_json["requestBody"]["content"]["application/yaml"] =
                     json!({"schema":request_schema(operation.operation_id)});
             }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            operation_json["requestBody"] = json!({"required":true,"content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}});
+            operation_json["responses"]["413"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["responses"]["415"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["description"] = json!(
+                "Register received ciphertext and an administrator-declared binding to the current desired settings. Control computes the ciphertext digest but does not decrypt or approve deployment. Maximum upload: 73400320 bytes."
+            );
         }
         let entry = paths
             .entry(operation.path.to_owned())
@@ -1785,8 +1814,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "getPlatformConfiguration"
         | "updatePlatformConfiguration"
         | "applyPlatformConfiguration"
+        | "registerPlatformConfigurationBundle"
         | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
         "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
+        "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")

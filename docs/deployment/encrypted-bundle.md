@@ -241,7 +241,9 @@ Cluster network、identity、verify、admin tools、foundation、Harbor、sandbo
 
 `managedConfigurationSha256` 是管理设置的 canonical 摘要，格式为64个小写十六进制字符。它等于版本 API 的 `configurationSha256`。`applicationObjectsSha256` 是渲染对象的摘要，带 `sha256:` 前缀。执行观察使用管理设置摘要和加密文件摘要，不能把对象摘要当作管理设置摘要。
 
-`seal` 返回实际导出文件的 `encryptedBundleSha256`，并同时返回其源 revision 和管理设置摘要。获准操作员核对它们与当前 desired 一致后，将密文摘要交给管理员应用请求。不要从配置摘要推算密文摘要。导出成功没有批准生产部署。当前 API 尚无获准导出登记或按 desired 查询该登记的入口，执行者仍须核对实际归档。
+`seal` 返回实际导出文件的 `encryptedBundleSha256`，并同时返回其源 revision 和管理设置摘要。操作员本地核对归档后，用管理员登记入口上传实际密文；Control 流式计算收到文件的摘要，并核对声明的 desired revision/设置摘要。当前 status 的 `registeredBundle` 和按 desired 的登记查询返回同一事实。应用请求只使用服务端登记，不另填密文摘要。步骤见[管理 API](../contracts/platform-configuration.md#应用与失败恢复)。
+
+服务端不持解密身份，登记只是收到密文后的绑定声明，不证明未解密内容正确，也不批准生产部署。操作员须持有原归档和独立密钥；登记 API 计算摘要后丢弃上传内容，只保存元数据。执行者仍须验证本地实际归档与原尝试绑定。不要从设置摘要推算密文摘要，也不要把 `seal` 或登记当成 applied。
 
 ## 离线准备首装设置
 

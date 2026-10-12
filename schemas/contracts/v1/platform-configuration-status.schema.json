@@ -196,6 +196,47 @@
       ],
       "type": "string"
     },
+    "PlatformConfigurationBundle": {
+      "additionalProperties": false,
+      "description": "An administrator's registration of received ciphertext, not deployment approval.",
+      "properties": {
+        "configurationSha256": {
+          "description": "Administrator-declared binding to the immutable settings snapshot.",
+          "type": "string"
+        },
+        "desiredRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "encryptedBundleSha256": {
+          "description": "Computed by Control from actual uploaded ciphertext bytes.",
+          "type": "string"
+        },
+        "encryptedBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "registeredAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "registeredAtRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "registeredBy": {
+          "$ref": "#/$defs/ActorId"
+        }
+      },
+      "required": [
+        "registeredAtRevision",
+        "desiredRevision",
+        "configurationSha256",
+        "encryptedBundleSha256",
+        "encryptedBytes",
+        "registeredBy",
+        "registeredAt"
+      ],
+      "type": "object"
+    },
     "PlatformConfigurationDesired": {
       "additionalProperties": false,
       "description": "The one managed settings document. It contains no credential values or secret locators.",
@@ -578,6 +619,17 @@
           "type": "null"
         }
       ]
+    },
+    "registeredBundle": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformConfigurationBundle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Current desired's last registered artifact. Registration alone never applies it."
     },
     "revision": {
       "description": "Aggregate fence, including apply updates. Zero is the unconfigured state.",

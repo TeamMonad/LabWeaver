@@ -2,12 +2,13 @@
 
 use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
-    ApplyPlatformConfigurationRequest, PlatformConfigurationAppliedState as AppliedState,
-    PlatformConfigurationApply, PlatformConfigurationApplyStage as Stage,
+    ApplyPlatformConfigurationRequest, PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES,
+    PlatformConfigurationAppliedState as AppliedState, PlatformConfigurationApply,
+    PlatformConfigurationApplyStage as Stage, PlatformConfigurationBundle,
     PlatformConfigurationFailureReason, PlatformConfigurationNextStep as Next,
     PlatformConfigurationStatus, PlatformConfigurationVersion,
-    ReportPlatformConfigurationApplyRequest, UpdatePlatformConfigurationRequest,
-    valid_configuration_sha256,
+    RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
+    UpdatePlatformConfigurationRequest, valid_configuration_sha256,
 };
 use contracts::{ActorId, OperationId, Revision, UtcTimestamp};
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, Sha256Digest};
@@ -15,6 +16,14 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 type Result<T> = std::result::Result<T, ConfigurationError>;
+
+/// Facts calculated at the bounded streaming HTTP boundary.
+pub struct BundleCiphertext {
+    /// Digest of all received bytes, including the age envelope.
+    pub digest: Sha256Digest,
+    /// Total received length after applying the upload bound.
+    pub bytes: u64,
+}
 
 #[derive(Debug, thiserror::Error)]
 /// Stable configuration diagnostics. Input contents and executor logs are never included.
@@ -37,6 +46,9 @@ pub enum ConfigurationError {
     /// The executor observed a different immutable configuration or Bundle.
     #[error("LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH")]
     ObservationMismatch,
+    /// Applying requires a received artifact bound to the current desired settings.
+    #[error("LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED")]
+    BundleRequired,
     /// No requested immutable record exists.
     #[error("LW_PLATFORM_CONFIGURATION_NOT_FOUND")]
     NotFound,
@@ -91,6 +103,65 @@ pub async fn get_apply(pool: &PgPool, id: OperationId) -> Result<PlatformConfigu
     serde_json::from_value(value).map_err(|_| ConfigurationError::Persistence)
 }
 
+/// Reads the latest registration for one immutable desired revision.
+pub async fn get_bundle(
+    pool: &PgPool,
+    desired_revision: Revision,
+) -> Result<PlatformConfigurationBundle> {
+    let value: Value = sqlx::query_scalar("SELECT contract FROM control.platform_configuration_bundles WHERE desired_revision=$1 ORDER BY registered_at_revision DESC LIMIT 1")
+        .bind(number(desired_revision.get())?).fetch_optional(pool).await.map_err(|_| ConfigurationError::Persistence)?.ok_or(ConfigurationError::NotFound)?;
+    serde_json::from_value(value).map_err(|_| ConfigurationError::Persistence)
+}
+
+/// Records computed ciphertext facts and an explicitly authorized binding declaration.
+/// The HTTP boundary computes digest/size from bytes; it never receives an identity key.
+pub async fn register_bundle(
+    pool: &PgPool,
+    actor: ActorId,
+    desired_revision: Revision,
+    request: &RegisterPlatformConfigurationBundleRequest,
+    ciphertext: BundleCiphertext,
+    key: &IdempotencyKey,
+    now: UtcTimestamp,
+) -> Result<PlatformConfigurationStatus> {
+    if !valid_configuration_sha256(&request.configuration_sha256)
+        || !(23..=PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES).contains(&ciphertext.bytes)
+    {
+        return Err(ConfigurationError::Invalid);
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| ConfigurationError::Persistence)?;
+    let operation = "control_platform_configuration_register_bundle_v1";
+    if let Some(replay) = reserve(&mut tx, operation, key, &json!({"actor":actor,"desiredRevision":desired_revision,"request":request,"digest":ciphertext.digest.to_string(),"encryptedBytes":ciphertext.bytes})).await? { return Ok(replay); }
+    let mut state = lock_state(&mut tx).await?;
+    let desired = state
+        .desired
+        .as_ref()
+        .ok_or(ConfigurationError::RevisionConflict)?;
+    if state.revision != request.expected_revision
+        || desired.revision != desired_revision
+        || desired.configuration_sha256 != request.configuration_sha256
+    {
+        return Err(ConfigurationError::RevisionConflict);
+    }
+    advance_state(&mut state)?;
+    let bundle = PlatformConfigurationBundle {
+        registered_at_revision: revision(state.revision)?,
+        desired_revision,
+        configuration_sha256: request.configuration_sha256.clone(),
+        encrypted_bundle_sha256: ciphertext.digest.to_string(),
+        encrypted_bytes: ciphertext.bytes,
+        registered_by: actor,
+        registered_at: now,
+    };
+    sqlx::query("INSERT INTO control.platform_configuration_bundles(registered_at_revision,desired_revision,contract) VALUES($1,$2,$3)")
+        .bind(number(state.revision)?).bind(number(desired_revision.get())?).bind(encode(&bundle)?).execute(&mut *tx).await.map_err(|_| ConfigurationError::Persistence)?;
+    state.registered_bundle = Some(bundle);
+    finish(tx, state, operation, key).await
+}
+
 /// Both JSON forms and advanced YAML reach this one conditional mutation.
 pub async fn update(
     pool: &PgPool,
@@ -141,6 +212,7 @@ pub async fn update(
     .await
     .map_err(|_| ConfigurationError::Persistence)?;
     state.desired = Some(desired);
+    state.registered_bundle = None;
     state.refresh_impact();
     finish(tx, state, operation, key).await
 }
@@ -153,9 +225,6 @@ pub async fn request_apply(
     key: &IdempotencyKey,
     now: UtcTimestamp,
 ) -> Result<PlatformConfigurationStatus> {
-    if !valid_configuration_sha256(&request.encrypted_bundle_sha256) {
-        return Err(ConfigurationError::Invalid);
-    }
     let mut tx = pool
         .begin()
         .await
@@ -184,12 +253,22 @@ pub async fn request_apply(
     {
         return Err(ConfigurationError::ApplyInProgress);
     }
+    let bundle = state
+        .registered_bundle
+        .as_ref()
+        .filter(|bundle| {
+            bundle.desired_revision == request.desired_revision
+                && state.desired.as_ref().is_some_and(|desired| {
+                    desired.configuration_sha256 == bundle.configuration_sha256
+                })
+        })
+        .ok_or(ConfigurationError::BundleRequired)?;
     let apply = PlatformConfigurationApply {
         id: OperationId::new(),
         previous_apply_id: state.latest_apply.as_ref().map(|v| v.id),
         revision: revision(1)?,
         desired_revision: request.desired_revision,
-        encrypted_bundle_sha256: request.encrypted_bundle_sha256.clone(),
+        encrypted_bundle_sha256: bundle.encrypted_bundle_sha256.clone(),
         stage: Stage::Requested,
         failed_stage: None,
         failure_reason: None,

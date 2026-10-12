@@ -17,6 +17,8 @@ fn configuration_operations_require_global_administrator_or_separate_executor_pe
         "getPlatformConfigurationVersion",
         "applyPlatformConfiguration",
         "getPlatformConfigurationApply",
+        "registerPlatformConfigurationBundle",
+        "getPlatformConfigurationBundle",
     ] {
         let operation = operation_contract(name).ok_or("missing operation")?;
         assert_eq!(operation.allowed_roles, &[PlatformRole::PlatformAdmin]);
@@ -74,5 +76,39 @@ fn generated_configuration_schema_and_openapi_preserve_required_fields_and_yaml_
     let version =
         &public["paths"]["/api/v1/admin/platform-configuration/versions/{revision}"]["get"];
     assert_eq!(version["parameters"][0]["schema"]["type"], "integer");
+    let registration =
+        &public["paths"]["/api/v1/admin/platform-configuration/versions/{revision}/bundle"]["post"];
+    assert_eq!(
+        registration["requestBody"]["content"]["application/octet-stream"]["schema"]["format"],
+        "binary"
+    );
+    assert!(
+        registration["requestBody"]["content"]
+            .get("application/json")
+            .is_none()
+    );
+    assert!(
+        registration["parameters"]
+            .as_array()
+            .ok_or("missing binding query")?
+            .iter()
+            .any(|value| value["name"] == "configurationSha256" && value["required"] == true)
+    );
+    let apply_schema: Value = serde_json::from_slice(
+        &artifacts
+            .iter()
+            .find(|artifact| {
+                artifact
+                    .relative_path
+                    .ends_with("/apply-platform-configuration-request.schema.json")
+            })
+            .ok_or("missing apply request")?
+            .bytes,
+    )?;
+    assert!(
+        apply_schema["properties"]
+            .get("encryptedBundleSha256")
+            .is_none()
+    );
     Ok(())
 }
