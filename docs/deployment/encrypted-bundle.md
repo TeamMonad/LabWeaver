@@ -379,6 +379,10 @@ Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob
 
 管理版本、离线首装请求、Resource profile、静态 inventory，以及 identity/Harbor/公网入口 locator 使用同一加密目录。PKI/NATS 签发 workspace 和实际安装步骤仍有独立输入，恢复不会自动执行它们。管理配置的保留、提醒、抢占、运行及 builder 策略尚未由全部服务消费。
 
-命令退出成功只说明消费者命令完成。投影文件存在或 Kubernetes rollout 就绪，也不能证明这些设置已经由服务采用。当前没有各消费者的活动配置 revision/hash 读回接口，也没有将现有部署步骤接入 Control apply 回报的执行观察器。只有独立核对原 desired、实际活动配置和原密文来源后，执行者才能报告 succeeded。缺少观察事实时保留待核对结果，不抄请求摘要作成功回执。
+`exec` 为管理版本生成私有 `platform-configuration-source.json`。密文摘要来自同一份实际解密输入快照，设置摘要来自原 Rust 类型校验；文件记录 Bundle 的 revision 和 namespace/releaseName。`validate`、直接渲染和未保存的首装请求不产生此加载来源。来源文件不含解密身份或 Secret，并与其他临时派生文件一起清理。
+
+Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，从实际读取的 typed 设置计算摘要，将快照固定在运行实例。原 apply/report 成功路径还要核对该快照与原尝试，不能只复制执行者的两个摘要。保存 desired、修改投影文件和命令退出成功均不会自动更新 applied。旧进程或错密文来源的成功回报被拒绝；失败保留最后验证的版本及待核对状态。具体输入与限制见[Control 启动加载](../contracts/platform-configuration.md#control-启动加载)。
+
+该路径只验证 Control 与数据库消费者。现有 Helm 工作负载尚未挂载新加载输入，其他配置消费者也没有完整活动 revision/hash 观察。Bundle 中的目标名称不是实际安装位置证明。执行者仍须独立核对实际实例、位置和其他服务的采用结果，才提交完整 succeeded。缺少这些事实时保留待核对结果，不将来源文件、投影或 rollout 就绪作为完整部署回执。
 
 隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。本入口没有落实运行策略的实际对象授权或执行位置。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。

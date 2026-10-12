@@ -98,7 +98,19 @@ JSON 使用 `application/json`。高级 YAML 使用 `application/yaml`。两个�
 
 执行报告使用尝试自身的 `expectedRevision` 和对应 `If-Match`，而非 aggregate 的 revision。执行者首次报告后绑定其客户端身份。其他执行者、迟到报告、乱序阶段和不同请求的幂等键复用均会失败。
 
-正常阶段为 `requested`、`validating`、`applying`、`verifying`、`succeeded`。执行者不能直接从 requested 报告 succeeded。成功报告必须同时匹配原 desired 的 canonical JSON 摘要和原加密 Bundle 摘要，才更新 applied、验证时间和 Bundle 观察值。
+正常阶段为 `requested`、`validating`、`applying`、`verifying`、`succeeded`。执行者不能直接从 requested 报告 succeeded。成功报告必须同时匹配原 desired 的 canonical JSON 摘要和原加密 Bundle 摘要，且与 Control 本进程实际加载的快照一致，才更新 applied、验证时间和 Bundle 观察值。没有加载快照、旧进程仍加载旧版或密文来源不同时返回 `LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH`；复制请求中的摘要不能通过。
+
+### Control 启动加载
+
+Bundle `exec` 对同一次 age 输入制作有上限的私有快照，计算实际密文摘要，再认证解密和验证目录。对于 `managed_version`，它生成非秘密的 `platform-configuration-source.json`，记录原 revision、设置摘要、实际密文摘要及原 Bundle 的 namespace/releaseName。仅解析或渲染目录不会生成此来源文件。未保存的 `initial_settings` 也不会产生已加载版本事实。
+
+`exec` 为消费者设置 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，并清除同名环境覆盖。Control 启动入口在连接外部依赖前读取这两个普通 `0600` 文件，拒绝符号链接、未知或重复字段、超限和不匹配绑定。它复用原 Rust 类型校验，并从实际读取的设置重算 canonical 摘要。两个变量必须同时存在；均不存在时，服务仍可读取、编辑和报告失败，但不能接受新的成功报告。
+
+Control 将读取结果固定在同一服务实例中。修改投影文件或保存新的 desired 不会替换运行进程的快照。加载新版本需通过获准路径启动替换实例；读取失败不会修改旧实例或数据库中的最后验证版本。原内部 report 从该实例读取快照，HTTP body 不能设置它。成功报告丢失响应时，相同幂等请求仍返回原结果；旧结果回放不触发再次应用。
+
+来源文件是获准部署路径交付的非秘密输入，不是签名证书或实际节点/namespace 的运行观察。该检查只闭合 Control 的加载与数据库发布边界。#199 的运行准入消费者继续从同一已验证 applied 记录读取策略；其授权、成员和 ResourceApproval 规则不变。其他服务、实际实例和安装位置仍需执行者独立验证。来源文件或命令退出成功本身不足以提交完整部署成功报告。
+
+现有 Helm 部署尚未挂载这两个新输入。不要仅设置环境变量并指向缺失路径；后续安装接线必须从已验证 Bundle 交付同一版本和来源文件，再按实际部署范围验收。此增量不新增公共 DTO、服务、审批状态或配置仓库。
 
 执行期间允许管理员保存新 desired。当前尝试仍绑定原 desired。原尝试成功后，applied 指向原版本，新 desired 继续保留为未应用期望。
 
@@ -159,4 +171,16 @@ Grok 可将版本 API 的完整 JSON 交给获准导出操作。归档选择使�
 
 测试 Keycloak 使用固定发行版和独立 CA，JVM heap 为128–512MiB。该限制只用于临时测试实例，配置方式见 [Keycloak 容器说明](https://www.keycloak.org/server/containers#_specifying_different_memory_settings)。此目标不连接共享集群，不执行部署或产生 applied 成功事实。
 
-尚未完成的范围：旧PKI/NATS签发workspace及远端locator归并、实际部署观察器、默认值消费者，以及 #207 运行授权与执行边界。
+### 实际 Bundle 加载验证
+
+准备 age、Helm 3.21.3、Python/PyYAML 和本仓库的 `cargo build -p xtask --locked`。然后运行：
+
+```sh
+cargo test -p control-service --test platform_configuration_loaded \
+  actual_bundle_load_is_required_for_success_and_failure_keeps_effective \
+  --locked -- --ignored --exact --test-threads=1
+```
+
+该目标使用新生成的合成 age 身份与完整 Bundle，执行原解密和派生入口，再由实际 Control API 和 PostgreSQL 保存结果。它验证未加载、另一份密文、旧进程、文件变化、失败保留最后验证版本与重试。外部 JWT issuer/Access 决策为测试边界；没有真实集群或其他服务的部署观察。CI 显式执行此目标，普通 Rust 的 ignored 不能计作通过。
+
+尚未完成的范围：旧 PKI/NATS 签发 workspace、其他服务的实际部署观察、默认值消费者、Helm 加载输入接线，以及 #207 运行授权与执行边界。
