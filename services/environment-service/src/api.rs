@@ -1514,9 +1514,9 @@ impl IntoResponse for EnvironmentApiError {
                 crate::RuntimeAdmissionError::FundingInactive
                 | crate::RuntimeAdmissionError::FundingChanged,
             )
-            | Self::Store(EnvironmentStoreError::AllocationPending)
             | Self::Store(
-                EnvironmentStoreError::IdempotencyConflict
+                EnvironmentStoreError::AllocationPending
+                | EnvironmentStoreError::IdempotencyConflict
                 | EnvironmentStoreError::IdempotencyInProgress
                 | EnvironmentStoreError::Lifecycle(crate::LifecycleError::OperationActive),
             )

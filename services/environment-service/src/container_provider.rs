@@ -764,6 +764,7 @@ impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),
                 envelope.fence.environment_id,
+                Some(container_executor_plan(&envelope.request).project_id),
                 envelope.fence.operation_id,
                 envelope.fence.operation_generation,
                 envelope.fence.deadline_at,
@@ -2050,15 +2051,7 @@ fn approved_resources(
     instance: &EnvironmentInstance,
     projection: &ReleasePublished,
 ) -> Result<(u32, u64, u64, Option<GpuAllocation>), ReleaseProjectionError> {
-    if !instance.has_resource_lease() {
-        let resources = &projection.environment_spec.resources;
-        Ok((
-            resources.cpu_millicores,
-            resources.memory_bytes,
-            resources.storage_bytes,
-            experiment_gpu_allocation(instance, projection)?,
-        ))
-    } else {
+    if instance.has_resource_lease() {
         let authorization = instance
             .operation
             .lease_authorization
@@ -2080,6 +2073,14 @@ fn approved_resources(
             authorization.approved_resources.memory_bytes,
             authorization.approved_resources.storage_bytes,
             authorization.gpu_allocation.clone(),
+        ))
+    } else {
+        let resources = &projection.environment_spec.resources;
+        Ok((
+            resources.cpu_millicores,
+            resources.memory_bytes,
+            resources.storage_bytes,
+            experiment_gpu_allocation(instance, projection)?,
         ))
     }
 }

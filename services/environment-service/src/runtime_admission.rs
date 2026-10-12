@@ -236,6 +236,7 @@ pub(crate) async fn executor_authorization(
     admission: Option<&EnvironmentRuntimeAdmission>,
     pool: sqlx::PgPool,
     environment_id: contracts::EnvironmentId,
+    project_id: Option<contracts::ProjectId>,
     operation_id: contracts::OperationId,
     generation: u64,
     deadline: contracts::UtcTimestamp,
@@ -243,7 +244,10 @@ pub(crate) async fn executor_authorization(
     let admission = admission.ok_or(RuntimeAdmissionError::Unavailable)?;
     let store = crate::PgEnvironmentStore::new(pool);
     let (instance, now) = store.load_for_owner_resolution(environment_id).await?;
-    if instance.operation.id != operation_id || instance.generation != generation {
+    if project_id.is_some_and(|id| id != instance.project_id)
+        || instance.operation.id != operation_id
+        || instance.generation != generation
+    {
         return Err(RuntimeAdmissionError::Binding);
     }
     let remaining = std::time::Duration::try_from(deadline.get() - now.get())
@@ -302,6 +306,7 @@ fn validate_credit_grant(
 pub(crate) fn release_project_matches(instance: &EnvironmentInstance, projection: &contracts::events::ReleasePublished) -> bool {
     if instance.project_id == projection.release.project_id {
         return true;
+
     }
     if instance.class != contracts::authoring::EnvironmentClass::Experiment || instance.course_id.is_none() || !instance.has_resource_lease() {
         return false;
@@ -314,4 +319,80 @@ pub(crate) fn release_project_matches(instance: &EnvironmentInstance, projection
             environment_id: Some(instance.id), project_id: instance.project_id, course_id: instance.course_id,
             owner_actor_id: instance.owner_id, release_id: instance.release_id, release_version: instance.release_version,
         }, &projection.environment_spec, &digest.to_string()).is_ok()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn funding_checks_original_identity_coverage_revision_and_unknown_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let instance =
+            crate::test_support::funded_instance(crate::test_support::requested_instance());
+        let lease = instance
+            .operation
+            .lease_authorization
+            .as_ref()
+            .ok_or("native lease")?;
+        let original = crate::test_support::credit_grant_for_lease(lease)?;
+        let now = lease.active_from;
+        assert!(validate_credit_grant(&original, lease, now).is_ok());
+        for changed in [
+            contracts::resource::environment_funding::EnvironmentCreditGrant {
+                request_id: contracts::ResourceRequestId::new(),
+                ..original.clone()
+            },
+            contracts::resource::environment_funding::EnvironmentCreditGrant {
+                lease_id: contracts::LeaseId::new(),
+                ..original.clone()
+            },
+            contracts::resource::environment_funding::EnvironmentCreditGrant {
+                claim_id: contracts::CapacityClaimId::new(),
+                ..original.clone()
+            },
+            contracts::resource::environment_funding::EnvironmentCreditGrant {
+                covered_until: now,
+                ..original.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_credit_grant(&changed, lease, now),
+                Err(RuntimeAdmissionError::Binding)
+            ));
+        }
+        let mut newer = original.clone();
+        newer.lease_revision = contracts::Revision::new(lease.lease_revision.get() + 1)?;
+        assert!(matches!(
+            validate_credit_grant(&newer, lease, now),
+            Err(RuntimeAdmissionError::FundingChanged)
+        ));
+        let mut unknown = original.clone();
+        unknown.hold.measurement_unknown = true;
+        let mut released = original.clone();
+        released.hold.state = contracts::resource::credits::CreditHoldState::Released;
+        let mut foreign_hold = original.clone();
+        foreign_hold.hold.project_id = contracts::ProjectId::new();
+        assert!(matches!(
+            validate_credit_grant(&foreign_hold, lease, now),
+            Err(RuntimeAdmissionError::Binding)
+        ));
+        for inactive in [
+            unknown,
+            released,
+            contracts::resource::environment_funding::EnvironmentCreditGrant {
+                can_authorize_execution: false,
+                ..original.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_credit_grant(&inactive, lease, now),
+                Err(RuntimeAdmissionError::FundingInactive)
+            ));
+        }
+        assert!(matches!(
+            validate_credit_grant(&original, lease, lease.expires_at),
+            Err(RuntimeAdmissionError::FundingInactive)
+        ));
+        Ok(())
+    }
 }

@@ -90,3 +90,71 @@ Access 的 `0008_funded_experiment_console_fence.sql` 将控制台能力的租�
 ## 验证
 
 本地保护创建到回收、重复/乱序、取消、超时、旧 Worker 更新、跨项目访问、撤销后拒绝访问和释放失败。真实容器、KubeVirt、设备和网络行为需对应执行后端验证；本轮本地测试结果不表示完成远端部署。
+
+
+## Original funded lease and ResourceApproval consumption
+
+Existing runtime declarations and security contexts remain unchanged. This slice consumes the original baseline approval; it does not add root/capability/privileged declaration or execution support.
+
+Environment calls Resource's authenticated `POST /internal/v1/environment-runtime-authorization`
+under the existing `resource.environment.resolve` permission and Environment client
+allowlist. It supplies `resourceRequestId`, optional `expectedLeaseId`, optional
+`environmentId` for first-create target resolution, project/course/owner and exact
+release ID/version. Resource reuses the original request→lease→claim→approval
+helper and returns that binding, its lease and values from the same verified
+platform version. The receipt expires at the earlier approval/lease deadline.
+There is no second grant, runtime approval table or independently configurable UID.
+
+Work and funded Experiment use the original Resource handoff, Environment target and lease IDs. Before provision/start/restart/reset,
+including retry/recovery that creates compute, Environment reads the authority
+again. Request, owner/project/course, release, canonical spec, provider and original
+Environment target must agree. Provider and executor admission derive the same
+security context; executor compares the rendered context with the durable instance
+and immutable release. Stop and cleanup do not require a new runtime grant.
+
+
+Public `CreateEnvironmentRequest` requires `resourceRequestId`; its approved target
+is resolved from the original request. Resource's normal approval → capacity claim →
+funded lease → handoff creates that same Environment aggregate. The public create
+binds its idempotent browser intent to the existing create operation; it creates no
+second Environment, reservation, hold or grant. The release determines Work or
+Experiment. A course Experiment may be funded by the student's project while the
+teacher's published release belongs to the authoring project; the existing teacher,
+course, actor and configuration checks still apply. Work and an unscoped Experiment
+require the same project. A supplied display label must match the Resource request's
+original label; omit it to use that label.
+
+Before handoff finishes, public create returns `LW_ENVIRONMENT_ALLOCATION_PENDING` (409,
+retryable), and a retry uses the same intent. Identity mismatch returns 412;
+idempotency/body conflict returns 409. Original Resource scope/policy errors retain
+their diagnostics. Legacy Experiment aggregates without a native lease remain
+readable and can stop/delete; creating new compute from them returns
+`LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED` (422). No lease is attached to legacy data
+and no second reservation is opened to bypass admission.
+
+The owner and both runtime executors read the same authenticated
+`GET /internal/v1/environment-credit-grants/{leaseId}` authority. The original
+request/lease/claim, project, lease revision and coverage must agree with the runtime
+approval receipt. Execution requires a currently covered, known Pending hold.
+Unknown, Released or expired funding returns `LW_RUNTIME_FUNDING_INACTIVE` (409).
+A renewal committed between the two reads returns retryable
+`LW_RUNTIME_FUNDING_CHANGED` and is retried within the existing operation budget.
+The execution deadline is bounded by runtime approval and credit coverage.
+Renewal extends the original lease and hold; Environment refresh retains ownership
+and generation. Stop/delete retain that lease through the original cleanup handshake.
+Metering uses `resource_request` for both funded purposes; the legacy
+`experiment_environment` target remains only for historical unleased aggregates.
+
+Runtime executors require the existing Resource authority client configuration:
+`LABWEAVER_RESOURCE_USAGE_BASE_URI`, `_CA_PATH`, `_AUDIENCE`, `_SCOPES` and
+`_TIMEOUT_MILLISECONDS`, with the shared service OIDC issuer/CA, client ID and secret
+file. They use the same JWT/TLS client as the owner; no fixed principal or new runtime
+grant is introduced. The #203 Bundle/profile owner must bind those existing settings
+and the permitted service identity before deployment. This increment does not edit
+real credentials, service allowlists or cluster permissions.
+
+A fresh authority read happens before the executor's fencing transaction. A new
+compute/storage effect also checks the current operation and generation (and the
+Container plan's project). Existing completed responses can replay if current funds
+are unavailable; a new effect cannot begin. Cleanup keeps its existing ownership,
+UID, generation and tombstone checks and does not depend on a new credit grant.
