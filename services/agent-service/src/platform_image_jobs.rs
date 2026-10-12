@@ -404,7 +404,7 @@ impl PlatformImageImportWorker {
             if let Err(error) = self.tick().await {
                 tracing::error!(
                     event = "agent.platform_image_import.worker_error",
-                    diagnostic = %error,
+                    diagnostic_code = error.diagnostic_code(),
                     "platform image import worker tick failed; lease recovery will retry"
                 );
                 tokio::time::sleep(self.poll_interval).await;
@@ -425,6 +425,8 @@ impl PlatformImageImportWorker {
         else {
             return Ok(());
         };
+        tracing::info!(event = "agent.platform_image_import.claimed", upload_id = %job.upload_id,
+            artifact_id = %job.request.archive.artifact_id);
         let Some(registry) = self.registry.as_ref() else {
             self.jobs
                 .fail(
@@ -474,7 +476,7 @@ impl PlatformImageImportWorker {
                             tracing::warn!(
                                 event = "agent.platform_image_import.lease_read_failed",
                                 upload_id = %job.upload_id,
-                                diagnostic = %error,
+                                diagnostic_code = error.diagnostic_code(),
                                 "stopping publication until the job lease can be recovered"
                             );
                             lease_lost = true;
@@ -490,12 +492,13 @@ impl PlatformImageImportWorker {
                         tracing::warn!(
                             event = "agent.platform_image_import.lease_renew_failed",
                             upload_id = %job.upload_id,
-                            diagnostic = %error,
+                            diagnostic_code = error.diagnostic_code(),
                             "stopping publication until the job lease can be recovered"
                         );
                         lease_lost = true;
                         break None;
                     }
+                    tracing::info!(event = "agent.platform_image_import.lease_renewed", upload_id = %job.upload_id);
                 }
             }
         };
@@ -507,6 +510,12 @@ impl PlatformImageImportWorker {
         let Some(published) = published else {
             return Ok(());
         };
+        tracing::info!(event = "agent.platform_image_import.publication_finished", upload_id = %job.upload_id,
+        diagnostic_code = match &published {
+            Ok(Ok(_)) => "none",
+            Ok(Err(error)) => error.diagnostic_code(),
+            Err(_) => "LW_PLATFORM_IMAGE_IMPORT_WORKER_FAILED",
+        });
         let published = match published {
             Ok(Ok(published)) => published,
             Ok(Err(platform_image_import::PlatformImageImportError::Cancelled)) => {
@@ -531,7 +540,7 @@ impl PlatformImageImportWorker {
                         PlatformImageStoreError::Persistence
                     )
                 ) {
-                    tracing::warn!(event = "agent.platform_image_import.transport_retry", upload_id = %job.upload_id, diagnostic,
+                    tracing::warn!(event = "agent.platform_image_import.transport_retry", upload_id = %job.upload_id, diagnostic_code = diagnostic,
                         "temporary import failure; the immutable job will be recovered after lease expiry");
                     return Ok(());
                 }
