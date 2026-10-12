@@ -33,6 +33,9 @@ type FixtureSuccess<T> = { data: T; error: undefined }
 type FixtureError = { data: undefined; error: unknown }
 type FixtureResult<T> = FixtureSuccess<T> | FixtureError
 
+// Platform configuration (#203) preview facts live in their own module.
+export * from './platformConfiguration'
+
 const now = '2026-09-14T08:00:00.000Z'
 const later = '2026-09-14T16:00:00.000Z'
 const GIB = 1024 ** 3
