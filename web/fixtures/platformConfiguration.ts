@@ -1,6 +1,7 @@
 import { activeScene, fixtureProjectId } from './scenes'
 import type {
   PlatformConfigurationApply,
+  PlatformConfigurationBundle,
   PlatformConfigurationDesired,
   PlatformConfigurationStatusSchema,
   PlatformConfigurationVersionSchema,
@@ -107,6 +108,7 @@ function platformConfigurationStatus(): PlatformConfigurationStatusSchema {
       defaults: platformConfigurationDefaults,
       desired: null,
       applied: null,
+      registeredBundle: null,
       latestApply: null,
       impact: { runtimePolicyChanged: false, builderPolicyChanged: false, lifecyclePolicyChanged: false },
     }
@@ -119,6 +121,15 @@ function platformConfigurationStatus(): PlatformConfigurationStatusSchema {
     applied: platformConfigurationApplied,
     appliedAt: '2026-09-10T02:20:00.000Z',
     appliedBundleSha256: platformConfigurationPreviousApply.encryptedBundleSha256,
+    registeredBundle: {
+      desiredRevision: platformConfigurationDesired.revision,
+      configurationSha256: platformConfigurationDesired.configurationSha256,
+      encryptedBundleSha256: platformConfigurationLatestApply.encryptedBundleSha256,
+      encryptedBytes: 1_048_576,
+      registeredAtRevision: 8,
+      registeredBy: 'fixture-admin',
+      registeredAt: '2026-09-14T06:45:00.000Z',
+    },
     latestApply: platformConfigurationLatestApply,
     impact: { runtimePolicyChanged: true, builderPolicyChanged: false, lifecyclePolicyChanged: true },
   }
@@ -137,3 +148,11 @@ export async function getPlatformConfigurationApply(options: { path: { applyId: 
 }
 export async function updatePlatformConfiguration(_options?: unknown) { return unsupportedResponse('保存平台配置') }
 export async function applyPlatformConfiguration(_options?: unknown) { return unsupportedResponse('提交平台配置应用请求') }
+
+export async function getPlatformConfigurationBundle(options: { path: { revision: number } }): Promise<Result<PlatformConfigurationBundle>> {
+  const status = platformConfigurationStatus()
+  const bundle = status.registeredBundle
+  if (bundle && bundle.desiredRevision === options.path.revision) return preview(bundle)
+  return notFoundResponse('平台配置 Bundle 登记', String(options.path.revision))
+}
+export async function registerPlatformConfigurationBundle(_options?: unknown) { return unsupportedResponse('登记平台配置 Bundle') }

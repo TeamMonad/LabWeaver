@@ -3,6 +3,7 @@ import {
   applyPlatformConfiguration,
   getPlatformConfiguration,
   getPlatformConfigurationApply,
+  registerPlatformConfigurationBundle,
   updatePlatformConfiguration,
 } from '@/generated/contracts'
 import type { PlatformConfigurationApply, PlatformConfigurationDesired, PlatformConfigurationStatusSchema } from '@/generated/contracts'
@@ -16,6 +17,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     getPlatformConfiguration: vi.fn(),
     updatePlatformConfiguration: vi.fn(),
     applyPlatformConfiguration: vi.fn(),
+    registerPlatformConfigurationBundle: vi.fn(),
     getPlatformConfigurationApply: vi.fn(),
     getPlatformConfigurationVersion: vi.fn(),
   }
@@ -28,18 +30,31 @@ const defaults: PlatformConfigurationDesired = {
 }
 
 const noImpact = { runtimePolicyChanged: false, builderPolicyChanged: false, lifecyclePolicyChanged: false }
+const configurationSha = 'a'.repeat(64)
+const bundleSha = 'c'.repeat(64)
 
 function unconfigured(): PlatformConfigurationStatusSchema {
-  return { revision: 0, appliedState: 'unconfigured', defaults, desired: null, applied: null, latestApply: null, impact: noImpact }
+  return { revision: 0, appliedState: 'unconfigured', defaults, desired: null, applied: null, registeredBundle: null, latestApply: null, impact: noImpact }
 }
 
-function configured(revision: number, grace: number): PlatformConfigurationStatusSchema {
+function configured(revision: number, grace: number, withRegistration = false): PlatformConfigurationStatusSchema {
   const configuration = structuredClone(defaults)
   configuration.lifecycle.preemptionGraceSeconds = grace
   return {
     ...unconfigured(),
     revision,
-    desired: { revision, configuration, configurationSha256: 'a'.repeat(64), createdAt: '2026-09-14T08:00:00Z', createdBy: 'admin-a' },
+    desired: { revision, configuration, configurationSha256: configurationSha, createdAt: '2026-09-14T08:00:00Z', createdBy: 'admin-a' },
+    registeredBundle: withRegistration
+      ? {
+          desiredRevision: revision,
+          configurationSha256: configurationSha,
+          encryptedBundleSha256: bundleSha,
+          encryptedBytes: 2048,
+          registeredAtRevision: revision,
+          registeredBy: 'admin-a',
+          registeredAt: '2026-09-14T08:05:00Z',
+        }
+      : null,
     impact: { ...noImpact, lifecyclePolicyChanged: true },
   }
 }
@@ -52,12 +67,23 @@ function problem(status: number, code = 'LW_TEST') {
   return { data: undefined, error: { type: 'about:blank', title: 't', status, detail: `失败 ${status}`, instance: '/x', requestId: 'req-1', diagnosticCode: code, retryable: false } }
 }
 
+function ageFile(name = 'platform.age', size = 2048): File {
+  return new File([new Uint8Array(size)], name, { type: 'application/octet-stream', lastModified: 1_700_000_000_000 })
+}
+
 const getMock = vi.mocked(getPlatformConfiguration)
 const updateMock = vi.mocked(updatePlatformConfiguration)
 const applyMock = vi.mocked(applyPlatformConfiguration)
+const registerMock = vi.mocked(registerPlatformConfigurationBundle)
 const getApplyMock = vi.mocked(getPlatformConfigurationApply)
 
-type CallOptions = { headers: Record<string, string>; body: unknown; bodySerializer?: (b: unknown) => unknown }
+type CallOptions = {
+  headers: Record<string, string>
+  body: unknown
+  bodySerializer?: (b: unknown) => unknown
+  path?: { revision: number }
+  query?: { expectedRevision: number; configurationSha256: string }
+}
 function callOf(mock: { mock: { calls: unknown[][] } }, index = 0): CallOptions {
   return mock.mock.calls[index][0] as CallOptions
 }
@@ -151,29 +177,79 @@ describe('usePlatformConfiguration', () => {
     expect(call.bodySerializer?.(call.body)).toBe(yaml)
   })
 
-  it('records an apply request for the saved desired revision and follows the previous-attempt chain', async () => {
+  it('registers a real .age file using server revision and configurationSha256, then applies without a hand-filled digest', async () => {
     const previous: PlatformConfigurationApply = {
       id: 'apply-1', desiredRevision: 2, encryptedBundleSha256: 'b'.repeat(64), stage: 'failed', failedStage: 'applying',
       failureReason: 'external_result_unknown', nextStep: 'reconcile_external_result', requestedAt: '2026-09-14T08:00:00Z',
       requestedBy: 'admin-a', revision: 3, updatedAt: '2026-09-14T08:10:00Z',
     }
-    const latest: PlatformConfigurationApply = { ...previous, id: 'apply-2', desiredRevision: 3, stage: 'requested', nextStep: 'execute_approved_deployment', failedStage: null, failureReason: null, previousApplyId: 'apply-1', revision: 1 }
+    const latest: PlatformConfigurationApply = {
+      ...previous, id: 'apply-2', desiredRevision: 3, stage: 'requested', nextStep: 'execute_approved_deployment',
+      failedStage: null, failureReason: null, previousApplyId: 'apply-1', revision: 1, encryptedBundleSha256: bundleSha,
+    }
+    const registered = { ...configured(3, 60, true), revision: 4 }
     getMock.mockResolvedValue(ok(configured(3, 60), '"rev-3"') as never)
-    applyMock.mockResolvedValue(ok({ ...configured(4, 60), latestApply: latest }) as never)
+    registerMock.mockResolvedValue(ok(registered, '"rev-4"') as never)
+    applyMock.mockResolvedValue(ok({ ...registered, revision: 5, latestApply: latest }, '"rev-5"') as never)
     getApplyMock.mockResolvedValue(ok(previous) as never)
     const config = usePlatformConfiguration()
     await config.load()
 
-    expect(await config.requestApply('c'.repeat(64))).toBe(true)
-    const call = callOf(applyMock)
-    expect(call.body).toEqual({ expectedRevision: 3, desiredRevision: 3, encryptedBundleSha256: 'c'.repeat(64) })
-    expect(call.headers['If-Match']).toBe('"rev-3"')
+    const file = ageFile()
+    expect(await config.registerBundle(file)).toBe(true)
+    const registerCall = callOf(registerMock)
+    expect(registerCall.path).toEqual({ revision: 3 })
+    expect(registerCall.query).toEqual({ expectedRevision: 3, configurationSha256: configurationSha })
+    expect(registerCall.body).toBe(file)
+    expect(registerCall.headers['If-Match']).toBe('"rev-3"')
+    expect(config.status?.registeredBundle?.encryptedBundleSha256).toBe(bundleSha)
+
+    expect(await config.requestApply()).toBe(true)
+    const applyCall = callOf(applyMock)
+    expect(applyCall.body).toEqual({ expectedRevision: 4, desiredRevision: 3 })
+    expect(applyCall.body).not.toHaveProperty('encryptedBundleSha256')
+    expect(applyCall.headers['If-Match']).toBe('"rev-4"')
     expect(config.notice).toContain('202')
     expect(config.status?.applied ?? null).toBeNull()
 
     await config.loadPreviousApply()
     expect(getApplyMock).toHaveBeenCalledWith({ path: { applyId: 'apply-1' } })
     expect(config.applyHistory.map((item) => item.id)).toEqual(['apply-2', 'apply-1'])
+  })
+
+  it('reuses the register idempotency key for the same file and keeps the file on 409', async () => {
+    getMock
+      .mockResolvedValueOnce(ok(configured(3, 60), '"rev-3"') as never)
+      .mockResolvedValue(ok(configured(7, 60), '"rev-7"') as never)
+    registerMock.mockResolvedValue(problem(409) as never)
+    const config = usePlatformConfiguration()
+    await config.load()
+    const file = ageFile()
+
+    expect(await config.registerBundle(file)).toBe(false)
+    expect(await config.registerBundle(file)).toBe(false)
+    const keys = registerMock.mock.calls.map((call) => (call[0] as CallOptions).headers['Idempotency-Key'])
+    expect(keys[0]).toBe(keys[1])
+    expect(config.selectedBundleFile).toBe(file)
+    expect(config.conflict?.latest.revision).toBe(7)
+  })
+
+  it('blocks apply without registration and maps LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED', async () => {
+    getMock.mockResolvedValue(ok(configured(3, 60), '"rev-3"') as never)
+    applyMock.mockResolvedValue(problem(422, 'LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED') as never)
+    const config = usePlatformConfiguration()
+    await config.load()
+
+    expect(await config.requestApply()).toBe(false)
+    expect(applyMock).not.toHaveBeenCalled()
+    expect(config.actionFailure?.code).toBe('LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED')
+
+    // Force a server-side required error after a stale local registration check by stubbing canApply path:
+    // mutate status to look registered then have server reject.
+    config.status = configured(3, 60, true)
+    expect(await config.requestApply()).toBe(false)
+    expect(applyMock).toHaveBeenCalledTimes(1)
+    expect(config.actionFailure?.recovery).toContain('.age')
   })
 
   it('explains a forbidden read before showing identifiers', async () => {
