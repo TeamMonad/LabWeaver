@@ -154,7 +154,7 @@ Resource 的容量 shell 就绪后，激活 Environment lease 前读取原 lease
 
 已有同一 request 的 metered-usage hold 只复用，实际剩余额度须覆盖上限。同一 request 的已有估价快照保留；不新建第二 hold、批准或 Environment reservation。显式零价仍需要有效费率及原 hold/窗口。Resource0020 保存不可变窗口，不维护第二套运行生命周期。
 
-续期仅估价 `[原 expiresAt, 新 expiresAt)`，每次新增区间不超过原 approvedDurationSeconds，新截止不超过原 approval.validUntil。原 lease 必须仍未到期。native revision、幂等键及同事务窗口写入确保重放或不同键并发不会重复追加预占；累计窗口报价先复用原 hold 已有上限，仅不足部分追加到同一个 hold；已有较大预占不会因续期重复冻结。未知、已释放或欠额的原 hold 不能续期，重试不能重新开始首次未知期限。
+续期仅估价 `[原 expiresAt, 新 expiresAt)`，每次新增区间不超过原 approvedDurationSeconds，新截止不超过原 approval.validUntil。原 lease 必须仍未到期。native revision、幂等键及同事务窗口写入确保重放或不同键并发不会重复追加预占；同一费率版本的窗口先累计精确数量，再用共享公式舍入累计上限；不能累加已舍入的增量金额而漏掉最小费用单位。累计上限先复用原 hold 已有额度，仅不足部分追加到同一个 hold；已有较大预占不会因续期重复冻结。未知、已释放或欠额的原 hold 不能续期，重试不能重新开始首次未知期限。
 
 `getEnvironmentCreditGrant` 是 GET `/internal/v1/environment-credit-grants/{leaseId}`，要求 `resource.environment.resolve` 和已配置 Environment 客户端的真实 JWT/TLS。返回 `requestId`、`leaseId/leaseRevision`、`claimId`、原 `approvalId`、实际 `hold`、`estimate` 和 `canAuthorizeExecution`。`coveredFrom/coveredUntil` 是从初次激活起的连续总区间，`estimate` 是最近一次增量窗口。Resource 校验原项目/owner/claim/approval；只有当前 Active lease、当前 revision/截止、已开始且未到期的覆盖和已知 Pending 资金可以授权新 compute。该响应是资金事实，Environment 仍须核原 runtime receipt、配置、发布版本和执行身份。
 

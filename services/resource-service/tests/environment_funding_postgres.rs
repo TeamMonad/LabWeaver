@@ -157,8 +157,15 @@ async fn fixture_with_approval_seconds(
     ))
 }
 async fn prices(store: &PgResourceStore, price: &str) -> Result<()> {
+    prices_with_cpu_quantity(store, price, 1000).await
+}
+async fn prices_with_cpu_quantity(
+    store: &PgResourceStore,
+    price: &str,
+    cpu_quantity: u64,
+) -> Result<()> {
     for (unit, quantity, value) in [
-        (ResourceBillingUnit::CpuMillicoreSecond, 1000, price),
+        (ResourceBillingUnit::CpuMillicoreSecond, cpu_quantity, price),
         (ResourceBillingUnit::MemoryByteSecond, 1, "0.000000"),
         (ResourceBillingUnit::StorageByteSecond, 1, "0.000000"),
     ] {
@@ -730,5 +737,74 @@ async fn unactivated_original_prehold_releases_when_its_exact_approval_expires()
             .await?,
         0
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fractional_renewals_reserve_the_combined_known_charge_without_rounding_loss() -> Result<()>
+{
+    use contracts::http::RecordResourceUsageRequest;
+    use contracts::resource::{
+        ResourceUsageKind, ResourceUsageQuantities, ResourceUsageTarget, UsageMeasurement,
+    };
+    let (_c, _pool, store, credits, request, lease) = fixture().await?;
+    prices_with_cpu_quantity(&store, "0.000001", 100_000).await?;
+    allowance(&credits, request.project_id, "1.000000").await?;
+    let from = store.current_time().await?;
+    let halfway = UtcTimestamp::from_utc(from.get() + time::Duration::seconds(50))?;
+    let until = at(from, 100)?;
+    let active = activate(&store, lease, from, halfway).await?;
+    assert_eq!(
+        store
+            .environment_credit_grant(OWNER, lease)
+            .await?
+            .hold
+            .amount,
+        FixedDecimal::zero()
+    );
+    store
+        .renew_lease(
+            "fractional-renew",
+            lease,
+            active.revision,
+            until,
+            "fractional-window",
+        )
+        .await?;
+    let grant = store.environment_credit_grant(OWNER, lease).await?;
+    assert_eq!(grant.estimate.total.amount, FixedDecimal::zero());
+    assert_eq!(grant.hold.amount, money("0.000001")?);
+    let usage = store
+        .record_usage(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease),
+                },
+                source_event_id: contracts::EventId::new(),
+                measured_from: from,
+                measured_until: until,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1000,
+                        cpu_millicore_seconds: 100_000_000,
+                        memory_byte_seconds: 0,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            until,
+        )
+        .await?;
+    let charge = store
+        .settle_usage(usage.id)
+        .await?
+        .ok_or("known combined charge")?;
+    assert_eq!(charge.total.amount, grant.hold.amount);
+    let account = credits.account(request.project_id).await?;
+    assert_eq!(account.spent, money("0.000001")?);
+    assert_eq!(account.platform_absorbed, FixedDecimal::zero());
     Ok(())
 }
