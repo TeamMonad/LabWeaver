@@ -622,7 +622,7 @@ export async function approveEvaluationTaskResourceRequestByUi(page, request, pr
   })
   const interactionPromise = (async () => {
     await approveButton.click()
-    const dialog = page.locator('dialog.confirm-dialog[role="alertdialog"]')
+    const dialog = page.locator('.confirm-dialog[role="alertdialog"]')
     await expect(dialog).toBeVisible()
     const confirmButton = dialog.locator('.filled-button')
     await expect(confirmButton).toHaveCount(1)
