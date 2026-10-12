@@ -234,12 +234,23 @@ def _value_references(value: Any, references: set[str]) -> None:
         raise BundleError("LW_BUNDLE_TEMPLATE_FORBIDDEN")
 
 
+CONTROLLER_LOCATORS = {
+    "harbor_secret_locator_path": "harbor_secret_locator",
+    "public_ingress_cloudflare_token_locator": "public_ingress_cloudflare_locator",
+}
+
 INFRASTRUCTURE_DERIVED = (
     {
         "labweaver_versions_lock_file",
         "identity_secret_locator_controller",
         "identity_secret_locator_sha256",
         "identity_secret_locator_controller_tmp",
+        "harbor_secret_locator_revision",
+    }
+    | {
+        f"{prefix}_{suffix}"
+        for prefix in CONTROLLER_LOCATORS.values()
+        for suffix in ("controller", "sha256", "controller_tmp")
     }
     | RESERVED_VARIABLES
     | RESOURCE_RESERVED
@@ -266,14 +277,21 @@ def _inventory_references(value: Any, references: set[str]) -> None:
             }:
                 # Host-key policy remains in the repository's Ansible configuration.
                 raise BundleError("LW_BUNDLE_SSH_OVERRIDE_FORBIDDEN")
-            file_key = key in {
-                "ansible_ssh_private_key_file",
-                "ansible_private_key_file",
-            } or key.endswith(("_credentials_file", "_kubeconfig_path", "_bundle"))
+            file_key = (
+                key in CONTROLLER_LOCATORS
+                or key
+                in {
+                    "ansible_ssh_private_key_file",
+                    "ansible_private_key_file",
+                }
+                or key.endswith(("_credentials_file", "_kubeconfig_path", "_bundle"))
+            )
             if file_key and not (isinstance(item, dict) and set(item) == {"file"}):
                 raise BundleError("LW_BUNDLE_CREDENTIAL_FILE_REFERENCE_REQUIRED")
-            if SECRET_FIELD.search(key) and not (
-                isinstance(item, dict) and set(item) == {"secret"}
+            if (
+                key not in CONTROLLER_LOCATORS
+                and SECRET_FIELD.search(key)
+                and not (isinstance(item, dict) and set(item) == {"secret"})
             ):
                 raise BundleError("LW_BUNDLE_SECRET_REFERENCE_REQUIRED")
             _inventory_references(item, references)
@@ -320,6 +338,47 @@ def _inventory_group(group: Any) -> None:
             raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
     for child in group.get("children", {}).values():
         _inventory_group(child)
+
+
+def _derive_controller_locators(
+    source: dict[str, Any],
+    inventory: dict[str, Any],
+    files: dict[str, bytes],
+    output: Path,
+) -> None:
+    """Bind existing role locators to the same decrypted inventory, including host overrides."""
+    temporary = str(output / "infrastructure/ansible-remote-tmp")
+
+    def variables(raw: dict[str, Any], derived: dict[str, Any]) -> None:
+        for key, prefix in CONTROLLER_LOCATORS.items():
+            if key not in raw:
+                continue
+            name = raw[key]["file"]
+            digest = "sha256:" + hashlib.sha256(files[name]).hexdigest()
+            derived[f"{prefix}_controller"] = True
+            derived[f"{prefix}_sha256"] = digest
+            derived[f"{prefix}_controller_tmp"] = temporary
+            if key == "harbor_secret_locator_path":
+                derived["harbor_secret_locator_revision"] = digest
+
+    def group(raw: dict[str, Any], derived: dict[str, Any]) -> None:
+        variables(raw.get("vars", {}), derived.setdefault("vars", {}))
+        for name, host in raw.get("hosts", {}).items():
+            if host is not None:
+                variables(host, derived["hosts"][name])
+        for name, child in raw.get("children", {}).items():
+            group(child, derived["children"][name])
+
+    defaults = inventory["all"].setdefault("vars", {})
+    # Absence must fail at the role, rather than fall back to a remote root file.
+    for key, prefix in CONTROLLER_LOCATORS.items():
+        if key not in source["all"].get("vars", {}):
+            defaults[key] = ""
+        defaults[f"{prefix}_controller"] = True
+        defaults[f"{prefix}_sha256"] = ""
+        defaults[f"{prefix}_controller_tmp"] = temporary
+    defaults["harbor_secret_locator_revision"] = ""
+    group(source["all"], inventory["all"])
 
 
 def _configuration_version(
@@ -776,9 +835,9 @@ def derive_bundle(
         _derive_resource(root, output / "resource", model, files)
     if "infrastructure" in model:
         infrastructure = model["infrastructure"]
-        inventory = _resolve_values(
-            _document(files[infrastructure["inventoryFile"]]), root, files
-        )
+        source_inventory = _document(files[infrastructure["inventoryFile"]])
+        inventory = _resolve_values(source_inventory, root, files)
+        _derive_controller_locators(source_inventory, inventory, files, output)
         variables = inventory["all"].setdefault("vars", {})
         variables["labweaver_versions_lock_file"] = str(
             root / model["versions"]["lockFile"]
