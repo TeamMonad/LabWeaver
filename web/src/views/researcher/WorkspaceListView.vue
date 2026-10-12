@@ -81,11 +81,11 @@
           <form class="project-form" @submit.prevent="saveProject">
             <label>
               <span>项目名称</span>
-              <input v-model="editName" class="text-input" :readonly="!canManageProject" required maxlength="160" />
+              <input v-model="editName" class="text-input" :readonly="!canEditProject" required maxlength="160" />
             </label>
             <label>
               <span>描述</span>
-              <textarea v-model="editDescription" class="text-input" :readonly="!canManageProject" rows="3" maxlength="2000" />
+              <textarea v-model="editDescription" class="text-input" :readonly="!canEditProject" rows="3" maxlength="2000" />
             </label>
             <div class="readonly-meta">
               <span>课程关联</span><span>{{ selectedProject.courseId ? '课程项目' : '独立项目' }}</span>
@@ -98,11 +98,11 @@
               <summary>查看项目标识</summary>
               <code>{{ selectedProject.id }}</code>
             </details>
-            <p v-if="!canManageProject" class="readonly-hint" role="note">当前账号可以查看项目和成员，但只有项目所有者或平台管理员可以编辑项目、归档项目和管理成员。</p>
+            <p v-if="!canEditProject && !canManageMembers" class="readonly-hint" role="note">当前账号可以查看项目和成员，但缺少 edit / manage_members 对象动作，不能编辑项目、归档项目或管理成员。</p>
             <div class="form-actions">
-              <button v-if="canManageProject" type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
+              <button v-if="canEditProject" type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
               <button
-                v-if="canManageProject && selectedProject.state === 'active'"
+                v-if="canEditProject && selectedProject.state === 'active'"
                 type="button"
                 class="outlined-button danger-button"
                 :disabled="projects.acting !== null"
@@ -135,12 +135,12 @@
                         <code>Actor ID：{{ member.actorId }}</code>
                       </details>
                     </span>
-                    <button v-if="canManageProject && member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
+                    <button v-if="canManageMembers && member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
                   </li>
                 </ul>
               </template>
             </AsyncStateView>
-            <form v-if="canManageProject && selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
+            <form v-if="canManageMembers && selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
               <div v-if="canSearchOrganizationDirectory" class="directory-picker">
                 <label>
                   <span>查找组织账号</span>
@@ -345,6 +345,7 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjectResources } from '@/composables/useProjectResources'
 import { useAuth } from '@/composables/useAuth'
+import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } from '@/composables/useProjects'
 import type { OrganizationUser, ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
@@ -374,11 +375,10 @@ const routeProjectPending = computed(() => Boolean(
 const projectSelectionBlocked = computed(() => projects.projects.kind !== 'success' || routeProjectInvalid.value || routeProjectPending.value)
 const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : projects.selectedProjectId)
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
-const canManageProject = computed(() => {
-  const project = selectedProject.value
-  return Boolean(project && (currentRoles.value.includes('admin') || currentActorId.value === project.ownerActorId))
-})
-const canSearchOrganizationDirectory = computed(() => canManageProject.value && hasAnyRole(currentRoles.value, ['teacher', 'admin']))
+const availableActions = useProjectAvailableActions(selectedProjectId)
+const canEditProject = computed(() => availableActions.canEdit.value)
+const canManageMembers = computed(() => availableActions.canManageMembers.value)
+const canSearchOrganizationDirectory = computed(() => canManageMembers.value && hasAnyRole(currentRoles.value, ['teacher', 'admin']))
 const members = useProjectMemberships(selectedProjectId)
 const directory = useOrganizationDirectoryUsers()
 const workEnvironments = useProjectWorkEnvironments(selectedProjectId)
@@ -405,9 +405,9 @@ const memberUsername = ref('')
 const directoryQuery = ref('')
 const selectedDirectoryUser = ref<OrganizationUser | null>(null)
 const memberRole = ref<'student' | 'teacher'>('student')
-const canSave = computed(() => Boolean(canManageProject.value && editName.value.trim()))
+const canSave = computed(() => Boolean(canEditProject.value && editName.value.trim()))
 const canAddMember = computed(() => Boolean(
-  canManageProject.value
+  canManageMembers.value
   && selectedProject.value?.state === 'active'
   && members.acting === null
   && (canSearchOrganizationDirectory.value ? selectedDirectoryUser.value?.enabled && memberUsername.value.trim() : memberUsername.value.trim()),
@@ -519,14 +519,14 @@ async function submitCreate() {
 }
 
 async function saveProject() {
-  if (!canManageProject.value) return
+  if (!canEditProject.value) return
   const project = projects.selectedProject
   if (!project) return
   await projects.update(project, { name: editName.value.trim(), description: editDescription.value.trim() || null })
 }
 
 function openArchiveConfirmation() {
-  if (!canManageProject.value) return
+  if (!canEditProject.value) return
   const project = projects.selectedProject
   if (!project) return
   destructiveConfirmation.value = { kind: 'archive', project }
@@ -538,7 +538,7 @@ function refreshMembers() {
 }
 
 async function addMember() {
-  if (!canManageProject.value) return
+  if (!canManageMembers.value) return
   const username = memberUsername.value.trim()
   if (!canAddMember.value || !username) return
   const ok = await members.add({ username, role: memberRole.value })
@@ -550,7 +550,7 @@ async function addMember() {
 }
 
 function openRemoveMemberConfirmation(member: ProjectMembershipSchema) {
-  if (!canManageProject.value) return
+  if (!canManageMembers.value) return
   const project = projects.selectedProject
   if (!project) return
   destructiveConfirmation.value = {
@@ -565,11 +565,14 @@ async function confirmDestructiveAction() {
   const confirmation = destructiveConfirmation.value
   destructiveConfirmation.value = null
   if (!confirmation) return
-  if (!canManageProject.value) return
   if (confirmation.kind === 'archive') {
+    if (!canEditProject.value) return
     if (projects.selectedProjectId === confirmation.project.id) await projects.archive(confirmation.project)
-  } else if (projects.selectedProjectId === confirmation.projectId) {
-    await members.remove(confirmation.member.actorId, confirmation.member)
+  } else {
+    if (!canManageMembers.value) return
+    if (projects.selectedProjectId === confirmation.projectId) {
+      await members.remove(confirmation.member.actorId, confirmation.member)
+    }
   }
 }
 </script>
