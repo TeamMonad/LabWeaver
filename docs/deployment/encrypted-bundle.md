@@ -322,13 +322,15 @@ Cluster network、identity、verify、admin tools、foundation、Harbor、sandbo
 
 `tools/prepare_bundle_acceptance.py` 在 Bundle `exec` 内生成验收清单，不连接集群。它只输出配置 JSON，Secret、SSH key、Vault 密码和 age 身份均不进入清单。输出文件使用 `0600`，已存在的文件不会被覆盖。
 
+真实集群测试复用执行端已经获准的专用 namespace。由唯一验证 owner 设置 `LW_TEST_NAMESPACE`，核对该 namespace、上下文、已有负载和安全设置。后续轮次不另建 namespace，也不删除整个 namespace。
+
 用新解密目录恢复实际归档，再生成清单：
 
 ```sh
 python tools/deployment_bundle.py exec \
   --archive installation-r7.age --identity .private/operator-age-key.txt \
   -- python tools/prepare_bundle_acceptance.py \
-  --namespace lw-bundle-203-unique-run --output .private/acceptance/restore.yaml
+  --namespace "$LW_TEST_NAMESPACE" --output .private/acceptance/restore.yaml
 ```
 
 输出路径须在 Bundle 临时目录之外。namespace 必须以 `lw-bundle-203-` 开头，并与应用及 Resource 目标不同。工具从同一版本锁的 `test_images.busybox` 选择固定摘要镜像；缺少该镜像时明确失败，不另给镜像默认值。
@@ -337,18 +339,24 @@ python tools/deployment_bundle.py exec \
 
 ```sh
 python tests/ansible/prepare_bundle_acceptance_fixture.py \
-  --namespace lw-bundle-203-unique-run --output .private/acceptance/synthetic.yaml
+  --namespace "$LW_TEST_NAMESPACE" --output .private/acceptance/synthetic.yaml
 ```
 
-该入口需要前述 age、Python 依赖和 xtask。清单包含一个 Namespace、ResourceQuota、NetworkPolicy、ConfigMap 和 Job。Namespace 使用 restricted Pod Security；Pod 默认拒绝网络、禁用服务账户 token、非 root、drop ALL、只读根文件系统。没有 PVC、hostPath、hostNetwork、GPU、Secret 或集群角色。Job 读取已恢复且经过类型校验的配置，核对挂载后的实际字节摘要。成功输出 `BUNDLE_RESTORE_SMOKE_OK`。
+默认输出4个对象：ResourceQuota、NetworkPolicy、ConfigMap 和 Job，不包含 Namespace。仅在另行获准准备新 namespace 时使用 `--create-namespace`；该选项只生成第5个 Namespace 对象，不执行创建。复用模式要求既有 namespace 已启用获准的 restricted Pod Security。Pod 默认拒绝网络、禁用服务账户 token、非 root、drop ALL、只读根文件系统。没有 PVC、hostPath、hostNetwork、GPU、Secret 或集群角色。Job 读取已恢复且经过类型校验的配置，核对挂载后的实际字节摘要。成功输出 `BUNDLE_RESTORE_SMOKE_OK`。
 
-执行端需要一个全新 namespace 名称、Linux amd64 节点、锁定 BusyBox 镜像的拉取能力和已有 CNI NetworkPolicy 支持。Pod 请求50m CPU、64Mi 内存、16Mi 临时存储，上限250m CPU、128Mi 内存、64Mi 临时存储；namespace 配额限制2个 Pod、1个 Job、2个 ConfigMap、0个 Secret/PVC。ConfigMap 配额包含控制器自动发布的 kube-root-ca.crt 和一个 fixture 配置对象。整个 namespace 的 CPU/内存上限分别为1核和512Mi。无需新增长期凭据或扩大平台服务权限。
+执行端需要 Linux amd64 节点、锁定 BusyBox 镜像的拉取能力和已有 CNI NetworkPolicy 支持。Pod 请求50m CPU、64Mi 内存、16Mi 临时存储，上限250m CPU、128Mi 内存、64Mi 临时存储；本 fixture quota 限制2个 Pod、1个 Job、2个 ConfigMap、0个 Secret/PVC，CPU/内存上限分别为1核和512Mi。ConfigMap 配额包含控制器自动发布的 kube-root-ca.crt 和一个 fixture 配置对象。其他测试超出此 fixture 预算时，由唯一验证 owner 核对实际资源需求；不要把 quota 拒绝记成配置恢复失败。
 
 Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/controller/certificates/rootcacertpublisher/publisher.go) 会为 namespace 创建 kube-root-ca.crt；禁用 Pod token 自动挂载不会关闭该控制器。该测试配额预留这一系统对象，避免创建顺序导致配置对象被拒绝。
 
-单独获准的集群验证线程先核对已有负载、上下文和 namespace 未存在，再使用 `kubectl create -f` 创建清单；不要用 apply 覆盖已有对象。读取 Job 终态和上述日志标记，记录实际调度、镜像拉取、Pod Security 与清理结果。失败或部分创建时保留错误和已创建对象清单，由执行端只清理本次拥有的对象。本工具不创建或删除远端资源。
+每轮由唯一验证 owner 执行：
 
-此入口验证控制器恢复、配置挂载和隔离 Job。六服务空环境安装、真实身份签发、数据库迁移、入口证书、镜像 Registry 与浏览器流程仍需要专门的隔离安装窗口和获准依赖。现有 foundation/identity/Harbor 角色含固定 namespace 或共享对象；不能将它们直接用于已有集群的本验收 namespace。不要将此 Job 成功记录为完整安装或用户旅程通过。
+1. 核对 namespace 和对象归属。quota 与 deny-all policy 只由该 owner 在已获准范围内建立或更新，不强制接管已有对象。
+2. 对重跑先读取上次 Job 的终态、日志和错误。确认 `job/bundle-restore`、`configmap/bundle-configuration` 的标签同时为 `labweaver.io/issue=203` 和 `app.kubernetes.io/name=labweaver-bundle-acceptance`，再回收这两个测试对象。等待本次 Job 的 Pod 回收后继续。
+3. 保留 namespace、kube-root-ca.crt 和已获准的网络/安全策略。不要对整份清单执行 `kubectl delete -f`，也不要默认删除 namespace。
+4. 用 `kubectl create` 创建本轮 ConfigMap/Job，避免覆盖活跃测试或将旧 Succeeded 当成本轮结果。读取 Job 终态与日志标记，记录实际调度、拉取、Pod Security 和回收结果。
+5. 结束后按归属回收本轮 Job/配置对象，等 Pod 完成回收后，再回收本 fixture 自建的 `resourcequota/bundle-acceptance`，避免0 Secret/PVC等临时限制阻挡其他已获准测试。不能删除其他 quota、deny-all policy 或 namespace。输出 metadata 的 `cleanupObjects` 仅列这三个 fixture 对象，本工具不会执行远端回收。
+
+此入口验证控制器恢复、配置挂载和隔离 Job。六服务空环境安装、真实身份签发、数据库迁移、入口证书、镜像 Registry 与浏览器流程仍需要专门的隔离安装窗口和获准依赖。现有 foundation/identity/Harbor 角色含固定 namespace 或共享对象，不能直接套用到该测试 namespace。不要将此 Job 成功记录为完整安装或用户旅程通过。
 
 ## 当前未完成范围
 

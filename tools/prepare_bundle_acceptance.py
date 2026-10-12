@@ -20,7 +20,9 @@ except ModuleNotFoundError:
     from tools import deployment_bundle as bundle
 
 
-def prepare(namespace: str, output: Path) -> dict[str, Any]:
+def prepare(
+    namespace: str, output: Path, create_namespace: bool = False
+) -> dict[str, Any]:
     if not namespace.startswith(
         "lw-bundle-203-"
     ) or not bundle.objects.DNS_LABEL.fullmatch(namespace):
@@ -182,6 +184,8 @@ def prepare(namespace: str, output: Path) -> dict[str, Any]:
             },
         },
     ]
+    if not create_namespace:
+        resources = resources[1:]
     bundle._publish_private(
         output, yaml.safe_dump_all(resources, sort_keys=False).encode()
     )
@@ -191,6 +195,12 @@ def prepare(namespace: str, output: Path) -> dict[str, Any]:
         "configurationFileSha256": digest,
         "revision": model["revision"],
         "configurationMode": mode,
+        "namespaceMode": "create" if create_namespace else "existing",
+        "cleanupObjects": [
+            "job/bundle-restore",
+            "configmap/bundle-configuration",
+            "resourcequota/bundle-acceptance",
+        ],
     }
 
 
@@ -198,10 +208,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--create-namespace",
+        action="store_true",
+        help="Include a new Namespace only when its creation is independently authorized.",
+    )
     arguments = parser.parse_args()
     try:
         print(
-            json.dumps(prepare(arguments.namespace, arguments.output), sort_keys=True)
+            json.dumps(
+                prepare(
+                    arguments.namespace, arguments.output, arguments.create_namespace
+                ),
+                sort_keys=True,
+            )
         )
         return 0
     except (bundle.BundleError, OSError) as error:
