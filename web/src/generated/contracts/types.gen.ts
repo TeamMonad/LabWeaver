@@ -1457,6 +1457,162 @@ export type ConsoleCapabilitySchemaRevision = number;
 export type ConsoleCapabilitySchemaUtcTimestamp = string;
 
 /**
+ * CourseMembershipPage
+ */
+export type CourseMembershipPageSchema = {
+    hasMore: boolean;
+    items: Array<CourseMembershipView>;
+    page: number;
+    pageSize: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CourseMembershipPageSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CourseMembershipPageSchemaCourseId = string;
+
+/**
+ * Course-local role grant with revision and expiry.
+ */
+export type CourseMembership = {
+    /**
+     * Actor scope.
+     */
+    actorId: CourseMembershipPageSchemaActorId;
+    /**
+     * Course scope.
+     */
+    courseId: CourseMembershipPageSchemaCourseId;
+    /**
+     * Optional hard expiry.
+     */
+    expiresAt?: CourseMembershipPageSchemaUtcTimestamp | null;
+    /**
+     * Control-owned course responsibility, independent of platform identity.
+     */
+    objectRole?: CourseObjectRole;
+    /**
+     * Monotonic authorization revision.
+     */
+    revision: CourseMembershipPageSchemaRevision;
+    /**
+     * Role permitted by this course.
+     */
+    role: CourseMembershipPageSchemaPlatformRole;
+    /**
+     * Current lifecycle state.
+     */
+    state: MembershipState;
+};
+
+export type CourseMembershipView = {
+    displayName?: string | null;
+    membership: CourseMembership;
+    username?: string | null;
+};
+
+/**
+ * Course responsibility does not change the actor's verified platform identity.
+ */
+export type CourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
+
+/**
+ * Authoritative membership state owned by Control Service.
+ */
+export type MembershipState = 'active' | 'suspended' | 'revoked';
+
+/**
+ * Base role asserted by the configured OIDC issuer.
+ */
+export type CourseMembershipPageSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CourseMembershipPageSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CourseMembershipPageSchemaUtcTimestamp = string;
+
+/**
+ * CourseMembership
+ *
+ * Course-local role grant with revision and expiry.
+ */
+export type CourseMembershipSchema = {
+    /**
+     * Actor scope.
+     */
+    actorId: CourseMembershipSchemaActorId;
+    /**
+     * Course scope.
+     */
+    courseId: CourseMembershipSchemaCourseId;
+    /**
+     * Optional hard expiry.
+     */
+    expiresAt?: CourseMembershipSchemaUtcTimestamp | null;
+    /**
+     * Control-owned course responsibility, independent of platform identity.
+     */
+    objectRole?: CourseMembershipSchemaCourseObjectRole;
+    /**
+     * Monotonic authorization revision.
+     */
+    revision: CourseMembershipSchemaRevision;
+    /**
+     * Role permitted by this course.
+     */
+    role: CourseMembershipSchemaPlatformRole;
+    /**
+     * Current lifecycle state.
+     */
+    state: CourseMembershipSchemaMembershipState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CourseMembershipSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CourseMembershipSchemaCourseId = string;
+
+/**
+ * Course responsibility does not change the actor's verified platform identity.
+ */
+export type CourseMembershipSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
+
+/**
+ * Authoritative membership state owned by Control Service.
+ */
+export type CourseMembershipSchemaMembershipState = 'active' | 'suspended' | 'revoked';
+
+/**
+ * Base role asserted by the configured OIDC issuer.
+ */
+export type CourseMembershipSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CourseMembershipSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CourseMembershipSchemaUtcTimestamp = string;
+
+/**
  * CsrfTokenResponse
  *
  * Synchronizer token returned only to an authenticated browser session.
@@ -2723,6 +2879,18 @@ export type GpuCatalogEntrySchemaGpuCatalogEntryId = string;
 export type GpuCatalogEntrySchemaRevision = number;
 
 /**
+ * AcceptMembershipInvitation
+ */
+export type AcceptMembershipInvitationSchema = {
+    expectedRevision: AcceptMembershipInvitationSchemaRevision;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AcceptMembershipInvitationSchemaRevision = number;
+
+/**
  * AddProjectMembershipRequest
  *
  * Control-owned membership grant for one Project actor.
@@ -3485,6 +3653,26 @@ export type CreateAgentRunRequestSchemaProjectId = string;
 export type CreateAgentRunRequestSchemaRevision = number;
 
 /**
+ * CreateCourseMembershipInvitation
+ */
+export type CreateCourseMembershipInvitationSchema = {
+    expiresAt: CreateCourseMembershipInvitationSchemaUtcTimestamp;
+    membershipExpiresAt?: CreateCourseMembershipInvitationSchemaUtcTimestamp | null;
+    objectRole: CreateCourseMembershipInvitationSchemaCourseObjectRole;
+    username: string;
+};
+
+/**
+ * Course responsibility does not change the actor's verified platform identity.
+ */
+export type CreateCourseMembershipInvitationSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CreateCourseMembershipInvitationSchemaUtcTimestamp = string;
+
+/**
  * CreateEnvironmentRequest
  */
 export type CreateEnvironmentRequestSchema = {
@@ -3673,6 +3861,28 @@ export type CreateProblemPackageUploadRequestSchemaProjectId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CreateProblemPackageUploadRequestSchemaRevision = number;
+
+/**
+ * CreateProjectMembershipInvitation
+ *
+ * The recipient must use this exact campus username. Access resolves it before forwarding.
+ */
+export type CreateProjectMembershipInvitationSchema = {
+    expiresAt: CreateProjectMembershipInvitationSchemaUtcTimestamp;
+    membershipExpiresAt?: CreateProjectMembershipInvitationSchemaUtcTimestamp | null;
+    objectRole: CreateProjectMembershipInvitationSchemaProjectObjectRole;
+    username: string;
+};
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type CreateProjectMembershipInvitationSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CreateProjectMembershipInvitationSchemaUtcTimestamp = string;
 
 /**
  * CreateProjectRequest
@@ -9294,6 +9504,155 @@ export type LogoutBrowserSessionResponseSchema = {
 };
 
 /**
+ * MembershipInvitationPage
+ */
+export type MembershipInvitationPageSchema = {
+    hasMore: boolean;
+    items: Array<MembershipInvitation>;
+    page: number;
+    pageSize: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type MembershipInvitationPageSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type MembershipInvitationPageSchemaCourseId = string;
+
+/**
+ * Course responsibility does not change the actor's verified platform identity.
+ */
+export type MembershipInvitationPageSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
+
+export type MembershipInvitation = {
+    acceptedMembershipRevision?: MembershipInvitationPageSchemaRevision | null;
+    createdAt: MembershipInvitationPageSchemaUtcTimestamp;
+    createdBy: MembershipInvitationPageSchemaActorId;
+    expiresAt: MembershipInvitationPageSchemaUtcTimestamp;
+    id: MembershipInvitationId;
+    membershipExpiresAt?: MembershipInvitationPageSchemaUtcTimestamp | null;
+    recipientActorId: MembershipInvitationPageSchemaActorId;
+    revision: MembershipInvitationPageSchemaRevision;
+    scope: MembershipInvitationScope;
+    state: MembershipInvitationState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `MembershipInvitationId`.
+ */
+export type MembershipInvitationId = string;
+
+/**
+ * Proposed responsibility. Acceptance does not create any unrelated membership.
+ */
+export type MembershipInvitationScope = {
+    kind: 'project';
+    objectRole: MembershipInvitationPageSchemaProjectObjectRole;
+    projectId: MembershipInvitationPageSchemaProjectId;
+} | {
+    courseId: MembershipInvitationPageSchemaCourseId;
+    kind: 'course';
+    objectRole: MembershipInvitationPageSchemaCourseObjectRole;
+};
+
+export type MembershipInvitationState = 'pending' | 'accepted' | 'revoked' | 'expired';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type MembershipInvitationPageSchemaProjectId = string;
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type MembershipInvitationPageSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type MembershipInvitationPageSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type MembershipInvitationPageSchemaUtcTimestamp = string;
+
+/**
+ * MembershipInvitation
+ */
+export type MembershipInvitationSchema = {
+    acceptedMembershipRevision?: MembershipInvitationSchemaRevision | null;
+    createdAt: MembershipInvitationSchemaUtcTimestamp;
+    createdBy: MembershipInvitationSchemaActorId;
+    expiresAt: MembershipInvitationSchemaUtcTimestamp;
+    id: MembershipInvitationSchemaMembershipInvitationId;
+    membershipExpiresAt?: MembershipInvitationSchemaUtcTimestamp | null;
+    recipientActorId: MembershipInvitationSchemaActorId;
+    revision: MembershipInvitationSchemaRevision;
+    scope: MembershipInvitationSchemaMembershipInvitationScope;
+    state: MembershipInvitationSchemaMembershipInvitationState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type MembershipInvitationSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type MembershipInvitationSchemaCourseId = string;
+
+/**
+ * Course responsibility does not change the actor's verified platform identity.
+ */
+export type MembershipInvitationSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
+
+/**
+ * Strongly typed UUIDv7 identifier for `MembershipInvitationId`.
+ */
+export type MembershipInvitationSchemaMembershipInvitationId = string;
+
+/**
+ * Proposed responsibility. Acceptance does not create any unrelated membership.
+ */
+export type MembershipInvitationSchemaMembershipInvitationScope = {
+    kind: 'project';
+    objectRole: MembershipInvitationSchemaProjectObjectRole;
+    projectId: MembershipInvitationSchemaProjectId;
+} | {
+    courseId: MembershipInvitationSchemaCourseId;
+    kind: 'course';
+    objectRole: MembershipInvitationSchemaCourseObjectRole;
+};
+
+export type MembershipInvitationSchemaMembershipInvitationState = 'pending' | 'accepted' | 'revoked' | 'expired';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type MembershipInvitationSchemaProjectId = string;
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type MembershipInvitationSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type MembershipInvitationSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type MembershipInvitationSchemaUtcTimestamp = string;
+
+/**
  * OrganizationUserPage
  *
  * Bounded organization-directory search result.
@@ -9631,7 +9990,7 @@ export type ProjectMembershipSchema = {
     /**
      * Current lifecycle state.
      */
-    state: MembershipState;
+    state: ProjectMembershipSchemaMembershipState;
     /**
      * Issuer username, present on project membership views when identity
      * metadata is available.  Authorization snapshots leave this unset.
@@ -9652,7 +10011,7 @@ export type ProjectMembershipSchemaCourseId = string;
 /**
  * Authoritative membership state owned by Control Service.
  */
-export type MembershipState = 'active' | 'suspended' | 'revoked';
+export type ProjectMembershipSchemaMembershipState = 'active' | 'suspended' | 'revoked';
 
 /**
  * Base role asserted by the configured OIDC issuer.
@@ -11811,6 +12170,288 @@ export type GetActiveCourseLlmPolicyResponses = {
 
 export type GetActiveCourseLlmPolicyResponse = GetActiveCourseLlmPolicyResponses[keyof GetActiveCourseLlmPolicyResponses];
 
+export type ListCourseMembershipInvitationsData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/courses/{courseId}/member-invitations';
+};
+
+export type ListCourseMembershipInvitationsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListCourseMembershipInvitationsError = ListCourseMembershipInvitationsErrors[keyof ListCourseMembershipInvitationsErrors];
+
+export type ListCourseMembershipInvitationsResponses = {
+    /**
+     * Successful response
+     */
+    200: MembershipInvitationPageSchema;
+};
+
+export type ListCourseMembershipInvitationsResponse = ListCourseMembershipInvitationsResponses[keyof ListCourseMembershipInvitationsResponses];
+
+export type CreateCourseMembershipInvitationData = {
+    body: CreateCourseMembershipInvitationSchema;
+    headers: {
+        'Idempotency-Key': string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/member-invitations';
+};
+
+export type CreateCourseMembershipInvitationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateCourseMembershipInvitationError = CreateCourseMembershipInvitationErrors[keyof CreateCourseMembershipInvitationErrors];
+
+export type CreateCourseMembershipInvitationResponses = {
+    /**
+     * Successful response
+     */
+    201: MembershipInvitationSchema;
+};
+
+export type CreateCourseMembershipInvitationResponse = CreateCourseMembershipInvitationResponses[keyof CreateCourseMembershipInvitationResponses];
+
+export type ListCourseMembershipsData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/courses/{courseId}/members';
+};
+
+export type ListCourseMembershipsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListCourseMembershipsError = ListCourseMembershipsErrors[keyof ListCourseMembershipsErrors];
+
+export type ListCourseMembershipsResponses = {
+    /**
+     * Successful response
+     */
+    200: CourseMembershipPageSchema;
+};
+
+export type ListCourseMembershipsResponse = ListCourseMembershipsResponses[keyof ListCourseMembershipsResponses];
+
+export type RemoveCourseMembershipData = {
+    body: RemoveProjectMembershipRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        courseId: string;
+        actorId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/members/{actorId}';
+};
+
+export type RemoveCourseMembershipErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RemoveCourseMembershipError = RemoveCourseMembershipErrors[keyof RemoveCourseMembershipErrors];
+
+export type RemoveCourseMembershipResponses = {
+    /**
+     * Successful response
+     */
+    200: CourseMembershipSchema;
+};
+
+export type RemoveCourseMembershipResponse = RemoveCourseMembershipResponses[keyof RemoveCourseMembershipResponses];
+
 export type ListOrganizationUsersData = {
     body?: never;
     path?: never;
@@ -13254,6 +13895,283 @@ export type DeleteSshPublicKeyResponses = {
 };
 
 export type DeleteSshPublicKeyResponse = DeleteSshPublicKeyResponses[keyof DeleteSshPublicKeyResponses];
+
+export type ListIncomingMembershipInvitationsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/member-invitations';
+};
+
+export type ListIncomingMembershipInvitationsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListIncomingMembershipInvitationsError = ListIncomingMembershipInvitationsErrors[keyof ListIncomingMembershipInvitationsErrors];
+
+export type ListIncomingMembershipInvitationsResponses = {
+    /**
+     * Successful response
+     */
+    200: MembershipInvitationPageSchema;
+};
+
+export type ListIncomingMembershipInvitationsResponse = ListIncomingMembershipInvitationsResponses[keyof ListIncomingMembershipInvitationsResponses];
+
+export type GetMembershipInvitationData = {
+    body?: never;
+    path: {
+        invitationId: string;
+    };
+    query?: never;
+    url: '/api/v1/member-invitations/{invitationId}';
+};
+
+export type GetMembershipInvitationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetMembershipInvitationError = GetMembershipInvitationErrors[keyof GetMembershipInvitationErrors];
+
+export type GetMembershipInvitationResponses = {
+    /**
+     * Successful response
+     */
+    200: MembershipInvitationSchema;
+};
+
+export type GetMembershipInvitationResponse = GetMembershipInvitationResponses[keyof GetMembershipInvitationResponses];
+
+export type AcceptMembershipInvitationData = {
+    body: AcceptMembershipInvitationSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        invitationId: string;
+    };
+    query?: never;
+    url: '/api/v1/member-invitations/{invitationId}/accept';
+};
+
+export type AcceptMembershipInvitationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type AcceptMembershipInvitationError = AcceptMembershipInvitationErrors[keyof AcceptMembershipInvitationErrors];
+
+export type AcceptMembershipInvitationResponses = {
+    /**
+     * Successful response
+     */
+    200: MembershipInvitationSchema;
+};
+
+export type AcceptMembershipInvitationResponse = AcceptMembershipInvitationResponses[keyof AcceptMembershipInvitationResponses];
+
+export type RevokeMembershipInvitationData = {
+    body: RemoveProjectMembershipRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        invitationId: string;
+    };
+    query?: never;
+    url: '/api/v1/member-invitations/{invitationId}/revoke';
+};
+
+export type RevokeMembershipInvitationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RevokeMembershipInvitationError = RevokeMembershipInvitationErrors[keyof RevokeMembershipInvitationErrors];
+
+export type RevokeMembershipInvitationResponses = {
+    /**
+     * Successful response
+     */
+    200: MembershipInvitationSchema;
+};
+
+export type RevokeMembershipInvitationResponse = RevokeMembershipInvitationResponses[keyof RevokeMembershipInvitationResponses];
 
 export type ListProjectsData = {
     body?: never;
@@ -15616,6 +16534,146 @@ export type GetOwnProjectEvaluationResultResponses = {
 };
 
 export type GetOwnProjectEvaluationResultResponse = GetOwnProjectEvaluationResultResponses[keyof GetOwnProjectEvaluationResultResponses];
+
+export type ListProjectMembershipInvitationsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/member-invitations';
+};
+
+export type ListProjectMembershipInvitationsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectMembershipInvitationsError = ListProjectMembershipInvitationsErrors[keyof ListProjectMembershipInvitationsErrors];
+
+export type ListProjectMembershipInvitationsResponses = {
+    /**
+     * Successful response
+     */
+    200: MembershipInvitationPageSchema;
+};
+
+export type ListProjectMembershipInvitationsResponse = ListProjectMembershipInvitationsResponses[keyof ListProjectMembershipInvitationsResponses];
+
+export type CreateProjectMembershipInvitationData = {
+    body: CreateProjectMembershipInvitationSchema;
+    headers: {
+        'Idempotency-Key': string;
+    };
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/member-invitations';
+};
+
+export type CreateProjectMembershipInvitationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateProjectMembershipInvitationError = CreateProjectMembershipInvitationErrors[keyof CreateProjectMembershipInvitationErrors];
+
+export type CreateProjectMembershipInvitationResponses = {
+    /**
+     * Successful response
+     */
+    201: MembershipInvitationSchema;
+};
+
+export type CreateProjectMembershipInvitationResponse = CreateProjectMembershipInvitationResponses[keyof CreateProjectMembershipInvitationResponses];
 
 export type ListProjectMembershipsData = {
     body?: never;

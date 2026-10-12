@@ -149,6 +149,23 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         "opaque-subject-not-persisted",
     )
     .await?;
+    assert!(
+        sqlx::query(
+            "SELECT actor_id,username,display_name,disabled_at FROM access.actors WHERE actor_id=$1"
+        )
+        .bind(local_actor.actor_id)
+        .fetch_one(&runtime_pools[&Domain::Control])
+        .await
+        .is_ok()
+    );
+    assert!(
+        sqlx::query("SELECT issuer,subject_sha256 FROM access.actors WHERE actor_id=$1")
+            .bind(local_actor.actor_id)
+            .fetch_one(&runtime_pools[&Domain::Control])
+            .await
+            .is_err(),
+        "Control cannot read provider identity fields through its member directory grant"
+    );
     let now = time::OffsetDateTime::now_utc();
     let course_id = Uuid::now_v7();
     let project_id = Uuid::now_v7();

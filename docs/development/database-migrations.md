@@ -26,6 +26,8 @@ Project 是幂等与归属的基本范围。可选 Course 不得作为普通唯�
 
 ## Sprint5 成员真源切换
 
-#199 将成员事实移到 Control，并保留 Control `0016`。组合 #197 的 `0014` 和 #203 的 `0015` 后，按 catalog 的有序并集生成部署输入。Access 只获得 Control 成员表的读取权限。
+#199 将成员事实移到 Control。`0016` 建立成员表，`0017` 保存课程职责和成员邀请。组合 #197 的 `0014` 和 #203 的 `0015` 后，按 catalog 的有序并集生成部署输入。Access 只获得 Control 成员表的读取权限。
+
+Access `0007` 在目录列创建后撤销 Control 的旧 actor 整表读取。它只授予 actor_id、username、display_name 和 disabled_at 四列。普通服务启动不得跳过这条迁移，也不得恢复更宽的账号读取。
 
 此次硬切修改旧成员建表身份，只适用于新建数据库。已记录旧校验值的数据库必须拒绝 catalog 不一致。应用启动不能自动清空或重新授权。生产切换另需明确窗口和维护者批准。授权语义见[对象动作与成员授权](../contracts/object-authorization.md)。

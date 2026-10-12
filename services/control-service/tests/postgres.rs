@@ -45,6 +45,8 @@ use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
+#[path = "cases/membership_governance.rs"]
+mod membership_governance_cases;
 mod support;
 use support::apply_domain_migrations;
 

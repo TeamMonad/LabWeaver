@@ -38,6 +38,30 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::object_authorization::AvailableObjectActions
     );
     document!(
+        "schemas/contracts/v1/membership-invitation.schema.json",
+        crate::membership_governance::MembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/membership-invitation-page.schema.json",
+        crate::membership_governance::MembershipInvitationPage
+    );
+    document!(
+        "schemas/contracts/v1/course-membership-page.schema.json",
+        crate::membership_governance::CourseMembershipPage
+    );
+    document!(
+        "schemas/contracts/v1/http/create-project-membership-invitation.schema.json",
+        crate::membership_governance::CreateProjectMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/create-course-membership-invitation.schema.json",
+        crate::membership_governance::CreateCourseMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/accept-membership-invitation.schema.json",
+        crate::membership_governance::AcceptMembershipInvitation
+    );
+    document!(
         "schemas/contracts/v1/project.schema.json",
         crate::project::Project
     );
@@ -1082,7 +1106,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if matches!(
             operation.operation_id,
-            "listProjectAgentRuns" | "listProjectResourceUsage"
+            "listProjectAgentRuns"
+                | "listProjectResourceUsage"
+                | "listCourseMemberships"
+                | "listProjectMembershipInvitations"
+                | "listCourseMembershipInvitations"
+                | "listIncomingMembershipInvitations"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -1610,10 +1639,15 @@ fn contract_ref(name: &str) -> Value {
 
 fn request_schema(operation_id: &str) -> Option<Value> {
     let name = match operation_id {
+        "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
+        "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
+        "acceptMembershipInvitation" => "http/accept-membership-invitation",
+        "revokeMembershipInvitation" | "removeCourseMembership" | "removeProjectMembership" => {
+            "http/remove-project-membership-request"
+        }
         "createProject" => "http/create-project-request",
         "updateProject" => "http/update-project-request",
         "addProjectMembership" => "http/add-project-membership-request",
-        "removeProjectMembership" => "http/remove-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
         "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
@@ -1683,6 +1717,16 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "createProjectMembershipInvitation"
+        | "createCourseMembershipInvitation"
+        | "getMembershipInvitation"
+        | "acceptMembershipInvitation"
+        | "revokeMembershipInvitation" => contract_ref("membership-invitation"),
+        "listIncomingMembershipInvitations"
+        | "listProjectMembershipInvitations"
+        | "listCourseMembershipInvitations" => contract_ref("membership-invitation-page"),
+        "listCourseMemberships" => contract_ref("course-membership-page"),
+        "removeCourseMembership" => contract_ref("course-membership"),
         "getProjectAvailableActions" => contract_ref("available-object-actions"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")

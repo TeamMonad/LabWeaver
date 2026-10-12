@@ -8,6 +8,7 @@
 pub mod api;
 mod candidate_builds;
 pub mod clients;
+mod membership_governance;
 pub mod messaging;
 mod object_authorization;
 pub mod platform_image_jobs;
@@ -895,42 +896,9 @@ impl ControlService {
         if project.state == ProjectState::Archived {
             return Err(ControlError::ProjectArchived);
         }
-        sqlx::query(
-            "INSERT INTO control.project_memberships \
-             (course_id,project_id,actor_id,role,object_role,state,revision,expires_at,updated_at) \
-             VALUES ($1,$2,$3,$4,$5,'active',1,$6,$7) \
-             ON CONFLICT (project_id,actor_id) DO UPDATE SET \
-                 course_id=EXCLUDED.course_id, \
-                 role=EXCLUDED.role, object_role=EXCLUDED.object_role, \
-                 state='active', \
-                 revision=control.project_memberships.revision+1, \
-                 expires_at=EXCLUDED.expires_at, \
-                 updated_at=EXCLUDED.updated_at \
-             RETURNING project_id",
-        )
-        .bind(project.course_id.map(CourseId::as_uuid))
-        .bind(project_id.as_uuid())
-        .bind(request.actor_id.as_uuid())
-        .bind(platform_role_name(request.role))
-        .bind(request.object_role.as_str())
-        .bind(request.expires_at.map(UtcTimestamp::get))
-        .bind(now.get())
-        .execute(&mut *transaction)
-        .await
-        .map_err(db)?;
-        let membership_row = sqlx::query(
-            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.object_role,pm.state,pm.revision,pm.expires_at, \
-                    a.username,a.display_name \
-             FROM control.project_memberships pm \
-             JOIN access.actors a ON a.actor_id=pm.actor_id \
-             WHERE pm.project_id=$1 AND pm.actor_id=$2",
-        )
-        .bind(project_id.as_uuid())
-        .bind(request.actor_id.as_uuid())
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(db)?;
-        let membership = project_membership_from_row(&membership_row)?;
+        let membership =
+            object_authorization::upsert_project_member(&mut transaction, &project, request, now)
+                .await?;
         let contract =
             serde_json::to_value(&membership).map_err(|_| ControlError::ContractInvalid)?;
         append_project_sse(
@@ -9191,6 +9159,18 @@ pub enum ControlError {
     MembershipNotFound,
     #[error("LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED")]
     OwnerMembershipProtected,
+    #[error("LW_MEMBERSHIP_INVITATION_DENIED")]
+    InvitationDenied,
+    #[error("LW_MEMBERSHIP_INVITATION_NOT_FOUND")]
+    InvitationNotFound,
+    #[error("LW_MEMBERSHIP_INVITATION_EXPIRED")]
+    InvitationExpired,
+    #[error("LW_MEMBERSHIP_INVITATION_STATE_CONFLICT")]
+    InvitationStateConflict,
+    #[error("LW_COURSE_GOVERNANCE_DENIED")]
+    CourseGovernanceDenied,
+    #[error("LW_COURSE_LAST_INSTRUCTOR_PROTECTED")]
+    CourseInstructorProtected,
     #[error("LW_LLM_POLICY_INVALID")]
     PolicyInvalid,
     #[error("LW_LLM_POLICY_NOT_FOUND")]

@@ -49,6 +49,9 @@ domains:
       - id: 16
         file: control/0016_object_authorization.sql
         sha256: 0190e9995d4a31cdd7b2c13f62d09f98d99133cdf0adf8835c1f94483740b301
+      - id: 17
+        file: control/0017_membership_governance.sql
+        sha256: 372889f419e80a01ef634d0175474ded486dd630e1cf0b150c11b461a8715218
   - name: access
     migrations:
       - id: 1
@@ -59,7 +62,7 @@ domains:
         sha256: 68588d75fa6a183bb1cdd62c4e8683ba450140809f22a5713ff684a1a3648ff9
       - id: 3
         file: access/0003_independent_project_memberships.sql
-        sha256: 5fa8ac35c80985972ee0b2f1841a22d0f774471e8abe1197ad339bc1a15b8d0a
+        sha256: 9c44c24a51be157e3892ca1adc90186f1e25900dbc5b304086ed39ed8363f296
       - id: 4
         file: access/0004_actor_identity_metadata.sql
         sha256: 0c3b55c0426b48457075665f7fe4ffc19a13adbfdf1d0bfd5c8c6c1088009b6e
@@ -69,6 +72,9 @@ domains:
       - id: 6
         file: access/0006_authorization_session_view.sql
         sha256: 08bf7e67157123739962bb168d03d776daffed69de4e510875b418518a005c84
+      - id: 7
+        file: access/0007_membership_actor_reads.sql
+        sha256: f02b0369e675b975116d4d73602153d72c341105dc2d72c2ea7991ff859b653e
   - name: environment
     migrations:
       - id: 1

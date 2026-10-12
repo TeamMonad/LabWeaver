@@ -141,9 +141,11 @@ pub fn project_operation_action(operation: &str) -> Option<ObjectAction> {
         | "completeProjectAuthoringApproval"
         | "createEnvironmentTemplateRelease"
         | "withdrawEnvironmentTemplateRelease" => Some(Edit),
-        "upsertProjectResourceBudget" | "addProjectMembership" | "removeProjectMembership" => {
-            Some(ManageMembers)
-        }
+        "upsertProjectResourceBudget"
+        | "addProjectMembership"
+        | "removeProjectMembership"
+        | "createProjectMembershipInvitation"
+        | "listProjectMembershipInvitations" => Some(ManageMembers),
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"
