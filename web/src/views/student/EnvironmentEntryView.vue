@@ -283,14 +283,18 @@
           </div>
 
           <!-- GCP Detail Tabs -->
-          <nav
-            class="gcp-detail-tabs"
-            aria-label="环境资源详情导航"
+          <TabsRoot
+            v-model="activeTab"
+            :unmount-on-hide="false"
+            class="detail-tabs-root"
           >
-            <button
-              type="button"
+          <TabsList
+            class="gcp-detail-tabs"
+            aria-label="环境资源详情"
+          >
+            <TabsTrigger
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'overview' }"
+              value="overview"
               @click="activeTab = 'overview'"
             >
               <SvgIcon
@@ -299,11 +303,10 @@
                 aria-hidden="true"
               />
               <span>概览与访问</span>
-            </button>
-            <button
-              type="button"
+            </TabsTrigger>
+            <TabsTrigger
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'terminal' }"
+              value="terminal"
               @click="activeTab = 'terminal'"
             >
               <SvgIcon
@@ -312,11 +315,10 @@
                 aria-hidden="true"
               />
               <span>Web 控制台</span>
-            </button>
-            <button
-              type="button"
+            </TabsTrigger>
+            <TabsTrigger
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'operations' }"
+              value="operations"
               @click="activeTab = 'operations'"
             >
               <SvgIcon
@@ -325,12 +327,11 @@
                 aria-hidden="true"
               />
               <span>异步操作与诊断</span>
-            </button>
-            <button
+            </TabsTrigger>
+            <TabsTrigger
               v-if="!isWorkConnection && !props.teacherMode"
-              type="button"
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'freeze' }"
+              value="freeze"
               @click="activeTab = 'freeze'"
             >
               <SvgIcon
@@ -339,8 +340,8 @@
                 aria-hidden="true"
               />
               <span>实验提交与凭据</span>
-            </button>
-          </nav>
+            </TabsTrigger>
+          </TabsList>
 
           <AsyncStateView
             :state="env.instance"
@@ -348,8 +349,8 @@
           >
             <template #success="{ data }">
               <!-- TAB 1: Overview & Endpoints -->
-              <div
-                v-show="activeTab === 'overview'"
+              <TabsContent
+                value="overview"
                 class="tab-pane"
               >
                 <div class="env-card md-card">
@@ -567,11 +568,11 @@
                     </template>
                   </AsyncStateView>
                 </div>
-              </div>
+              </TabsContent>
 
               <!-- TAB 2: Web Terminal -->
-              <div
-                v-show="activeTab === 'terminal'"
+              <TabsContent
+                value="terminal"
                 class="tab-pane"
               >
                 <div
@@ -694,11 +695,11 @@
                     {{ accessGrantBlockReason(data) }}
                   </p>
                 </div>
-              </div>
+              </TabsContent>
 
               <!-- TAB 3: Operations & Timeline -->
-              <div
-                v-show="activeTab === 'operations'"
+              <TabsContent
+                value="operations"
                 class="tab-pane"
               >
                 <div
@@ -806,12 +807,12 @@
                     </div>
                   </template>
                 </AsyncStateView>
-              </div>
+              </TabsContent>
 
               <!-- TAB 4: Freeze & Submission -->
-              <div
+              <TabsContent
                 v-if="!isWorkConnection && !props.teacherMode"
-                v-show="activeTab === 'freeze'"
+                value="freeze"
                 class="tab-pane"
               >
                 <div class="freeze-section md-card">
@@ -990,6 +991,32 @@
                     />
                   </div>
 
+                  <section
+                    v-if="latestSubmission && latestSubmission.environmentId === data.id"
+                    class="submission-tracking"
+                    aria-labelledby="submission-tracking-heading"
+                    data-testid="submission-tracking"
+                  >
+                    <div class="submission-tracking__head">
+                      <h5 id="submission-tracking-heading">
+                        最近一次提交
+                      </h5>
+                      <RouterLink
+                        class="submission-tracking__link"
+                        :to="{ path: '/student/results', query: { projectId: data.projectId, submissionId: latestSubmission.submissionId } }"
+                      >
+                        {{ latestResult ? '查看评测详情' : '在评测结果中查看' }}
+                      </RouterLink>
+                    </div>
+                    <p
+                      class="submission-tracking__summary"
+                      role="status"
+                    >
+                      {{ latestResult ? evaluationOutcome(latestResult).summary : '提交已保存，正在等待评测结果。页面会自动更新，离开后回到这里或“评测结果”页也能看到这次提交。' }}
+                    </p>
+                    <SubmissionProgress :stages="latestStages" />
+                  </section>
+
                   <div
                     v-if="freezeEvidenceFor(data)"
                     class="evidence-card"
@@ -1019,9 +1046,10 @@
                     </p>
                   </div>
                 </div>
-              </div>
+              </TabsContent>
             </template>
           </AsyncStateView>
+          </TabsRoot>
         </div>
       </template>
     </section>
@@ -1048,6 +1076,12 @@ import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
 import { useProjects } from '@/composables/useProjects'
 import { freezeSubmission, getFrozenSubmission, retryEnvironment } from '@/generated/contracts'
+import { TabsContent, TabsList, TabsRoot, TabsTrigger } from 'reka-ui'
+import SubmissionProgress from '@/components/evaluation/SubmissionProgress.vue'
+import { useEvaluationResults } from '@/composables/useEvaluationResults'
+import { readTrackedSubmissions, rememberSubmission, useSubmissionDirectory } from '@/composables/useSubmissionDirectory'
+import { useVisiblePolling } from '@/composables/useVisiblePolling'
+import { evaluationOutcome, submissionStages } from '@/utils/evaluationOutcome'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConsolePanel from '@/components/console/ConsolePanel.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
@@ -1192,6 +1226,37 @@ const frozenSubmission = ref<{
   contentSha256: string
   frozenAt: string
 } | null>(null)
+// Submission progress: only identifiers are remembered; every stage comes from the server.
+const trackedVersion = ref(0)
+const instanceProjectId = computed(() => env.instance.kind === 'success' ? env.instance.data.projectId : undefined)
+const instanceEnvironmentId = computed(() => env.instance.kind === 'success' ? env.instance.data.id : undefined)
+const latestSubmission = computed(() => {
+  void trackedVersion.value
+  const project = instanceProjectId.value
+  const environmentId = instanceEnvironmentId.value
+  if (!project || !environmentId || props.teacherMode) return null
+  return readTrackedSubmissions(project).find((item) => item.environmentId === environmentId) ?? null
+})
+const trackingProjectId = computed(() => latestSubmission.value ? instanceProjectId.value : undefined)
+const submissionResults = useEvaluationResults(trackingProjectId)
+const submissionDirectory = useSubmissionDirectory(trackingProjectId)
+const latestResult = computed(() => {
+  const submission = latestSubmission.value
+  if (!submission || submissionResults.results.kind !== 'success') return null
+  return submissionResults.results.data.find((item) => item.frozenSubmissionId === submission.submissionId) ?? null
+})
+const latestStages = computed(() => {
+  const submission = latestSubmission.value
+  if (!submission) return []
+  const record = submissionDirectory.records[submission.submissionId]
+  return submissionStages({ frozenAt: record?.kind === 'ready' ? record.frozenAt : submission.submittedAt, result: latestResult.value }, formatTimestamp)
+})
+watch(latestSubmission, (submission) => { if (submission) void submissionDirectory.resolve([submission.submissionId]) })
+useVisiblePolling(
+  () => submissionResults.refresh(),
+  computed(() => Boolean(latestSubmission.value) && !latestResult.value && submissionResults.results.kind !== 'error'),
+)
+
 const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
 const retryingEnvironment = ref(false)
 const freezeConfirmVisible = ref(false)
@@ -1766,6 +1831,8 @@ async function freeze(data: EnvironmentInstanceSchema) {
     contentSha256: frozenContentSha256 ?? '',
     frozenAt: frozenAt ?? '',
   }
+  rememberSubmission(data.projectId, { submissionId, environmentId: data.id, submittedAt: frozenAt || new Date().toISOString() })
+  trackedVersion.value += 1
   if (freezeAccepted.value?.operationId === result.data.operationId) {
     freezeAccepted.value.state = 'succeeded'
   }
@@ -2113,12 +2180,12 @@ async function revokeAccessGrant() {
   color: var(--md-sys-color-on-surface);
 }
 
-.detail-tab--active {
+.detail-tab[data-state='active'] {
   color: var(--md-sys-color-primary);
   font-weight: 600;
 }
 
-.detail-tab--active::after {
+.detail-tab[data-state='active']::after {
   content: '';
   position: absolute;
   bottom: -1px;
@@ -2134,6 +2201,51 @@ async function revokeAccessGrant() {
   flex-direction: column;
   gap: 20px;
   padding: 8px 0;
+}
+
+/* Inactive panels stay mounted (the console session must survive) but hidden. */
+.tab-pane[hidden] {
+  display: none;
+}
+
+.detail-tab:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -2px;
+  border-radius: var(--md-sys-shape-small);
+}
+
+.submission-tracking {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+}
+
+.submission-tracking__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.submission-tracking__head h5 {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-small);
+}
+
+.submission-tracking__summary {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-body-medium);
+}
+
+.submission-tracking__link {
+  color: var(--md-sys-color-primary);
+  font: var(--md-sys-label-large);
 }
 
 .env-meta-grid {

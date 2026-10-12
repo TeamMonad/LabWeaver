@@ -13,6 +13,7 @@ const paths = [
   '/student/environments',
   '/student/ssh-keys',
   '/student/results',
+  '/student/results/:runId',
   '/researcher/workspaces',
   '/researcher/environments',
   '/researcher/software',
