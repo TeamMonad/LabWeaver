@@ -14,8 +14,11 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
+#[path = "support/platform_configuration_common.rs"]
+mod configuration_common;
 #[path = "support/platform_configuration_http.rs"]
 mod http_fixture;
+use configuration_common::ciphertext;
 mod support;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -80,44 +83,6 @@ async fn begin(
         now()?,
     )
     .await?)
-}
-
-fn ciphertext() -> TestResult<Vec<u8>> {
-    let directory = tempfile::tempdir()?;
-    let identity = directory.path().join("synthetic-identity");
-    let plaintext = directory.path().join("synthetic-plaintext");
-    let archive = directory.path().join("synthetic.age");
-    let generate = std::process::Command::new("age-keygen")
-        .arg("-o")
-        .arg(&identity)
-        .output()?;
-    if !generate.status.success() {
-        return Err("synthetic age key generation failed".into());
-    }
-    let recipient = std::process::Command::new("age-keygen")
-        .arg("-y")
-        .arg(&identity)
-        .output()?;
-    if !recipient.status.success() {
-        return Err("synthetic age recipient failed".into());
-    }
-    std::fs::write(&plaintext, b"synthetic-only-configuration-and-secret")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&plaintext, std::fs::Permissions::from_mode(0o600))?;
-    }
-    let encrypted = std::process::Command::new("age")
-        .arg("-r")
-        .arg(String::from_utf8(recipient.stdout)?.trim())
-        .arg("-o")
-        .arg(&archive)
-        .arg(&plaintext)
-        .output()?;
-    if !encrypted.status.success() {
-        return Err("synthetic age encryption failed".into());
-    }
-    Ok(std::fs::read(archive)?)
 }
 
 /// Run explicitly with the Web dependencies and a Playwright Chromium installed.
