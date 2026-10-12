@@ -13,10 +13,19 @@ pub fn authorize_project_action(
     project_id: contracts::ProjectId,
     action: ObjectAction,
 ) -> Result<AuthorizationDecision, AuthorizationError> {
+    authorize_project_action_with_admin_policy(context, project_id, action, true)
+}
+
+fn authorize_project_action_with_admin_policy(
+    context: &AuthorizationContext,
+    project_id: contracts::ProjectId,
+    action: ObjectAction,
+    allow_global_admin: bool,
+) -> Result<AuthorizationDecision, AuthorizationError> {
     if context.actor.roles.is_empty() || context.actor.expires_at.get() <= context.now {
         return Err(AuthorizationError::IdentityExpired);
     }
-    let admin = context.actor.roles.contains(&PlatformRole::PlatformAdmin);
+    let admin = allow_global_admin && context.actor.roles.contains(&PlatformRole::PlatformAdmin);
     let (revision, valid_until) = if admin {
         (
             Revision::new(1).map_err(|_| AuthorizationError::RoleDenied)?,
@@ -71,7 +80,14 @@ pub fn authorize_operation(
         {
             return Err(AuthorizationError::RoleDenied);
         }
-        return authorize_project_action(context, project_id, action);
+        return authorize_project_action_with_admin_policy(
+            context,
+            project_id,
+            action,
+            operation
+                .allowed_roles
+                .contains(&PlatformRole::PlatformAdmin),
+        );
     }
     crate::authorize(
         context,
