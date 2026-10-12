@@ -26,6 +26,9 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmissionFreezeCommand {
+    /// Internal dispatch provenance, persisted before any Kubernetes write.
+    #[serde(default)]
+    pub worker_dispatch: crate::FreezeWorkerDispatch,
     pub frozen_submission_id: FrozenSubmissionId,
     pub operation_id: OperationId,
     /// Project scope carried into the immutable event context. Course is an optional teaching
@@ -44,6 +47,9 @@ pub struct SubmissionFreezeCommand {
 
 impl SubmissionFreezeCommand {
     pub fn validate(&self) -> Result<(), FreezeCommandStoreError> {
+        if !self.worker_dispatch.valid() {
+            return Err(FreezeCommandStoreError::ContractInvalid);
+        }
         self.manifest
             .validate()
             .map_err(|_| FreezeCommandStoreError::ContractInvalid)?;
@@ -174,8 +180,16 @@ impl PgFreezeCommandStore {
             return Ok(None);
         };
         let frozen_submission_id: uuid::Uuid = row.try_get("frozen_submission_id")?;
-        let command: SubmissionFreezeCommand = serde_json::from_value(row.try_get("contract")?)?;
+        let mut command: SubmissionFreezeCommand =
+            serde_json::from_value(row.try_get("contract")?)?;
         command.validate()?;
+        if matches!(
+            command.worker_dispatch,
+            crate::FreezeWorkerDispatch::Bound { .. }
+        ) {
+            return Err(FreezeCommandStoreError::DatabaseIdentityInvalid);
+        }
+        command.worker_dispatch = crate::FreezeWorkerDispatch::Pending;
         if command.frozen_submission_id.as_uuid() != frozen_submission_id {
             return Err(FreezeCommandStoreError::DatabaseIdentityInvalid);
         }
@@ -184,11 +198,12 @@ impl PgFreezeCommandStore {
             &frozen_submission_id.simple().to_string()[..20]
         );
         let updated = sqlx::query(
-            "UPDATE evaluation.submission_freeze_commands SET state='running',job_name=$2,updated_at=clock_timestamp() \
+            "UPDATE evaluation.submission_freeze_commands SET state='running',job_name=$2,contract=$3,updated_at=clock_timestamp() \
              WHERE frozen_submission_id=$1 AND state='queued'",
         )
         .bind(frozen_submission_id)
         .bind(job_name)
+        .bind(serde_json::to_value(&command)?)
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
@@ -196,6 +211,76 @@ impl PgFreezeCommandStore {
         }
         transaction.commit().await?;
         Ok(Some(command))
+    }
+
+    /// Atomically fixes dispatch provenance from an authenticated binding on the existing ledger.
+    /// A restarted coordinator cannot silently move a command or change its resource profile.
+    pub async fn bind_worker_dispatch(
+        &self,
+        command: &SubmissionFreezeCommand,
+        dispatch: &crate::FreezeWorkerDispatch,
+    ) -> Result<SubmissionFreezeCommand, FreezeCommandStoreError> {
+        if !dispatch.valid() || !matches!(dispatch, crate::FreezeWorkerDispatch::Bound { .. }) {
+            return Err(FreezeCommandStoreError::ContractInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT contract FROM evaluation.submission_freeze_commands \
+             WHERE frozen_submission_id=$1 AND state IN ('running','failed') FOR UPDATE",
+        )
+        .bind(command.frozen_submission_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(FreezeCommandStoreError::FenceConflict)?;
+        let mut stored: SubmissionFreezeCommand = serde_json::from_value(row.try_get("contract")?)?;
+        stored.validate()?;
+        let mut expected = command.clone();
+        expected.worker_dispatch = crate::FreezeWorkerDispatch::Untracked;
+        let previous = std::mem::replace(
+            &mut stored.worker_dispatch,
+            crate::FreezeWorkerDispatch::Untracked,
+        );
+        if stored != expected {
+            return Err(FreezeCommandStoreError::DatabaseIdentityInvalid);
+        }
+        if matches!(previous, crate::FreezeWorkerDispatch::Bound { .. }) && previous != *dispatch {
+            return Err(FreezeCommandStoreError::FenceConflict);
+        }
+        stored.worker_dispatch = dispatch.clone();
+        sqlx::query(
+            "UPDATE evaluation.submission_freeze_commands SET contract=$2,updated_at=clock_timestamp() \
+             WHERE frozen_submission_id=$1",
+        )
+        .bind(command.frozen_submission_id.as_uuid())
+        .bind(serde_json::to_value(&stored)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(stored)
+    }
+
+    /// Refreshes dispatch after provider I/O so cleanup cannot use an older Pending snapshot.
+    pub async fn refresh_worker_dispatch(
+        &self,
+        command: &SubmissionFreezeCommand,
+    ) -> Result<SubmissionFreezeCommand, FreezeCommandStoreError> {
+        let contract: serde_json::Value = sqlx::query_scalar(
+            "SELECT contract FROM evaluation.submission_freeze_commands WHERE frozen_submission_id=$1",
+        )
+        .bind(command.frozen_submission_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(FreezeCommandStoreError::FenceConflict)?;
+        let stored: SubmissionFreezeCommand = serde_json::from_value(contract)?;
+        stored.validate()?;
+        let mut expected = command.clone();
+        let mut actual = stored.clone();
+        expected.worker_dispatch = crate::FreezeWorkerDispatch::Untracked;
+        actual.worker_dispatch = crate::FreezeWorkerDispatch::Untracked;
+        if expected != actual {
+            return Err(FreezeCommandStoreError::DatabaseIdentityInvalid);
+        }
+        Ok(stored)
     }
 
     /// Loads running commands so a restarted coordinator resumes observation and cleanup.
@@ -362,6 +447,9 @@ impl PgFreezeCommandStore {
         command: &SubmissionFreezeCommand,
     ) -> Result<FreezeCommandAccept, FreezeCommandStoreError> {
         command.validate()?;
+        if command.worker_dispatch != crate::FreezeWorkerDispatch::Pending {
+            return Err(FreezeCommandStoreError::ContractInvalid);
+        }
         let request_sha256 = request_hash(command)?;
         let manifest_sha256 = Sha256Digest::of_canonical(&command.manifest)
             .map_err(|_| FreezeCommandStoreError::ContractInvalid)?;

@@ -31,11 +31,84 @@ use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
 #[tokio::test]
+async fn worker_dispatch_is_fenced_on_the_existing_command_ledger()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(0).await?;
+    let store = PgFreezeCommandStore::new(fixture.pool.clone());
+    let command = SubmissionFreezeCommand {
+        worker_dispatch: evaluation_service::FreezeWorkerDispatch::Pending,
+        frozen_submission_id: fixture.request.frozen_submission_id,
+        operation_id: contracts::OperationId::new(),
+        project_id: fixture.request.project_id,
+        course_id: fixture.request.course_id,
+        environment_id: fixture.request.environment.environment_id,
+        actor_id: fixture.request.actor_id,
+        environment_revision: fixture.request.environment.environment_revision,
+        manifest_revision: fixture.request.manifest_revision,
+        manifest: fixture.request.manifest.clone(),
+        idempotency_key: "dispatch-ledger".to_owned(),
+        trace_id: "dispatch-ledger".to_owned(),
+        requested_at: store.authority_now().await?,
+    };
+    store.accept(&command).await?;
+    store.claim_next().await?.ok_or("queued command missing")?;
+    let dispatch = evaluation_service::FreezeWorkerDispatch::Bound {
+        namespace: "synthetic-workspace".to_owned(),
+        profile: evaluation_service::FreezeWorkerProfile::Managed,
+    };
+    let bound = store.bind_worker_dispatch(&command, &dispatch).await?;
+    assert_eq!(
+        store.bind_worker_dispatch(&command, &dispatch).await?,
+        bound
+    );
+    assert_eq!(store.refresh_worker_dispatch(&command).await?, bound);
+    assert_eq!(store.running(32).await?, vec![bound.clone()]);
+    let moved = evaluation_service::FreezeWorkerDispatch::Bound {
+        namespace: "another-workspace".to_owned(),
+        profile: evaluation_service::FreezeWorkerProfile::Managed,
+    };
+    assert!(matches!(
+        store.bind_worker_dispatch(&command, &moved).await,
+        Err(evaluation_service::FreezeCommandStoreError::FenceConflict)
+    ));
+    let mut wrong_owner = command.clone();
+    wrong_owner.actor_id = ActorId::new();
+    assert!(matches!(
+        store.bind_worker_dispatch(&wrong_owner, &dispatch).await,
+        Err(evaluation_service::FreezeCommandStoreError::DatabaseIdentityInvalid)
+    ));
+    assert!(
+        store.accept(&bound).await.is_err(),
+        "public acceptance cannot supply dispatch provenance"
+    );
+    let mut retry = command.clone();
+    retry.frozen_submission_id = FrozenSubmissionId::new();
+    retry.operation_id = contracts::OperationId::new();
+    retry.trace_id = "dispatch-ledger-retry".to_owned();
+    let replay = store.accept(&retry).await?;
+    assert!(replay.replay);
+    assert_eq!(replay.frozen_submission_id, command.frozen_submission_id);
+    assert_eq!(store.refresh_worker_dispatch(&command).await?, bound);
+    let mut legacy = serde_json::to_value(&command)?;
+    legacy
+        .as_object_mut()
+        .ok_or("command object")?
+        .remove("workerDispatch");
+    let legacy: SubmissionFreezeCommand = serde_json::from_value(legacy)?;
+    assert_eq!(
+        legacy.worker_dispatch,
+        evaluation_service::FreezeWorkerDispatch::Untracked
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = TestContext::start(0).await?;
     let store = PgFreezeCommandStore::new(fixture.pool.clone());
     let command = SubmissionFreezeCommand {
+        worker_dispatch: evaluation_service::FreezeWorkerDispatch::Pending,
         frozen_submission_id: contracts::FrozenSubmissionId::new(),
         operation_id: contracts::OperationId::new(),
         project_id: fixture.request.project_id,
@@ -146,6 +219,7 @@ async fn durable_outcome_uses_latest_attempt_and_completed_result_wins()
     let command_store = PgFreezeCommandStore::new(fixture.pool.clone());
     let now = freeze_store.authority_now().await?;
     let command = SubmissionFreezeCommand {
+        worker_dispatch: evaluation_service::FreezeWorkerDispatch::Pending,
         frozen_submission_id,
         operation_id: contracts::OperationId::new(),
         project_id: fixture.request.project_id,

@@ -181,6 +181,7 @@ async fn freeze_submission(
     let environment_revision = if_match(&headers)?;
     let idempotency_key = idempotency_key(&headers)?;
     let command = SubmissionFreezeCommand {
+        worker_dispatch: crate::FreezeWorkerDispatch::Pending,
         frozen_submission_id: FrozenSubmissionId::new(),
         operation_id: OperationId::new(),
         project_id,

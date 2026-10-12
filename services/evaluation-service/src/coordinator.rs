@@ -23,15 +23,18 @@ use contracts::{
     },
 };
 use rand::random;
-use reqwest::{Certificate, Client, Method, StatusCode, Url, header::HeaderMap};
+use reqwest::{
+    Certificate, Client, Method, StatusCode, Url,
+    header::{self, HeaderMap},
+};
 use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::authoring_client::{AuthoringAdmissionClient, AuthoringAdmissionClientError};
 use crate::{
-    EvaluationControlStoreError, FreezeCommandDurableOutcome, FreezeRequest,
-    PgEvaluationControlStore, PgFreezeCommandStore, SubmissionFreezeCommand,
+    EvaluationControlStoreError, FreezeCommandDurableOutcome, FreezeRequest, FreezeWorkerDispatch,
+    FreezeWorkerProfile, PgEvaluationControlStore, PgFreezeCommandStore, SubmissionFreezeCommand,
 };
 
 const WORKER_IMAGE_PULL_SECRET_NAME: &str = "harbor-labweaver-system-pull";
@@ -43,6 +46,8 @@ const ENVIRONMENT_FREEZE_SCOPE: &str = "evaluation.environment.freeze";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreezeCoordinatorConfiguration {
+    #[serde(default)]
+    pub worker_profile: FreezeWorkerProfile,
     pub kubernetes_api_server: Url,
     pub kubernetes_bearer_token_file: PathBuf,
     pub kubernetes_ca_file: PathBuf,
@@ -50,14 +55,21 @@ pub struct FreezeCoordinatorConfiguration {
     pub environment_ca_file: PathBuf,
     pub environment_audience: String,
     pub worker_image: String,
+    #[serde(default)]
     pub worker_service_account_name: String,
+    #[serde(default)]
     pub vm_job_namespace: String,
     pub worker_configuration_file: PathBuf,
+    #[serde(default)]
     pub worker_secret_files: BTreeMap<String, PathBuf>,
+    #[serde(default)]
     pub worker_registry_pull_config_file: PathBuf,
     pub worker_tls_ca_file: PathBuf,
+    #[serde(default)]
     pub infrastructure_namespace_labels: BTreeMap<String, String>,
+    #[serde(default)]
     pub dns_namespace_labels: BTreeMap<String, String>,
+    #[serde(default)]
     pub dns_pod_labels: BTreeMap<String, String>,
     pub retention_policy_id: PolicyId,
     pub retention_policy_revision: Revision,
@@ -128,16 +140,20 @@ impl FreezeCoordinator {
         let worker_configuration = read_bound_text(&configuration.worker_configuration_file)?;
         serde_yaml::from_str::<Value>(&worker_configuration)
             .map_err(|_| FreezeCoordinatorError::ConfigurationInvalid)?;
-        let worker_secrets = configuration
-            .worker_secret_files
-            .iter()
-            .map(|(name, path)| {
-                validate_key(name)?;
-                Ok((name.clone(), read_bound_file(path)?))
-            })
-            .collect::<Result<_, FreezeCoordinatorError>>()?;
-        let worker_registry_pull_config =
-            read_registry_pull_config(&configuration.worker_registry_pull_config_file)?;
+        let (worker_secrets, worker_registry_pull_config) = match &configuration.worker_profile {
+            FreezeWorkerProfile::Managed => (
+                configuration
+                    .worker_secret_files
+                    .iter()
+                    .map(|(name, path)| {
+                        validate_key(name)?;
+                        Ok((name.clone(), read_bound_file(path)?))
+                    })
+                    .collect::<Result<_, FreezeCoordinatorError>>()?,
+                read_registry_pull_config(&configuration.worker_registry_pull_config_file)?,
+            ),
+            FreezeWorkerProfile::Existing { .. } => (BTreeMap::new(), Vec::new()),
+        };
         Ok(Self {
             configuration,
             store,
@@ -283,20 +299,30 @@ impl FreezeCoordinator {
         &self,
         command: &SubmissionFreezeCommand,
     ) -> Result<bool, FreezeCoordinatorError> {
-        let job_name = job_name(command);
-        let container_namespace = format!("lw-env-{}", command.environment_id);
-        for namespace in [&container_namespace, &self.configuration.vm_job_namespace] {
-            if !self.cleanup(namespace, &job_name).await? {
-                tracing::warn!(
-                    event = "evaluation.freeze.cleanup.pending",
-                    frozen_submission_id = %command.frozen_submission_id,
-                    environment_id = %command.environment_id,
-                    namespace,
-                );
-                return Ok(false);
+        let refreshed = self.store.refresh_worker_dispatch(command).await?;
+        let command = &refreshed;
+        let bound = match &command.worker_dispatch {
+            FreezeWorkerDispatch::Pending => return Ok(true),
+            FreezeWorkerDispatch::Bound { .. } => command.clone(),
+            FreezeWorkerDispatch::Untracked => {
+                // Legacy residue requires a real binding. Never guess its former namespace.
+                let namespace = self.job_namespace(command).await?;
+                self.store
+                    .bind_worker_dispatch(
+                        command,
+                        &FreezeWorkerDispatch::Bound {
+                            namespace,
+                            profile: FreezeWorkerProfile::Managed,
+                        },
+                    )
+                    .await?
             }
-        }
-        Ok(true)
+        };
+        let FreezeWorkerDispatch::Bound { namespace, profile } = &bound.worker_dispatch else {
+            return Err(FreezeCoordinatorError::BindingInvalid);
+        };
+        self.cleanup(namespace, &job_name(command), &bound, profile)
+            .await
     }
 
     async fn recover_completed_command(
@@ -331,10 +357,29 @@ impl FreezeCoordinator {
                 .await?;
             return Ok(());
         }
+        let bound = match &command.worker_dispatch {
+            FreezeWorkerDispatch::Bound { .. } => command.clone(),
+            FreezeWorkerDispatch::Pending | FreezeWorkerDispatch::Untracked => {
+                let namespace = self.job_namespace(command).await?;
+                self.store
+                    .bind_worker_dispatch(
+                        command,
+                        &FreezeWorkerDispatch::Bound {
+                            namespace,
+                            profile: self.configuration.worker_profile.clone(),
+                        },
+                    )
+                    .await?
+            }
+        };
+        let command = &bound;
+        let FreezeWorkerDispatch::Bound { namespace, profile } = &command.worker_dispatch else {
+            return Err(FreezeCoordinatorError::BindingInvalid);
+        };
         let job_name = job_name(command);
-        let namespace = self.job_namespace(command).await?;
-        let job = self.get(&namespace, "batch/v1", "jobs", &job_name).await?;
+        let job = self.get(namespace, "batch/v1", "jobs", &job_name).await?;
         if let Some(job) = job {
+            verify_owned(&job, command)?;
             let succeeded = job.pointer("/status/succeeded").and_then(Value::as_u64) == Some(1);
             let failed = job
                 .pointer("/status/failed")
@@ -342,7 +387,7 @@ impl FreezeCoordinator {
                 .unwrap_or(0)
                 > 0;
             let worker_diagnostic = if failed {
-                self.worker_failure_diagnostic(&namespace, command).await?
+                self.worker_failure_diagnostic(namespace, command).await?
             } else {
                 None
             };
@@ -362,7 +407,7 @@ impl FreezeCoordinator {
                 self.cleanup_failed_command(command).await?;
                 return Ok(());
             }
-            if succeeded && self.cleanup(&namespace, &job_name).await? {
+            if succeeded && self.cleanup(namespace, &job_name, command, profile).await? {
                 // The worker persists the immutable result before exiting. A
                 // Job can still be observed as failed after that durable write
                 // (for example when the kubelet reports a terminal transition
@@ -379,7 +424,7 @@ impl FreezeCoordinator {
             }
             return Ok(());
         }
-        self.create_resources(command, &namespace, &job_name).await
+        self.create_resources(command, namespace, &job_name).await
     }
 
     async fn worker_failure_diagnostic(
@@ -416,12 +461,31 @@ impl FreezeCoordinator {
         let binding = self
             .binding(command, Some(probe_key.public_key().to_openssh()?))
             .await?;
-        Ok(match binding.source {
+        if binding.environment.environment_id != command.environment_id
+            || binding.environment.environment_revision != command.environment_revision
+        {
+            return Err(FreezeCoordinatorError::BindingInvalid);
+        }
+        let namespace = match binding.source {
             EnvironmentFreezeSourceBinding::Container { namespace, .. } => namespace,
             EnvironmentFreezeSourceBinding::VirtualMachine { .. } => {
+                if !matches!(
+                    self.configuration.worker_profile,
+                    FreezeWorkerProfile::Managed
+                ) {
+                    return Err(FreezeCoordinatorError::BindingInvalid);
+                }
                 self.configuration.vm_job_namespace.clone()
             }
-        })
+        };
+        if !self
+            .configuration
+            .worker_profile
+            .accepts_namespace(&namespace)
+        {
+            return Err(FreezeCoordinatorError::BindingInvalid);
+        }
+        Ok(namespace)
     }
 
     #[allow(
@@ -435,8 +499,22 @@ impl FreezeCoordinator {
         job_name: &str,
     ) -> Result<(), FreezeCoordinatorError> {
         let existing_config = self.get(namespace, "v1", "configmaps", job_name).await?;
-        let existing_secret = self.get(namespace, "v1", "secrets", job_name).await?;
+        let profile = match &command.worker_dispatch {
+            FreezeWorkerDispatch::Bound {
+                namespace: bound_namespace,
+                profile,
+            } if bound_namespace == namespace => profile,
+            _ => &self.configuration.worker_profile,
+        };
+        let existing_secret = match profile {
+            FreezeWorkerProfile::Managed => self.get(namespace, "v1", "secrets", job_name).await?,
+            FreezeWorkerProfile::Existing { .. } => None,
+        };
         let existing_bundle = match (existing_config.as_ref(), existing_secret.as_ref()) {
+            (Some(config), None) if matches!(profile, FreezeWorkerProfile::Existing { .. }) => {
+                verify_owned(config, command)?;
+                true
+            }
             (Some(config), Some(secret)) => {
                 verify_owned(config, command)?;
                 verify_owned(secret, command)?;
@@ -444,7 +522,7 @@ impl FreezeCoordinator {
             }
             (None, None) => false,
             _ => {
-                let _ = self.cleanup(namespace, job_name).await?;
+                let _ = self.cleanup(namespace, job_name, command, profile).await?;
                 return Ok(());
             }
         };
@@ -593,6 +671,25 @@ impl FreezeCoordinator {
         };
         let command_document = serde_json::to_string(&json!({"request":request,"source":source}))?;
         let labels = resource_labels(command);
+        if !matches!(&command.worker_dispatch, FreezeWorkerDispatch::Bound {
+            namespace: bound_namespace, profile: bound_profile
+        } if bound_namespace == namespace && bound_profile == profile)
+        {
+            return Err(FreezeCoordinatorError::BindingInvalid);
+        }
+        if matches!(profile, FreezeWorkerProfile::Existing { .. }) {
+            let volume = volume.ok_or(FreezeCoordinatorError::BindingInvalid)?;
+            return self
+                .create_existing_resources(
+                    command,
+                    namespace,
+                    job_name,
+                    &command_document,
+                    volume,
+                    profile,
+                )
+                .await;
+        }
         if !existing_bundle {
             self.apply(
                 namespace,
@@ -694,22 +791,213 @@ impl FreezeCoordinator {
             volumes.push(volume);
             mounts.push(json!({"name":"workspace","mountPath":"/workspace","readOnly":true}));
         }
-        let job = json!({
+        let job = self.worker_job(command, namespace, job_name, &volumes, &mounts, profile);
+        self.apply(namespace, "batch/v1", "jobs", job_name, job)
+            .await
+    }
+
+    fn worker_job(
+        &self,
+        command: &SubmissionFreezeCommand,
+        namespace: &str,
+        job_name: &str,
+        volumes: &[Value],
+        mounts: &[Value],
+        profile: &FreezeWorkerProfile,
+    ) -> Value {
+        let labels = resource_labels(command);
+        let (service_account, pull_policy) = match profile {
+            FreezeWorkerProfile::Managed => (
+                self.configuration.worker_service_account_name.as_str(),
+                "IfNotPresent",
+            ),
+            FreezeWorkerProfile::Existing {
+                service_account_name,
+                ..
+            } => (service_account_name.as_str(), "Never"),
+        };
+        let mut job = json!({
             "apiVersion":"batch/v1","kind":"Job","metadata":{"name":job_name,"namespace":namespace,"labels":labels},
             "spec":{"backoffLimit":0,"activeDeadlineSeconds":self.configuration.job_active_deadline_seconds,
-                "template":{"metadata":{"labels":labels},"spec":{"restartPolicy":"Never","serviceAccountName":self.configuration.worker_service_account_name,
+                "template":{"metadata":{"labels":labels},"spec":{"restartPolicy":"Never","serviceAccountName":service_account,
                     "automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"fsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},
-                    "containers":[{"name":"freeze","image":self.configuration.worker_image,"imagePullPolicy":"IfNotPresent",
+                    "containers":[{"name":"freeze","image":self.configuration.worker_image,"imagePullPolicy":pull_policy,
                         "args":["--mode","freeze-worker"],"env":[
                             {"name":"LABWEAVER_EVALUATION_CONFIG_FILE","value":"/etc/labweaver/worker/worker.yaml"},
                             {"name":"LABWEAVER_FREEZE_COMMAND_FILE","value":"/etc/labweaver/worker/command.json"},
                             {"name":"SSL_CERT_FILE","value":self.configuration.worker_tls_ca_file}],
                         "terminationMessagePath":"/dev/termination-log","terminationMessagePolicy":"File",
                         "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},
-                        "resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"1","memory":"1Gi"}},"volumeMounts":mounts}],"volumes":volumes}}}
+                        "resources":profile.resources().document(),"volumeMounts":mounts}],"volumes":volumes}}}
         });
-        self.apply(namespace, "batch/v1", "jobs", job_name, job)
+        if let FreezeWorkerProfile::Existing {
+            node_name: Some(node),
+            ..
+        } = profile
+        {
+            job["spec"]["template"]["spec"]["nodeSelector"] =
+                json!({"kubernetes.io/hostname":node});
+        }
+        job
+    }
+
+    async fn create_existing_resources(
+        &self,
+        command: &SubmissionFreezeCommand,
+        namespace: &str,
+        job_name: &str,
+        command_document: &str,
+        workspace_volume: Value,
+        profile: &FreezeWorkerProfile,
+    ) -> Result<(), FreezeCoordinatorError> {
+        self.verify_existing_resources(command, namespace, profile)
+            .await?;
+        let FreezeWorkerProfile::Existing { secret_name, .. } = profile else {
+            return Err(FreezeCoordinatorError::ConfigurationInvalid);
+        };
+        let labels = resource_labels(command);
+        let config = json!({"apiVersion":"v1","kind":"ConfigMap",
+            "metadata":{"name":job_name,"namespace":namespace,"labels":labels},"immutable":true,
+            "data":{"worker.yaml":self.worker_configuration,"command.json":command_document}});
+        self.create_owned(namespace, "v1", "configmaps", job_name, config, command)
+            .await?;
+        let volumes = vec![
+            json!({"name":"command","configMap":{"name":job_name}}),
+            json!({"name":"secrets","secret":{"secretName":secret_name,"defaultMode":292}}),
+            workspace_volume,
+        ];
+        let mounts = vec![
+            json!({"name":"command","mountPath":"/etc/labweaver/worker","readOnly":true}),
+            json!({"name":"secrets","mountPath":"/etc/labweaver/secrets","readOnly":true}),
+            json!({"name":"workspace","mountPath":"/workspace","readOnly":true}),
+        ];
+        let job = self.worker_job(command, namespace, job_name, &volumes, &mounts, profile);
+        self.create_owned(namespace, "batch/v1", "jobs", job_name, job, command)
             .await
+    }
+
+    async fn verify_existing_resources(
+        &self,
+        command: &SubmissionFreezeCommand,
+        namespace: &str,
+        profile: &FreezeWorkerProfile,
+    ) -> Result<(), FreezeCoordinatorError> {
+        let FreezeWorkerProfile::Existing {
+            secret_name,
+            service_account_name,
+            network_policy_names,
+            resource_quota_names,
+            resources,
+            ..
+        } = profile
+        else {
+            return Err(FreezeCoordinatorError::ConfigurationInvalid);
+        };
+        if !profile.accepts_namespace(namespace) {
+            return Err(FreezeCoordinatorError::BindingInvalid);
+        }
+        // Request only Secret metadata; never negotiate a fallback to its data representation.
+        let response = self
+            .authorized(self.kubernetes.get(self.resource_url(
+                namespace,
+                "v1",
+                "secrets",
+                secret_name,
+            )?))
+            .header(
+                header::ACCEPT,
+                "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1",
+            )
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable);
+        }
+        let secret: Value = response.json().await?;
+        if secret.get("kind").and_then(Value::as_str) != Some("PartialObjectMetadata")
+            || secret.get("data").is_some()
+            || secret.get("stringData").is_some()
+        {
+            return Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable);
+        }
+        verify_existing_reference(&secret, namespace, secret_name)?;
+        let account = self
+            .get(namespace, "v1", "serviceaccounts", service_account_name)
+            .await?
+            .ok_or(FreezeCoordinatorError::ProfilePrerequisiteUnavailable)?;
+        verify_existing_reference(&account, namespace, service_account_name)?;
+        let labels = resource_labels(command);
+        let mut isolated_ingress = false;
+        let mut isolated_egress = false;
+        for name in network_policy_names {
+            let policy = self
+                .get(namespace, "networking.k8s.io/v1", "networkpolicies", name)
+                .await?
+                .ok_or(FreezeCoordinatorError::ProfilePrerequisiteUnavailable)?;
+            verify_existing_reference(&policy, namespace, name)?;
+            let (ingress, egress) = crate::freeze_profile::selected_policy_types(&policy, &labels)
+                .ok_or(FreezeCoordinatorError::ProfilePrerequisiteUnavailable)?;
+            if ingress
+                && policy
+                    .pointer("/spec/ingress")
+                    .is_some_and(|rules| rules.as_array().is_none_or(|rules| !rules.is_empty()))
+            {
+                return Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable);
+            }
+            isolated_ingress |= ingress;
+            isolated_egress |= egress;
+        }
+        if !isolated_ingress || !isolated_egress {
+            return Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable);
+        }
+        for name in resource_quota_names {
+            let quota = self
+                .get(namespace, "v1", "resourcequotas", name)
+                .await?
+                .ok_or(FreezeCoordinatorError::QuotaUnavailable)?;
+            verify_existing_reference(&quota, namespace, name)?;
+            match crate::freeze_profile::check_quota(&quota, resources) {
+                crate::freeze_profile::QuotaCheck::Fits => {}
+                crate::freeze_profile::QuotaCheck::Full => {
+                    return Err(FreezeCoordinatorError::QuotaExceeded);
+                }
+                crate::freeze_profile::QuotaCheck::Unavailable => {
+                    return Err(FreezeCoordinatorError::QuotaUnavailable);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn create_owned(
+        &self,
+        namespace: &str,
+        api_version: &str,
+        plural: &str,
+        name: &str,
+        document: Value,
+        command: &SubmissionFreezeCommand,
+    ) -> Result<(), FreezeCoordinatorError> {
+        let response = self
+            .authorized(self.kubernetes.post(self.collection_url(
+                namespace,
+                api_version,
+                plural,
+            )?))
+            .json(&document)
+            .send()
+            .await?;
+        if response.status() == StatusCode::CONFLICT {
+            let existing = self
+                .get(namespace, api_version, plural, name)
+                .await?
+                .ok_or(FreezeCoordinatorError::KubernetesRejected)?;
+            return verify_owned(&existing, command);
+        }
+        if !response.status().is_success() {
+            return Err(FreezeCoordinatorError::KubernetesRejected);
+        }
+        Ok(())
     }
 
     async fn binding(
@@ -810,13 +1098,38 @@ impl FreezeCoordinator {
         }
     }
 
-    async fn cleanup(&self, namespace: &str, name: &str) -> Result<bool, FreezeCoordinatorError> {
-        for (api_version, plural) in [
+    async fn cleanup(
+        &self,
+        namespace: &str,
+        name: &str,
+        command: &SubmissionFreezeCommand,
+        profile: &FreezeWorkerProfile,
+    ) -> Result<bool, FreezeCoordinatorError> {
+        let owned_kinds = [
             ("batch/v1", "jobs"),
             ("v1", "configmaps"),
             ("v1", "secrets"),
             ("networking.k8s.io/v1", "networkpolicies"),
-        ] {
+        ];
+        let owned_kinds = match profile {
+            FreezeWorkerProfile::Managed => owned_kinds.as_slice(),
+            FreezeWorkerProfile::Existing { .. } => &owned_kinds[..2],
+        };
+        let mut pending = false;
+        for &(api_version, plural) in owned_kinds {
+            let Some(resource) = self.get(namespace, api_version, plural, name).await? else {
+                continue;
+            };
+            verify_owned(&resource, command)?;
+            verify_resource_identity(&resource, namespace, name)?;
+            if resource.pointer("/metadata/deletionTimestamp").is_some() {
+                pending = true;
+                continue;
+            }
+            let uid = resource
+                .pointer("/metadata/uid")
+                .and_then(Value::as_str)
+                .ok_or(FreezeCoordinatorError::KubernetesRejected)?;
             let response = self
                 .authorized(self.kubernetes.delete(self.resource_url(
                     namespace,
@@ -824,19 +1137,18 @@ impl FreezeCoordinator {
                     plural,
                     name,
                 )?))
-                .json(&json!({"propagationPolicy":"Foreground"}))
+                .json(&json!({"propagationPolicy":"Foreground","preconditions":{"uid":uid}}))
                 .send()
                 .await?;
+            if response.status() == StatusCode::CONFLICT {
+                pending = true;
+                continue;
+            }
             if !(response.status().is_success() || response.status() == StatusCode::NOT_FOUND) {
                 return Err(FreezeCoordinatorError::KubernetesRejected);
             }
         }
-        for (api_version, plural) in [
-            ("batch/v1", "jobs"),
-            ("v1", "configmaps"),
-            ("v1", "secrets"),
-            ("networking.k8s.io/v1", "networkpolicies"),
-        ] {
+        for &(api_version, plural) in owned_kinds {
             if self
                 .get(namespace, api_version, plural, name)
                 .await?
@@ -848,7 +1160,7 @@ impl FreezeCoordinator {
                 return Ok(false);
             }
         }
-        Ok(true)
+        Ok(!pending)
     }
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -936,7 +1248,21 @@ fn validate_configuration(
         || !(60..=3600).contains(&configuration.job_active_deadline_seconds)
         || !(100..=30_000).contains(&configuration.request_timeout_milliseconds)
         || !(1..=3650).contains(&configuration.retention_days)
-        || configuration.worker_secret_files.is_empty()
+        || !configuration.worker_profile.valid()
+        || !configuration.worker_tls_ca_file.is_absolute()
+    {
+        return Err(FreezeCoordinatorError::ConfigurationInvalid);
+    }
+    if matches!(
+        configuration.worker_profile,
+        FreezeWorkerProfile::Existing { .. }
+    ) {
+        if !configuration.worker_secret_files.is_empty() {
+            return Err(FreezeCoordinatorError::ConfigurationInvalid);
+        }
+        return Ok(());
+    }
+    if configuration.worker_secret_files.is_empty()
         || !configuration.worker_registry_pull_config_file.is_absolute()
         || !configuration.worker_tls_ca_file.is_absolute()
         || !configuration
@@ -959,14 +1285,7 @@ fn validate_configuration(
 }
 
 fn validate_key(value: &str) -> Result<(), FreezeCoordinatorError> {
-    if value.is_empty()
-        || value.len() > 63
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
-        })
-        || value.starts_with(['-', '.'])
-        || value.ends_with(['-', '.'])
-    {
+    if !crate::freeze_profile::valid_name(value) {
         return Err(FreezeCoordinatorError::ConfigurationInvalid);
     }
     Ok(())
@@ -1063,6 +1382,38 @@ fn verify_owned(
     Ok(())
 }
 
+fn verify_existing_reference(
+    resource: &Value,
+    namespace: &str,
+    name: &str,
+) -> Result<(), FreezeCoordinatorError> {
+    verify_resource_identity(resource, namespace, name)?;
+    if resource.pointer("/metadata/deletionTimestamp").is_some() {
+        return Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable);
+    }
+    Ok(())
+}
+
+fn verify_resource_identity(
+    resource: &Value,
+    namespace: &str,
+    name: &str,
+) -> Result<(), FreezeCoordinatorError> {
+    if resource.pointer("/metadata/name").and_then(Value::as_str) != Some(name)
+        || resource
+            .pointer("/metadata/namespace")
+            .and_then(Value::as_str)
+            != Some(namespace)
+        || resource
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable);
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FreezeCoordinatorError {
     #[error("LW_COLLECT_COORDINATOR_CONFIG_INVALID")]
@@ -1077,6 +1428,12 @@ pub enum FreezeCoordinatorError {
     BindingUnavailable,
     #[error("LW_COLLECT_KUBERNETES_REJECTED")]
     KubernetesRejected,
+    #[error("LW_COLLECT_PROFILE_RESOURCE_UNAVAILABLE")]
+    ProfilePrerequisiteUnavailable,
+    #[error("LW_COLLECT_QUOTA_UNAVAILABLE")]
+    QuotaUnavailable,
+    #[error("LW_COLLECT_QUOTA_EXCEEDED")]
+    QuotaExceeded,
     #[error("LW_COLLECT_IO_FAILED")]
     Io(#[from] std::io::Error),
     #[error("LW_COLLECT_HTTP_FAILED")]
@@ -1118,6 +1475,9 @@ impl FreezeCoordinatorError {
             Self::BindingNotEligible => "LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE",
             Self::BindingUnavailable => "LW_COLLECT_BINDING_UNAVAILABLE",
             Self::KubernetesRejected => "LW_COLLECT_KUBERNETES_REJECTED",
+            Self::ProfilePrerequisiteUnavailable => "LW_COLLECT_PROFILE_RESOURCE_UNAVAILABLE",
+            Self::QuotaUnavailable => "LW_COLLECT_QUOTA_UNAVAILABLE",
+            Self::QuotaExceeded => "LW_COLLECT_QUOTA_EXCEEDED",
             Self::Io(_) => "LW_COLLECT_IO_FAILED",
             Self::Http(_) => "LW_COLLECT_HTTP_FAILED",
             Self::ServiceToken(_) => "LW_COLLECT_SERVICE_TOKEN_FAILED",
@@ -1211,7 +1571,7 @@ mod tests {
     };
     use reqwest::{Certificate, Client, Url};
     use rustls::{ServerConfig, pki_types::PrivateKeyDer};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use sqlx::postgres::PgPoolOptions;
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -1229,6 +1589,41 @@ mod tests {
     use testcontainers_modules::postgres::Postgres;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
+
+    #[test]
+    fn existing_profile_example_requires_no_worker_credential_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base: Value = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/evaluation-service.yaml.example"
+        ))?;
+        let mut configuration: FreezeCoordinatorConfiguration =
+            serde_json::from_value(base["coordinator"].clone())?;
+        assert!(super::validate_configuration(&configuration).is_ok());
+        let fragment: Value = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/evaluation-freeze-existing-profile.yaml.example"
+        ))?;
+        configuration.worker_profile =
+            serde_json::from_value(fragment["coordinator"]["workerProfile"].clone())?;
+        assert!(
+            super::validate_configuration(&configuration).is_err(),
+            "existing mode rejects credential-copy configuration"
+        );
+        configuration.worker_secret_files.clear();
+        configuration.worker_registry_pull_config_file =
+            Path::new("not-a-credential-file").to_owned();
+        assert!(super::validate_configuration(&configuration).is_ok());
+        assert!(
+            configuration
+                .worker_profile
+                .accepts_namespace("lw-bundle-synthetic-example")
+        );
+        assert!(
+            !configuration
+                .worker_profile
+                .accepts_namespace("other-namespace")
+        );
+        Ok(())
+    }
 
     #[test]
     fn unavailable_binding_is_retried_until_the_command_deadline()
@@ -1347,7 +1742,7 @@ mod tests {
         reason = "the integration fixture keeps the complete admission and Kubernetes boundary in one scenario"
     )]
     #[tokio::test]
-    async fn approved_release_manifest_mismatch_rejects_before_kubernetes_write()
+    async fn coordinator_profiles_preserve_admission_and_recover_dispatch_without_binding()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Postgres::default().with_tag("17.5-alpine").start().await?;
         let database_url = format!(
@@ -1523,8 +1918,9 @@ spec:
             },
         )?;
         let kubernetes_server = KubernetesServer::start().await?;
-        let coordinator = FreezeCoordinator {
+        let mut coordinator = FreezeCoordinator {
             configuration: FreezeCoordinatorConfiguration {
+                worker_profile: crate::FreezeWorkerProfile::Managed,
                 kubernetes_api_server: kubernetes_server.base_uri.clone(),
                 kubernetes_bearer_token_file: Path::new("unused").to_owned(),
                 kubernetes_ca_file: Path::new("unused").to_owned(),
@@ -1565,7 +1961,8 @@ spec:
             worker_secrets: BTreeMap::new(),
             worker_registry_pull_config: Vec::new(),
         };
-        let command = SubmissionFreezeCommand {
+        let mut command = SubmissionFreezeCommand {
+            worker_dispatch: crate::FreezeWorkerDispatch::Pending,
             frozen_submission_id: FrozenSubmissionId::new(),
             operation_id: contracts::OperationId::new(),
             project_id,
@@ -1592,18 +1989,314 @@ spec:
             0,
             "manifest mismatch must reject before ConfigMap, Secret, or Job apply"
         );
+        kubernetes_server.objects.lock().map_err(|_| "Kubernetes fixture lock")?.insert(
+            "/apis/batch/v1/namespaces/student/jobs/lw-freeze-test".to_owned(),
+            json!({"metadata":{"name":"lw-freeze-test","namespace":"student",
+                "uid":FrozenSubmissionId::new().to_string(),"labels":super::resource_labels(&command),
+                "deletionTimestamp":"2026-09-12T00:00:00Z"}}),
+        );
         assert!(
-            !coordinator.cleanup("student", "lw-freeze-test").await?,
+            !coordinator
+                .cleanup(
+                    "student",
+                    "lw-freeze-test",
+                    &command,
+                    &crate::FreezeWorkerProfile::Managed
+                )
+                .await?,
             "a foreground Job that is still observed must keep cleanup pending"
         );
         assert!(
-            coordinator.cleanup("student", "lw-freeze-test").await?,
+            coordinator
+                .cleanup(
+                    "student",
+                    "lw-freeze-test",
+                    &command,
+                    &crate::FreezeWorkerProfile::Managed
+                )
+                .await?,
             "cleanup completes only after the Job and all owned objects disappear"
         );
 
+        // The same authenticated producer and real PostgreSQL queue now exercise the existing profile.
+        let profile = existing_profile();
+        coordinator.configuration.worker_profile = profile.clone();
+        command.manifest = expected_manifest;
+        seed_existing_resources(&kubernetes_server, "student")?;
+        coordinator.store.accept(&command).await?;
+        kubernetes_server
+            .lose_next_job_response
+            .store(1, Ordering::Release);
+        coordinator.reconcile_once().await?;
+        let first_requests = kubernetes_server
+            .requests
+            .lock()
+            .map_err(|_| "request log lock")?
+            .clone();
+        let writes: Vec<_> = first_requests
+            .iter()
+            .filter(|(method, _, _)| method == Method::POST.as_str())
+            .collect();
+        assert_eq!(
+            writes.len(),
+            2,
+            "only ConfigMap and Job are created despite the lost response"
+        );
+        assert!(
+            writes
+                .iter()
+                .all(|(_, path, _)| path.ends_with("/configmaps") || path.ends_with("/jobs"))
+        );
+        assert_eq!(kubernetes_server.patch_count.load(Ordering::Acquire), 0);
+        let bound = coordinator.store.refresh_worker_dispatch(&command).await?;
+        assert_eq!(
+            bound.worker_dispatch,
+            crate::FreezeWorkerDispatch::Bound {
+                namespace: "student".to_owned(),
+                profile: profile.clone()
+            }
+        );
+        let job_path = format!(
+            "/apis/batch/v1/namespaces/student/jobs/{}",
+            super::job_name(&command)
+        );
+        let config_path = format!(
+            "/api/v1/namespaces/student/configmaps/{}",
+            super::job_name(&command)
+        );
+        let objects = kubernetes_server
+            .objects
+            .lock()
+            .map_err(|_| "object lock")?
+            .clone();
+        let job = objects.get(&job_path).ok_or("worker Job missing")?;
+        assert_eq!(
+            job.pointer("/spec/template/spec/serviceAccountName"),
+            Some(&json!("synthetic-freeze-account"))
+        );
+        assert_eq!(
+            job.pointer("/spec/template/spec/containers/0/imagePullPolicy"),
+            Some(&json!("Never"))
+        );
+        assert_eq!(
+            job.pointer("/spec/template/spec/containers/0/resources/limits/memory"),
+            Some(&json!("268435456"))
+        );
+        assert_eq!(
+            job.pointer("/spec/template/spec/volumes/1/secret/secretName"),
+            Some(&json!("synthetic-freeze-secret"))
+        );
+        assert_eq!(
+            job.pointer("/spec/template/spec/volumes/2/persistentVolumeClaim/claimName"),
+            Some(&json!("student-workspace"))
+        );
+        assert_eq!(
+            job.pointer("/spec/template/spec/volumes/2/persistentVolumeClaim/readOnly"),
+            Some(&json!(true))
+        );
+        let original_config = objects
+            .get(&config_path)
+            .cloned()
+            .ok_or("ConfigMap missing")?;
+        assert_eq!(
+            job.pointer("/spec/template/spec/nodeSelector/kubernetes.io~1hostname"),
+            Some(&json!("synthetic-node"))
+        );
+        let account_path = "/api/v1/namespaces/student/serviceaccounts/synthetic-freeze-account";
+        let account = kubernetes_server
+            .objects
+            .lock()
+            .map_err(|_| "object lock")?
+            .remove(account_path)
+            .ok_or("account missing")?;
+        let command_json = original_config
+            .pointer("/data/command.json")
+            .and_then(Value::as_str)
+            .ok_or("command missing")?;
+        let workspace = job
+            .pointer("/spec/template/spec/volumes/2")
+            .cloned()
+            .ok_or("workspace volume missing")?;
+        assert!(matches!(
+            coordinator
+                .create_existing_resources(
+                    &bound,
+                    "student",
+                    &super::job_name(&command),
+                    command_json,
+                    workspace.clone(),
+                    &profile
+                )
+                .await,
+            Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable)
+        ));
+        kubernetes_server
+            .objects
+            .lock()
+            .map_err(|_| "object lock")?
+            .insert(account_path.to_owned(), account);
+        let secret_path = "/api/v1/namespaces/student/secrets/synthetic-freeze-secret";
+        {
+            let mut objects = kubernetes_server
+                .objects
+                .lock()
+                .map_err(|_| "object lock")?;
+            objects
+                .get_mut(secret_path)
+                .ok_or("secret metadata missing")?["kind"] = json!("Secret");
+        }
+        assert!(
+            matches!(
+                coordinator
+                    .create_existing_resources(
+                        &bound,
+                        "student",
+                        &super::job_name(&command),
+                        command_json,
+                        workspace,
+                        &profile
+                    )
+                    .await,
+                Err(FreezeCoordinatorError::ProfilePrerequisiteUnavailable)
+            ),
+            "full Secret representation is not a metadata fallback"
+        );
+        kubernetes_server
+            .objects
+            .lock()
+            .map_err(|_| "object lock")?
+            .get_mut(secret_path)
+            .ok_or("secret metadata missing")?["kind"] = json!("PartialObjectMetadata");
+
+        // The quota already accounts for the Work and other Pods. A full namespace cannot create another worker.
+        let mut blocked = command.clone();
+        blocked.frozen_submission_id = FrozenSubmissionId::new();
+        blocked.operation_id = contracts::OperationId::new();
+        blocked.idempotency_key = "coordinator-quota-full".to_owned();
+        let quota_path = "/api/v1/namespaces/student/resourcequotas/synthetic-budget";
+        {
+            let mut objects = kubernetes_server
+                .objects
+                .lock()
+                .map_err(|_| "object lock")?;
+            objects.get_mut(quota_path).ok_or("quota missing")?["status"]["used"]["limits.cpu"] =
+                json!("900m");
+        }
+        coordinator.store.accept(&blocked).await?;
+        coordinator.reconcile_once().await?;
+        assert_eq!(
+            kubernetes_server
+                .requests
+                .lock()
+                .map_err(|_| "request log lock")?
+                .iter()
+                .filter(|(method, _, _)| method == Method::POST.as_str())
+                .count(),
+            2,
+            "quota rejection must occur before any ConfigMap or Job creation"
+        );
+
+        // No fresh binding is available after this point. Observation and cleanup must use the ledger.
+        environment_server.stop().await;
+        if let crate::FreezeWorkerProfile::Existing { namespace, .. } =
+            &mut coordinator.configuration.worker_profile
+        {
+            *namespace = "another-synthetic-namespace".to_owned();
+        }
+        coordinator.reconcile_once().await?;
+        let requests = kubernetes_server
+            .requests
+            .lock()
+            .map_err(|_| "request log lock")?
+            .clone();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, _, _)| method == Method::POST.as_str())
+                .count(),
+            2
+        );
+        assert_eq!(
+            kubernetes_server
+                .objects
+                .lock()
+                .map_err(|_| "object lock")?
+                .get(&config_path),
+            Some(&original_config)
+        );
+        {
+            let mut objects = kubernetes_server
+                .objects
+                .lock()
+                .map_err(|_| "object lock")?;
+            objects.get_mut(&job_path).ok_or("Job missing")?["metadata"]["labels"]["labweaver.io/environment-id"] =
+                json!(EnvironmentId::new().to_string());
+        }
+        assert!(
+            matches!(
+                coordinator.cleanup_command_resources(&command).await,
+                Err(FreezeCoordinatorError::KubernetesRejected)
+            ),
+            "foreign ownership must block cleanup"
+        );
+        assert!(
+            !kubernetes_server
+                .requests
+                .lock()
+                .map_err(|_| "request log lock")?
+                .iter()
+                .any(|(method, _, _)| method == Method::DELETE.as_str())
+        );
+        kubernetes_server
+            .objects
+            .lock()
+            .map_err(|_| "object lock")?
+            .insert(job_path.clone(), job.clone());
+        assert!(
+            coordinator.cleanup_command_resources(&command).await?,
+            "refresh Pending and recover the real dispatch after binding expiry"
+        );
+        {
+            let final_objects = kubernetes_server
+                .objects
+                .lock()
+                .map_err(|_| "object lock")?;
+            assert!(
+                !final_objects.contains_key(&job_path) && !final_objects.contains_key(&config_path)
+            );
+            assert!(
+                final_objects
+                    .keys()
+                    .any(|path| path.ends_with("/secrets/synthetic-freeze-secret"))
+            );
+            assert!(
+                final_objects
+                    .keys()
+                    .any(|path| path.ends_with("/serviceaccounts/synthetic-freeze-account"))
+            );
+            assert!(
+                final_objects
+                    .keys()
+                    .any(|path| path.ends_with("/networkpolicies/synthetic-isolation"))
+            );
+        }
+        let requests = kubernetes_server
+            .requests
+            .lock()
+            .map_err(|_| "request log lock")?
+            .clone();
+        let deletes: Vec<_> = requests
+            .iter()
+            .filter(|(method, _, _)| method == Method::DELETE.as_str())
+            .collect();
+        assert_eq!(deletes.len(), 2);
+        assert!(deletes.iter().all(
+            |(_, path, body)| (path == &job_path || path == &config_path)
+                && body.pointer("/preconditions/uid").is_some()
+        ));
+
         kubernetes_server.stop().await;
         admission_server.stop().await;
-        environment_server.stop().await;
         drop(database);
         Ok(())
     }
@@ -1710,9 +2403,14 @@ spec:
         }
     }
 
+    type KubernetesRequestLog = Vec<(String, String, Value)>;
+
     struct KubernetesServer {
         base_uri: Url,
         patch_count: Arc<AtomicUsize>,
+        objects: Arc<Mutex<BTreeMap<String, Value>>>,
+        requests: Arc<Mutex<KubernetesRequestLog>>,
+        lose_next_job_response: Arc<AtomicUsize>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -1723,12 +2421,18 @@ spec:
             let base_uri = Url::parse(&format!("http://127.0.0.1:{port}/"))?;
             let patch_count = Arc::new(AtomicUsize::new(0));
             let deleting_job_reads = Arc::new(AtomicUsize::new(1));
+            let objects = Arc::new(Mutex::new(BTreeMap::new()));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let lose_next_job_response = Arc::new(AtomicUsize::new(0));
             let router =
                 Router::new()
                     .fallback(any(kubernetes_request))
                     .with_state(KubernetesState {
                         patch_count: patch_count.clone(),
                         deleting_job_reads: deleting_job_reads.clone(),
+                        objects: objects.clone(),
+                        requests: requests.clone(),
+                        lose_next_job_response: lose_next_job_response.clone(),
                     });
             let task = tokio::spawn(async move {
                 let _ = axum::serve(listener, router).await;
@@ -1736,6 +2440,9 @@ spec:
             Ok(Self {
                 base_uri,
                 patch_count,
+                objects,
+                requests,
+                lose_next_job_response,
                 task,
             })
         }
@@ -1750,36 +2457,132 @@ spec:
     struct KubernetesState {
         patch_count: Arc<AtomicUsize>,
         deleting_job_reads: Arc<AtomicUsize>,
+        objects: Arc<Mutex<BTreeMap<String, Value>>>,
+        requests: Arc<Mutex<KubernetesRequestLog>>,
+        lose_next_job_response: Arc<AtomicUsize>,
     }
 
     async fn kubernetes_request(
         State(state): State<KubernetesState>,
         request: Request<Body>,
     ) -> Response {
-        if request.method() == Method::PATCH {
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let accept = request
+            .headers()
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let Ok(bytes) = axum::body::to_bytes(request.into_body(), 1024 * 1024).await else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if let Ok(mut requests) = state.requests.lock() {
+            requests.push((method.to_string(), path.clone(), body.clone()));
+        } else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        if method == Method::PATCH {
             state.patch_count.fetch_add(1, Ordering::AcqRel);
             StatusCode::OK.into_response()
-        } else if request.method() == Method::DELETE {
+        } else if method == Method::DELETE {
+            let Ok(mut objects) = state.objects.lock() else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            if let Some(object) = objects.get(&path) {
+                if body.pointer("/preconditions/uid") != object.pointer("/metadata/uid") {
+                    return StatusCode::CONFLICT.into_response();
+                }
+                objects.remove(&path);
+            }
             StatusCode::OK.into_response()
-        } else if request.method() == Method::GET
-            && request.uri().path().contains("/jobs/")
-            && state
-                .deleting_job_reads
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-        {
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "metadata": {"deletionTimestamp": "2026-09-12T00:00:00Z"}
-                })),
-            )
-                .into_response()
+        } else if method == Method::POST {
+            let Some(name) = body.pointer("/metadata/name").and_then(Value::as_str) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let object_path = format!("{path}/{name}");
+            let Ok(mut objects) = state.objects.lock() else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            if objects.contains_key(&object_path) {
+                return StatusCode::CONFLICT.into_response();
+            }
+            let mut object = body;
+            object["metadata"]["uid"] = json!(FrozenSubmissionId::new().to_string());
+            objects.insert(object_path, object.clone());
+            if path.ends_with("/jobs")
+                && state
+                    .lose_next_job_response
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1))
+                    .is_ok()
+            {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            (StatusCode::CREATED, Json(object)).into_response()
+        } else if method == Method::GET {
+            if path.ends_with("/secrets/synthetic-freeze-secret")
+                && accept.as_deref()
+                    != Some("application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1")
+            {
+                return StatusCode::NOT_ACCEPTABLE.into_response();
+            }
+            let Ok(mut objects) = state.objects.lock() else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            let Some(object) = objects.get(&path).cloned() else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            if object.pointer("/metadata/deletionTimestamp").is_some()
+                && state
+                    .deleting_job_reads
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1))
+                    .is_err()
+            {
+                objects.remove(&path);
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            (StatusCode::OK, Json(object)).into_response()
         } else {
             StatusCode::NOT_FOUND.into_response()
         }
+    }
+
+    fn existing_profile() -> crate::FreezeWorkerProfile {
+        crate::FreezeWorkerProfile::Existing {
+            namespace: "student".to_owned(),
+            secret_name: "synthetic-freeze-secret".to_owned(),
+            service_account_name: "synthetic-freeze-account".to_owned(),
+            network_policy_names: vec!["synthetic-isolation".to_owned()],
+            resource_quota_names: vec!["synthetic-budget".to_owned()],
+            node_name: Some("synthetic-node".to_owned()),
+            resources: crate::FreezeWorkerResources {
+                request_cpu_millicores: 100,
+                limit_cpu_millicores: 500,
+                request_memory_bytes: 64 * 1024 * 1024,
+                limit_memory_bytes: 256 * 1024 * 1024,
+            },
+        }
+    }
+
+    fn seed_existing_resources(
+        server: &KubernetesServer,
+        namespace: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut objects = server.objects.lock().map_err(|_| "object lock")?;
+        let metadata = |name| json!({"name":name,"namespace":namespace,"uid":FrozenSubmissionId::new().to_string()});
+        objects.insert(format!("/api/v1/namespaces/{namespace}/secrets/synthetic-freeze-secret"),
+            json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":metadata("synthetic-freeze-secret")}));
+        objects.insert(
+            format!("/api/v1/namespaces/{namespace}/serviceaccounts/synthetic-freeze-account"),
+            json!({"metadata":metadata("synthetic-freeze-account")}),
+        );
+        objects.insert(format!("/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies/synthetic-isolation"),
+            json!({"metadata":metadata("synthetic-isolation"),"spec":{"podSelector":{},"policyTypes":["Ingress","Egress"],"ingress":[],"egress":[]}}));
+        let hard = json!({"requests.cpu":"1","limits.cpu":"1","requests.memory":"512Mi","limits.memory":"512Mi"});
+        let used = json!({"requests.cpu":"100m","limits.cpu":"500m","requests.memory":"64Mi","limits.memory":"256Mi"});
+        objects.insert(format!("/api/v1/namespaces/{namespace}/resourcequotas/synthetic-budget"),
+            json!({"metadata":metadata("synthetic-budget"),"spec":{"hard":hard},"status":{"hard":hard,"used":used}}));
+        Ok(())
     }
 
     struct AdmissionServer {

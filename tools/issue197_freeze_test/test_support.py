@@ -30,7 +30,7 @@ class FreezeTestSupport(unittest.TestCase):
                         'idempotencyKey': 'SYNTHETIC_SELF_TEST_ONLY', 'traceId': 'SYNTHETIC_RENDER_SELF_TEST_ONLY'}
         self.command = {'request': self.request, 'source': {'kind': 'pvc', 'workspaceRoot': '/workspace', 'sourceIdentity': digest}}
         self.binding = {'environment': env, 'agentRunId': self.request['agentRunId'], 'source': {'kind': 'container',
-                        'namespace': TEST_NAMESPACE, 'persistentVolumeClaim': 'workspace',
+                        'namespace': TEST_NAMESPACE, 'persistentVolumeClaim': 'lw-' + self.uid(1) + '-workspace',
                         'storageClassName': 'SYNTHETIC_SELF_TEST_ONLY'}}
         self.facts = json.loads((SUPPORT_ROOT / 'facts.example.json').read_text())
         self.receipt = json.loads((SUPPORT_ROOT / 'image-receipt.example.json').read_text())
@@ -116,6 +116,7 @@ class FreezeTestSupport(unittest.TestCase):
         self.assertTrue(all(m['readOnly'] for m in pod['containers'][0]['volumeMounts']))
         self.assertFalse(any('gpu' in key.lower() for values in pod['containers'][0]['resources'].values() for key in values))
         self.assertEqual(len(pod['volumes'][1]['secret']['items']), 5)
+        self.assertEqual(pod['volumes'][2]['persistentVolumeClaim']['claimName'], self.binding['source']['persistentVolumeClaim'])
         self.assertEqual(pod['containers'][0]['resources'],
                          {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}})
 
