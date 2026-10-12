@@ -1,0 +1,309 @@
+{
+  "$defs": {
+    "BuilderEntitlement": {
+      "enum": [
+        "network.host",
+        "security.insecure"
+      ],
+      "type": "string"
+    },
+    "BuilderSecurityPolicy": {
+      "additionalProperties": false,
+      "description": "Independently configured builder range. Runtime requests cannot change these fields.",
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "entitlements": {
+          "items": {
+            "$ref": "#/$defs/BuilderEntitlement"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "capabilities",
+        "allowPrivilegeEscalation",
+        "entitlements"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "LinuxCapability": {
+      "description": "Linux capability names from the kernel UAPI. `ALL` is never an addition.",
+      "enum": [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "DAC_READ_SEARCH",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "SETGID",
+        "SETUID",
+        "SETPCAP",
+        "LINUX_IMMUTABLE",
+        "NET_BIND_SERVICE",
+        "NET_BROADCAST",
+        "NET_ADMIN",
+        "NET_RAW",
+        "IPC_LOCK",
+        "IPC_OWNER",
+        "SYS_MODULE",
+        "SYS_RAWIO",
+        "SYS_CHROOT",
+        "SYS_PTRACE",
+        "SYS_PACCT",
+        "SYS_ADMIN",
+        "SYS_BOOT",
+        "SYS_NICE",
+        "SYS_RESOURCE",
+        "SYS_TIME",
+        "SYS_TTY_CONFIG",
+        "MKNOD",
+        "LEASE",
+        "AUDIT_WRITE",
+        "AUDIT_CONTROL",
+        "SETFCAP",
+        "MAC_OVERRIDE",
+        "MAC_ADMIN",
+        "SYSLOG",
+        "WAKE_ALARM",
+        "BLOCK_SUSPEND",
+        "AUDIT_READ",
+        "PERFMON",
+        "BPF",
+        "CHECKPOINT_RESTORE"
+      ],
+      "type": "string"
+    },
+    "PlatformLifecycleDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "detailedLogRetentionSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expiryReminderSeconds": {
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "preemptionGraceSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readOnlyRetentionSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "readOnlyRetentionSeconds",
+        "detailedLogRetentionSeconds",
+        "expiryReminderSeconds",
+        "preemptionGraceSeconds"
+      ],
+      "type": "object"
+    },
+    "PlatformRuntimePolicy": {
+      "additionalProperties": false,
+      "description": "Platform allowed range. This does not replace object authorization or actual placement.",
+      "properties": {
+        "allowedCapabilities": {
+          "items": {
+            "$ref": "#/$defs/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "defaultContainerUid": {
+          "description": "Zero means guest/container root, without host privileges.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preauthorizations": {
+          "items": {
+            "$ref": "#/$defs/RuntimePreauthorization"
+          },
+          "type": "array"
+        },
+        "privilegedAllowed": {
+          "type": "boolean"
+        },
+        "privilegedExecutionLocation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrivilegedExecutionLocation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "defaultContainerUid",
+        "allowedCapabilities",
+        "preauthorizations",
+        "privilegedAllowed"
+      ],
+      "type": "object"
+    },
+    "PrivilegedExecutionLocation": {
+      "description": "An execution boundary declaration. The Environment consumer must prove exclusivity.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "dedicated_node_pool",
+              "type": "string"
+            },
+            "nodeSelector": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "taintKey": {
+              "type": "string"
+            },
+            "taintValue": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "nodeSelector",
+            "taintKey",
+            "taintValue"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "virtual_machine_guest",
+              "type": "string"
+            },
+            "providerBinding": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "providerBinding"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RuntimePreauthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "privileged": {
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/$defs/RuntimePreauthorizationScope"
+        }
+      },
+      "required": [
+        "scope",
+        "capabilities",
+        "privileged"
+      ],
+      "type": "object"
+    },
+    "RuntimePreauthorizationScope": {
+      "description": "Object scope for a runtime preauthorization, never a builder authorization.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "projectId": {
+              "$ref": "#/$defs/ProjectId"
+            }
+          },
+          "required": [
+            "kind",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "courseId": {
+              "$ref": "#/$defs/CourseId"
+            },
+            "kind": {
+              "const": "course",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "courseId"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The one managed settings document. It contains no credential values or secret locators.",
+  "properties": {
+    "builderPolicy": {
+      "$ref": "#/$defs/BuilderSecurityPolicy"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/PlatformLifecycleDefaults"
+    },
+    "runtimePolicy": {
+      "$ref": "#/$defs/PlatformRuntimePolicy"
+    }
+  },
+  "required": [
+    "lifecycle",
+    "runtimePolicy",
+    "builderPolicy"
+  ],
+  "title": "PlatformConfigurationDesired",
+  "type": "object"
+}

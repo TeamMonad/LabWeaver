@@ -1857,7 +1857,8 @@ fn valid_control_path(path: &str) -> bool {
     (path.starts_with("/api/v1/courses/")
         || path == "/api/v1/projects"
         || path.starts_with("/api/v1/projects/")
-        || valid_admin_image_path(path))
+        || valid_admin_image_path(path)
+        || valid_platform_configuration_path(path))
         && !path.contains("//")
         && !path.contains('\\')
         && !lowercase.contains("%2f")
@@ -1865,6 +1866,46 @@ fn valid_control_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|segment| segment != "." && segment != "..")
+}
+
+fn valid_platform_configuration_path(path: &str) -> bool {
+    if !safe_path(path) {
+        return false;
+    }
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["", "api", "v1", "admin", "platform-configuration"]
+        | [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "applies",
+        ] => true,
+        [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "versions",
+            revision,
+        ] => revision
+            .parse::<u64>()
+            .ok()
+            .and_then(|v| contracts::Revision::new(v).ok())
+            .is_some(),
+        [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "applies",
+            id,
+        ] => id.parse::<contracts::OperationId>().is_ok(),
+        _ => false,
+    }
 }
 
 fn valid_admin_image_path(path: &str) -> bool {
@@ -2070,6 +2111,28 @@ mod tests {
             policy,
             now,
         )
+    }
+
+    #[test]
+    fn platform_configuration_proxy_bounds_ids_and_never_exposes_executor_routes() {
+        let root = "/api/v1/admin/platform-configuration";
+        assert!(valid_control_path(root));
+        assert!(valid_control_path(&format!("{root}/applies")));
+        assert!(valid_control_path(&format!("{root}/versions/1")));
+        assert!(valid_control_path(&format!(
+            "{root}/applies/{}",
+            contracts::OperationId::new()
+        )));
+        for invalid in [
+            format!("{root}/versions/0"),
+            format!("{root}/versions/nope"),
+            format!("{root}/applies/not-an-id"),
+            format!("{root}/applies/../secret"),
+            format!("{root}/applies%2fsecret"),
+            "/internal/v1/platform-configuration/applies".to_owned(),
+        ] {
+            assert!(!valid_control_path(&invalid));
+        }
     }
 
     #[test]

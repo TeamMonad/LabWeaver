@@ -3003,6 +3003,20 @@ export type AgentWorkExecutionIntentQuerySchemaCourseId = string;
 export type AgentWorkExecutionIntentQuerySchemaProjectId = string;
 
 /**
+ * ApplyPlatformConfigurationRequest
+ */
+export type ApplyPlatformConfigurationRequestSchema = {
+    desiredRevision: ApplyPlatformConfigurationRequestSchemaRevision;
+    encryptedBundleSha256: string;
+    expectedRevision: number;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ApplyPlatformConfigurationRequestSchemaRevision = number;
+
+/**
  * ApproveResourceRequest
  *
  * Administrator approval or resize decision. The selected Provider is always explicit.
@@ -9025,6 +9039,102 @@ export type RevokeAccessGrantRequestSchema = {
 export type RevokeAccessGrantRequestSchemaAccessGrantId = string;
 
 /**
+ * UpdatePlatformConfigurationRequest
+ */
+export type UpdatePlatformConfigurationRequestSchema = {
+    configuration: PlatformConfigurationDesired;
+    expectedRevision: number;
+};
+
+export type BuilderEntitlement = 'network.host' | 'security.insecure';
+
+/**
+ * Independently configured builder range. Runtime requests cannot change these fields.
+ */
+export type BuilderSecurityPolicy = {
+    allowPrivilegeEscalation: boolean;
+    capabilities: Array<LinuxCapability>;
+    entitlements: Array<BuilderEntitlement>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type UpdatePlatformConfigurationRequestSchemaCourseId = string;
+
+/**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type LinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
+ * The one managed settings document. It contains no credential values or secret locators.
+ */
+export type PlatformConfigurationDesired = {
+    builderPolicy: BuilderSecurityPolicy;
+    lifecycle: PlatformLifecycleDefaults;
+    runtimePolicy: PlatformRuntimePolicy;
+};
+
+export type PlatformLifecycleDefaults = {
+    detailedLogRetentionSeconds: number;
+    expiryReminderSeconds: Array<number>;
+    preemptionGraceSeconds: number;
+    readOnlyRetentionSeconds: number;
+};
+
+/**
+ * Platform allowed range. This does not replace object authorization or actual placement.
+ */
+export type PlatformRuntimePolicy = {
+    allowedCapabilities: Array<LinuxCapability>;
+    /**
+     * Zero means guest/container root, without host privileges.
+     */
+    defaultContainerUid: number;
+    preauthorizations: Array<RuntimePreauthorization>;
+    privilegedAllowed: boolean;
+    privilegedExecutionLocation?: PrivilegedExecutionLocation | null;
+};
+
+/**
+ * An execution boundary declaration. The Environment consumer must prove exclusivity.
+ */
+export type PrivilegedExecutionLocation = {
+    kind: 'dedicated_node_pool';
+    nodeSelector: {
+        [key: string]: string;
+    };
+    taintKey: string;
+    taintValue: string;
+} | {
+    kind: 'virtual_machine_guest';
+    providerBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type UpdatePlatformConfigurationRequestSchemaProjectId = string;
+
+export type RuntimePreauthorization = {
+    capabilities: Array<LinuxCapability>;
+    privileged: boolean;
+    scope: RuntimePreauthorizationScope;
+};
+
+/**
+ * Object scope for a runtime preauthorization, never a builder authorization.
+ */
+export type RuntimePreauthorizationScope = {
+    kind: 'project';
+    projectId: UpdatePlatformConfigurationRequestSchemaProjectId;
+} | {
+    courseId: UpdatePlatformConfigurationRequestSchemaCourseId;
+    kind: 'course';
+};
+
+/**
  * UpdateProjectRequest
  *
  * Revision-fenced project metadata mutation.
@@ -9626,6 +9736,358 @@ export type OrganizationUserSchema = {
      */
     username: string;
 };
+
+/**
+ * PlatformConfigurationApply
+ */
+export type PlatformConfigurationApplySchema = {
+    desiredRevision: PlatformConfigurationApplySchemaRevision;
+    encryptedBundleSha256: string;
+    executorClientId?: string | null;
+    failedStage?: PlatformConfigurationApplyStage | null;
+    failureReason?: PlatformConfigurationFailureReason | null;
+    id: PlatformConfigurationApplySchemaOperationId;
+    nextStep: PlatformConfigurationNextStep;
+    /**
+     * Follow this link to read prior attempts after reconnecting or retrying.
+     */
+    previousApplyId?: PlatformConfigurationApplySchemaOperationId | null;
+    requestedAt: PlatformConfigurationApplySchemaUtcTimestamp;
+    requestedBy: PlatformConfigurationApplySchemaActorId;
+    revision: PlatformConfigurationApplySchemaRevision;
+    stage: PlatformConfigurationApplyStage;
+    updatedAt: PlatformConfigurationApplySchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type PlatformConfigurationApplySchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type PlatformConfigurationApplySchemaOperationId = string;
+
+export type PlatformConfigurationApplyStage = 'requested' | 'validating' | 'applying' | 'verifying' | 'succeeded' | 'failed';
+
+/**
+ * Bounded failure categories. Executor log content is never an API payload.
+ */
+export type PlatformConfigurationFailureReason = 'configuration_invalid' | 'dependency_unavailable' | 'execution_failed' | 'verification_failed' | 'external_result_unknown' | 'interrupted';
+
+/**
+ * Readable next step, without executor logs or credential content.
+ */
+export type PlatformConfigurationNextStep = 'execute_approved_deployment' | 'wait_for_executor' | 'fix_configuration_and_retry' | 'reconcile_external_result' | 'none';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type PlatformConfigurationApplySchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformConfigurationApplySchemaUtcTimestamp = string;
+
+/**
+ * PlatformConfigurationStatus
+ *
+ * Applied means last fully verified configuration. A failed apply can leave external state unknown.
+ */
+export type PlatformConfigurationStatusSchema = {
+    applied?: PlatformConfigurationVersion | null;
+    appliedAt?: PlatformConfigurationStatusSchemaUtcTimestamp | null;
+    appliedBundleSha256?: string | null;
+    appliedState: PlatformConfigurationAppliedState;
+    defaults?: PlatformConfigurationStatusSchemaPlatformConfigurationDesired;
+    desired?: PlatformConfigurationVersion | null;
+    impact: PlatformConfigurationImpact;
+    latestApply?: PlatformConfigurationApply | null;
+    /**
+     * Aggregate fence, including apply updates. Zero is the unconfigured state.
+     */
+    revision: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type PlatformConfigurationStatusSchemaActorId = string;
+
+export type PlatformConfigurationStatusSchemaBuilderEntitlement = 'network.host' | 'security.insecure';
+
+/**
+ * Independently configured builder range. Runtime requests cannot change these fields.
+ */
+export type PlatformConfigurationStatusSchemaBuilderSecurityPolicy = {
+    allowPrivilegeEscalation: boolean;
+    capabilities: Array<PlatformConfigurationStatusSchemaLinuxCapability>;
+    entitlements: Array<PlatformConfigurationStatusSchemaBuilderEntitlement>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type PlatformConfigurationStatusSchemaCourseId = string;
+
+/**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type PlatformConfigurationStatusSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type PlatformConfigurationStatusSchemaOperationId = string;
+
+/**
+ * Whether the current external configuration has a complete verified observation.
+ */
+export type PlatformConfigurationAppliedState = 'unconfigured' | 'verified' | 'unverified';
+
+export type PlatformConfigurationApply = {
+    desiredRevision: PlatformConfigurationStatusSchemaRevision;
+    encryptedBundleSha256: string;
+    executorClientId?: string | null;
+    failedStage?: PlatformConfigurationStatusSchemaPlatformConfigurationApplyStage | null;
+    failureReason?: PlatformConfigurationStatusSchemaPlatformConfigurationFailureReason | null;
+    id: PlatformConfigurationStatusSchemaOperationId;
+    nextStep: PlatformConfigurationStatusSchemaPlatformConfigurationNextStep;
+    /**
+     * Follow this link to read prior attempts after reconnecting or retrying.
+     */
+    previousApplyId?: PlatformConfigurationStatusSchemaOperationId | null;
+    requestedAt: PlatformConfigurationStatusSchemaUtcTimestamp;
+    requestedBy: PlatformConfigurationStatusSchemaActorId;
+    revision: PlatformConfigurationStatusSchemaRevision;
+    stage: PlatformConfigurationStatusSchemaPlatformConfigurationApplyStage;
+    updatedAt: PlatformConfigurationStatusSchemaUtcTimestamp;
+};
+
+export type PlatformConfigurationStatusSchemaPlatformConfigurationApplyStage = 'requested' | 'validating' | 'applying' | 'verifying' | 'succeeded' | 'failed';
+
+/**
+ * The one managed settings document. It contains no credential values or secret locators.
+ */
+export type PlatformConfigurationStatusSchemaPlatformConfigurationDesired = {
+    builderPolicy: PlatformConfigurationStatusSchemaBuilderSecurityPolicy;
+    lifecycle: PlatformConfigurationStatusSchemaPlatformLifecycleDefaults;
+    runtimePolicy: PlatformConfigurationStatusSchemaPlatformRuntimePolicy;
+};
+
+/**
+ * Bounded failure categories. Executor log content is never an API payload.
+ */
+export type PlatformConfigurationStatusSchemaPlatformConfigurationFailureReason = 'configuration_invalid' | 'dependency_unavailable' | 'execution_failed' | 'verification_failed' | 'external_result_unknown' | 'interrupted';
+
+export type PlatformConfigurationImpact = {
+    builderPolicyChanged: boolean;
+    lifecyclePolicyChanged: boolean;
+    runtimePolicyChanged: boolean;
+};
+
+/**
+ * Readable next step, without executor logs or credential content.
+ */
+export type PlatformConfigurationStatusSchemaPlatformConfigurationNextStep = 'execute_approved_deployment' | 'wait_for_executor' | 'fix_configuration_and_retry' | 'reconcile_external_result' | 'none';
+
+export type PlatformConfigurationVersion = {
+    configuration: PlatformConfigurationStatusSchemaPlatformConfigurationDesired;
+    /**
+     * SHA-256 of the canonical managed settings JSON, without a prefix.
+     */
+    configurationSha256: string;
+    createdAt: PlatformConfigurationStatusSchemaUtcTimestamp;
+    createdBy: PlatformConfigurationStatusSchemaActorId;
+    revision: PlatformConfigurationStatusSchemaRevision;
+};
+
+export type PlatformConfigurationStatusSchemaPlatformLifecycleDefaults = {
+    detailedLogRetentionSeconds: number;
+    expiryReminderSeconds: Array<number>;
+    preemptionGraceSeconds: number;
+    readOnlyRetentionSeconds: number;
+};
+
+/**
+ * Platform allowed range. This does not replace object authorization or actual placement.
+ */
+export type PlatformConfigurationStatusSchemaPlatformRuntimePolicy = {
+    allowedCapabilities: Array<PlatformConfigurationStatusSchemaLinuxCapability>;
+    /**
+     * Zero means guest/container root, without host privileges.
+     */
+    defaultContainerUid: number;
+    preauthorizations: Array<PlatformConfigurationStatusSchemaRuntimePreauthorization>;
+    privilegedAllowed: boolean;
+    privilegedExecutionLocation?: PlatformConfigurationStatusSchemaPrivilegedExecutionLocation | null;
+};
+
+/**
+ * An execution boundary declaration. The Environment consumer must prove exclusivity.
+ */
+export type PlatformConfigurationStatusSchemaPrivilegedExecutionLocation = {
+    kind: 'dedicated_node_pool';
+    nodeSelector: {
+        [key: string]: string;
+    };
+    taintKey: string;
+    taintValue: string;
+} | {
+    kind: 'virtual_machine_guest';
+    providerBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type PlatformConfigurationStatusSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type PlatformConfigurationStatusSchemaRevision = number;
+
+export type PlatformConfigurationStatusSchemaRuntimePreauthorization = {
+    capabilities: Array<PlatformConfigurationStatusSchemaLinuxCapability>;
+    privileged: boolean;
+    scope: PlatformConfigurationStatusSchemaRuntimePreauthorizationScope;
+};
+
+/**
+ * Object scope for a runtime preauthorization, never a builder authorization.
+ */
+export type PlatformConfigurationStatusSchemaRuntimePreauthorizationScope = {
+    kind: 'project';
+    projectId: PlatformConfigurationStatusSchemaProjectId;
+} | {
+    courseId: PlatformConfigurationStatusSchemaCourseId;
+    kind: 'course';
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformConfigurationStatusSchemaUtcTimestamp = string;
+
+/**
+ * PlatformConfigurationVersion
+ */
+export type PlatformConfigurationVersionSchema = {
+    configuration: PlatformConfigurationVersionSchemaPlatformConfigurationDesired;
+    /**
+     * SHA-256 of the canonical managed settings JSON, without a prefix.
+     */
+    configurationSha256: string;
+    createdAt: PlatformConfigurationVersionSchemaUtcTimestamp;
+    createdBy: PlatformConfigurationVersionSchemaActorId;
+    revision: PlatformConfigurationVersionSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type PlatformConfigurationVersionSchemaActorId = string;
+
+export type PlatformConfigurationVersionSchemaBuilderEntitlement = 'network.host' | 'security.insecure';
+
+/**
+ * Independently configured builder range. Runtime requests cannot change these fields.
+ */
+export type PlatformConfigurationVersionSchemaBuilderSecurityPolicy = {
+    allowPrivilegeEscalation: boolean;
+    capabilities: Array<PlatformConfigurationVersionSchemaLinuxCapability>;
+    entitlements: Array<PlatformConfigurationVersionSchemaBuilderEntitlement>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type PlatformConfigurationVersionSchemaCourseId = string;
+
+/**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type PlatformConfigurationVersionSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
+ * The one managed settings document. It contains no credential values or secret locators.
+ */
+export type PlatformConfigurationVersionSchemaPlatformConfigurationDesired = {
+    builderPolicy: PlatformConfigurationVersionSchemaBuilderSecurityPolicy;
+    lifecycle: PlatformConfigurationVersionSchemaPlatformLifecycleDefaults;
+    runtimePolicy: PlatformConfigurationVersionSchemaPlatformRuntimePolicy;
+};
+
+export type PlatformConfigurationVersionSchemaPlatformLifecycleDefaults = {
+    detailedLogRetentionSeconds: number;
+    expiryReminderSeconds: Array<number>;
+    preemptionGraceSeconds: number;
+    readOnlyRetentionSeconds: number;
+};
+
+/**
+ * Platform allowed range. This does not replace object authorization or actual placement.
+ */
+export type PlatformConfigurationVersionSchemaPlatformRuntimePolicy = {
+    allowedCapabilities: Array<PlatformConfigurationVersionSchemaLinuxCapability>;
+    /**
+     * Zero means guest/container root, without host privileges.
+     */
+    defaultContainerUid: number;
+    preauthorizations: Array<PlatformConfigurationVersionSchemaRuntimePreauthorization>;
+    privilegedAllowed: boolean;
+    privilegedExecutionLocation?: PlatformConfigurationVersionSchemaPrivilegedExecutionLocation | null;
+};
+
+/**
+ * An execution boundary declaration. The Environment consumer must prove exclusivity.
+ */
+export type PlatformConfigurationVersionSchemaPrivilegedExecutionLocation = {
+    kind: 'dedicated_node_pool';
+    nodeSelector: {
+        [key: string]: string;
+    };
+    taintKey: string;
+    taintValue: string;
+} | {
+    kind: 'virtual_machine_guest';
+    providerBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type PlatformConfigurationVersionSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type PlatformConfigurationVersionSchemaRevision = number;
+
+export type PlatformConfigurationVersionSchemaRuntimePreauthorization = {
+    capabilities: Array<PlatformConfigurationVersionSchemaLinuxCapability>;
+    privileged: boolean;
+    scope: PlatformConfigurationVersionSchemaRuntimePreauthorizationScope;
+};
+
+/**
+ * Object scope for a runtime preauthorization, never a builder authorization.
+ */
+export type PlatformConfigurationVersionSchemaRuntimePreauthorizationScope = {
+    kind: 'project';
+    projectId: PlatformConfigurationVersionSchemaProjectId;
+} | {
+    courseId: PlatformConfigurationVersionSchemaCourseId;
+    kind: 'course';
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformConfigurationVersionSchemaUtcTimestamp = string;
 
 /**
  * ProblemPackage
@@ -11647,6 +12109,347 @@ export type RepinPlatformImageResponses = {
 };
 
 export type RepinPlatformImageResponse = RepinPlatformImageResponses[keyof RepinPlatformImageResponses];
+
+export type GetPlatformConfigurationData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/platform-configuration';
+};
+
+export type GetPlatformConfigurationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetPlatformConfigurationError = GetPlatformConfigurationErrors[keyof GetPlatformConfigurationErrors];
+
+export type GetPlatformConfigurationResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformConfigurationStatusSchema;
+};
+
+export type GetPlatformConfigurationResponse = GetPlatformConfigurationResponses[keyof GetPlatformConfigurationResponses];
+
+export type UpdatePlatformConfigurationData = {
+    body: UpdatePlatformConfigurationRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/platform-configuration';
+};
+
+export type UpdatePlatformConfigurationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type UpdatePlatformConfigurationError = UpdatePlatformConfigurationErrors[keyof UpdatePlatformConfigurationErrors];
+
+export type UpdatePlatformConfigurationResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformConfigurationStatusSchema;
+};
+
+export type UpdatePlatformConfigurationResponse = UpdatePlatformConfigurationResponses[keyof UpdatePlatformConfigurationResponses];
+
+export type ApplyPlatformConfigurationData = {
+    body: ApplyPlatformConfigurationRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/platform-configuration/applies';
+};
+
+export type ApplyPlatformConfigurationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ApplyPlatformConfigurationError = ApplyPlatformConfigurationErrors[keyof ApplyPlatformConfigurationErrors];
+
+export type ApplyPlatformConfigurationResponses = {
+    /**
+     * Successful response
+     */
+    202: PlatformConfigurationStatusSchema;
+};
+
+export type ApplyPlatformConfigurationResponse = ApplyPlatformConfigurationResponses[keyof ApplyPlatformConfigurationResponses];
+
+export type GetPlatformConfigurationApplyData = {
+    body?: never;
+    path: {
+        applyId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/platform-configuration/applies/{applyId}';
+};
+
+export type GetPlatformConfigurationApplyErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetPlatformConfigurationApplyError = GetPlatformConfigurationApplyErrors[keyof GetPlatformConfigurationApplyErrors];
+
+export type GetPlatformConfigurationApplyResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformConfigurationApplySchema;
+};
+
+export type GetPlatformConfigurationApplyResponse = GetPlatformConfigurationApplyResponses[keyof GetPlatformConfigurationApplyResponses];
+
+export type GetPlatformConfigurationVersionData = {
+    body?: never;
+    path: {
+        revision: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/platform-configuration/versions/{revision}';
+};
+
+export type GetPlatformConfigurationVersionErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetPlatformConfigurationVersionError = GetPlatformConfigurationVersionErrors[keyof GetPlatformConfigurationVersionErrors];
+
+export type GetPlatformConfigurationVersionResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformConfigurationVersionSchema;
+};
+
+export type GetPlatformConfigurationVersionResponse = GetPlatformConfigurationVersionResponses[keyof GetPlatformConfigurationVersionResponses];
 
 export type IssueCsrfTokenData = {
     body?: never;

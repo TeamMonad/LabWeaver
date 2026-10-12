@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "PlatformConfigurationApplyStage": {
+      "enum": [
+        "requested",
+        "validating",
+        "applying",
+        "verifying",
+        "succeeded",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "PlatformConfigurationFailureReason": {
+      "description": "Bounded failure categories. Executor log content is never an API payload.",
+      "enum": [
+        "configuration_invalid",
+        "dependency_unavailable",
+        "execution_failed",
+        "verification_failed",
+        "external_result_unknown",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Only a permission-checked deployment identity can submit execution facts.",
+  "properties": {
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "failureReason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformConfigurationFailureReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observedConfigurationSha256": {
+      "description": "Required only on success and must match the immutable desired snapshot.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "observedEncryptedBundleSha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stage": {
+      "$ref": "#/$defs/PlatformConfigurationApplyStage"
+    }
+  },
+  "required": [
+    "expectedRevision",
+    "stage"
+  ],
+  "title": "ReportPlatformConfigurationApplyRequest",
+  "type": "object"
+}

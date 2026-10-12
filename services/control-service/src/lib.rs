@@ -10,6 +10,7 @@ mod candidate_builds;
 pub mod clients;
 mod material_uploads;
 pub mod messaging;
+pub mod platform_configuration;
 pub mod platform_image_jobs;
 
 use std::collections::{BTreeMap, BTreeSet};

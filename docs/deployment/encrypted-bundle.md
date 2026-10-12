@@ -1,6 +1,6 @@
 # 加密应用 Bundle
 
-本入口实现 #203 的应用配置与加密目录切片。管理员配置 API、配置应用状态、运行权限策略和基础设施安装仍由后续切片完成。不要据此关闭 #203。
+本入口实现 #203 的应用配置与加密目录切片。[管理员配置 API](../contracts/platform-configuration.md) 已提供 revision 和应用事实管理。它与 Bundle 的完整接线、运行权限消费者和基础设施安装尚未完成。不要据此关闭 #203。
 
 ## 配置归属
 
@@ -173,6 +173,6 @@ application:
 
 ## 当前未完成范围
 
-本切片没有管理员表单或高级 YAML API，也没有 desired/applied/失败阶段持久化。它没有配置 7 天只读保留、30 天详细日志、24h/1h 提醒或 60 秒抢占宽限的服务消费者。它没有放宽 namespace Pod Security，也没有落实普通 capabilities、特权准入、对象预授权或专用执行位置。
+管理员 JSON/YAML API、desired/applied/失败阶段和策略契约已由同一 Control 配置模块提供，见[配置接口说明](../contracts/platform-configuration.md)。管理设置与本入口的整体导入/导出接线尚未完成。7天/30天/24h/1h/60秒的服务消费者、Grok 表单和实际执行观察器仍未交付。本切片没有放宽 namespace Pod Security，也没有落实 #207 的实际运行授权或执行位置。
 
-上述范围仍属于 #203。后续公共契约需先协调 `crates/contracts`，再交接 Grok。不要用本地加密测试替代实际授权、执行位置和前后端验收。
+剩余范围仍属于 #203 和明确的下游消费者。公共契约已由父线程协调，生成 SDK 从 `crates/contracts` 产生。不要用本地加密或状态测试替代实际授权、执行位置和前后端验收。
