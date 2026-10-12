@@ -49,3 +49,6 @@ pub struct EstimatedCreditHold {
     pub hold: CreditHold,
     pub estimate: ResourceCostEstimate,
 }
+
+/// Confirmed unknown-usage reconciliation deadline, measured from the first unknown fact.
+pub const UNKNOWN_USAGE_RECONCILIATION_SECONDS: u32 = 3600;

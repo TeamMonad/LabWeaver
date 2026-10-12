@@ -67,6 +67,10 @@
         },
         "quantityDivisor": {
           "default": 1,
+          "enum": [
+            1,
+            1000
+          ],
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

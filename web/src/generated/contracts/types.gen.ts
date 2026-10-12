@@ -1824,14 +1824,17 @@ export type CreditHold = {
     amount: CreditHoldPageSchemaFixedDecimal;
     businessKey: string;
     createdAt: CreditHoldPageSchemaUtcTimestamp;
+    expiredUnknownAt?: CreditHoldPageSchemaUtcTimestamp | null;
     id: string;
     measurementUnknown: boolean;
     ownerClientId: string;
     projectId: CreditHoldPageSchemaProjectId;
     reason?: string | null;
+    reconciliationDueAt?: CreditHoldPageSchemaUtcTimestamp | null;
     remaining: CreditHoldPageSchemaFixedDecimal;
     requestId: CreditHoldPageSchemaResourceRequestId;
     state: CreditHoldState;
+    unknownSince?: CreditHoldPageSchemaUtcTimestamp | null;
 };
 
 export type CreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
@@ -11430,7 +11433,7 @@ export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | '
 export type ResourceChargeLine = {
     amount: ResourceChargeSchemaMoney;
     quantity: number;
-    quantityDivisor?: number;
+    quantityDivisor?: 1 | 1000;
     rateId: RateId;
     rateRevision: ResourceChargeSchemaRevision;
     unit: ResourceChargeSchemaResourceBillingUnit;
@@ -11553,7 +11556,7 @@ export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_secon
 export type ResourceCostEstimateSchemaResourceChargeLine = {
     amount: ResourceCostEstimateSchemaMoney;
     quantity: number;
-    quantityDivisor?: number;
+    quantityDivisor?: 1 | 1000;
     rateId: ResourceCostEstimateSchemaRateId;
     rateRevision: ResourceCostEstimateSchemaRevision;
     unit: ResourceCostEstimateSchemaResourceBillingUnit;
@@ -11983,7 +11986,7 @@ export type ResourceUsageQuantities = {
      * Divide every quantity by this value to obtain the named base unit.
      * 1000 preserves millisecond observations without changing per-second prices.
      */
-    quantityDivisor?: number;
+    quantityDivisor?: 1 | 1000;
     storageByteSeconds: number;
 };
 

@@ -278,6 +278,9 @@ async fn run_outbox(
                         safe_detail = safe_detail.as_str(),
                     );
                 }
+                if let Err(error)=credits.expire_unknown_once().await {
+                    tracing::warn!(event="resource.credits.unknown_deadline_failed",diagnostic_code=%error,outcome="will_retry");
+                }
                 if let Err(error)=credits.reconcile_terminal_once().await {
                     tracing::warn!(event="resource.credits.recovery_failed",diagnostic_code=%error,outcome="will_retry");
                 }

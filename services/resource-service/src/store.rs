@@ -1053,6 +1053,12 @@ impl PgResourceStore {
         observed_at: UtcTimestamp,
         authority: Option<&UsageAuthority<'_>>,
     ) -> Result<ResourceUsageRecord, ResourceStoreError> {
+        input.measurement.validate()?;
+        if input.measured_until <= input.measured_from || observed_at < input.measured_until {
+            return Err(ResourceStoreError::Contract(
+                contracts::resource::ResourceError::InvalidUsage,
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let (project_id, course_id, target) = match input.target.clone() {
             ResourceUsageTarget::ResourceRequest {
@@ -3250,6 +3256,13 @@ impl PgResourceStore {
         let request = decode_request(row.try_get("request_contract")?)?;
         let claim = decode_claim(row.try_get("claim_contract")?)?;
         let lease = decode_lease(row.try_get("lease_contract")?)?;
+        crate::credits::check_request_hold_owner(
+            &mut transaction,
+            request.id,
+            owner,
+            request.state == ResourceRequestState::Active,
+        )
+        .await?;
         let current_namespace: Option<String> = row.try_get("execution_namespace")?;
         let approval_id: uuid::Uuid = row.try_get("approval_id")?;
         let approval_request_id: uuid::Uuid = row.try_get("approval_request_id")?;
