@@ -1043,6 +1043,7 @@ impl PgResourceStore {
         .bind(serde_json::to_value(&usage)?)
         .execute(&mut *transaction)
         .await?;
+        crate::credits::observe_unknown_usage(&mut transaction, &usage).await?;
         transaction.commit().await?;
         Ok(usage)
     }
@@ -1195,6 +1196,7 @@ impl PgResourceStore {
         charge.created_at = database_now(&mut transaction).await?;
         charge.validate().map_err(ResourceStoreError::Contract)?;
         insert_charge(&mut transaction, &charge).await?;
+        crate::credits::settle_metered_charge(&mut transaction, &usage, &charge).await?;
         update_usage_settlement(&mut transaction, &usage, UsageSettlementState::Settled).await?;
         apply_budget_delta(&mut transaction, usage.project_id, &charge.total).await?;
         transaction.commit().await?;
@@ -2764,6 +2766,7 @@ impl PgResourceStore {
                 next
             }
         };
+        crate::credits::release_request_holds(&mut transaction, request.id).await?;
         transaction.commit().await?;
         Ok(result)
     }
@@ -3222,6 +3225,7 @@ impl PgResourceStore {
             None,
         )
         .await?;
+        crate::credits::release_request_holds(&mut transaction, request.id).await?;
         transaction.commit().await?;
         Ok(status)
     }
@@ -3980,6 +3984,7 @@ impl PgResourceStore {
             trace_id,
         )
         .await?;
+        crate::credits::release_request_holds(&mut transaction, request.id).await?;
         transaction.commit().await?;
         Ok(next_lease)
     }
@@ -4124,6 +4129,7 @@ impl PgResourceStore {
             &input.trace_id,
         )
         .await?;
+        crate::credits::release_request_holds(&mut transaction, request.id).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -4201,6 +4207,7 @@ impl PgResourceStore {
             trace_id,
         )
         .await?;
+        crate::credits::release_request_holds(&mut transaction, request.id).await?;
         transaction.commit().await?;
         Ok(next_lease)
     }
@@ -5963,6 +5970,8 @@ fn safe_sqlstate_value(code: Option<&str>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceStoreError {
+    #[error(transparent)]
+    Credits(#[from] crate::credits::CreditError),
     #[error("LW_RESOURCE_NOT_FOUND")]
     NotFound,
     #[error("LW_RESOURCE_CREATE_STATE_INVALID")]
