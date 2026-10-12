@@ -504,7 +504,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         ObservedEnvironmentState::Failed
     );
 
-    let mut crash_target = requested_instance();
+    let mut crash_target = support::funded_instance(requested_instance());
     crash_target.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
     store
         .create("create-key-crash-recovery", &crash_target)
@@ -593,7 +593,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         release_version: completed_create.release_version,
     };
     store
-        .accept_command(
+        .accept_api_command(
             "reset-key-persisted-target",
             &LifecycleCommand {
                 environment_id: completed_create.id,
@@ -608,6 +608,10 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
                 max_attempts: 3,
                 reset_target: Some(reset_target.clone()),
             },
+            None,
+            completed_create.operation.lease_authorization.clone(),
+            completed_create.project_id,
+            completed_create.course_id,
         )
         .await?;
     assert_eq!(
@@ -1403,15 +1407,6 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     )?;
 
     let stopped = store.load(migrated_ready.id).await?;
-    // The store records the transition with PostgreSQL's database clock.  Use a
-    // database observation for the following Ready transition so this test
-    // does not confuse its historical fixture timestamps with live boundaries.
-    let restart_observed_at = store.current_time().await?;
-    let worker = success_worker_with_restart_ready_observation(
-        store.clone(),
-        Some(restart_observed_at),
-        pool.clone(),
-    )?;
     store
         .accept_command(
             "legacy-meter-restart",
@@ -1437,10 +1432,8 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
                 timestamp("2026-07-14T00:03:00.000Z")
             )
             .await?,
-        ReconcileWorkerOutcome::Advanced {
-            state: ObservedEnvironmentState::Ready,
-            terminal: true
-        }
+        ReconcileWorkerOutcome::Failed { ref diagnostic_code }
+            if diagnostic_code == "LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED"
     ));
     let restarted_meter: Value = sqlx::query_scalar(
         "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
@@ -1448,15 +1441,9 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     .bind(migrated_ready.id.as_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        restarted_meter["computeStartedAt"],
-        serde_json::to_value(restart_observed_at)?
-    );
-    assert_eq!(
-        restarted_meter["storageStartedAt"],
-        serde_json::to_value(restart_observed_at)?
-    );
-    assert_eq!(restarted_meter["storageKnown"], true);
+    assert!(restarted_meter["computeStartedAt"].is_null());
+    assert_eq!(restarted_meter["storageKnown"], false);
+    assert!(!store.load(migrated_ready.id).await?.has_resource_lease());
 
     let restarted = store.load(migrated_ready.id).await?;
     store
@@ -1524,7 +1511,7 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()?;
-    assert_eq!(deliveries.len(), 5);
+    assert_eq!(deliveries.len(), 3);
     for request in &deliveries {
         assert!(matches!(
             request.target,
@@ -1543,13 +1530,7 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         &unknown_compute.measurement,
         UsageMeasurement::Unknown { .. }
     ));
-    let stop_boundary = unknown_compute.measured_until;
-    assert!(
-        stop_boundary <= restart_observed_at,
-        "unknown compute boundary crossed the Ready observation"
-    );
-    assert_eq!(stop_boundary, stop_event_time);
-
+    assert_eq!(unknown_compute.measured_until, stop_event_time);
     let unknown_storage = deliveries
         .iter()
         .find(|request| {
@@ -1560,35 +1541,19 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         &unknown_storage.measurement,
         UsageMeasurement::Unknown { .. }
     ));
-    assert_eq!(unknown_storage.measured_until, restart_observed_at);
-
-    let known_compute = deliveries
-        .iter()
-        .find(|request| {
-            request.kind == ResourceUsageKind::Compute
-                && request.measured_from == restart_observed_at
-        })
-        .ok_or("migrated known compute delivery missing")?;
-    assert!(matches!(
-        &known_compute.measurement,
-        UsageMeasurement::Known { .. }
-    ));
-    let delete_boundary = known_compute.measured_until;
-    assert!(delete_boundary >= restart_observed_at);
-    assert_eq!(delete_boundary, delete_event_time);
-
-    let known_storage = deliveries
+    let storage_tail = deliveries
         .iter()
         .find(|request| {
             request.kind == ResourceUsageKind::Storage
-                && request.measured_from == restart_observed_at
-                && request.measured_until == delete_boundary
+                && request.measured_from == unknown_storage.measured_until
         })
-        .ok_or("migrated known storage delivery missing")?;
-    assert!(matches!(
-        &known_storage.measurement,
-        UsageMeasurement::Known { .. }
-    ));
+        .ok_or("unknown storage tail after rejected restart missing")?;
+    assert_eq!(storage_tail.measured_until, delete_event_time);
+    assert!(
+        deliveries
+            .iter()
+            .all(|request| matches!(&request.measurement, UsageMeasurement::Unknown { .. }))
+    );
     Ok(())
 }
 
@@ -1755,7 +1720,7 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
     assert_eq!(stopped_operation.snapshot.state, OperationState::Succeeded);
 
     store
-        .accept_command(
+        .accept_api_command(
             "restart-key-after-lease-refresh",
             &LifecycleCommand {
                 environment_id: work.id,
@@ -1770,6 +1735,10 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
                 max_attempts: 3,
                 reset_target: None,
             },
+            None,
+            stopped_refreshed.operation.lease_authorization.clone(),
+            stopped_refreshed.project_id,
+            stopped_refreshed.course_id,
         )
         .await?;
     let restarting = store.load(work.id).await?;
@@ -1924,7 +1893,7 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
     assert!(timeout_deleted.endpoints.is_empty());
     assert!(timeout_deleted.cleanup_evidence.is_some());
 
-    let ready_target = requested_instance();
+    let ready_target = support::funded_instance(requested_instance());
     store
         .create("create-key-ready-cancel", &ready_target)
         .await?;

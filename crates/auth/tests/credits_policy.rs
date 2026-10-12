@@ -24,6 +24,7 @@ fn credits_reads_reject_other_projects_revocation_and_member_minting()
             username: None,
             display_name: None,
             role: PlatformRole::Student,
+            object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
             state: MembershipState::Active,
             revision: Revision::new(1)?,
             expires_at: None,

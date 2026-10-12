@@ -327,7 +327,7 @@ pub fn runtime_receipt(
         .clone()
         .unwrap_or_else(|| contracts::environment::EnvironmentLeaseAuthorization {
             resource_request_id: contracts::ResourceRequestId::new(),
-            lease_id: instance.lease_id.unwrap_or_else(contracts::LeaseId::new),
+            lease_id: instance.lease_id.unwrap_or_default(),
             lease_revision: revision(1),
             environment_id: instance.id,
             project_id: instance.project_id,

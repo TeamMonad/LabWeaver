@@ -59,7 +59,6 @@ pub(super) async fn assert_original_lease_chain(
         binding.target.environment_id()
     );
     assert_eq!(result.lease.project_id, binding.project_id);
-    super::funded_handoff::exercise(pool, store, &result).await?;
     assert_eq!(result.lease.course_id, binding.course_id);
     assert_eq!(result.provider_binding, approval.provider_binding);
     assert_eq!(
@@ -146,5 +145,6 @@ pub(super) async fn assert_original_lease_chain(
             .binding,
         *binding
     );
+    Box::pin(super::funded_handoff::exercise(pool, store, &result)).await?;
     Ok(active)
 }

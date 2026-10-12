@@ -207,19 +207,17 @@ impl MeteringState {
             ) {
                 return Err(EnvironmentStoreError::MeteringInvalid);
             }
-        } else {
-            if self.lease_id.is_some()
-                || self.lease_revision.is_some()
-                || self.capacity_binding.is_some()
-                || !matches!(
-                    &self.target,
-                    contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
-                        environment_id,
-                    } if *environment_id == instance.id
-                )
-            {
-                return Err(EnvironmentStoreError::MeteringInvalid);
-            }
+        } else if self.lease_id.is_some()
+            || self.lease_revision.is_some()
+            || self.capacity_binding.is_some()
+            || !matches!(
+                &self.target,
+                contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                    environment_id,
+                } if *environment_id == instance.id
+            )
+        {
+            return Err(EnvironmentStoreError::MeteringInvalid);
         }
         self.approved_resources
             .validate()
