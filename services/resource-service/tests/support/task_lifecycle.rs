@@ -402,6 +402,7 @@ async fn approve(
 ) -> TestResult<ResourceRequest> {
     let now = store.current_time().await?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: request.revision,

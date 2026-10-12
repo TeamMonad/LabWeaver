@@ -1653,6 +1653,36 @@ async fn owned_environment_requests_use_current_control_actions_and_reject_remov
             .count(),
         1
     );
+    let start = client
+        .post(format!("{base}/api/v1/environments/{environment_id}/start"))
+        .header(header::COOKIE, &cookie)
+        .header(header::ORIGIN, ORIGIN)
+        .header("x-csrf-token", bff.csrf_token.expose())
+        .header("idempotency-key", "synthetic-start")
+        .header(header::IF_MATCH, "\"1\"")
+        .json(&json!({"expectedRevision":1}))
+        .send()
+        .await?;
+    assert_eq!(
+        start.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "new admission requires a verified applied policy"
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r["method"] == "POST")
+            .count(),
+        1,
+        "policy denial must not reach Environment"
+    );
+    assert_eq!(
+        stop().send().await?.status(),
+        StatusCode::ACCEPTED,
+        "stopping remains available while no applied policy is verified"
+    );
     sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=2 WHERE course_id=$1 AND actor_id=$2")
         .bind(course.as_uuid()).bind(actor).execute(&pool).await?;
     assert_eq!(
@@ -1676,7 +1706,7 @@ async fn owned_environment_requests_use_current_control_actions_and_reject_remov
             .iter()
             .filter(|r| r["method"] == "POST")
             .count(),
-        1
+        2
     );
     Ok(())
 }

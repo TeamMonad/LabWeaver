@@ -13,6 +13,7 @@ pub mod messaging;
 mod object_authorization;
 pub mod platform_configuration;
 pub mod platform_image_jobs;
+mod runtime_authorization;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -4352,12 +4353,13 @@ impl ControlService {
         &self,
         project_id: ProjectId,
         request: &CompleteAuthoringApprovalRequest,
-        actor_id: ActorId,
+        actor: &contracts::AuthenticatedActor,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
         trace_id: &str,
         catalog: &[PlatformImageEntry],
     ) -> Result<AuthoringApproval, ControlError> {
+        let actor_id = actor.actor_id;
         if request.project_id != project_id
             || request.reason.trim().is_empty()
             || request.reason.chars().count() > 500
@@ -4376,6 +4378,9 @@ impl ControlService {
         }))?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         advisory_project_lock(&mut transaction, project_id).await?;
+        let teacher_scope =
+            runtime_authorization::teacher_scope(&mut transaction, actor, request.course_id, now)
+                .await?;
         match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Control,
@@ -4696,6 +4701,7 @@ impl ControlService {
         .await
         .map_err(db)?;
         let approval = AuthoringApproval {
+            teacher_scope,
             id: ApprovalId::new(),
             project_id,
             course_id: project.course_id,
@@ -9172,6 +9178,8 @@ pub enum ControlError {
     CourseGovernanceDenied,
     #[error("LW_COURSE_LAST_INSTRUCTOR_PROTECTED")]
     CourseInstructorProtected,
+    #[error("LW_RUNTIME_TEACHER_APPROVAL_REQUIRED")]
+    TeacherApprovalDenied,
     #[error("LW_LLM_POLICY_INVALID")]
     PolicyInvalid,
     #[error("LW_LLM_POLICY_NOT_FOUND")]

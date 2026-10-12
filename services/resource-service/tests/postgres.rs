@@ -160,6 +160,7 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         .create("resource-create-1", &request, "trace-resource-create")
         .await?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: Revision::new(1)?,
@@ -515,6 +516,7 @@ async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
         .create("resource-create-cleanup", &request, "trace-create-cleanup")
         .await?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: Revision::new(1)?,
@@ -711,6 +713,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         Err(resource_service::store::ResourceStoreError::Database(_))
     ));
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: Revision::new(1)?,
@@ -989,6 +992,7 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
         )
         .await?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: approving.id,
         request_revision: approving.revision,
@@ -1387,6 +1391,7 @@ async fn gpu_time_slice_approval_rejects_count_above_one_with_stable_catalog_err
         .create("gpu-time-slice-request", &request, "gpu-time-slice-create")
         .await?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: request.revision,
@@ -3375,6 +3380,7 @@ async fn create_active_request(
         .await
         .map_err(|error| format!("create: {error}"))?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: Revision::new(1)?,
@@ -4044,6 +4050,7 @@ fn gpu_bundle(
         diagnostic_code: None,
     };
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: request.id,
         request_revision: request.revision,

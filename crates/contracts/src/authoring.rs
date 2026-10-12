@@ -1282,6 +1282,9 @@ impl CandidateApproval {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthoringApproval {
+    /// Course teacher authority captured in the same Control approval transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teacher_scope: Option<crate::runtime_authorization::CourseTeacherApprovalScope>,
     pub id: ApprovalId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,

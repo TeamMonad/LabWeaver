@@ -533,6 +533,22 @@ pub(super) async fn forward_environment(
         )
         .await?;
     }
+    if method == Method::POST
+        && (uri.path() == "/api/v1/environments"
+            || uri.path().ends_with("/start")
+            || uri.path().ends_with("/restart")
+            || uri.path().ends_with("/reset")
+            || uri.path().ends_with("/retry"))
+    {
+        let status = auth::runtime_authorization::load_runtime_policy(&state.pool)
+            .await
+            .map_err(|_| ApiError::unavailable("LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE"))?;
+        contracts::runtime_authorization::check_policy_use(
+            &status,
+            contracts::runtime_authorization::RuntimePolicyUse::Admission,
+        )
+        .map_err(|_| ApiError::unavailable("LW_RUNTIME_POLICY_NOT_VERIFIED"))?;
+    }
     forward(
         &state,
         &state.environment_proxy,
@@ -1013,6 +1029,22 @@ async fn resource_target_request(
 ) -> Result<(contracts::resource::ResourceRequest, &'static str), ApiError> {
     let segments = path.split('/').collect::<Vec<_>>();
     match segments.as_slice() {
+        [
+            "",
+            "api",
+            "v1",
+            "resource-requests",
+            request_id,
+            "runtime-authorization",
+        ] if *method == Method::GET => {
+            let id = request_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            Ok((
+                fetch_resource_request(state, session, id).await?,
+                "getResourceRuntimeAuthorization",
+            ))
+        }
         ["", "api", "v1", "resource-requests", request_id] if *method == Method::GET => {
             let id = request_id
                 .parse()
@@ -2040,7 +2072,7 @@ fn valid_resource_path(path: &str) -> bool {
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-requests", _, action]
-            if matches!(*action, "approve" | "resize-and-approve" | "cancel" | "reject" | "retry")
+            if matches!(*action, "approve" | "resize-and-approve" | "cancel" | "reject" | "retry" | "runtime-authorization")
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-leases", _, action]

@@ -818,6 +818,10 @@ export type AuthoringApproval = {
     projectId: AuthoringApprovalPublicationStatusSchemaProjectId;
     reason: string;
     revision: AuthoringApprovalPublicationStatusSchemaRevision;
+    /**
+     * Course teacher authority captured in the same Control approval transaction.
+     */
+    teacherScope?: CourseTeacherApprovalScope | null;
 };
 
 /**
@@ -843,6 +847,15 @@ export type AuthoringApprovalPublicationStatusSchemaCandidateId = string;
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type AuthoringApprovalPublicationStatusSchemaCourseId = string;
+
+/**
+ * Captured by Control while the verified teacher and current course instructor are checked.
+ */
+export type CourseTeacherApprovalScope = {
+    actorId: AuthoringApprovalPublicationStatusSchemaActorId;
+    courseId: AuthoringApprovalPublicationStatusSchemaCourseId;
+    membershipRevision: AuthoringApprovalPublicationStatusSchemaRevision;
+};
 
 /**
  * Stable machine-readable diagnostic code.
@@ -1007,6 +1020,10 @@ export type AuthoringApprovalSchema = {
     projectId: AuthoringApprovalSchemaProjectId;
     reason: string;
     revision: AuthoringApprovalSchemaRevision;
+    /**
+     * Course teacher authority captured in the same Control approval transaction.
+     */
+    teacherScope?: AuthoringApprovalSchemaCourseTeacherApprovalScope | null;
 };
 
 /**
@@ -1033,6 +1050,15 @@ export type AuthoringApprovalSchemaCandidateId = string;
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type AuthoringApprovalSchemaCourseId = string;
+
+/**
+ * Captured by Control while the verified teacher and current course instructor are checked.
+ */
+export type AuthoringApprovalSchemaCourseTeacherApprovalScope = {
+    actorId: AuthoringApprovalSchemaActorId;
+    courseId: AuthoringApprovalSchemaCourseId;
+    membershipRevision: AuthoringApprovalSchemaRevision;
+};
 
 /**
  * Immutable build and deployment identity that must match every run using the release.
@@ -11270,6 +11296,136 @@ export type ResourceUsagePageSchemaUsageSettlementState = 'pending' | 'settled' 
 export type ResourceUsagePageSchemaUtcTimestamp = string;
 
 /**
+ * RuntimeAuthorizationBinding
+ *
+ * Part of the existing immutable ResourceApproval, with no independent approval lifecycle.
+ */
+export type RuntimeAuthorizationBindingSchema = {
+    basis: RuntimeAdmissionBasis;
+    configuration: RuntimeConfigurationIdentity;
+    courseId?: RuntimeAuthorizationBindingSchemaCourseId | null;
+    permissions: RuntimeAuthorizationBindingSchemaRuntimePreauthorization;
+    /**
+     * This is the verified applied platform version, never the candidate's LLM policy revision.
+     */
+    platformConfigurationRevision: RuntimeAuthorizationBindingSchemaRevision;
+    platformConfigurationSha256: string;
+    projectId: RuntimeAuthorizationBindingSchemaProjectId;
+    requestGeneration: number;
+    requestId: RuntimeAuthorizationBindingSchemaResourceRequestId;
+    target: RuntimeAuthorizationBindingSchemaResourceTarget;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type RuntimeAuthorizationBindingSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ApprovalId`.
+ */
+export type RuntimeAuthorizationBindingSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type RuntimeAuthorizationBindingSchemaCandidateId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type RuntimeAuthorizationBindingSchemaCourseId = string;
+
+/**
+ * Captured by Control while the verified teacher and current course instructor are checked.
+ */
+export type RuntimeAuthorizationBindingSchemaCourseTeacherApprovalScope = {
+    actorId: RuntimeAuthorizationBindingSchemaActorId;
+    courseId: RuntimeAuthorizationBindingSchemaCourseId;
+    membershipRevision: RuntimeAuthorizationBindingSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type RuntimeAuthorizationBindingSchemaEnvironmentId = string;
+
+/**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type RuntimeAuthorizationBindingSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type RuntimeAuthorizationBindingSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type RuntimeAuthorizationBindingSchemaReleaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type RuntimeAuthorizationBindingSchemaResourceRequestId = string;
+
+/**
+ * Immutable identity of a Resource request's target.
+ */
+export type RuntimeAuthorizationBindingSchemaResourceTarget = {
+    environmentId: RuntimeAuthorizationBindingSchemaEnvironmentId;
+    kind: 'environment';
+    releaseId: RuntimeAuthorizationBindingSchemaReleaseId;
+    releaseVersion: number;
+} | {
+    kind: 'task';
+    taskRunId: RuntimeAuthorizationBindingSchemaTaskRunId;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type RuntimeAuthorizationBindingSchemaRevision = number;
+
+export type RuntimeAdmissionBasis = 'restricted_baseline' | 'project_preauthorization' | 'course_preauthorization';
+
+/**
+ * Control-owned immutable configuration identity. Clients cannot supply a replacement digest.
+ */
+export type RuntimeConfigurationIdentity = {
+    authoringApprovalId?: RuntimeAuthorizationBindingSchemaApprovalId | null;
+    authoringProjectId: RuntimeAuthorizationBindingSchemaProjectId;
+    candidateId: RuntimeAuthorizationBindingSchemaCandidateId;
+    candidateRevision: RuntimeAuthorizationBindingSchemaRevision;
+    configurationSha256: string;
+    courseId?: RuntimeAuthorizationBindingSchemaCourseId | null;
+    teacherScope?: RuntimeAuthorizationBindingSchemaCourseTeacherApprovalScope | null;
+};
+
+export type RuntimeAuthorizationBindingSchemaRuntimePreauthorization = {
+    capabilities: Array<RuntimeAuthorizationBindingSchemaLinuxCapability>;
+    privileged: boolean;
+    scope: RuntimeAuthorizationBindingSchemaRuntimePreauthorizationScope;
+};
+
+/**
+ * Object scope for a runtime preauthorization, never a builder authorization.
+ */
+export type RuntimeAuthorizationBindingSchemaRuntimePreauthorizationScope = {
+    kind: 'project';
+    projectId: RuntimeAuthorizationBindingSchemaProjectId;
+} | {
+    courseId: RuntimeAuthorizationBindingSchemaCourseId;
+    kind: 'course';
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `TaskRunId`.
+ */
+export type RuntimeAuthorizationBindingSchemaTaskRunId = string;
+
+/**
  * SshPublicKey
  *
  * Sanitized key metadata returned by public APIs.
@@ -19674,6 +19830,73 @@ export type RetryResourceRequestResponses = {
 };
 
 export type RetryResourceRequestResponse = RetryResourceRequestResponses[keyof RetryResourceRequestResponses];
+
+export type GetResourceRuntimeAuthorizationData = {
+    body?: never;
+    path: {
+        requestId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource-requests/{requestId}/runtime-authorization';
+};
+
+export type GetResourceRuntimeAuthorizationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetResourceRuntimeAuthorizationError = GetResourceRuntimeAuthorizationErrors[keyof GetResourceRuntimeAuthorizationErrors];
+
+export type GetResourceRuntimeAuthorizationResponses = {
+    /**
+     * Successful response
+     */
+    200: RuntimeAuthorizationBindingSchema;
+};
+
+export type GetResourceRuntimeAuthorizationResponse = GetResourceRuntimeAuthorizationResponses[keyof GetResourceRuntimeAuthorizationResponses];
 
 export type ListResourceGpuCatalogData = {
     body?: never;

@@ -28,6 +28,7 @@ pub mod repository;
 /// Short-lived signed identity delegation from Access to Resource.
 pub mod resource_delegation;
 pub mod roles;
+pub mod runtime_authorization;
 /// OAuth 2.0 client-credentials and service-token verification.
 pub mod service_auth;
 
