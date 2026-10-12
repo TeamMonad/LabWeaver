@@ -3,7 +3,7 @@
   tags: [cilium]
   ansible.builtin.set_fact:
     cluster_network_cilium_lock: >-
-      {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).cilium }}
+      {{ (lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml).cilium }}
 
 - name: Require the locked Cilium image to match the chart release
   tags: [cilium]

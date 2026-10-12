@@ -2,7 +2,7 @@
 - name: Load the locked Sprint 2 administration tool identities
   ansible.builtin.set_fact:
     platform_admin_tools_lock: >-
-      {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml')
+      {{ (lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml'))
           | from_yaml).platform_foundation.admin_tools }}
 
 - name: Reject an unknown administration tool profile

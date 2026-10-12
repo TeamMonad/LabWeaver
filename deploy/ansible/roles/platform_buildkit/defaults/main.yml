@@ -3,6 +3,10 @@ platform_buildkit_enabled: false
 platform_buildkit_kubeconfig: /etc/kubernetes/admin.conf
 platform_buildkit_namespace: labweaver-build
 platform_buildkit_bundle: ""
+platform_buildkit_client_files:
+  ca.crt: "{{ platform_buildkit_bundle | dirname }}/build-executor-client/ca.crt"
+  tls.crt: "{{ platform_buildkit_bundle | dirname }}/build-executor-client/tls.crt"
+  tls.key: "{{ platform_buildkit_bundle | dirname }}/build-executor-client/tls.key"
 platform_buildkit_manifest: "{{ playbook_dir }}/../../config/platform-buildkit-bundle-manifest.json"
 platform_buildkit_storage_class: local-path
 platform_buildkit_storage: 40Gi
