@@ -418,6 +418,13 @@ async fn repeated_request_replays_one_database_object_and_event_identity()
         .service
         .freeze(&fixture.request, &fixture.source)
         .await?;
+    assert_eq!(
+        first.files[0].sha256,
+        Sha256Digest::of_bytes(b"fn main() {}\n").to_string()
+    );
+    let mut invalid = first.clone();
+    invalid.files[0].sha256 = "invalid".to_owned();
+    assert!(invalid.validate().is_err());
     let replay = fixture
         .service
         .freeze(&fixture.request, &fixture.source)

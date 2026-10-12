@@ -106,6 +106,12 @@ SHA-256. The output media type is
 `application/vnd.labweaver.frozen-submission.v1+json` and the canonical JCS
 archive holds sorted path/base64 entries.
 
+Each `FrozenFile.sha256` contains the hash of the bytes from that collection read.
+Equal file sizes do not establish equal content. A same-size rewrite invalidates the
+previous preflight with `LW_COLLECT_SOURCE_CHANGED`. A completed frozen object remains
+unchanged when the user later edits the Work. The file hashes bind the manifest to the
+same submission attempt and exact archive object version.
+
 ## Storage, persistence and event
 
 The object store binding must support bucket versioning and Governance Object

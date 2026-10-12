@@ -1422,6 +1422,7 @@ spec:
             course_id: Some(course_id),
             revision: Revision::new(1)?,
             files: vec![PackageFile {
+                sha256: "0".repeat(64),
                 path: "program.json".to_owned(),
                 object: ArtifactRef {
                     artifact_id: package_artifact_id,

@@ -1,5 +1,10 @@
 # Issue #48 Control-plane deployment
 
+Material upload recovery and migration requirements are documented in
+[Material uploads](../contracts/material-uploads.md). Keep the original upload deadline
+when reissuing authorities. Budget temporary storage for two concurrent material
+verifications and retain exact-version cleanup permission within the owned prefix.
+
 ## Configuration boundary
 
 Control and Agent read one reviewed YAML document from

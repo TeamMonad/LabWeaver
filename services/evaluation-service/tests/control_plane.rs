@@ -1966,6 +1966,7 @@ impl TestContext {
             attempt: 1,
             manifest_revision: Revision::new(1)?,
             files: vec![FrozenFile {
+                sha256: "0".repeat(64),
                 path: "answer.txt".to_owned(),
                 size_bytes: 1,
                 media_type: "text/plain".to_owned(),
@@ -2143,6 +2144,7 @@ fn evaluation_execution_binding(
         course_id,
         revision: Revision::new(1).expect("valid revision"),
         files: vec![PackageFile {
+            sha256: "0".repeat(64),
             path: "program.json".to_owned(),
             object: ArtifactRef {
                 artifact_id,
