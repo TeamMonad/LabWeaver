@@ -84,17 +84,19 @@ async function loginFromPublicHome({ page, baseURL, actor, username, password, v
     }),
     page.locator('#kc-login').click({ noWaitAfter: true }),
   ])
-  // When authentication returns to the task home, follow the actor's
-  // authorized task card before asserting the protected landing page. The
-  // drawer can be collapsed into a rail whose accessible labels include the
-  // group name, so the public home card is the stable user-facing entry.
+  // When authentication returns to the home page, follow the actor's
+  // authorized navigation item before asserting the protected landing page.
+  // The home page lists the current project's in-progress items; the task
+  // navigation is the single entry for workbenches. In rail mode the visible
+  // label is hidden, so match the item label text rather than its accessible name.
   if (viaTaskCard && new URL(page.url()).pathname.startsWith(actor.landingPath)) {
     await page.goto('/', { waitUntil: 'domcontentloaded' })
   }
   if (viaTaskCard || !new URL(page.url()).pathname.startsWith(actor.landingPath)) {
-    await expect(page.getByRole('heading', { name: '欢迎进入 LabWeaver', exact: true })).toBeVisible()
-    const taskLink = page.locator('.task-grid').getByRole('link', {
-      name: new RegExp(`^${escapeRegExp(actor.entryLabel)}`),
+    const navigation = page.getByRole('navigation', { name: '任务导航', exact: true })
+    await expect(navigation).toBeVisible({ timeout: 60_000 })
+    const taskLink = navigation.locator('a.drawer-item').filter({
+      has: page.locator('.drawer-item__label', { hasText: new RegExp(`^${escapeRegExp(actor.entryLabel)}$`) }),
     })
     await expect(taskLink).toHaveCount(1, { timeout: 60_000 })
     await taskLink.click()

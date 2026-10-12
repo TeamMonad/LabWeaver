@@ -359,6 +359,9 @@ onScopeDispose(() => {
     position: static;
     top: auto;
     left: auto;
+    /* A grid item honours z-index; the docked drawer must stay below the top
+       bar so the project selector and search menus are not covered. */
+    z-index: auto;
     grid-row: 3;
     grid-column: 1;
     transform: none;

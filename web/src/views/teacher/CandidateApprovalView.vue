@@ -366,6 +366,8 @@
                 <DiagnosticBanner
                   v-if="authoring.approval.kind === 'error'"
                   :code="authoring.approval.diagnostic.code"
+                  :request-id="authoring.approval.diagnostic.requestId"
+                  :next-step="authoring.approval.diagnostic.nextStep"
                   :message="authoring.approval.diagnostic.message"
                   :retryable="authoring.approval.diagnostic.retryable"
                   severity="error"

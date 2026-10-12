@@ -10,6 +10,8 @@
     <DiagnosticBanner
       v-if="approval.outcome"
       :code="approval.outcome.diagnostic.code"
+      :request-id="approval.outcome.diagnostic.requestId"
+      :next-step="approval.outcome.diagnostic.nextStep"
       :message="approval.outcome.diagnostic.message"
       :retryable="false"
       :severity="approval.outcome.kind === 'success' ? 'info' : 'error'"
@@ -18,6 +20,8 @@
     <DiagnosticBanner
       v-if="approval.refreshDiagnostic"
       :code="approval.refreshDiagnostic.code"
+      :request-id="approval.refreshDiagnostic.requestId"
+      :next-step="approval.refreshDiagnostic.nextStep"
       :message="approval.refreshDiagnostic.message"
       :retryable="approval.refreshDiagnostic.retryable"
       severity="warning"
@@ -104,6 +108,8 @@
       <DiagnosticBanner
         v-if="approval.requests.kind === 'error'"
         :code="approval.requests.diagnostic.code"
+        :request-id="approval.requests.diagnostic.requestId"
+        :next-step="approval.requests.diagnostic.nextStep"
         :message="approval.requests.diagnostic.message"
         :retryable="approval.requests.diagnostic.retryable"
         severity="error"
@@ -592,6 +598,8 @@
       <DiagnosticBanner
         v-if="approval.leases.kind === 'error'"
         :code="approval.leases.diagnostic.code"
+        :request-id="approval.leases.diagnostic.requestId"
+        :next-step="approval.leases.diagnostic.nextStep"
         :message="approval.leases.diagnostic.message"
         :retryable="approval.leases.diagnostic.retryable"
         severity="error"

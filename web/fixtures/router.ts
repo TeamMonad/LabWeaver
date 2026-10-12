@@ -1,35 +1,25 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 import FixtureRouteView from './FixtureRouteView.vue'
+import { NAVIGATION_DETAIL_ROUTES, NAVIGATION_GROUPS } from '@/utils/navigation'
 import { activeScene, fixtureProjectId, sceneById, setFixtureScene } from './scenes'
 
-const paths = [
-  '/',
-  '/teacher/overview',
-  '/teacher/labs',
-  '/teacher/environments',
-  '/teacher/materials',
-  '/teacher/approvals',
-  '/student/labs',
-  '/student/environments',
-  '/student/ssh-keys',
-  '/student/results',
-  '/researcher/workspaces',
-  '/researcher/environments',
-  '/researcher/software',
-  '/researcher/resources',
-  '/admin/resource-approval',
-  '/admin/resource-finance',
-  '/admin/platform-images',
-  '/admin/gpu-catalog',
-  '/admin/policies',
-  '/admin/audit',
+// Paths, titles and project scope come from the application navigation config
+// so the preview cannot drift from the real router.
+const routes: RouteRecordRaw[] = [
+  { path: '/', name: 'fixture-home', component: FixtureRouteView, meta: { title: '进行中', projectScoped: true } },
+  ...NAVIGATION_GROUPS.flatMap((group) => group.items.map((item) => ({
+    path: item.path,
+    name: `fixture-${item.id}`,
+    component: FixtureRouteView,
+    meta: { title: item.label, projectScoped: Boolean(item.projectScoped) },
+  }))),
+  ...NAVIGATION_DETAIL_ROUTES.map((detail) => ({
+    path: detail.path,
+    name: `fixture-detail-${detail.parentId}`,
+    component: FixtureRouteView,
+    meta: { title: detail.title, projectScoped: true },
+  })),
 ]
-
-const routes: RouteRecordRaw[] = paths.map((path, index) => ({
-  path,
-  name: `fixture-${index}`,
-  component: FixtureRouteView,
-}))
 
 routes.push({ path: '/:pathMatch(.*)*', name: 'fixture-fallback', component: FixtureRouteView })
 

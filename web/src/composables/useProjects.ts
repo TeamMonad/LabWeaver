@@ -22,7 +22,7 @@ import { idempotencyKey, ifMatch } from '@/utils/format'
 
 function diagnostic(error: unknown, fallbackCode: string, fallbackMessage: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
+  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true, problem)
 }
 
 function directoryDiagnostic(error: unknown): DiagnosticViewModel {
@@ -45,6 +45,9 @@ function persistedProjectId(): string | null {
 }
 
 const projects = ref<AsyncState<ProjectSchema[]>>({ kind: 'idle' })
+// Last finished list result. Consumers that must not flicker while a sibling
+// component reloads the shared catalog (the AppShell project gate) read this.
+const settledProjects = ref<AsyncState<ProjectSchema[]>>({ kind: 'idle' })
 // Restore the browser's existing project context before the first async list
 // response so project-scoped links remain scoped during a page reload.
 const selectedProjectId = ref<string | null>(persistedProjectId())
@@ -75,15 +78,18 @@ async function loadProjects() {
   if (generation !== loadGeneration) return
   if (result.error) {
     projects.value = { kind: 'error', diagnostic: diagnostic(result.error, 'PROJECT_LIST_FAILED', '加载项目失败') }
+    settledProjects.value = projects.value
     return
   }
   if (result.data.length === 0) {
     selectedProjectId.value = null
     projects.value = { kind: 'empty' }
+    settledProjects.value = projects.value
     return
   }
-  projects.value = { kind: 'success', data: result.data }
   preserveSelection(result.data)
+  projects.value = { kind: 'success', data: result.data }
+  settledProjects.value = projects.value
 }
 
 /**
@@ -185,6 +191,7 @@ export function useProjects() {
 
   return reactive({
     projects,
+    settledProjects,
     selectedProjectId,
     selectedProject,
     acting,

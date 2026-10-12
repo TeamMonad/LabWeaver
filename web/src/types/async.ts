@@ -3,7 +3,13 @@ import type { ProblemDetails } from '@/generated/contracts'
 export interface DiagnosticViewModel {
   code: string
   traceId?: string
+  /** Server request identifier from the RFC 9457 body; copyable for support. */
+  requestId?: string
+  /** HTTP status of the failed request, when the server answered. */
+  status?: number
   message: string
+  /** Chinese next step shown after the reason. */
+  nextStep?: string
   retryable: boolean
 }
 
@@ -31,8 +37,67 @@ function readableDiagnosticMessage(code: string, message: string): string {
   }
 }
 
-export function makeDiagnostic(code: string, message: string, retryable = false): DiagnosticViewModel {
-  return { code, message: readableDiagnosticMessage(code, message), retryable }
+/**
+ * Next step for a failed request, derived only from the HTTP status the
+ * server returned. Domain-specific advice belongs in the server detail or in
+ * `readableDiagnosticMessage`; this fallback never guesses a business cause.
+ */
+export function diagnosticNextStep(status: number | undefined, retryable: boolean): string | undefined {
+  switch (status) {
+    case 401:
+      return '登录已失效，请重新登录后再试。'
+    case 403:
+      return '当前账号没有这项操作的权限。请确认所选项目，或联系项目 Owner 授权。'
+    case 404:
+      return '对象不存在或已被删除。请刷新列表，或确认所选项目是否正确。'
+    case 409:
+    case 412:
+      return '数据已被其他操作更新。请刷新后确认最新状态，再决定是否重试。'
+    case 410:
+      return '对象已过期或已回收，无法继续使用。请重新创建。'
+    case 422:
+    case 400:
+      return '请按提示修改输入后重新提交。'
+    case 429:
+      return '请求过于频繁，请稍等片刻再试。'
+    default:
+      if (status !== undefined && status >= 500) {
+        return retryable ? '平台服务暂时不可用，请稍后重试；多次失败请把下方诊断信息发给管理员。' : '平台服务处理失败，请把下方诊断信息发给管理员。'
+      }
+      return undefined
+  }
+}
+
+type DiagnosticProblem = Pick<Partial<ProblemDetails>, 'requestId' | 'status' | 'traceId'> | null | undefined
+
+export function makeDiagnostic(code: string, message: string, retryable = false, problem?: DiagnosticProblem): DiagnosticViewModel {
+  const diagnostic: DiagnosticViewModel = { code, message: readableDiagnosticMessage(code, message), retryable }
+  if (!problem) return diagnostic
+  if (typeof problem.requestId === 'string' && problem.requestId) diagnostic.requestId = problem.requestId
+  if (typeof problem.traceId === 'string' && problem.traceId) diagnostic.traceId = problem.traceId
+  if (typeof problem.status === 'number') {
+    diagnostic.status = problem.status
+    const nextStep = diagnosticNextStep(problem.status, retryable)
+    if (nextStep) diagnostic.nextStep = nextStep
+  }
+  return diagnostic
+}
+
+/** Build a diagnostic from a generated-SDK error, keeping requestId and status for support. */
+export function diagnosticFromError(error: unknown, fallbackCode: string, fallbackMessage: string, fallbackRetryable = true): DiagnosticViewModel {
+  const problem = extractProblemDetails(error)
+  if (problem) {
+    return makeDiagnostic(problem.diagnosticCode ?? fallbackCode, problem.detail ?? fallbackMessage, problem.retryable ?? fallbackRetryable, problem)
+  }
+  const diagnostic = makeDiagnostic(fallbackCode, fallbackMessage, fallbackRetryable)
+  if (isTransportError(error)) diagnostic.nextStep = '无法连接平台服务。请检查网络连接后重试。'
+  return diagnostic
+}
+
+function isTransportError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { isAxiosError?: boolean; response?: unknown; code?: unknown }
+  return candidate.isAxiosError === true && candidate.response === undefined
 }
 
 /**

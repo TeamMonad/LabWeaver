@@ -1,10 +1,5 @@
 <template>
   <div class="home-view">
-    <section class="hero">
-      <h1>欢迎进入 LabWeaver</h1>
-      <p class="hero-subtitle">面向教学实验与科研工作的 Agent 驱动云原生实验平台</p>
-    </section>
-
     <DiagnosticBanner
       v-if="routeReason"
       class="route-reason"
@@ -14,80 +9,236 @@
       severity="warning"
     />
 
-    <section v-if="!auth.isLoading.value" class="dashboard" aria-labelledby="task-heading">
-      <h2 id="task-heading" class="section-title">
-        {{ auth.isAuthenticated.value ? '可用任务' : '登录 LabWeaver' }}
-      </h2>
+    <template v-if="auth.isLoading.value" />
 
-      <div v-if="auth.isAuthenticated.value && visibleGroups.length" class="task-groups">
-        <section
-          v-for="group in visibleGroups"
-          :key="group.id"
-          class="task-group"
-          :data-task-group="group.id"
-          :aria-labelledby="`task-group-${group.id}`"
+    <section v-else-if="!auth.isAuthenticated.value" class="empty-state" aria-labelledby="login-heading">
+      <SvgIcon name="login" size="lg" aria-hidden="true" />
+      <h1 id="login-heading">欢迎进入 LabWeaver</h1>
+      <p>请使用组织账号登录后查看当前项目的进行中事项。</p>
+      <button v-if="oidcEnabled" type="button" class="filled-button" @click="auth.login()">
+        <SvgIcon name="login" size="sm" aria-hidden="true" />
+        <span>登录</span>
+      </button>
+      <p v-else class="hint">当前部署未配置 OIDC 登录服务。</p>
+    </section>
+
+    <template v-else>
+      <header class="home-header">
+        <div class="home-header__text">
+          <p class="eyebrow">进行中</p>
+          <h1>{{ project?.name ?? '当前项目' }}</h1>
+          <p class="home-header__meta" role="status">
+            <template v-if="inProgress.loading">正在刷新…</template>
+            <template v-else-if="inProgress.loadedAt">更新于 {{ formatClock(inProgress.loadedAt) }} · 页面在后台时不自动刷新</template>
+          </p>
+        </div>
+        <button
+          v-if="project"
+          type="button"
+          class="outlined-button"
+          :disabled="inProgress.loading"
+          aria-label="刷新进行中事项"
+          @click="inProgress.load()"
         >
-          <div class="group-heading">
-            <h3 :id="`task-group-${group.id}`">{{ group.label }}</h3>
-            <span class="group-count">{{ group.items.length }} 项任务</span>
+          <SvgIcon name="refresh" size="sm" aria-hidden="true" />
+          <span>刷新</span>
+        </button>
+      </header>
+
+      <DiagnosticBanner
+        v-if="projects.projects.kind === 'error'"
+        :diagnostic="projects.projects.diagnostic"
+        @retry="projects.load()"
+      />
+
+      <section v-else-if="!project && projects.projects.kind !== 'loading'" class="empty-state" aria-labelledby="no-project-heading">
+        <SvgIcon name="folder_off" size="lg" aria-hidden="true" />
+        <h2 id="no-project-heading">还没有可访问的项目</h2>
+        <p>创建项目后，这里会显示项目中运行的环境、未完成的任务和待处理事项。也可以联系项目 Owner 邀请你加入。</p>
+        <RouterLink class="filled-button" :to="{ path: '/researcher/workspaces' }">前往项目与工作空间</RouterLink>
+      </section>
+
+      <div v-else-if="project" class="home-sections">
+        <section class="home-section md-card" aria-labelledby="home-env-heading" data-home-section="environments">
+          <div class="section-heading">
+            <h2 id="home-env-heading">运行中的环境</h2>
+            <span v-if="inProgress.environments.kind === 'success'" class="count">{{ inProgress.environments.data.length }}</span>
           </div>
-          <div class="task-grid">
-            <RouterLink
-              v-for="item in group.items"
-              :key="item.id"
-              :to="navigationTarget(item, projects.selectedProjectId)"
-              class="task-card md-card"
-            >
-              <div class="card-header">
-                <span class="card-icon">
-                  <SvgIcon :name="item.icon" size="lg" aria-hidden="true" />
-                </span>
-                <SvgIcon name="arrow_forward" size="md" aria-hidden="true" />
-              </div>
-              <h4 class="card-title">{{ item.label }}</h4>
-              <p class="card-desc">{{ item.description }}</p>
-            </RouterLink>
+          <AsyncStateView
+            v-if="inProgress.environments.kind !== 'hidden'"
+            :state="inProgress.environments"
+            empty-text="当前项目没有运行中的环境。"
+            @retry="inProgress.load()"
+          >
+            <template #success="{ data }">
+              <ul class="item-list">
+                <li v-for="env in data" :key="env.id" class="item-row" :class="{ 'item-row--attention': environmentNeedsAttention(env) }">
+                  <div class="item-main">
+                    <div class="item-title">
+                      <strong>{{ env.displayLabel }}</strong>
+                      <GcpStatusPill :state="env.observedState" domain="environment" size="sm" />
+                    </div>
+                    <p class="item-sub">
+                      {{ env.class === 'work' ? 'Work 环境' : '实验环境' }} · {{ env.runtimeKind === 'virtual_machine' ? '虚拟机' : '容器' }}
+                      <template v-if="environmentOperationText(env)"> · {{ environmentOperationText(env) }}</template>
+                    </p>
+                    <p v-if="environmentNeedsAttention(env)" class="item-attention">
+                      环境处理失败。打开控制台查看原因，可在“异步操作与诊断”中重试或删除。
+                    </p>
+                  </div>
+                  <RouterLink class="outlined-button" :to="environmentLink(env)">
+                    {{ environmentNeedsAttention(env) ? '查看原因' : '打开控制台' }}
+                  </RouterLink>
+                </li>
+              </ul>
+            </template>
+          </AsyncStateView>
+        </section>
+
+        <section
+          v-if="inProgress.agentRuns.kind !== 'hidden'"
+          class="home-section md-card"
+          aria-labelledby="home-runs-heading"
+          data-home-section="agent-runs"
+        >
+          <div class="section-heading">
+            <h2 id="home-runs-heading">未完成的生成与配置</h2>
+            <span v-if="inProgress.agentRuns.kind === 'success'" class="count">{{ inProgress.agentRuns.data.length }}</span>
           </div>
+          <AsyncStateView :state="inProgress.agentRuns" empty-text="当前项目没有未完成的生成或配置任务。" @retry="inProgress.load()">
+            <template #success="{ data }">
+              <ul class="item-list">
+                <li v-for="run in data" :key="run.id" class="item-row" :class="{ 'item-row--attention': run.state === 'awaiting_approval' }">
+                  <div class="item-main">
+                    <div class="item-title">
+                      <strong>{{ agentRunPurposeLabel(run) }}</strong>
+                      <GcpStatusPill :state="run.state" domain="agent" size="sm" />
+                    </div>
+                    <p class="item-sub">创建于 {{ formatTimestamp(run.createdAt) }} · 更新于 {{ formatTimestamp(run.updatedAt) }}</p>
+                    <p v-if="run.state === 'awaiting_approval'" class="item-attention">等待人工审核。审核通过后才会继续。</p>
+                  </div>
+                  <RouterLink v-if="agentRunLink(run)" class="outlined-button" :to="agentRunLink(run)!">
+                    {{ run.state === 'awaiting_approval' ? '去审核' : '查看进度' }}
+                  </RouterLink>
+                </li>
+              </ul>
+            </template>
+          </AsyncStateView>
+        </section>
+
+        <section
+          v-if="inProgress.resourceRequests.kind !== 'hidden'"
+          class="home-section md-card"
+          aria-labelledby="home-requests-heading"
+          data-home-section="resource-requests"
+        >
+          <div class="section-heading">
+            <h2 id="home-requests-heading">待处理事项</h2>
+            <span v-if="inProgress.resourceRequests.kind === 'success'" class="count">{{ inProgress.resourceRequests.data.length }}</span>
+          </div>
+          <AsyncStateView :state="inProgress.resourceRequests" empty-text="当前项目没有待审批或分配中的资源申请。" @retry="inProgress.load()">
+            <template #success="{ data }">
+              <ul class="item-list">
+                <li v-for="request in data" :key="request.id" class="item-row" :class="{ 'item-row--attention': resourceRequestAttention(request) }">
+                  <div class="item-main">
+                    <div class="item-title">
+                      <strong>{{ resourceSummary(request) }}</strong>
+                      <GcpStatusPill :state="request.state" domain="resource" size="sm" />
+                    </div>
+                    <p class="item-sub">{{ request.target.kind === 'environment' ? '环境容量' : '任务容量' }} · 更新于 {{ formatTimestamp(request.updatedAt) }}</p>
+                    <p v-if="resourceRequestAttention(request)" class="item-attention">{{ resourceRequestAttention(request) }}</p>
+                  </div>
+                  <RouterLink class="outlined-button" :to="{ path: '/researcher/resources', query: { projectId: project.id } }">
+                    查看申请
+                  </RouterLink>
+                </li>
+              </ul>
+            </template>
+          </AsyncStateView>
         </section>
       </div>
-
-      <div v-else-if="auth.isAuthenticated.value" class="empty-state">
-        <SvgIcon name="block" size="lg" aria-hidden="true" />
-        <p>当前账号未授予任何可用任务，请联系管理员。</p>
-      </div>
-
-      <div v-else class="empty-state">
-        <SvgIcon name="login" size="lg" aria-hidden="true" />
-        <p>请使用组织账号登录后查看可用任务。</p>
-        <button v-if="oidcEnabled" type="button" class="filled-button" @click="auth.login()">
-          <SvgIcon name="login" size="sm" aria-hidden="true" />
-          <span>登录</span>
-        </button>
-        <p v-else class="hint">当前部署未配置 OIDC 登录服务。</p>
-      </div>
-    </section>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
-import SvgIcon from '@/components/common/SvgIcon.vue'
+import { RouterLink, useRoute, type RouteLocationRaw } from 'vue-router'
+import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
+import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useAuth } from '@/composables/useAuth'
+import { useProjectInProgress } from '@/composables/useProjectInProgress'
 import { useProjects } from '@/composables/useProjects'
 import { OIDC_ENABLED } from '@/config'
-import { navigationGroupsForRoles, navigationTarget, rolesFromProfile } from '@/utils/navigation'
+import type { AgentRunHistoryItem, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
+import { formatBytes, formatTimestamp } from '@/utils/format'
+import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
+import { environmentOperationKindLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
 
 const auth = useAuth()
 const projects = useProjects()
 const route = useRoute()
 const oidcEnabled = OIDC_ENABLED
 
-const visibleGroups = computed(() => {
-  if (!auth.isAuthenticated.value) return []
-  return navigationGroupsForRoles(rolesFromProfile(auth.user.value?.profile))
-})
+const roles = computed(() => auth.isAuthenticated.value ? rolesFromProfile(auth.user.value?.profile) : [])
+// The AppShell keeps the selection equal to the linked project before this view renders.
+const project = computed(() => auth.isAuthenticated.value ? projects.selectedProject : null)
+const projectId = computed(() => project.value?.id ?? null)
+const inProgress = useProjectInProgress(projectId)
+
+function environmentNeedsAttention(env: EnvironmentSummary): boolean {
+  return env.observedState === 'failed' || env.currentOperation?.state === 'failed'
+}
+
+function environmentOperationText(env: EnvironmentSummary): string {
+  const operation = env.currentOperation
+  if (!operation || !['accepted', 'running', 'cancelling'].includes(operation.state)) return ''
+  return operation.state === 'cancelling' ? `正在取消${environmentOperationKindLabel(operation.kind)}` : `正在${environmentOperationKindLabel(operation.kind)}`
+}
+
+function environmentLink(env: EnvironmentSummary): RouteLocationRaw {
+  const studentConsole = env.class === 'experiment' && roles.value.includes('student')
+  return {
+    path: studentConsole ? '/student/environments' : '/researcher/environments',
+    query: { projectId: env.projectId, environmentId: env.id },
+  }
+}
+
+function agentRunPurposeLabel(run: AgentRunHistoryItem): string {
+  if (run.purpose.kind === 'work_configuration') return 'Work 配置'
+  return run.purpose.environmentClass === 'work' ? 'Work 模板生成' : '实验生成'
+}
+
+/** The page that owns the run; awaiting approval opens the review entry directly. */
+function agentRunLink(run: AgentRunHistoryItem): RouteLocationRaw | null {
+  const query = { projectId: run.projectId, runId: run.id }
+  if (run.purpose.kind === 'work_configuration') return { path: '/researcher/software', query }
+  if (run.purpose.environmentClass === 'work') return { path: '/researcher/software', query: { ...query, mode: 'template' } }
+  if (!hasAnyRole(roles.value, ['teacher'])) return null
+  return { path: run.state === 'awaiting_approval' ? '/teacher/approvals' : '/teacher/materials', query }
+}
+
+function resourceSummary(request: ResourceRequestSchema): string {
+  const resources = request.requestedResources
+  const cores = resources.cpuMillicores / 1000
+  const parts = [`${Number.isInteger(cores) ? cores : cores.toFixed(1)} 核 CPU`, `${formatBytes(resources.memoryBytes)} 内存`]
+  if (resources.gpu) parts.push('GPU')
+  return parts.join(' · ')
+}
+
+function resourceRequestAttention(request: ResourceRequestSchema): string {
+  const failure = resourceAllocationFailureMessage(request.diagnosticCode)
+  if (failure) return failure
+  if (request.state === 'reviewing') return '等待管理员审批。'
+  if (request.state === 'expiring') return '使用授权即将到期，请决定是否续期。'
+  return ''
+}
+
+function formatClock(date: Date): string {
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
 
 const routeReason = computed(() => {
   const reason = route.query.reason
@@ -109,123 +260,135 @@ const routeReason = computed(() => {
 .home-view {
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: 20px;
   max-width: var(--content-max-width);
   margin: 0 auto;
 }
 
-.hero {
-  padding: 24px 0 8px;
-}
-
-.hero h1 {
-  margin-bottom: 8px;
-  color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-headline-large);
-}
-
-.hero-subtitle {
-  color: var(--md-sys-color-on-surface-variant);
-  font: var(--md-sys-body-large);
-}
-
-.section-title {
-  margin-bottom: 20px;
-  color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-title-medium);
-}
-
-.task-groups {
-  display: grid;
-  gap: 28px;
-}
-
-.task-group {
-  display: grid;
-  gap: 12px;
-}
-
-.group-heading {
+.home-header {
   display: flex;
-  align-items: baseline;
+  align-items: flex-end;
   justify-content: space-between;
-  gap: 12px;
-}
-
-.group-heading h3 {
-  margin: 0;
-  color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-title-medium);
-}
-
-.group-count {
-  flex-shrink: 0;
-  color: var(--md-sys-color-on-surface-variant);
-  font: var(--md-sys-label-medium);
-}
-
-.task-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 16px;
 }
 
-.task-card {
-  display: flex;
-  min-height: 154px;
-  flex-direction: column;
-  padding: 20px;
+.home-header__text {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.eyebrow {
+  color: var(--md-sys-color-primary);
+  font: var(--md-sys-label-large);
+}
+
+.home-header h1 {
+  overflow: hidden;
   color: var(--md-sys-color-on-surface);
-  text-decoration: none;
-  transition: box-shadow 0.2s ease, transform 0.2s ease;
+  font: var(--md-sys-headline-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.task-card:hover {
-  box-shadow: var(--md-sys-elevation-2);
-  transform: translateY(-2px);
-}
-
-.task-card:focus-visible {
-  outline: 2px solid var(--md-sys-color-primary);
-  outline-offset: 2px;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 18px;
+.home-header__meta {
+  min-height: 1.4em;
   color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
 }
 
-.card-icon {
+.home-sections {
+  display: grid;
+  gap: 16px;
+}
+
+.home-section {
+  display: grid;
+  gap: 8px;
+  padding: 16px 20px;
+}
+
+.section-heading {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: var(--md-sys-shape-medium);
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  gap: 8px;
 }
 
-.card-title {
-  margin-bottom: 6px;
+.section-heading h2 {
   color: var(--md-sys-color-on-surface);
   font: var(--md-sys-title-medium);
 }
 
-.card-desc {
+.count {
+  min-width: 24px;
+  padding: 0 8px;
+  border-radius: var(--md-sys-shape-full);
+  background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-medium);
+  line-height: 22px;
+  text-align: center;
+}
+
+.item-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.item-row:first-child {
+  border-top: 0;
+}
+
+.item-row--attention {
+  box-shadow: inset 3px 0 0 var(--md-sys-color-warning);
+  padding-left: 12px;
+}
+
+.item-main {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.item-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.item-title strong {
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-body-large);
+  font-weight: 500;
+}
+
+.item-sub {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.item-attention {
+  color: var(--md-sys-color-on-surface);
   font: var(--md-sys-body-medium);
-  line-height: 1.45;
 }
 
 .empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: 48px 24px;
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-large);
@@ -234,59 +397,53 @@ const routeReason = computed(() => {
   text-align: center;
 }
 
-.filled-button {
+.empty-state h1,
+.empty-state h2 {
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-large);
+}
+
+.filled-button,
+.outlined-button {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  height: 40px;
-  padding: 0 24px;
-  border: none;
+  height: 36px;
+  padding: 0 16px;
   border-radius: var(--md-sys-shape-full);
+  font: var(--md-sys-label-large);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.filled-button {
+  border: none;
   background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
+}
+
+.outlined-button {
+  border: 1px solid var(--md-sys-color-outline);
+  background: transparent;
+  color: var(--md-sys-color-primary);
+}
+
+.outlined-button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .hint {
   font: var(--md-sys-body-small);
 }
 
-.dashboard {
-  width: 100%;
-}
-
-.route-reason {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  border-radius: var(--md-sys-shape-medium);
-  background: var(--md-sys-color-error-container);
-  color: var(--md-sys-color-on-error-container);
-  font: var(--md-sys-body-medium);
-}
-
 @media (max-width: 599px) {
-  .task-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .group-heading {
-    align-items: flex-start;
+  .home-header,
+  .item-row {
+    align-items: stretch;
     flex-direction: column;
-    gap: 4px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .task-card {
-    transition: none;
-  }
-
-  .task-card:hover {
-    transform: none;
   }
 }
 </style>

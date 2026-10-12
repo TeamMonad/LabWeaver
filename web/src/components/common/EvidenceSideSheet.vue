@@ -33,7 +33,7 @@
 </template>
 
 <script setup lang="ts">
-import { watch, nextTick, ref } from 'vue'
+import { watch, nextTick, onScopeDispose, ref } from 'vue'
 import SvgIcon from './SvgIcon.vue'
 
 interface Props {
@@ -46,20 +46,41 @@ const props = withDefaults(defineProps<Props>(), {
   dismissible: true,
 })
 
-defineEmits<{
+const emit = defineEmits<{
   close: []
 }>()
 
 const closeButton = ref<HTMLButtonElement | null>(null)
+let returnFocus: HTMLElement | null = null
+
+// Escape closes the sheet like the navigation drawer; focus returns to the opener.
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !props.open || !props.dismissible || event.defaultPrevented) return
+  event.preventDefault()
+  emit('close')
+}
 
 watch(
   () => props.open,
   (open) => {
+    if (typeof document === 'undefined') return
     if (open) {
+      returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      document.addEventListener('keydown', onKeydown)
       void nextTick(() => closeButton.value?.focus())
+    } else {
+      document.removeEventListener('keydown', onKeydown)
+      const target = returnFocus
+      returnFocus = null
+      void nextTick(() => target?.isConnected && target.focus())
     }
-  }
+  },
+  { immediate: true },
 )
+
+onScopeDispose(() => {
+  if (typeof document !== 'undefined') document.removeEventListener('keydown', onKeydown)
+})
 </script>
 
 <style scoped>

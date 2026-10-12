@@ -94,6 +94,7 @@ export function useEnvironmentTemplateReleases(
           problem?.diagnosticCode ?? 'RELEASE_LIST_FAILED',
           problem?.detail ?? '加载环境模板版本失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       return
