@@ -182,65 +182,9 @@ impl PgCreditStore {
         input: &CreditHoldRequest,
     ) -> Result<CreditHold, CreditError> {
         positive(&input.amount)?;
-        if owner.is_empty()
-            || input.business_key.trim().is_empty()
-            || input.business_key.len() > 128
-        {
-            return Err(CreditError::Invalid);
-        }
         let mut tx = self.pool.begin().await?;
-        if let Some(replay) = reserve(&mut tx, "credits_hold", key, &(owner, input)).await? {
-            return Ok(serde_json::from_value(replay)?);
-        }
-        let scope=sqlx::query("SELECT project_id,state FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE").bind(input.request_id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(CreditError::NotFound)?;
-        let project: Uuid = scope.try_get("project_id")?;
-        let request_state: String = scope.try_get("state")?;
-        if !matches!(
-            request_state.as_str(),
-            "reviewing" | "allocating" | "active"
-        ) {
-            return Err(CreditError::Conflict);
-        }
-        if project != input.project_id.as_uuid() {
-            return Err(CreditError::Denied);
-        }
-        lock_account(&mut tx, input.project_id).await?;
-        if let Some(row)=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id=$1 AND business_key=$2").bind(input.request_id.as_uuid()).bind(&input.business_key).fetch_optional(&mut *tx).await? {
-            let existing=decode_hold(&row)?;
-            if existing.owner_client_id!=owner || existing.project_id!=input.project_id || existing.amount!=input.amount { return Err(CreditError::Conflict); }
-            complete(&mut tx,"credits_hold",key,&existing).await?;tx.commit().await?;return Ok(existing);
-        }
-        let hold = CreditHold {
-            id: Uuid::now_v7(),
-            project_id: input.project_id,
-            request_id: input.request_id,
-            business_key: input.business_key.clone(),
-            owner_client_id: owner.into(),
-            amount: input.amount.clone(),
-            remaining: input.amount.clone(),
-            state: CreditHoldState::Pending,
-            measurement_unknown: false,
-            reason: None,
-            created_at: now(&mut tx).await?,
-        };
-        sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6::text::numeric,$6::text::numeric,'pending',$7)").bind(hold.id).bind(project).bind(input.request_id.as_uuid()).bind(&input.business_key).bind(owner).bind(input.amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut *tx).await?;
-        let mut e = entry(
-            Uuid::now_v7(),
-            Some(input.project_id),
-            0,
-            input.amount.scaled(),
-            0,
-            0,
-            "hold",
-            hold.created_at,
-        )?;
-        e.hold_id = Some(hold.id);
-        e.reason = "preauthorized upper bound".into();
-        e.owner_client_id = Some(owner.into());
-        apply(&mut tx, &e).await?;
-        complete(&mut tx, "credits_hold", key, &hold).await?;
+        let hold = hold_in_transaction(&mut tx, key, owner, input).await?;
         tx.commit().await?;
-        tracing::info!(event="resource.credits.hold_committed",hold_id=%hold.id,project_id=%hold.project_id,owner_client_id=owner);
         Ok(hold)
     }
 
@@ -428,7 +372,7 @@ async fn apply(tx: &mut Tx<'_>, e: &CreditLedgerEntry) -> Result<(), CreditError
         .await?;
     Ok(())
 }
-async fn reserve<T: Serialize>(
+pub(crate) async fn reserve<T: Serialize>(
     tx: &mut Tx<'_>,
     operation: &str,
     key: &str,
@@ -442,7 +386,7 @@ async fn reserve<T: Serialize>(
         _ => Err(CreditError::Conflict),
     }
 }
-async fn complete<T: Serialize>(
+pub(crate) async fn complete<T: Serialize>(
     tx: &mut Tx<'_>,
     operation: &str,
     key: &str,
@@ -855,5 +799,113 @@ pub(crate) async fn observe_unknown_usage(
         Some(usage.source_event_id),
     )
     .await?;
+    Ok(())
+}
+
+/// Shared atomic entry used by Resource-priced holds.
+pub(crate) async fn hold_in_transaction(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    input: &CreditHoldRequest,
+) -> Result<CreditHold, CreditError> {
+    if input.amount.scaled() < 0 || input.amount.scaled().unsigned_abs() >= 10_u128.pow(38) {
+        return Err(CreditError::Invalid);
+    }
+    if owner.is_empty() || input.business_key.trim().is_empty() || input.business_key.len() > 128 {
+        return Err(CreditError::Invalid);
+    }
+    if let Some(replay) = reserve(tx, "credits_hold", key, &(owner, input)).await? {
+        return Ok(serde_json::from_value(replay)?);
+    }
+    let scope = sqlx::query(
+        "SELECT project_id,state FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE",
+    )
+    .bind(input.request_id.as_uuid())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(CreditError::NotFound)?;
+    let project: Uuid = scope.try_get("project_id")?;
+    let request_state: String = scope.try_get("state")?;
+    if !matches!(
+        request_state.as_str(),
+        "reviewing" | "allocating" | "active"
+    ) {
+        return Err(CreditError::Conflict);
+    }
+    if project != input.project_id.as_uuid() {
+        return Err(CreditError::Denied);
+    }
+    lock_account(tx, input.project_id).await?;
+    if let Some(row)=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id=$1 AND business_key=$2").bind(input.request_id.as_uuid()).bind(&input.business_key).fetch_optional(&mut **tx).await? {
+            let existing=decode_hold(&row)?;
+            if existing.owner_client_id!=owner || existing.project_id!=input.project_id || existing.amount!=input.amount { return Err(CreditError::Conflict); }
+            complete(tx,"credits_hold",key,&existing).await?;return Ok(existing);
+        }
+    let hold = CreditHold {
+        id: Uuid::now_v7(),
+        project_id: input.project_id,
+        request_id: input.request_id,
+        business_key: input.business_key.clone(),
+        owner_client_id: owner.into(),
+        amount: input.amount.clone(),
+        remaining: input.amount.clone(),
+        state: CreditHoldState::Pending,
+        measurement_unknown: false,
+        reason: None,
+        created_at: now(tx).await?,
+    };
+    sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6::text::numeric,$6::text::numeric,'pending',$7)").bind(hold.id).bind(project).bind(input.request_id.as_uuid()).bind(&input.business_key).bind(owner).bind(input.amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut **tx).await?;
+    let mut e = entry(
+        Uuid::now_v7(),
+        Some(input.project_id),
+        0,
+        input.amount.scaled(),
+        0,
+        0,
+        "hold",
+        hold.created_at,
+    )?;
+    e.hold_id = Some(hold.id);
+    e.reason = "preauthorized upper bound".into();
+    e.owner_client_id = Some(owner.into());
+    apply(tx, &e).await?;
+    complete(tx, "credits_hold", key, &hold).await?;
+
+    tracing::info!(event="resource.credits.hold_staged",hold_id=%hold.id,project_id=%hold.project_id,owner_client_id=owner);
+    Ok(hold)
+}
+
+/// Execution cannot reuse a released, spent or uncertain preauthorization snapshot.
+pub(crate) async fn require_funded_in_transaction(
+    tx: &mut Tx<'_>,
+    owner: &str,
+    id: Uuid,
+    amount: &FixedDecimal,
+) -> Result<(), CreditError> {
+    let project: Uuid =
+        sqlx::query_scalar("SELECT project_id FROM resource.credit_holds WHERE hold_id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    lock_account(
+        tx,
+        project
+            .to_string()
+            .parse()
+            .map_err(|_| CreditError::Invalid)?,
+    )
+    .await?;
+    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE hold_id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
+    let hold = decode_hold(&row)?;
+    if hold.owner_client_id != owner {
+        return Err(CreditError::Denied);
+    }
+    if hold.state != CreditHoldState::Pending
+        || hold.measurement_unknown
+        || hold.remaining.scaled() < amount.scaled()
+    {
+        return Err(CreditError::Insufficient);
+    }
     Ok(())
 }

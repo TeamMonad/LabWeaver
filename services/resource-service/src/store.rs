@@ -36,7 +36,7 @@ use persistence_sqlx::cursor_key_id;
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };
-use rust_decimal::{Decimal, RoundingStrategy};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -1285,9 +1285,9 @@ impl PgResourceStore {
              (usage_record_id,project_id,course_id,target_kind,environment_id,request_id,lease_id,source_event_id,kind,
               measured_from,measured_until,measurement_state,cpu_millicore_seconds,
               memory_byte_seconds,storage_byte_seconds,gpu_unit_seconds,unknown_reason,
-              settlement,observed_at,contract)
+              settlement,observed_at,contract,quantity_divisor)
               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::numeric,$14::numeric,
-                      $15::numeric,$16::numeric,$17,$18,$19,$20)",
+                      $15::numeric,$16::numeric,$17,$18,$19,$20,$21)",
         )
         .bind(usage.id.as_uuid())
         .bind(usage.project_id.as_uuid())
@@ -1309,6 +1309,7 @@ impl PgResourceStore {
         .bind(wire(usage.settlement)?)
         .bind(usage.observed_at.get())
         .bind(serde_json::to_value(&usage)?)
+        .bind(match &usage.measurement { UsageMeasurement::Known { quantities } => i32::try_from(quantities.quantity_divisor)?, UsageMeasurement::Unknown { .. } => 1 })
         .execute(&mut *transaction)
         .await?;
         crate::credits::observe_unknown_usage(&mut transaction, &usage).await?;
@@ -2724,6 +2725,7 @@ impl PgResourceStore {
                     project_id,
                     course_id: original.course_id,
                     lines: vec![contracts::resource::ResourceChargeLine {
+                        quantity_divisor: 1,
                         rate_id: original_line.rate_id,
                         rate_revision: original_line.rate_revision,
                         unit: original_line.unit,
@@ -3207,20 +3209,28 @@ impl PgResourceStore {
     /// database clock, advances the request and lease together, and only then records
     /// `HandedOff`. A stale Evaluation worker cannot acknowledge a newer reservation.
     #[allow(clippy::too_many_lines)]
-    pub async fn acknowledge_task_resource(
+    /// Production Task authorization and its priced upper bound commit atomically.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fencing, funding and execution authorization share one atomic transaction"
+    )]
+    pub async fn acknowledge_funded_task_resource(
         &self,
         task_run_id: TaskRunId,
-        expected_claim_revision: Revision,
-        expected_lease_revision: Revision,
-        execution_namespace: &str,
+        input: &contracts::http::AcknowledgeTaskResourceRequest,
+        owner: &str,
         trace_id: &str,
     ) -> Result<TaskResourceStatus, ResourceStoreError> {
+        let expected_claim_revision = input.expected_claim_revision;
+        let expected_lease_revision = input.expected_lease_revision;
+        let execution_namespace = input.execution_namespace.as_str();
         if !valid_namespace_name(execution_namespace) {
             return Err(ResourceStoreError::InvalidNamespace);
         }
         validate_trace(trace_id)?;
         self.expire_task_resource(task_run_id).await?;
         let mut transaction = self.pool.begin().await?;
+        crate::costing::rate_lock(&mut transaction).await?;
         let row = sqlx::query(
             "SELECT r.contract AS request_contract,c.contract AS claim_contract,
                     l.contract AS lease_contract,c.namespace_name AS execution_namespace,
@@ -3321,6 +3331,15 @@ impl PgResourceStore {
         let duration = approved_duration_seconds;
         let expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(duration))
             .map_err(|_| ResourceStoreError::CapacityReadbackInvalid)?;
+        crate::costing::fund_task_in_transaction(
+            &mut transaction,
+            &request,
+            &claim,
+            owner,
+            now,
+            expires_at,
+        )
+        .await?;
         let next_lease =
             ResourceLifecycle::activate_lease(&lease, expected_lease_revision, now, expires_at)?;
         let next_request = ResourceLifecycle::activate(&request, request.revision, now)?;
@@ -4707,7 +4726,7 @@ impl PgResourceStore {
     }
 }
 
-async fn calculate_charge(
+pub(crate) async fn calculate_charge(
     transaction: &mut Transaction<'_, Postgres>,
     usage: &ResourceUsageRecord,
 ) -> Result<Option<ResourceCharge>, ResourceStoreError> {
@@ -4721,7 +4740,9 @@ async fn calculate_charge(
         if quantities.cpu_millicore_seconds > 0 {
             append_rate_segments(
                 transaction,
-                usage,
+                usage.measured_from,
+                usage.measured_until,
+                quantities.quantity_divisor,
                 ResourceBillingUnit::CpuMillicoreSecond,
                 quantities.cpu_millicore_seconds,
                 None,
@@ -4734,7 +4755,9 @@ async fn calculate_charge(
         if quantities.memory_byte_seconds > 0 {
             append_rate_segments(
                 transaction,
-                usage,
+                usage.measured_from,
+                usage.measured_until,
+                quantities.quantity_divisor,
                 ResourceBillingUnit::MemoryByteSecond,
                 quantities.memory_byte_seconds,
                 None,
@@ -4748,7 +4771,9 @@ async fn calculate_charge(
             let allocation = load_usage_gpu_allocation(transaction, usage).await?;
             append_rate_segments(
                 transaction,
-                usage,
+                usage.measured_from,
+                usage.measured_until,
+                quantities.quantity_divisor,
                 ResourceBillingUnit::GpuUnitSecond,
                 quantities.gpu_unit_seconds,
                 Some(&allocation.class),
@@ -4761,7 +4786,9 @@ async fn calculate_charge(
     } else if quantities.storage_byte_seconds > 0 {
         append_rate_segments(
             transaction,
-            usage,
+            usage.measured_from,
+            usage.measured_until,
+            quantities.quantity_divisor,
             ResourceBillingUnit::StorageByteSecond,
             quantities.storage_byte_seconds,
             None,
@@ -4803,9 +4830,11 @@ async fn calculate_charge(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn append_rate_segments(
+pub(crate) async fn append_rate_segments(
     transaction: &mut Transaction<'_, Postgres>,
-    usage: &ResourceUsageRecord,
+    from: UtcTimestamp,
+    until: UtcTimestamp,
+    quantity_divisor: u64,
     unit: ResourceBillingUnit,
     quantity: u64,
     gpu_class: Option<&str>,
@@ -4813,9 +4842,9 @@ async fn append_rate_segments(
     lines: &mut Vec<ResourceChargeLine>,
     currency: &mut Option<String>,
 ) -> Result<(), ResourceStoreError> {
-    let segments = select_rate_segments(transaction, unit, gpu_class, gpu_mode, usage).await?;
-    let total_millis =
-        (usage.measured_until.get() - usage.measured_from.get()).whole_milliseconds();
+    let segments =
+        select_rate_segments(transaction, unit, gpu_class, gpu_mode, from, until).await?;
+    let total_millis = (until.get() - from.get()).whole_milliseconds();
     if total_millis <= 0 {
         return Err(ResourceStoreError::NumericOverflow);
     }
@@ -4837,7 +4866,14 @@ async fn append_rate_segments(
         allocated = allocated
             .checked_add(segment_quantity)
             .ok_or(ResourceStoreError::NumericOverflow)?;
-        append_charge_line(unit, segment_quantity, rate, lines, currency)?;
+        append_charge_line(
+            unit,
+            segment_quantity,
+            quantity_divisor,
+            rate,
+            lines,
+            currency,
+        )?;
     }
     if allocated != quantity {
         return Err(ResourceStoreError::NumericOverflow);
@@ -4848,6 +4884,7 @@ async fn append_rate_segments(
 fn append_charge_line(
     unit: ResourceBillingUnit,
     quantity: u64,
+    quantity_divisor: u64,
     rate: &ResourceRate,
     lines: &mut Vec<ResourceChargeLine>,
     currency: &mut Option<String>,
@@ -4861,8 +4898,14 @@ fn append_charge_line(
         return Err(ResourceStoreError::RateCurrencyConflict);
     }
     *currency = Some(rate.unit_price.currency.clone());
-    let amount = multiply_money(&rate.unit_price, quantity, rate.unit_quantity)?;
+    let amount = multiply_money(
+        &rate.unit_price,
+        quantity,
+        rate.unit_quantity,
+        quantity_divisor,
+    )?;
     lines.push(ResourceChargeLine {
+        quantity_divisor,
         rate_id: rate.id,
         rate_revision: rate.revision,
         unit,
@@ -4879,7 +4922,8 @@ async fn select_rate_segments(
     unit: ResourceBillingUnit,
     gpu_class: Option<&str>,
     gpu_mode: Option<GpuAllocationMode>,
-    usage: &ResourceUsageRecord,
+    from: UtcTimestamp,
+    until: UtcTimestamp,
 ) -> Result<Vec<(ResourceRate, u128)>, ResourceStoreError> {
     let unit = wire(unit)?;
     let gpu_mode = gpu_mode.map(wire).transpose()?;
@@ -4894,15 +4938,15 @@ async fn select_rate_segments(
     .bind(&unit)
     .bind(gpu_class)
     .bind(gpu_mode.as_deref())
-    .bind(usage.measured_until.get())
-    .bind(usage.measured_from.get())
+    .bind(until.get())
+    .bind(from.get())
     .fetch_all(&mut **transaction)
     .await?;
     if rows.is_empty() {
         return Err(ResourceStoreError::RateUnconfigured);
     }
-    let from = usage.measured_from.get();
-    let until = usage.measured_until.get();
+    let from = from.get();
+    let until = until.get();
     let mut cursor = from;
     let mut segments = Vec::with_capacity(rows.len());
     for row in rows {
@@ -4987,21 +5031,16 @@ fn multiply_money(
     unit_price: &Money,
     quantity: u64,
     unit_quantity: u64,
+    quantity_divisor: u64,
 ) -> Result<Money, ResourceStoreError> {
-    if unit_quantity == 0 {
-        return Err(ResourceStoreError::NumericOverflow);
-    }
-    let price = Decimal::from_str(unit_price.amount.as_str())
-        .map_err(|_| ResourceStoreError::NumericOverflow)?;
-    let amount = Decimal::from(quantity)
-        .checked_mul(price)
-        .ok_or(ResourceStoreError::NumericOverflow)?
-        .checked_div(Decimal::from(unit_quantity))
-        .ok_or(ResourceStoreError::NumericOverflow)?
-        .round_dp_with_strategy(6, RoundingStrategy::MidpointNearestEven);
     Ok(Money {
         currency: unit_price.currency.clone(),
-        amount: FixedDecimal::parse(&format!("{amount:.6}"))?,
+        amount: FixedDecimal::from_scaled(contracts::resource::rounded_scaled_amount(
+            unit_price.amount.scaled(),
+            quantity,
+            unit_quantity,
+            quantity_divisor,
+        )?)?,
     })
 }
 
@@ -5931,12 +5970,13 @@ async fn canonical_environment_measurement(
             u128::from(value)
                 .checked_mul(millis)
                 .ok_or(ResourceStoreError::NumericOverflow)?
-                / 1_000,
+                / (1000 / u128::from(quantities.quantity_divisor)),
         )
         .map_err(|_| ResourceStoreError::NumericOverflow)
     };
     let expected = match kind {
         ResourceUsageKind::Compute => ResourceUsageQuantities {
+            quantity_divisor: quantities.quantity_divisor,
             cpu_millicore_seconds: per_second(u64::from(resources.cpu_millicores))?,
             memory_byte_seconds: per_second(resources.memory_bytes)?,
             storage_byte_seconds: 0,
@@ -5948,6 +5988,7 @@ async fn canonical_environment_measurement(
             )?,
         },
         ResourceUsageKind::Storage => ResourceUsageQuantities {
+            quantity_divisor: quantities.quantity_divisor,
             cpu_millicore_seconds: 0,
             memory_byte_seconds: 0,
             storage_byte_seconds: per_second(resources.storage_bytes)?,
@@ -6247,6 +6288,8 @@ fn safe_sqlstate_value(code: Option<&str>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceStoreError {
+    #[error("LW_RESOURCE_ESTIMATE_CHANGED")]
+    EstimateChanged,
     #[error(transparent)]
     Credits(#[from] crate::credits::CreditError),
     #[error(transparent)]

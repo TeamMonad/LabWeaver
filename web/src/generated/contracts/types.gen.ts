@@ -11430,7 +11430,8 @@ export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | '
 export type ResourceChargeLine = {
     amount: ResourceChargeSchemaMoney;
     quantity: number;
-    rateId: ResourceChargeSchemaRateId;
+    quantityDivisor?: number;
+    rateId: RateId;
     rateRevision: ResourceChargeSchemaRevision;
     unit: ResourceChargeSchemaResourceBillingUnit;
     unitPrice: ResourceChargeSchemaMoney;
@@ -11456,6 +11457,140 @@ export type UsageSettlementState = 'pending' | 'settled' | 'unsettled';
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ResourceChargeSchemaUtcTimestamp = string;
+
+/**
+ * ResourceCostEstimateRequest
+ *
+ * Half-open compute and storage intervals are independent, even when they overlap.
+ */
+export type ResourceCostEstimateRequestSchema = {
+    computeFrom: ResourceCostEstimateRequestSchemaUtcTimestamp;
+    computeUntil: ResourceCostEstimateRequestSchemaUtcTimestamp;
+    resources: ResourceCostEstimateRequestSchemaWorkloadResources;
+    storageFrom: ResourceCostEstimateRequestSchemaUtcTimestamp;
+    storageUntil: ResourceCostEstimateRequestSchemaUtcTimestamp;
+};
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type ResourceCostEstimateRequestSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ResourceCostEstimateRequestSchemaUtcTimestamp = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type ResourceCostEstimateRequestSchemaWorkloadResources = {
+    cpuMillicores: number;
+    gpu?: ResourceCostEstimateRequestSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
+ * ResourceCostEstimate
+ *
+ * Calculated lines retain the exact rate IDs, revisions, prices and quantity divisors.
+ */
+export type ResourceCostEstimateSchema = {
+    input: ResourceCostEstimateRequest;
+    lines: Array<ResourceCostEstimateSchemaResourceChargeLine>;
+    projectId: ResourceCostEstimateSchemaProjectId;
+    total: ResourceCostEstimateSchemaMoney;
+};
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type ResourceCostEstimateSchemaFixedDecimal = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type ResourceCostEstimateSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * A fixed-precision amount with an explicit ISO-4217-like currency code.
+ */
+export type ResourceCostEstimateSchemaMoney = {
+    amount: ResourceCostEstimateSchemaFixedDecimal;
+    currency: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ResourceCostEstimateSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type ResourceCostEstimateSchemaRateId = string;
+
+/**
+ * Resource dimension used by a versioned rate card.
+ */
+export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second';
+
+/**
+ * One immutable line in a calculated charge.
+ */
+export type ResourceCostEstimateSchemaResourceChargeLine = {
+    amount: ResourceCostEstimateSchemaMoney;
+    quantity: number;
+    quantityDivisor?: number;
+    rateId: ResourceCostEstimateSchemaRateId;
+    rateRevision: ResourceCostEstimateSchemaRevision;
+    unit: ResourceCostEstimateSchemaResourceBillingUnit;
+    unitPrice: ResourceCostEstimateSchemaMoney;
+    unitQuantity: number;
+};
+
+/**
+ * Half-open compute and storage intervals are independent, even when they overlap.
+ */
+export type ResourceCostEstimateRequest = {
+    computeFrom: ResourceCostEstimateSchemaUtcTimestamp;
+    computeUntil: ResourceCostEstimateSchemaUtcTimestamp;
+    resources: ResourceCostEstimateSchemaWorkloadResources;
+    storageFrom: ResourceCostEstimateSchemaUtcTimestamp;
+    storageUntil: ResourceCostEstimateSchemaUtcTimestamp;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceCostEstimateSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ResourceCostEstimateSchemaUtcTimestamp = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type ResourceCostEstimateSchemaWorkloadResources = {
+    cpuMillicores: number;
+    gpu?: ResourceCostEstimateSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
 
 /**
  * ResourceLease
@@ -11844,6 +11979,11 @@ export type ResourceUsageQuantities = {
     cpuMillicoreSeconds: number;
     gpuUnitSeconds: number;
     memoryByteSeconds: number;
+    /**
+     * Divide every quantity by this value to obtain the named base unit.
+     * 1000 preserves millisecond observations without changing per-second prices.
+     */
+    quantityDivisor?: number;
     storageByteSeconds: number;
 };
 
@@ -19747,6 +19887,73 @@ export type UpsertProjectResourceBudgetResponses = {
 };
 
 export type UpsertProjectResourceBudgetResponse = UpsertProjectResourceBudgetResponses[keyof UpsertProjectResourceBudgetResponses];
+
+export type EstimateProjectResourceCostData = {
+    body: ResourceCostEstimateRequestSchema;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/resource-cost-estimate';
+};
+
+export type EstimateProjectResourceCostErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type EstimateProjectResourceCostError = EstimateProjectResourceCostErrors[keyof EstimateProjectResourceCostErrors];
+
+export type EstimateProjectResourceCostResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceCostEstimateSchema;
+};
+
+export type EstimateProjectResourceCostResponse = EstimateProjectResourceCostResponses[keyof EstimateProjectResourceCostResponses];
 
 export type ListProjectResourceLeasesData = {
     body?: never;

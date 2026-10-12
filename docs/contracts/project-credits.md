@@ -92,3 +92,25 @@ HTTP 错误使用 RFC 9457，并含 requestId。服务 JWT 拒绝沿用现有鉴
 本地数据库验证只使用隔离合成账户。生产迁移、支付、账本调整、部署与发布需要各自授权。浏览器完整用户流程留给 Grok 联调与 Sprint 验收。
 
 现有 Resource 后台循环还回收终态申请的遗漏预占。它只处理没有容量或容量已 released 的申请。#200 deadline worker 的取消记录可由此恢复。expiring 和未释放容量不会触发退款。重复恢复不新增扣收或再次退款。
+
+## 计算与存储估价
+
+`estimateProjectResourceCost` 使用 `POST /api/v1/projects/{projectId}/resource-cost-estimate`。权限与 Credits 读取相同。请求提供资源规格及独立的 `computeFrom/computeUntil`、`storageFrom/storageUntil` 半开区间。停止计算后保留的存储可使用更长区间。该读取没有资金或容量副作用。
+
+响应 `ResourceCostEstimate` 保存输入、每条费率 ID、revision、价格、quantity、quantityDivisor 及 CREDITS 总额。价格由 Resource 当前费率取出；GPU 模式由真实目录解析。缺费率、覆盖缺口、混用币种、数值溢出或未知 GPU 类别明确失败，不显示为免费。
+
+内部 `createEstimatedCreditHold` 使用 `POST /internal/v1/credits/estimated-holds`，要求 `resource.credits.hold` 与已配置的工作负载 owner。请求仅提供 requestId 和 expectedEstimate。Resource 从已保存的申请或批准读取资源规格与时限，在同一事务验证范围、重新计算价格、预占账户并保存不可变快照。Access 不能调用此入口。批准后改变规格或费率变化导致报价不一致时，返回 `409/LW_RESOURCE_ESTIMATE_CHANGED`；调用方重新显示真实估价并取得原流程要求的授权。
+
+当前绑定 `businessKey=metered-usage` 的上限覆盖申请的完整计算和存储时限。两段开始时间必须尚未到达。相同输入和 Idempotency-Key 丢响应重放返回原结果；换重试键也只取得同一申请的原快照。再次读取当前预占状态仍使用 holds 查询，创建响应表示当时的接受结果。
+
+共享 Task 的内部 ack 已强制按批准的 CPU、内存、存储和 GPU 与最大时限预占。预占、报价快照和执行授权在同一事务提交。缺费率或欠额时保持尚未启动，不能取得执行授权。Agent 沙箱和 Evaluation 沿其既有 ack 入口消费同一规则。明确配置的零价仍写零额预占与报价，不以缺配置推断免费。
+
+独立 LLM token、BuildKit 构建、环境新建与续期的全部消费入口，以及预留产品的期间预付仍由后续 #210/#225 接线完成。这个切片不能代替这些入口的验收。
+
+## 毫秒数量
+
+每条已知用量和费用明细携带 `quantityDivisor`。基础单位仍是 millicore-second、byte-second 或 GPU-unit-second；数量除以该字段后才是基础单位值。真实 Environment 与共享 Task 计量使用1000。例如400毫秒的1单位 GPU记录 quantity=400、quantityDivisor=1000，对应0.4 GPU-unit-second。
+
+历史整秒数量使用除数1。金额不使用浮点数；估价、结算及费用契约校验共用精确整数公式，六位小数的中点舍入取偶数。按费率边界分段后记录每段数量和费率。不得先把毫秒截断成整秒。运营方的每秒价格不随此修正换算或自动改变。
+
+运行时间或 token 未知仍保留 unknown。未知核实期限及模型最高允许预占在方案中尚未指定具体值，当前增量没有新增默认值或自动追收规则；这些项目仍是 #210 账务闭环的验收条件。

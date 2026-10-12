@@ -654,6 +654,10 @@ impl ResourceRate {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceUsageQuantities {
+    /// Divide every quantity by this value to obtain the named base unit.
+    /// 1000 preserves millisecond observations without changing per-second prices.
+    #[serde(default = "whole_quantity")]
+    pub quantity_divisor: u64,
     pub cpu_millicore_seconds: u64,
     pub memory_byte_seconds: u64,
     pub storage_byte_seconds: u64,
@@ -770,6 +774,9 @@ impl ResourceUsageRecord {
         self.target.validate()?;
         self.measurement.validate()?;
         if let UsageMeasurement::Known { quantities } = &self.measurement {
+            if !matches!(quantities.quantity_divisor, 1 | 1000) {
+                return Err(ResourceError::InvalidUsage);
+            }
             let invalid_scope = match self.kind {
                 ResourceUsageKind::Compute => quantities.storage_byte_seconds != 0,
                 ResourceUsageKind::Storage => {
@@ -806,6 +813,8 @@ pub struct ResourceUsagePage {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceChargeLine {
+    #[serde(default = "whole_quantity")]
+    pub quantity_divisor: u64,
     pub rate_id: RateId,
     pub rate_revision: Revision,
     pub unit: ResourceBillingUnit,
@@ -817,7 +826,10 @@ pub struct ResourceChargeLine {
 
 impl ResourceChargeLine {
     pub fn validate(&self) -> Result<(), ResourceError> {
-        if self.rate_revision.get() == 0 || self.unit_quantity == 0 {
+        if self.rate_revision.get() == 0
+            || self.unit_quantity == 0
+            || !matches!(self.quantity_divisor, 1 | 1000)
+        {
             return Err(ResourceError::InvalidCharge);
         }
         self.unit_price.validate()?;
@@ -829,6 +841,7 @@ impl ResourceChargeLine {
             self.unit_price.amount.scaled(),
             self.quantity,
             self.unit_quantity,
+            self.quantity_divisor,
         )?;
         if expected != self.amount.amount.scaled() {
             return Err(ResourceError::InvalidCharge);
@@ -838,15 +851,20 @@ impl ResourceChargeLine {
 }
 
 /// Computes a six-decimal amount with exact integer arithmetic and midpoint
-/// ties rounded to the nearest even result.  The Resource service uses the
-/// same formula through `rust_decimal`; keeping this checked contract rule
-/// makes malformed persisted charges fail closed during decoding.
-fn rounded_scaled_amount(
+/// ties rounded to the nearest even result. Estimates, settlement and persisted
+/// charge validation all call this formula. A quantity divisor preserves milliseconds.
+const fn whole_quantity() -> u64 {
+    1
+}
+
+/// Exact six-place price calculation shared by estimates and settlement.
+pub fn rounded_scaled_amount(
     unit_price_scaled: i128,
     quantity: u64,
     unit_quantity: u64,
+    quantity_divisor: u64,
 ) -> Result<i128, ResourceError> {
-    if unit_quantity == 0 {
+    if unit_quantity == 0 || !matches!(quantity_divisor, 1 | 1000) {
         return Err(ResourceError::InvalidCharge);
     }
     let product = unit_price_scaled
@@ -854,7 +872,7 @@ fn rounded_scaled_amount(
         .ok_or(ResourceError::InvalidCharge)?;
     let negative = product < 0;
     let magnitude = product.unsigned_abs();
-    let denominator = u128::from(unit_quantity);
+    let denominator = u128::from(unit_quantity) * u128::from(quantity_divisor);
     let quotient = magnitude / denominator;
     let remainder = magnitude % denominator;
     let twice_remainder = remainder
@@ -1054,5 +1072,6 @@ mod tests {
         Ok(())
     }
 }
+pub mod costing;
 /// Project Credits account and immutable ledger contracts.
 pub mod credits;

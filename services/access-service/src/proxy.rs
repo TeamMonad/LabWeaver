@@ -944,6 +944,33 @@ async fn authorize_resource_request(
             .await?;
             return Ok("endResourceRate");
         }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "resource-cost-estimate",
+        ] if *method == Method::POST => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let input = contracts::parse_strict_json::<
+                contracts::resource::costing::ResourceCostEstimateRequest,
+            >(body)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            input
+                .validate()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "estimateProjectResourceCost",
+            )
+            .await?;
+            return Ok("estimateProjectResourceCost");
+        }
         ["", "api", "v1", "projects", project_id, "credits"] if *method == Method::GET => {
             let project_id = project_id
                 .parse()
@@ -2231,6 +2258,7 @@ fn valid_resource_path(path: &str) -> bool {
             | ["", "api", "v1", "projects", _, "resource-budget"]
             | ["", "api", "v1", "projects", _, "charges"]
             | ["", "api", "v1", "projects", _, "credits"]
+            | ["", "api", "v1", "projects", _, "resource-cost-estimate"]
             | [
                 "",
                 "api",
