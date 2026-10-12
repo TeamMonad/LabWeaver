@@ -26,7 +26,7 @@ export type ProjectContextState =
   | {
       kind: 'unavailable'
       projectId: string
-      reason: 'checking' | 'not-found' | 'forbidden' | 'archived-or-hidden' | 'error'
+      reason: 'checking' | 'not-accessible' | 'archived-or-hidden' | 'error'
       diagnostic: DiagnosticViewModel | null
       fallback: ProjectSchema | null
     }
@@ -103,7 +103,9 @@ export function useProjectContext() {
     return {
       kind: 'unavailable',
       projectId: requested,
-      reason: status === 404 ? 'not-found' : status === 403 || status === 401 ? 'forbidden' : 'error',
+      // Access may answer 403 before it knows whether the project exists, so
+      // 401/403/404 are one user-facing reason: missing or not accessible.
+      reason: status === 404 || status === 403 || status === 401 ? 'not-accessible' : 'error',
       diagnostic: checked.diagnostic,
       fallback: fallbackProject.value,
     }

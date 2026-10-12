@@ -1864,10 +1864,7 @@ function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
   if (hasActiveLifecycleOperation(data)) return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
   if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
   if (data.observedState === 'stopped') {
-    const resourceHint = data.class === 'experiment'
-      ? 'GPU 预留已释放，重新启动时会重新进行 GPU 资源准入。'
-      : 'GPU 预留和 Work 资源租约会保留，删除环境并完成回收后才归还容量。'
-    return `环境已停止，启动后才能打开终端。计算用量已停止计量；工作目录和磁盘仍保留并继续按存储费率核算。${resourceHint}`
+    return `环境已停止，启动后才能打开终端。工作目录和磁盘仍保留。${STOPPED_IMPACT_NOTICE}`
   }
   if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
   return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
@@ -1917,6 +1914,14 @@ function retryCreate() {
 }
 
 type ConfirmedLifecycleAction = 'stop' | 'restart'
+/**
+ * Neutral wording for usage and GPU capacity around stop. The platform does not
+ * yet publish a per-environment stop impact, so the page must not promise that
+ * charges stop or that a GPU reservation is kept or released.
+ */
+const STOP_IMPACT_NOTICE = '提交停止不代表已停止计量：环境实际停止后，计算用量才停止计量；保留的工作目录和磁盘会继续计入存储用量，直到删除。GPU 容量是否保留取决于环境类型和项目资源配置，请以资源与费用记录为准。'
+const STOPPED_IMPACT_NOTICE = '保留的工作目录和磁盘会继续计入存储用量，直到删除。GPU 容量是否保留取决于环境类型和项目资源配置，请以资源与费用记录为准。'
+
 const lifecycleConfirmation = ref<{ data: EnvironmentInstanceSchema; action: ConfirmedLifecycleAction } | null>(null)
 
 /** Stop and restart interrupt sessions and change usage, so they confirm first; start never does. */
@@ -1930,10 +1935,9 @@ function lifecycleConfirmationText(data: EnvironmentInstanceSchema, action: Conf
   if (action === 'restart') {
     return `重启${name}${sessions}环境随后会重新启动，重启完成前无法连接。工作目录和磁盘会保留。确定重启吗？`
   }
-  const gpu = data.class === 'experiment'
-    ? 'GPU 预留会释放，重新启动时需要重新进行 GPU 资源准入。'
-    : 'GPU 预留和 Work 资源租约会保留，删除环境并完成回收后才归还容量。'
-  return `停止${name}${sessions}停止后计算用量不再计量；工作目录和磁盘仍保留，并继续按存储费率核算。${gpu}之后可以重新启动。确定停止吗？`
+  // There is no stop-impact contract yet: billing and GPU capacity effects are
+  // stated as conditional, never as something this action guarantees.
+  return `停止${name}${sessions}工作目录和磁盘会保留，之后可以重新启动。${STOP_IMPACT_NOTICE}确定停止吗？`
 }
 
 async function confirmLifecycle() {
