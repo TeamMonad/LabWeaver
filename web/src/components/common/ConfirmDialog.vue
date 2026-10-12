@@ -83,10 +83,20 @@ const cancelButtonRef = ref<HTMLButtonElement | null>(null)
 
 // Focus lands on the cancel action so an accidental Enter can never trigger an
 // irreversible confirm (GCP-style destructive-action protection).
+let returnFocus: HTMLElement | null = null
+
 watch(
   () => props.open,
   async (open) => {
-    if (!open) return
+    if (!open) {
+      // Return focus to the control that opened the dialog so keyboard users keep their place.
+      const target = returnFocus
+      returnFocus = null
+      await nextTick()
+      if (target?.isConnected) target.focus()
+      return
+    }
+    if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) returnFocus = document.activeElement
     await nextTick()
     if (props.dismissible) cancelButtonRef.value?.focus()
     else dialogRef.value?.querySelector<HTMLButtonElement>('.filled-button')?.focus()

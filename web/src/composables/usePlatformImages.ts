@@ -240,6 +240,7 @@ export function usePlatformImages() {
         problem?.diagnosticCode ?? fallbackCode,
         problem?.detail ?? fallbackMessage,
         retryableOverride ?? problem?.retryable ?? true,
+        problem,
       ),
       ...(uploadId ? { uploadId } : {}),
     }

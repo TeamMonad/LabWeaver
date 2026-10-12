@@ -13,6 +13,8 @@
     <DiagnosticBanner
       v-if="bannerFailure"
       :code="bannerFailure.code"
+      :request-id="bannerFailure.requestId"
+      :next-step="bannerFailure.nextStep"
       :message="bannerFailure.message"
       :retryable="bannerFailure.retryable"
       severity="error"
@@ -233,6 +235,8 @@
       <DiagnosticBanner
         v-if="uploadDescriptorFailure"
         :code="uploadDescriptorFailure.code"
+        :request-id="uploadDescriptorFailure.requestId"
+        :next-step="uploadDescriptorFailure.nextStep"
         :message="uploadDescriptorFailure.message"
         severity="error"
       />

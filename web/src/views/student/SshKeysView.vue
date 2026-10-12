@@ -30,6 +30,8 @@
         v-if="addError"
         class="form-error"
         :code="addError.code"
+        :request-id="addError.requestId"
+        :next-step="addError.nextStep"
         :message="addError.message"
         :retryable="addError.retryable"
         severity="error"

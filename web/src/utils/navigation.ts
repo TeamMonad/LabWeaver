@@ -39,7 +39,20 @@ export interface NavigationItem {
 export interface NavigationGroup {
   id: NavigationGroupId
   label: string
+  /** Route prefix of the workbench that owns every item of this group. */
+  basePath: string
+  /** Page title of the workbench parent route. */
+  workbenchTitle: string
+  /** Roles allowed to enter the workbench route; items narrow this further. */
+  allowedRoles: readonly PlatformRole[]
   items: readonly NavigationItem[]
+}
+
+/** A routed detail page that belongs to a navigation item but has no menu entry. */
+export interface NavigationDetailRoute {
+  parentId: NavigationItemId
+  path: string
+  title: string
 }
 
 export interface AuthorizedNavigationItem extends NavigationItem {
@@ -56,6 +69,9 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
   {
     id: 'teaching',
     label: '教学管理',
+    basePath: '/teacher',
+    workbenchTitle: '教师工作台',
+    allowedRoles: TEACHER_ONLY,
     items: [
       {
         id: 'teacher-overview',
@@ -112,6 +128,9 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
   {
     id: 'student',
     label: '我的实验',
+    basePath: '/student',
+    workbenchTitle: '学生工作台',
+    allowedRoles: STUDENT_ONLY,
     items: [
       {
         id: 'student-labs',
@@ -157,6 +176,9 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
   {
     id: 'work',
     label: '项目与工作',
+    basePath: '/researcher',
+    workbenchTitle: '项目与工作',
+    allowedRoles: ALL_PLATFORM_ROLES,
     items: [
       {
         id: 'workspaces',
@@ -213,6 +235,9 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
   {
     id: 'admin',
     label: '平台管理',
+    basePath: '/admin',
+    workbenchTitle: '管理工作台',
+    allowedRoles: ADMIN_ONLY,
     items: [
       {
         id: 'admin-resource-approval',
@@ -263,6 +288,31 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
     ],
   },
 ] as const
+
+export const NAVIGATION_DETAIL_ROUTES: readonly NavigationDetailRoute[] = [
+  { parentId: 'student-results', path: '/student/results/:runId', title: '评测详情' },
+]
+
+/** The navigation item whose path owns `path` (exact match or a nested detail path). */
+export function navigationItemForPath(path: string): AuthorizedNavigationItem | null {
+  for (const group of NAVIGATION_GROUPS) {
+    const item = group.items.find((candidate) => path === candidate.path || path.startsWith(`${candidate.path}/`))
+    if (item) return { ...item, groupId: group.id, groupLabel: group.label }
+  }
+  return null
+}
+
+/** Home and project-scoped items carry `?projectId=` so links, reloads and deep links name one project. */
+export function isProjectScopedPath(path: string): boolean {
+  if (path === '/') return true
+  return Boolean(navigationItemForPath(path)?.projectScoped)
+}
+
+/** The list path to return to when the project changes under a project-scoped detail route. */
+export function projectScopedBasePath(path: string): string | null {
+  const item = navigationItemForPath(path)
+  return item?.projectScoped ? item.path : null
+}
 
 function roleAlias(value: unknown): PlatformRole | null {
   if (typeof value !== 'string') return null

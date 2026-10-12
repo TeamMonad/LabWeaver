@@ -11,6 +11,7 @@ function resultError(error: unknown, fallbackCode: string, fallbackDetail: strin
     problem?.diagnosticCode ?? fallbackCode,
     problem?.detail ?? fallbackDetail,
     problem?.retryable ?? true,
+    problem,
   )
   if (problem?.status === 401 || problem?.status === 403) return { kind: 'unauthorized', diagnostic }
   return { kind: 'error', diagnostic }

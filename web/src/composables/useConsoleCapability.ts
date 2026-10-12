@@ -11,7 +11,7 @@ import { idempotencyKey, ifMatch } from '@/utils/format'
 
 function errorDiagnostic(err: unknown, fallbackCode: string, fallbackDetail: string) {
   const problem = extractProblemDetails(err)
-  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackDetail, problem?.retryable ?? true)
+  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackDetail, problem?.retryable ?? true, problem)
 }
 
 export function useConsoleCapability(grantId: Ref<string | undefined>) {

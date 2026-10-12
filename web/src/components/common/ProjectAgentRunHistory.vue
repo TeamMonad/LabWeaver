@@ -147,6 +147,7 @@ async function loadHistory(page = historyPage.value) {
         problem?.diagnosticCode ?? 'PROJECT_AGENT_RUN_HISTORY_LOAD_FAILED',
         problem?.detail ?? '加载项目任务历史失败',
         problem?.retryable ?? true,
+        problem,
       ),
     }
     return

@@ -2,40 +2,103 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized, RouteRecordRaw } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { OIDC_ENABLED } from '@/config'
-import { PLATFORM_ROLES, rolesFromProfile, type PlatformRole } from '@/utils/navigation'
+import {
+  NAVIGATION_DETAIL_ROUTES,
+  NAVIGATION_GROUPS,
+  rolesFromProfile,
+  type NavigationGroupId,
+  type NavigationItemId,
+  type PlatformRole,
+} from '@/utils/navigation'
 
 /** Roles that come from the authenticated platform identity. Work is project-scoped. */
 export type AppRole = PlatformRole
 
-type WorkbenchRoute = AppRole | 'researcher'
-
 export interface AppRouteMeta {
   title?: string
-  navGroup?: WorkbenchRoute
+  navGroup?: NavigationGroupId
   requiredRoles?: AppRole[]
   requiredCourseScope?: boolean
+  /** The page reads or writes one project; the shell keeps `?projectId=` authoritative. */
+  projectScoped?: boolean
 }
 
 declare module 'vue-router' {
   interface RouteMeta extends AppRouteMeta {}
 }
 
-function roleRoute(
-  role: WorkbenchRoute,
-  path: string,
-  title: string,
-  component: () => Promise<unknown>,
-  children: RouteRecordRaw[] = [],
-  requiredRoles: AppRole[] = role === 'researcher' ? [...PLATFORM_ROLES] : [role],
-): RouteRecordRaw {
-  return {
-    path,
-    name: role,
-    component,
-    meta: { title, navGroup: role, requiredRoles },
-    redirect: children.length ? `${path}/${children[0].path}` : undefined,
-    children,
-  }
+type ViewLoader = () => Promise<unknown>
+
+/**
+ * Path, title, roles and project scope live in `utils/navigation.ts`; the
+ * router only binds each navigation item to its view. The `Record` keeps the
+ * binding exhaustive, so a menu entry cannot exist without a route.
+ */
+const WORKBENCH_VIEWS: Record<NavigationGroupId, ViewLoader> = {
+  teaching: () => import('@/views/TeacherView.vue'),
+  student: () => import('@/views/StudentView.vue'),
+  work: () => import('@/views/ResearcherView.vue'),
+  admin: () => import('@/views/AdminView.vue'),
+}
+
+const ITEM_VIEWS: Record<NavigationItemId, ViewLoader> = {
+  'teacher-overview': () => import('@/views/teacher/TeacherOverviewView.vue'),
+  'teacher-labs': () => import('@/views/teacher/LabListView.vue'),
+  'teacher-materials': () => import('@/views/teacher/MaterialUploadView.vue'),
+  'teacher-environments': () => import('@/views/teacher/WorkbenchModuleView.vue'),
+  'teacher-approvals': () => import('@/views/teacher/CandidateApprovalView.vue'),
+  'student-labs': () => import('@/views/student/MyLabsView.vue'),
+  'student-environments': () => import('@/views/student/EnvironmentEntryView.vue'),
+  'student-ssh-keys': () => import('@/views/student/SshKeysView.vue'),
+  'student-results': () => import('@/views/student/ResultListView.vue'),
+  workspaces: () => import('@/views/researcher/WorkspaceListView.vue'),
+  'work-environments': () => import('@/views/student/EnvironmentEntryView.vue'),
+  'work-software': () => import('@/views/researcher/SoftwareConfigView.vue'),
+  'work-ai-policy': () => import('@/views/admin/PolicyListView.vue'),
+  'work-resources': () => import('@/views/researcher/ResourceRequestView.vue'),
+  'admin-resource-approval': () => import('@/views/admin/ResourceApprovalView.vue'),
+  'admin-policies': () => import('@/views/admin/PolicyListView.vue'),
+  'admin-platform-images': () => import('@/views/admin/PlatformImageView.vue'),
+  'admin-gpu-catalog': () => import('@/views/admin/GpuCatalogView.vue'),
+  'admin-finance': () => import('@/views/admin/ResourceFinanceView.vue'),
+}
+
+const DETAIL_VIEWS: Record<string, ViewLoader> = {
+  '/student/results/:runId': () => import('@/views/student/ResultDetailView.vue'),
+}
+
+function childPath(basePath: string, path: string): string {
+  if (!path.startsWith(`${basePath}/`)) throw new Error(`navigation path ${path} is outside ${basePath}`)
+  return path.slice(basePath.length + 1)
+}
+
+function workbenchRoutes(): RouteRecordRaw[] {
+  return NAVIGATION_GROUPS.map((group) => {
+    const children: RouteRecordRaw[] = group.items.map((item) => ({
+      path: childPath(group.basePath, item.path),
+      component: ITEM_VIEWS[item.id],
+      meta: { title: item.label, projectScoped: Boolean(item.projectScoped) },
+    }))
+    for (const detail of NAVIGATION_DETAIL_ROUTES) {
+      const parent = group.items.find((item) => item.id === detail.parentId)
+      if (!parent) continue
+      const component = DETAIL_VIEWS[detail.path]
+      if (!component) throw new Error(`missing view for ${detail.path}`)
+      children.push({
+        path: childPath(group.basePath, detail.path),
+        component,
+        meta: { title: detail.title, projectScoped: Boolean(parent.projectScoped) },
+      })
+    }
+    return {
+      path: group.basePath,
+      name: group.id,
+      component: WORKBENCH_VIEWS[group.id],
+      meta: { title: group.workbenchTitle, navGroup: group.id, requiredRoles: [...group.allowedRoles] },
+      redirect: group.items.length ? group.items[0].path : undefined,
+      children,
+    }
+  })
 }
 
 const routes: RouteRecordRaw[] = [
@@ -43,7 +106,7 @@ const routes: RouteRecordRaw[] = [
     path: '/',
     name: 'home',
     component: () => import('@/views/HomeView.vue'),
-    meta: { title: 'LabWeaver' },
+    meta: { title: '进行中', projectScoped: true },
   },
   {
     path: '/auth/callback',
@@ -58,37 +121,7 @@ const routes: RouteRecordRaw[] = [
     props: (route) => ({ reason: route.query.reason }),
     meta: { title: '认证失败' },
   },
-  roleRoute('teacher', '/teacher', '教师工作台', () => import('@/views/TeacherView.vue'), [
-    { path: 'overview', component: () => import('@/views/teacher/TeacherOverviewView.vue'), meta: { title: '实验总览' } },
-    { path: 'labs', component: () => import('@/views/teacher/LabListView.vue'), meta: { title: '实验' } },
-    { path: 'environments', component: () => import('@/views/teacher/WorkbenchModuleView.vue'), meta: { title: '环境' } },
-    { path: 'materials', component: () => import('@/views/teacher/MaterialUploadView.vue'), meta: { title: '材料' } },
-    { path: 'approvals', component: () => import('@/views/teacher/CandidateApprovalView.vue'), meta: { title: '审批' } },
-  ]),
-  roleRoute('student', '/student', '学生工作台', () => import('@/views/StudentView.vue'), [
-    { path: 'labs', component: () => import('@/views/student/MyLabsView.vue'), meta: { title: '我的实验' } },
-    { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: '环境控制台' } },
-    { path: 'ssh-keys', component: () => import('@/views/student/SshKeysView.vue'), meta: { title: 'SSH 公钥' } },
-    { path: 'results', component: () => import('@/views/student/ResultListView.vue'), meta: { title: '评测结果' } },
-    { path: 'results/:runId', component: () => import('@/views/student/ResultDetailView.vue'), meta: { title: '评测详情' } },
-  ]),
-  // Work is project-scoped and the platform has no separate researcher
-  // identity role. Any authenticated platform role can use this workbench;
-  // project membership and operation permissions remain server-authoritative.
-  roleRoute('researcher', '/researcher', '科研工作台', () => import('@/views/ResearcherView.vue'), [
-    { path: 'workspaces', component: () => import('@/views/researcher/WorkspaceListView.vue'), meta: { title: '工作空间' } },
-    { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: 'Work 环境' } },
-    { path: 'software', component: () => import('@/views/researcher/SoftwareConfigView.vue'), meta: { title: '软件配置' } },
-    { path: 'ai-policy', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '项目 AI 设置' } },
-    { path: 'resources', component: () => import('@/views/researcher/ResourceRequestView.vue'), meta: { title: '资源申请' } },
-  ], [...PLATFORM_ROLES]),
-  roleRoute('admin', '/admin', '管理工作台', () => import('@/views/AdminView.vue'), [
-    { path: 'resource-approval', component: () => import('@/views/admin/ResourceApprovalView.vue'), meta: { title: '资源审批' } },
-    { path: 'policies', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '策略' } },
-    { path: 'resource-finance', component: () => import('@/views/admin/ResourceFinanceView.vue'), meta: { title: '预算与费用' } },
-    { path: 'platform-images', component: () => import('@/views/admin/PlatformImageView.vue'), meta: { title: '平台镜像' } },
-    { path: 'gpu-catalog', component: () => import('@/views/admin/GpuCatalogView.vue'), meta: { title: 'GPU 目录' } },
-  ]),
+  ...workbenchRoutes(),
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
@@ -145,9 +178,8 @@ router.beforeEach(async (to) => {
     }
   }
 
-  if (to.meta.title) {
-    document.title = to.meta.title === 'LabWeaver' ? 'LabWeaver' : `${to.meta.title} · LabWeaver`
-  }
+  // Project-scoped titles are finalized by the AppShell once the project resolves.
+  if (to.meta.title) document.title = `${to.meta.title} · LabWeaver`
 })
 
 export default router

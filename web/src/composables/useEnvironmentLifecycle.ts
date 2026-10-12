@@ -62,6 +62,7 @@ export function useEnvironmentLifecycle(
           problem?.diagnosticCode ?? 'ENVIRONMENT_CREATE_FAILED',
           problem?.detail ?? '创建环境失败，结果可能尚未确认。',
           problem?.retryable ?? true,
+          problem,
         ),
       }
     }
@@ -73,6 +74,7 @@ export function useEnvironmentLifecycle(
           problem?.diagnosticCode ?? 'ENVIRONMENT_CREATE_FAILED',
           problem?.detail ?? '创建环境失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
     }
@@ -102,6 +104,7 @@ export function useEnvironmentLifecycle(
             problem?.diagnosticCode ?? `ENVIRONMENT_${action.toUpperCase()}_FAILED`,
             problem?.detail ?? `${action} 失败`,
             problem?.retryable ?? true,
+            problem,
           ),
         }
       }
