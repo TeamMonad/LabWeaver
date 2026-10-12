@@ -30,33 +30,6 @@ CREATE TABLE actors (
     UNIQUE (issuer, subject_sha256)
 );
 
-CREATE TABLE course_memberships (
-    course_id uuid NOT NULL,
-    actor_id uuid NOT NULL REFERENCES actors(actor_id),
-    role text NOT NULL CHECK (role IN ('teacher', 'student', 'platform_admin')),
-    state text NOT NULL CHECK (state IN ('active', 'suspended', 'revoked')),
-    revision bigint NOT NULL CHECK (revision > 0),
-    expires_at timestamptz,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (course_id, actor_id, role),
-    UNIQUE (course_id, actor_id, revision)
-);
-
-CREATE TABLE project_memberships (
-    course_id uuid NOT NULL,
-    project_id uuid NOT NULL,
-    actor_id uuid NOT NULL REFERENCES actors(actor_id),
-    role text NOT NULL CHECK (role IN ('teacher', 'student', 'platform_admin')),
-    state text NOT NULL CHECK (state IN ('active', 'suspended', 'revoked')),
-    revision bigint NOT NULL CHECK (revision > 0),
-    expires_at timestamptz,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, actor_id, role),
-    UNIQUE (project_id, actor_id, revision)
-);
-
 CREATE TABLE service_identities (
     service_identity_id uuid PRIMARY KEY,
     san_uri text NOT NULL UNIQUE CHECK (san_uri LIKE 'spiffe://%'),

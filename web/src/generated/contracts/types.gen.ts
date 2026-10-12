@@ -1219,6 +1219,44 @@ export type AuthorizationDecisionSchemaRevision = number;
 export type AuthorizationDecisionSchemaUtcTimestamp = string;
 
 /**
+ * AvailableObjectActions
+ *
+ * Current actions for the authenticated actor. It is advisory and never replaces a write check.
+ */
+export type AvailableObjectActionsSchema = {
+    actions: Array<ObjectAction>;
+    actorId: AvailableObjectActionsSchemaActorId;
+    membershipRevision: AvailableObjectActionsSchemaRevision;
+    projectId: AvailableObjectActionsSchemaProjectId;
+    validUntil: AvailableObjectActionsSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type AvailableObjectActionsSchemaActorId = string;
+
+/**
+ * An operation on an object. Platform identity alone does not grant these operations.
+ */
+export type ObjectAction = 'browse' | 'edit' | 'start' | 'stop' | 'configure_agent' | 'grant_access' | 'manage_members' | 'view_costs' | 'request_runtime_permissions' | 'approve_runtime_permissions' | 'manage_runtime_policy';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type AvailableObjectActionsSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AvailableObjectActionsSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type AvailableObjectActionsSchemaUtcTimestamp = string;
+
+/**
  * CandidateApproval
  *
  * Human decision bound to an exact candidate and dependency identity.
@@ -2687,10 +2725,11 @@ export type GpuCatalogEntrySchemaRevision = number;
 /**
  * AddProjectMembershipRequest
  *
- * Access-owned membership grant for one Project actor.
+ * Control-owned membership grant for one Project actor.
  */
 export type AddProjectMembershipRequestSchema = {
     expiresAt?: AddProjectMembershipRequestSchemaUtcTimestamp | null;
+    objectRole?: ProjectObjectRole;
     role: AddProjectMembershipRequestSchemaPlatformRole;
     /**
      * Exact issuer username resolved by Access before the membership
@@ -2704,6 +2743,11 @@ export type AddProjectMembershipRequestSchema = {
  * Base role asserted by the configured OIDC issuer.
  */
 export type AddProjectMembershipRequestSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type ProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -9569,6 +9613,10 @@ export type ProjectMembershipSchema = {
      */
     expiresAt?: ProjectMembershipSchemaUtcTimestamp | null;
     /**
+     * Project action responsibilities, independent of the verified platform role.
+     */
+    objectRole?: ProjectMembershipSchemaProjectObjectRole;
+    /**
      * Project scope.
      */
     projectId: ProjectMembershipSchemaProjectId;
@@ -9602,7 +9650,7 @@ export type ProjectMembershipSchemaActorId = string;
 export type ProjectMembershipSchemaCourseId = string;
 
 /**
- * Authoritative membership state owned by Access Service.
+ * Authoritative membership state owned by Control Service.
  */
 export type MembershipState = 'active' | 'suspended' | 'revoked';
 
@@ -9615,6 +9663,11 @@ export type ProjectMembershipSchemaPlatformRole = 'teacher' | 'student' | 'platf
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type ProjectMembershipSchemaProjectId = string;
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type ProjectMembershipSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -14174,6 +14227,73 @@ export type GetProjectAuthoringApprovalResponses = {
 };
 
 export type GetProjectAuthoringApprovalResponse = GetProjectAuthoringApprovalResponses[keyof GetProjectAuthoringApprovalResponses];
+
+export type GetProjectAvailableActionsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/available-actions';
+};
+
+export type GetProjectAvailableActionsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectAvailableActionsError = GetProjectAvailableActionsErrors[keyof GetProjectAvailableActionsErrors];
+
+export type GetProjectAvailableActionsResponses = {
+    /**
+     * Successful response
+     */
+    200: AvailableObjectActionsSchema;
+};
+
+export type GetProjectAvailableActionsResponse = GetProjectAvailableActionsResponses[keyof GetProjectAvailableActionsResponses];
 
 export type GetProjectCandidateBuildData = {
     body?: never;

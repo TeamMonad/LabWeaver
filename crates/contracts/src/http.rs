@@ -27,7 +27,7 @@ pub struct OperationAccepted {
     pub status_url: String,
 }
 
-/// Access-owned membership grant for one Project actor.
+/// Control-owned membership grant for one Project actor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddProjectMembershipRequest {
@@ -36,6 +36,8 @@ pub struct AddProjectMembershipRequest {
     /// browser request.
     pub username: String,
     pub role: PlatformRole,
+    #[serde(default)]
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 
@@ -47,6 +49,8 @@ pub struct AddProjectMembershipRequest {
 pub struct ResolvedProjectMembershipRequest {
     pub actor_id: ActorId,
     pub role: PlatformRole,
+    #[serde(default)]
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 
@@ -2334,6 +2338,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         ALL_ROLES,
         Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/available-actions",
+        "getProjectAvailableActions",
+        "project:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
     ),
     op!(
         Public,

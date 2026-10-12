@@ -23,3 +23,9 @@ cargo test -p persistence-sqlx --test postgres_integration bootstrap_migrate_and
 Project 是幂等与归属的基本范围。可选 Course 不得作为普通唯一索引中唯一防重的组成条件，否则无课程记录可能绕过 PostgreSQL 的唯一约束。一次执行尝试的 TaskRunId 必须持久化且唯一，恢复时复用该身份；不得在读取时生成替代 ID。
 
 若初始化失败，检查实际事务终态并修复原因；仅可重建明确属于本地测试的空数据库。对已有业务数据不自动 drop，不以修改已应用记录隐藏结构差异。代码回退和数据库恢复是不同操作，PR 应分别说明其影响。
+
+## Sprint5 成员真源切换
+
+#199 将成员事实移到 Control，并保留 Control `0016`。组合 #197 的 `0014` 和 #203 的 `0015` 后，按 catalog 的有序并集生成部署输入。Access 只获得 Control 成员表的读取权限。
+
+此次硬切修改旧成员建表身份，只适用于新建数据库。已记录旧校验值的数据库必须拒绝 catalog 不一致。应用启动不能自动清空或重新授权。生产切换另需明确窗口和维护者批准。授权语义见[对象动作与成员授权](../contracts/object-authorization.md)。

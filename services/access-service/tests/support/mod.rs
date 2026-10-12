@@ -16,6 +16,14 @@ pub async fn apply_access_migrations(pool: &PgPool) -> Result<(), Box<dyn Error>
     )
     .execute(pool)
     .await?;
+    sqlx::raw_sql("CREATE SCHEMA IF NOT EXISTS control")
+        .execute(pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/control/0016_object_authorization.sql"
+    ))
+    .execute(pool)
+    .await?;
     let domain = Domain::Access;
     sqlx::query(&format!("CREATE SCHEMA {}", domain.schema()))
         .execute(pool)

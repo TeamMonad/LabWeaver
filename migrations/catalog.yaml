@@ -46,23 +46,29 @@ domains:
       - id: 13
         file: control/0013_platform_image_multipart_uploads.sql
         sha256: b81fd23d1a129375bca4856db443afdc7a3b634b54959e6511ab1a29e21dc5b9
+      - id: 16
+        file: control/0016_object_authorization.sql
+        sha256: 0190e9995d4a31cdd7b2c13f62d09f98d99133cdf0adf8835c1f94483740b301
   - name: access
     migrations:
       - id: 1
         file: access/0001_platform_baseline.sql
-        sha256: c14b59b9c628e4b8fc3b48bc6592b59fb1d52fef875b6b893df3865189e16bf5
+        sha256: 3910f4e149f9287f472323e903b4e5ed52e775c695f7fe93c4592e942462304a
       - id: 2
         file: access/0002_console_capabilities_and_sessions.sql
         sha256: 68588d75fa6a183bb1cdd62c4e8683ba450140809f22a5713ff684a1a3648ff9
       - id: 3
         file: access/0003_independent_project_memberships.sql
-        sha256: 25e05e7390c6a8859889ce5f778ba153e2b8cee2a806dddf41a50f3aa1bbfa6b
+        sha256: 5fa8ac35c80985972ee0b2f1841a22d0f774471e8abe1197ad339bc1a15b8d0a
       - id: 4
         file: access/0004_actor_identity_metadata.sql
         sha256: 0c3b55c0426b48457075665f7fe4ffc19a13adbfdf1d0bfd5c8c6c1088009b6e
       - id: 5
         file: access/0005_gateway_service_client_identity.sql
         sha256: de4db24883b329d64ccced38655e18f8a0106dc4824fea9a343156e729a3005a
+      - id: 6
+        file: access/0006_authorization_session_view.sql
+        sha256: 08bf7e67157123739962bb168d03d776daffed69de4e510875b418518a005c84
   - name: environment
     migrations:
       - id: 1
