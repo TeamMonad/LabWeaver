@@ -82,6 +82,12 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '任务缺少原始的模型输入授权，未开始新的模型调用。'
     case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
       return '平台暂时无法核验模型输入授权，未开始模型调用。'
+    case 'LW_RESOURCE_RATE_UNCONFIGURED':
+      return '缺少适用费率：估价或结算无法完成，不会按免费处理。'
+    case 'LW_RESOURCE_GPU_CATALOG_MISSING':
+      return '缺少 GPU 目录项：无法完成资源计价。'
+    case 'LW_RESOURCE_ESTIMATE_CHANGED':
+      return '报价已过期或规格/费率已变化：请重新估价后再继续。'
     default:
       return message
   }

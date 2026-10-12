@@ -140,11 +140,39 @@
           </div>
           </fieldset>
           <div class="form-footer">
-          <div class="estimate-box" role="note">
+          <div class="estimate-box" role="note" data-testid="request-cost-estimate">
             <span>提交规格</span>
             <strong>{{ requestSummary }}</strong>
             <small v-if="gpuSelectionMessage" class="field-note">{{ gpuSelectionMessage }}</small>
-            <small>费率缺失、冲突或读取失败时不显示为免费，费用状态以实际计量和平台后续核算为准。</small>
+            <div class="estimate-actions">
+              <button
+                type="button"
+                class="outlined-button small"
+                :disabled="!canEstimate || costEstimate.acting || !selectedProjectId"
+                @click="requestServerEstimate"
+              >
+                请求 CREDITS 估价
+              </button>
+              <small>使用服务端 estimateProjectResourceCost；金额不在浏览器重算。</small>
+            </div>
+            <AsyncStateView
+              :state="costEstimate.estimate"
+              empty-text=""
+              @retry="requestServerEstimate"
+            >
+              <template #success="{ data }">
+                <strong data-testid="request-estimate-total">估价合计 {{ data.total.amount }} {{ data.total.currency }}</strong>
+                <small
+                  v-for="(line, index) in data.lines"
+                  :key="`${line.rateId}-${index}`"
+                >
+                  {{ billingUnitLabel(line.unit) }}：{{ line.amount.amount }} {{ line.amount.currency }}
+                  · {{ formatEstimateQuantity(line) }}
+                  · 费率 rev {{ line.rateRevision }}
+                </small>
+              </template>
+            </AsyncStateView>
+            <small>缺费率、缺目录或过时报价会显示诊断，不会显示为零或免费。预占由后端内部入口完成。</small>
           </div>
           <div class="form-footer__actions">
             <button type="submit" class="filled-button" :disabled="!canSubmit || resources.acting !== null">提交资源申请</button>
@@ -214,13 +242,19 @@
 
 <script setup lang="ts">
 import AppSelect from '@/components/form/AppSelect.vue'
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResources, resourceSummary } from '@/composables/useProjectResources'
+import {
+  billingUnitLabel,
+  formatEstimateQuantity,
+  hoursFromNowInterval,
+  useProjectResourceCostEstimate,
+} from '@/composables/useProjectResourceCostEstimate'
 import { useProjectResourceOptions, type ResourceGpuCatalogOption } from '@/composables/useProjectResourceOptions'
 import { useProjects } from '@/composables/useProjects'
 import { useAuth } from '@/composables/useAuth'
@@ -259,6 +293,7 @@ const canPublishEnvironmentTemplates = computed(() => hasAnyRole(currentRoles.va
 const resources = useProjectResources(projectIdRef)
 const courseIdRef = computed(() => selectedProject.value?.courseId ?? null)
 const options = useProjectResourceOptions(projectIdRef, courseIdRef)
+const costEstimate = reactive(useProjectResourceCostEstimate(projectIdRef))
 
 const selectedReleaseKey = ref('')
 const routeReleaseId = computed(() => typeof route.query.releaseId === 'string' ? route.query.releaseId.trim() : '')
@@ -405,6 +440,7 @@ watch(
     // failed retry with the same body keeps both values so the server can
     // replay the idempotent command without creating another Work.
     pendingSubmission.value = null
+    costEstimate.reset()
   },
 )
 const requestSummary = computed(() => resourceSummary({
@@ -413,6 +449,35 @@ const requestSummary = computed(() => resourceSummary({
   storageBytes: storageGiB.value * 1024 ** 3,
   ...(selectedGpu.value ? { gpu: { class: selectedGpu.value.class, count: gpuCount.value } } : {}),
 }))
+
+const canEstimate = computed(() => Boolean(
+  selectedProjectId.value &&
+  Number.isInteger(cpuMillicores.value) && cpuMillicores.value > 0 &&
+  Number.isInteger(memoryGiB.value) && memoryGiB.value > 0 &&
+  Number.isInteger(storageGiB.value) && storageGiB.value > 0 &&
+  Number.isInteger(durationHours.value) && durationHours.value > 0 &&
+  (!selectedGpuCatalogId.value || (selectedGpu.value &&
+    Number.isInteger(gpuCount.value) &&
+    gpuCount.value > 0
+  ))
+))
+
+async function requestServerEstimate() {
+  if (!canEstimate.value || !selectedProjectId.value) return
+  const compute = hoursFromNowInterval(durationHours.value)
+  await costEstimate.run({
+    computeFrom: compute.from,
+    computeUntil: compute.until,
+    storageFrom: compute.from,
+    storageUntil: compute.until,
+    resources: {
+      cpuMillicores: cpuMillicores.value,
+      memoryBytes: memoryGiB.value * 1024 ** 3,
+      storageBytes: storageGiB.value * 1024 ** 3,
+      ...(selectedGpu.value ? { gpu: { class: selectedGpu.value.class, count: gpuCount.value } } : {}),
+    },
+  })
+}
 
 async function submitRequest() {
   if (!canSubmit.value) return
@@ -493,6 +558,7 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .request-form { display: grid; gap: var(--space-4); margin-top: var(--space-5); }
 .two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .estimate-box { display: grid; gap: var(--space-1); padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.estimate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
 .estimate-box strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .gpu-detail { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-body-small); }
 .status-card { display: grid; gap: var(--space-5); }
