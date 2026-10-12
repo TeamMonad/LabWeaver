@@ -864,7 +864,9 @@ impl PgEvaluationControlStore {
                ON step.step_run_id=attempt.step_run_id
              WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
                AND attempt.worker_id=$4 AND attempt.lease_token=$5
-               AND step.revision=$6",
+               AND step.revision=$6 AND step.current_attempt=attempt.attempt
+               AND step.state='running' AND attempt.state='running'
+               AND attempt.lease_expires_at > clock_timestamp()",
         )
         .bind(lease.step_run_id.as_uuid())
         .bind(

@@ -2499,6 +2499,14 @@ impl PgResourceStore {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let request = load_locked(&mut transaction, request_id).await?;
+        // One TaskRunId names one execution attempt. Only the task owner can
+        // retry, with a fresh TaskRunId after confirmed cleanup; a generic
+        // Resource retry must not resurrect the old authorization.
+        if matches!(request.target, ResourceTarget::Task { .. }) {
+            return Err(ResourceStoreError::Lifecycle(
+                crate::LifecycleError::StateConflict,
+            ));
+        }
         let hash = Sha256Digest::of_canonical(&(
             request_id,
             request.project_id,
@@ -2681,6 +2689,39 @@ impl PgResourceStore {
             || lease.claim_id != claim.id
             || approval_id != claim.approval_id.as_uuid()
             || approval_request_id != request.id.as_uuid()
+        {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        let now = database_now(&mut transaction).await?;
+        // Replay a committed handoff after a lost response, or accept its
+        // current status during same-attempt recovery. Replays neither extend
+        // the lease nor emit another event, and still fence namespace/revision.
+        let current_fence =
+            claim.revision == expected_claim_revision && lease.revision == expected_lease_revision;
+        let handoff_fence = expected_claim_revision.get().checked_add(1)
+            == Some(claim.revision.get())
+            && expected_lease_revision.get().checked_add(1) == Some(lease.revision.get());
+        if claim.state == CapacityClaimState::HandedOff
+            && request.state == ResourceRequestState::Active
+            && lease.state == ResourceLeaseState::Active
+            && current_namespace.as_deref() == Some(execution_namespace)
+            && lease.expires_at.is_some_and(|expiry| expiry > now)
+            && (current_fence || handoff_fence)
+        {
+            transaction.commit().await?;
+            return Ok(task_resource_status(
+                request,
+                claim,
+                lease,
+                current_namespace,
+            ));
+        }
+        if !matches!(request.target, ResourceTarget::Task { task_run_id: id } if id == task_run_id)
+            || claim.request_id != request.id
+            || lease.request_id != request.id
+            || lease.claim_id != claim.id
+            || approval_id != claim.approval_id.as_uuid()
+            || approval_request_id != request.id.as_uuid()
             || claim.state != CapacityClaimState::Provisioning
             || request.state != ResourceRequestState::Allocating
             || claim.revision != expected_claim_revision
@@ -2692,7 +2733,6 @@ impl PgResourceStore {
         {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
-        let now = database_now(&mut transaction).await?;
         if approved_duration_seconds <= 0 || approval_valid_until <= now.get() {
             return Err(ResourceStoreError::ApprovalInvalid);
         }
@@ -2815,6 +2855,31 @@ impl PgResourceStore {
         let claim = decode_claim(row.try_get("claim_contract")?)?;
         let lease = decode_lease(row.try_get("lease_contract")?)?;
         let execution_namespace: Option<String> = row.try_get("execution_namespace")?;
+        // Release advances each fence twice (begin/complete). Only the exact
+        // completed operation may replay; an older pre-handoff worker cannot
+        // claim cleanup success for a different revision.
+        if !matches!(request.target, ResourceTarget::Task { task_run_id: id } if id == task_run_id)
+            || claim.request_id != request.id
+            || lease.request_id != request.id
+            || lease.claim_id != claim.id
+        {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        if request.state == ResourceRequestState::Expired
+            && claim.state == CapacityClaimState::Released
+            && lease.state == ResourceLeaseState::Revoked
+            && lease.revoke_reason_code.as_deref() == Some("task_owner_release")
+            && expected_claim_revision.get().checked_add(2) == Some(claim.revision.get())
+            && expected_lease_revision.get().checked_add(2) == Some(lease.revision.get())
+        {
+            transaction.commit().await?;
+            return Ok(task_resource_status(
+                request,
+                claim,
+                lease,
+                execution_namespace,
+            ));
+        }
         if !matches!(request.target, ResourceTarget::Task { task_run_id: id } if id == task_run_id)
             || claim.request_id != request.id
             || lease.request_id != request.id
