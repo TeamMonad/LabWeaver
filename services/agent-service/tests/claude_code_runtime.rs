@@ -5305,8 +5305,13 @@ fn placeholder_binding() -> contracts::http::ModelInputAuthorizationBinding {
         project_id: ProjectId::new(),
         course_id: None,
         operation_id: "createProjectAgentRun".to_owned(),
-        valid_until: UtcTimestamp::from_utc(OffsetDateTime::now_utc() + time::Duration::hours(1))
-            .expect("fixture time"),
+        valid_until: UtcTimestamp::from_utc(
+            OffsetDateTime::now_utc()
+                .replace_nanosecond(0)
+                .expect("fixture time precision")
+                + time::Duration::hours(1),
+        )
+        .expect("fixture time"),
         package_id: contracts::ProblemPackageId::new(),
         package_revision: Revision::new(1).expect("fixture revision"),
         policy_id: PolicyId::new(),
