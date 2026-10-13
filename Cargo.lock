@@ -5145,11 +5145,14 @@ dependencies = [
 name = "resource-service"
 version = "0.1.0"
 dependencies = [
+ "artifact-store",
  "async-nats",
+ "async-trait",
  "auth",
  "axum 0.8.9",
  "base64 0.22.1",
  "contracts",
+ "control-service",
  "futures-util",
  "hyper-util",
  "jsonwebtoken",

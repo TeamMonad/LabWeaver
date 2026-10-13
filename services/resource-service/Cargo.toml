@@ -36,6 +36,9 @@ url.workspace = true
 workspace = true
 
 [dev-dependencies]
+artifact-store = { path = "../../crates/artifact-store" }
+async-trait.workspace = true
+control-service = { path = "../control-service" }
 base64.workspace = true
 jsonwebtoken.workspace = true
 rcgen.workspace = true

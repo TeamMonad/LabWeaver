@@ -15,7 +15,7 @@ use contracts::events::{
 };
 use contracts::http::{
     CreateResourceRateRequest, EndResourceRateRequest, IdempotencyKey, RecordResourceUsageRequest,
-    TaskResourceStatus, UpsertResourceBudgetRequest,
+    RenewResourceLease, ResourceOperationAccepted, TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, FixedDecimal, GpuAllocation, GpuAllocationMode,
@@ -215,6 +215,14 @@ impl PendingAllocation {
 pub struct PgResourceStore {
     pool: PgPool,
     environment_credit_owner: Option<String>,
+}
+
+enum LeaseRenewalIntent<'a> {
+    Absolute {
+        expected_revision: Revision,
+        expires_at: UtcTimestamp,
+    },
+    Duration(&'a RenewResourceLease),
 }
 
 struct UsageAuthority<'a> {
@@ -2580,7 +2588,7 @@ impl PgResourceStore {
         allocation: &PendingAllocation,
         policy: ApprovalPolicy,
         trace_id: &str,
-    ) -> Result<ResourceRequest, ResourceStoreError> {
+    ) -> Result<ResourceOperationAccepted, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
@@ -2631,12 +2639,23 @@ impl PgResourceStore {
         )
         .await?
         {
-            IdempotencyDecision::Replay(value) => decode_request(value)?,
+            IdempotencyDecision::Replay(value) => {
+                replay_approval_receipt(
+                    &mut transaction,
+                    value,
+                    request_id,
+                    approval.request_revision,
+                )
+                .await?
+            }
             IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
             IdempotencyDecision::InProgress => {
                 return Err(ResourceStoreError::IdempotencyInProgress);
             }
             IdempotencyDecision::Reserved => {
+                if request.revision != approval.request_revision {
+                    return Err(ResourceStoreError::RevisionConflict);
+                }
                 let now = database_now(&mut transaction).await?;
                 let next = ResourceLifecycle::accept_approval(&request, approval, policy, now)?;
                 if let Some(binding) = &approval.runtime_authorization {
@@ -2682,7 +2701,8 @@ impl PgResourceStore {
                 .await?;
                 enqueue_request_event(&mut transaction, &next, REQUEST_APPROVED_SUBJECT, trace_id)
                     .await?;
-                let value = serde_json::to_value(&next)?;
+                let accepted = approval_receipt(next.id, lease.id, next.revision);
+                let value = serde_json::to_value(&accepted)?;
                 IdempotencyStore::complete(
                     &mut transaction,
                     Domain::Resource,
@@ -2691,7 +2711,7 @@ impl PgResourceStore {
                     &value,
                 )
                 .await?;
-                next
+                accepted
             }
         };
         transaction.commit().await?;
@@ -3260,13 +3280,49 @@ impl PgResourceStore {
         Ok(status)
     }
 
-    /// Applies an administrator renewal with an exact revision and idempotency fence.
+    /// Native callers supply an absolute deadline; the original identity remains unchanged.
     pub async fn renew_lease(
         &self,
         idempotency_key: &str,
         lease_id: LeaseId,
-        expected_revision: contracts::Revision,
+        expected_revision: Revision,
         expires_at: UtcTimestamp,
+        trace_id: &str,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        self.apply_lease_renewal(
+            idempotency_key,
+            lease_id,
+            LeaseRenewalIntent::Absolute {
+                expected_revision,
+                expires_at,
+            },
+            trace_id,
+        )
+        .await
+    }
+
+    /// HTTP retries bind the complete client body, and derive the deadline only on first reserve.
+    pub async fn renew_lease_for_duration(
+        &self,
+        idempotency_key: &str,
+        lease_id: LeaseId,
+        input: &RenewResourceLease,
+        trace_id: &str,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        self.apply_lease_renewal(
+            idempotency_key,
+            lease_id,
+            LeaseRenewalIntent::Duration(input),
+            trace_id,
+        )
+        .await
+    }
+
+    async fn apply_lease_renewal(
+        &self,
+        idempotency_key: &str,
+        lease_id: LeaseId,
+        intent: LeaseRenewalIntent<'_>,
         trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
@@ -3274,8 +3330,14 @@ impl PgResourceStore {
         let mut transaction = self.pool.begin().await?;
         crate::costing::rate_lock(&mut transaction).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
-        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at))
-            .map_err(|_| ResourceStoreError::Wire)?;
+        let hash = match &intent {
+            LeaseRenewalIntent::Absolute {
+                expected_revision,
+                expires_at,
+            } => Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at)),
+            LeaseRenewalIntent::Duration(input) => Sha256Digest::of_canonical(&(lease_id, input)),
+        }
+        .map_err(|_| ResourceStoreError::Wire)?;
         let result = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -3292,6 +3354,21 @@ impl PgResourceStore {
             }
             IdempotencyDecision::Reserved => {
                 let now = database_now(&mut transaction).await?;
+                let (expected_revision, expires_at) = match intent {
+                    LeaseRenewalIntent::Absolute {
+                        expected_revision,
+                        expires_at,
+                    } => (expected_revision, expires_at),
+                    LeaseRenewalIntent::Duration(input) => {
+                        let duration = i64::try_from(input.duration_seconds)
+                            .map_err(|_| ResourceStoreError::NumericOverflow)?;
+                        let until = now
+                            .get()
+                            .checked_add(time::Duration::seconds(duration))
+                            .ok_or(ResourceStoreError::NumericOverflow)?;
+                        (input.expected_revision, UtcTimestamp::from_utc(until)?)
+                    }
+                };
                 let next =
                     ResourceLifecycle::renew_lease(&lease, expected_revision, expires_at, now)?;
                 let request = load_locked(&mut transaction, lease.request_id).await?;
@@ -5208,6 +5285,53 @@ fn event_contract(subject: &str) -> Result<contracts::events::EventContract, Res
         .copied()
         .find(|contract| contract.subject == subject)
         .ok_or(ResourceStoreError::EventContractInvalid)
+}
+
+fn approval_receipt(
+    request_id: ResourceRequestId,
+    lease_id: LeaseId,
+    revision: Revision,
+) -> ResourceOperationAccepted {
+    ResourceOperationAccepted {
+        request_id,
+        lease_id: Some(lease_id),
+        revision,
+        status_url: format!("/api/v1/resource-requests/{request_id}"),
+    }
+}
+
+/// Reads the original completed format without rewriting historical idempotency results.
+async fn replay_approval_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    value: Value,
+    request_id: ResourceRequestId,
+    expected_revision: Revision,
+) -> Result<ResourceOperationAccepted, ResourceStoreError> {
+    if let Ok(receipt) = serde_json::from_value::<ResourceOperationAccepted>(value.clone()) {
+        return Ok(receipt);
+    }
+    let original = decode_request(value)?;
+    if original.id != request_id
+        || original.state != ResourceRequestState::Allocating
+        || original.revision.get()
+            != expected_revision
+                .get()
+                .checked_add(1)
+                .ok_or(ResourceStoreError::NumericOverflow)?
+    {
+        return Err(ResourceStoreError::AllocationMismatch);
+    }
+    // The persisted approval version selects the historical claim/lease; never use newest/current.
+    let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT l.lease_id FROM resource.resource_leases l JOIN resource.capacity_claims c ON c.claim_id=l.claim_id AND c.request_id=l.request_id JOIN resource.resource_approvals a ON a.approval_id=c.approval_id AND a.request_id=l.request_id WHERE l.request_id=$1 AND a.request_revision=$2 LIMIT 2")
+        .bind(original.id.as_uuid()).bind(i64::try_from(expected_revision.get()).map_err(|_|ResourceStoreError::NumericOverflow)?).fetch_all(&mut **tx).await?;
+    let [id] = ids.as_slice() else {
+        return Err(ResourceStoreError::AllocationMismatch);
+    };
+    let lease_id = id
+        .to_string()
+        .parse()
+        .map_err(|_| ResourceStoreError::Wire)?;
+    Ok(approval_receipt(original.id, lease_id, original.revision))
 }
 
 async fn database_now(

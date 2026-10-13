@@ -454,7 +454,7 @@ async fn approve(
         },
         lease_id: LeaseId::new(),
     };
-    Ok(store
+    let accepted = store
         .approve(
             &format!("approve-{}", request.id),
             request.id,
@@ -466,7 +466,8 @@ async fn approve(
             },
             "trace-task-test",
         )
-        .await?)
+        .await?;
+    Ok(store.load(accepted.request_id).await?)
 }
 
 #[tokio::test]

@@ -161,3 +161,13 @@ Resource 的容量 shell 就绪后，激活 Environment lease 前读取原 lease
 资金覆盖到期后仍没有确认最终计量/释放，独立账务维护记录首次未知事实并沿用一小时核实期限。其后释放资金、保留未知用量；不能把实际时间填零，也不宣称运行对象或持久盘已经释放。迟到/尾部费用沿原 Credits 规则由平台承担。停止和实际回收不依赖新的资金授权。尚未产生资金窗口、仍 Allocating 的原申请在其确切批准到期后释放未启动预占；这仅结束资金冻结，不宣称容量 claim 已回收。
 
 `ResourceEnvironmentHandoff` 使用现有 handoff 字段和 work-handoffs、work-lease-updates、work-cleanups 路径。类别由可信不可变 ReleasePublished 的 environmentSpec.class 得到，不由 courseId 或浏览器选择；在途 Work 消费者的符号仍指向同一具体 DTO。Experiment/Work 的实际接收、创建、启动、重启、停止、租约刷新与计量接线归 Environment owner（#207）。资金 DTO 和 Resource 事务可独立验证，不代表整个 Environment 用户旅程、预付持久存储产品或真实集群验收已经完成。
+
+
+## 审批与续期的 HTTP 重放
+
+审批成功的 `ResourceOperationAccepted`（含实际落库的 leaseId、revision 和 statusUrl）与批准、claim、lease 同事务保存。响应丢失后，同 key 和同审批意图返回原回执；当前 revision 已前进不阻止合法重放。新 key 仍核当前 revision，不同审批 body/actor 使用同 key 明确冲突。每次请求仍先核当前服务身份与管理员权限，重放不绕过授权。
+
+续期的 `durationSeconds` 保持原含义：以首次 reservation 内的数据库当前时间计算目标 expiresAt。幂等绑定 leaseId 与完整客户端 body（expectedRevision、durationSeconds、reason），重试不再按新时钟计算另一个截止。同 key 顺序或并发重试返回原 lease 与原 ETag，不再次延长、写窗口或追加 hold；不同 body 冲突。读取当前 lease/grant 获得最新事实，原操作回执不恢复后来已撤销的租约。
+
+
+升级前以 ResourceRequest JSON 保存的审批结果继续支持只读重放：旧回执的 requestId 与 revision 必须匹配原批准版本，再沿原 lease→claim→approval 的关系唯一查回实际 leaseId。后来更新的批准不会替换该版本。关系缺失或版本不匹配明确拒绝，不选择当前任意租约；旧幂等 JSON 保留，不删除或覆盖。
