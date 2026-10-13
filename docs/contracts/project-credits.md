@@ -168,3 +168,6 @@ Resource 的容量 shell 就绪后，激活 Environment lease 前读取原 lease
 审批成功的 `ResourceOperationAccepted`（含实际落库的 leaseId、revision 和 statusUrl）与批准、claim、lease 同事务保存。响应丢失后，同 key 和同审批意图返回原回执；当前 revision 已前进不阻止合法重放。新 key 仍核当前 revision，不同审批 body/actor 使用同 key 明确冲突。每次请求仍先核当前服务身份与管理员权限，重放不绕过授权。
 
 续期的 `durationSeconds` 保持原含义：以首次 reservation 内的数据库当前时间计算目标 expiresAt。幂等绑定 leaseId 与完整客户端 body（expectedRevision、durationSeconds、reason），重试不再按新时钟计算另一个截止。同 key 顺序或并发重试返回原 lease 与原 ETag，不再次延长、写窗口或追加 hold；不同 body 冲突。读取当前 lease/grant 获得最新事实，原操作回执不恢复后来已撤销的租约。
+
+
+升级前以 ResourceRequest JSON 保存的审批结果继续支持只读重放：旧回执的 requestId 与 revision 必须匹配原批准版本，再沿原 lease→claim→approval 的关系唯一查回实际 leaseId。后来更新的批准不会替换该版本。关系缺失或版本不匹配明确拒绝，不选择当前任意租约；旧幂等 JSON 保留，不删除或覆盖。

@@ -2948,7 +2948,15 @@ impl PgResourceStore {
         )
         .await?
         {
-            IdempotencyDecision::Replay(value) => serde_json::from_value(value)?,
+            IdempotencyDecision::Replay(value) => {
+                replay_approval_receipt(
+                    &mut transaction,
+                    value,
+                    request_id,
+                    approval.request_revision,
+                )
+                .await?
+            }
             IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
             IdempotencyDecision::InProgress => {
                 return Err(ResourceStoreError::IdempotencyInProgress);
@@ -3011,12 +3019,7 @@ impl PgResourceStore {
                 .await?;
                 enqueue_request_event(&mut transaction, &next, REQUEST_APPROVED_SUBJECT, trace_id)
                     .await?;
-                let accepted = ResourceOperationAccepted {
-                    request_id: next.id,
-                    lease_id: Some(lease.id),
-                    revision: next.revision,
-                    status_url: format!("/api/v1/resource-requests/{}", next.id),
-                };
+                let accepted = approval_receipt(next.id, lease.id, next.revision);
                 let value = serde_json::to_value(&accepted)?;
                 IdempotencyStore::complete(
                     &mut transaction,
@@ -5632,6 +5635,53 @@ fn event_contract(subject: &str) -> Result<contracts::events::EventContract, Res
         .copied()
         .find(|contract| contract.subject == subject)
         .ok_or(ResourceStoreError::EventContractInvalid)
+}
+
+fn approval_receipt(
+    request_id: ResourceRequestId,
+    lease_id: LeaseId,
+    revision: Revision,
+) -> ResourceOperationAccepted {
+    ResourceOperationAccepted {
+        request_id,
+        lease_id: Some(lease_id),
+        revision,
+        status_url: format!("/api/v1/resource-requests/{request_id}"),
+    }
+}
+
+/// Reads the original completed format without rewriting historical idempotency results.
+async fn replay_approval_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    value: Value,
+    request_id: ResourceRequestId,
+    expected_revision: Revision,
+) -> Result<ResourceOperationAccepted, ResourceStoreError> {
+    if let Ok(receipt) = serde_json::from_value::<ResourceOperationAccepted>(value.clone()) {
+        return Ok(receipt);
+    }
+    let original = decode_request(value)?;
+    if original.id != request_id
+        || original.state != ResourceRequestState::Allocating
+        || original.revision.get()
+            != expected_revision
+                .get()
+                .checked_add(1)
+                .ok_or(ResourceStoreError::NumericOverflow)?
+    {
+        return Err(ResourceStoreError::AllocationMismatch);
+    }
+    // The persisted approval version selects the historical claim/lease; never use newest/current.
+    let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT l.lease_id FROM resource.resource_leases l JOIN resource.capacity_claims c ON c.claim_id=l.claim_id AND c.request_id=l.request_id JOIN resource.resource_approvals a ON a.approval_id=c.approval_id AND a.request_id=l.request_id WHERE l.request_id=$1 AND a.request_revision=$2 LIMIT 2")
+        .bind(original.id.as_uuid()).bind(i64::try_from(expected_revision.get()).map_err(|_|ResourceStoreError::NumericOverflow)?).fetch_all(&mut **tx).await?;
+    let [id] = ids.as_slice() else {
+        return Err(ResourceStoreError::AllocationMismatch);
+    };
+    let lease_id = id
+        .to_string()
+        .parse()
+        .map_err(|_| ResourceStoreError::Wire)?;
+    Ok(approval_receipt(original.id, lease_id, original.revision))
 }
 
 async fn database_now(
