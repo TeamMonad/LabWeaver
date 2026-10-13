@@ -459,7 +459,8 @@ impl PostgresAgentRunStore {
         }
         // A currently authorized replay has the same business intent even when Access caps a
         // fresh decision at a new deadline or the actor signs in again. The first dispatch still
-        // freezes its original session and deadline; replay never refreshes that authority.
+        // freezes its original session and initial decision evidence; replay never swaps that
+        // session or changes the original task budget. Sending requires fresh authorization.
         let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
             "projectId": command.project_id,
             "courseId": command.course_id,
