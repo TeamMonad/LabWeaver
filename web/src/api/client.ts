@@ -2,6 +2,7 @@ import axios, { AxiosError, type AxiosInstance } from 'axios'
 import { API_AUTH_MODE, API_BASE_URL } from '@/config'
 import { getOidcAccessToken } from '@/composables/useAuth'
 import type { ProblemDetails } from '@/generated/contracts'
+import type { Auth } from '@/generated/contracts/core/auth.gen'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 
@@ -158,9 +159,18 @@ function attachResponseInterceptor(instance: AxiosInstance): void {
   )
 }
 
-/** Shared bearer resolver for Axios-bound REST and generated SSE (fetch). */
-function resolveBearerAuth(accessToken: AccessTokenProvider): () => Promise<string> {
-  return async () => {
+/**
+ * Shared auth resolver for generated REST/SSE.
+ * Only HTTP bearer schemes receive an OIDC token; cookie/apiKey schemes return
+ * undefined so setAuthParams does not invent a handwritten Cookie header.
+ */
+function resolveBearerAuth(
+  accessToken: AccessTokenProvider,
+): (auth: Auth) => Promise<string | undefined> {
+  return async (auth) => {
+    if (auth.type !== 'http' || auth.scheme !== 'bearer') {
+      return undefined
+    }
     const token = await accessToken()
     if (!token) {
       throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
