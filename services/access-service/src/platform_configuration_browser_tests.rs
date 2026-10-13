@@ -6,14 +6,11 @@ use control_service::api::{ApiState, authenticated_router};
 use control_service::clients::{
     AccessClient, AgentClient, EnvironmentClient, EvaluationClient, ServiceHttpClientConfig,
 };
-use persistence_sqlx::Domain;
 use std::path::{Component, PathBuf};
 use std::process::Stdio;
 
 #[path = "../../control-service/tests/support/platform_configuration_common.rs"]
 mod configuration_common;
-#[path = "../../control-service/tests/support/mod.rs"]
-mod control_support;
 
 #[derive(Clone)]
 struct WebFiles(PathBuf);
@@ -114,7 +111,6 @@ async fn connect_control(
     access_secret: &str,
     control_secret: &str,
 ) -> Result<(), Box<dyn Error>> {
-    control_support::apply_domain_migrations(&app.pool, Domain::Control).await?;
     let access_listener = TcpListener::bind("127.0.0.1:0").await?;
     let control_listener = TcpListener::bind("127.0.0.1:0").await?;
     let access_base = format!("https://{}/", access_listener.local_addr()?);
