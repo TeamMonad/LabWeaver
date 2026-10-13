@@ -3601,9 +3601,46 @@ async fn model_input_rechecks_current_session_roles_membership_and_object_scope(
         control_config()?,
     )?;
     let actor = ActorId::new();
-    let session = contracts::BffSessionId::new();
     sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256) VALUES($1,'https://synthetic.invalid',$2)").bind(actor.as_uuid()).bind("a".repeat(64)).execute(&pool).await?;
-    sqlx::query("INSERT INTO access.bff_sessions(session_id,actor_id,platform_roles,authorization_revision,expires_at,idle_expires_at,encrypted_csrf_token,csrf_encryption_key_id) VALUES($1,$2,ARRAY['student'],1,date_trunc('milliseconds',clock_timestamp())+interval '1 hour',date_trunc('milliseconds',clock_timestamp())+interval '1 hour',$3,'synthetic')").bind(session.as_uuid()).bind(actor.as_uuid()).bind(vec![0u8;32]).execute(&pool).await?;
+    let key_ring = auth::KeyRing::parse(
+        "synthetic".to_owned(),
+        &format!(
+            "synthetic:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+        ),
+    )?;
+    let session_now = time::OffsetDateTime::now_utc();
+    let bff = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: actor.as_uuid(),
+            roles: vec![contracts::PlatformRole::Student],
+            authorization_revision: 1,
+            expires_at: session_now + time::Duration::hours(1),
+            idle_ttl: time::Duration::minutes(15),
+            oidc_sid: None,
+            logout_hint: "synthetic-logout-hint".to_owned(),
+        },
+        session_now,
+    )
+    .await?;
+    let session: contracts::BffSessionId = bff.session_id.to_string().parse()?;
+    let renewed = auth::load_bff_session(
+        &pool,
+        &key_ring,
+        bff.session_id,
+        time::Duration::minutes(15),
+        time::OffsetDateTime::now_utc().replace_nanosecond(123_456_000)?,
+    )
+    .await?;
+    assert_ne!(renewed.idle_expires_at.nanosecond() % 1_000_000, 0);
+    let stored_idle: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT idle_expires_at FROM access.bff_sessions WHERE session_id=$1")
+            .bind(bff.session_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored_idle, renewed.idle_expires_at);
     let now = UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?;
     let project = service
         .create_project(
@@ -3648,12 +3685,7 @@ async fn model_input_rechecks_current_session_roles_membership_and_object_scope(
         },
         selected_paths: paths,
     };
-    assert!(
-        service
-            .resolve_model_input_authorization(&request)
-            .await
-            .is_ok()
-    );
+    service.resolve_model_input_authorization(&request).await?;
     let mut altered = request.clone();
     altered.binding.project_id = ProjectId::new();
     assert!(
