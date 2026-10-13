@@ -53,6 +53,8 @@ logout-token validation and RP session clearing follow
 
 ## 浏览器与 SSH
 
+Access 自身的 API 错误使用公共 `ProblemDetails` 契约，返回 `application/problem+json`。响应保留原 HTTP 状态和 `diagnosticCode`，包含安全的 `type/title/detail/instance`、与 `x-request-id` 一致的 `requestId`、关联 `traceId` 和 `retryable`。412 的 `currentRevision/state` 提示作为扩展保留，不覆盖标准字段。缺少或与当前会话不匹配的 CSRF 仍拒绝写入；403 不允许原输入直接重试，客户端须刷新当前会话后由用户重新提交。
+
 浏览器退出先向 BFF 提交带 Origin 和 CSRF 的请求。Access 撤销本地会话及控制台连接、清理会话 Cookie，并返回身份提供方的完整退出地址；浏览器随后进行顶层导航完成 [OIDC RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)。跨源退出不能用后台 fetch 跟随重定向代替。退出响应不允许缓存，页面在会话失效时清除本地登录状态并提示重新登录。
 
 SSH Gateway 会话绑定独立的 AccessGrant、密钥和端点，而非 BFF session。BFF 退出不自动撤销全部 SSH 授权；SSH 按 AccessGrant 到期、显式撤销及成员/环境授权变化的既定规则收尾。验证 OIDC 登录不能冒充已验证真实 SSH 传输：后者需要临时 Gateway/sshd、受控服务 JWT/TLS、真实目标端点和 grant 撤销事件。

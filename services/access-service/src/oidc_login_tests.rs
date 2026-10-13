@@ -309,10 +309,12 @@ async fn real_keycloak_binds_two_browsers_and_preserves_tabs_replay_expiry_and_l
     }
     let rejected = browser_b.get(callbacks[0].clone()).send().await?;
     assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        rejected.json::<Value>().await?,
-        json!({"diagnosticCode": "LW_AUTH_OIDC_BROWSER_REJECTED"})
-    );
+    assert_problem_response(
+        rejected,
+        StatusCode::UNAUTHORIZED,
+        "LW_AUTH_OIDC_BROWSER_REJECTED",
+    )
+    .await?;
     let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM access.bff_sessions")
         .fetch_one(&app.pool)
         .await?;
@@ -373,10 +375,12 @@ async fn real_keycloak_binds_two_browsers_and_preserves_tabs_replay_expiry_and_l
         .bind(Sha256Digest::of_bytes(expired_state.as_bytes()).to_string()).execute(&app.pool).await?;
     let rejected = browser_a.get(expired_callback).send().await?;
     assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        rejected.json::<Value>().await?,
-        json!({"diagnosticCode": "LW_AUTH_OIDC_STATE_REJECTED"})
-    );
+    assert_problem_response(
+        rejected,
+        StatusCode::UNAUTHORIZED,
+        "LW_AUTH_OIDC_STATE_REJECTED",
+    )
+    .await?;
     let csrf: Value = browser_a
         .get(format!("{base}/api/v1/auth/csrf"))
         .send()
