@@ -553,7 +553,11 @@ async fn approve_request(
             },
             context.trace_id(),
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            ResourceStoreError::RevisionConflict => ResourceApiError::RevisionConflict,
+            other => ResourceApiError::Store(other),
+        })?;
     Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
 }
 

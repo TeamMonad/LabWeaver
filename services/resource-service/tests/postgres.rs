@@ -6204,7 +6204,7 @@ async fn http_renewal_same_key_concurrent_requests_change_hold_and_lease_once()
     assert_eq!(actual.revision.get(), active.revision.get() + 1);
     let balance = credits.account(f.request.project_id).await?;
     assert_eq!(balance.reserved, grant.hold.remaining);
-    assert!(balance.reserved > original_balance.reserved);
+    assert!(balance.reserved.scaled() > original_balance.reserved.scaled());
     assert_eq!(balance.spent, original_balance.spent);
     assert_eq!(balance.balance, original_balance.balance);
     assert_eq!(grant.covered_until, actual.expires_at.ok_or("expiry")?);
