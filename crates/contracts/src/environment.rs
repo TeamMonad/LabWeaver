@@ -1813,9 +1813,9 @@ impl EnvironmentConsoleEligibility {
         now: UtcTimestamp,
     ) -> Result<(), EnvironmentError> {
         let lease_valid = match (self.environment_class, &self.lease_fence) {
+            (_, Some(fence)) => fence.expires_at > now,
             (EnvironmentClass::Experiment, None) => true,
-            (EnvironmentClass::Work, Some(fence)) => fence.expires_at > now,
-            _ => false,
+            (EnvironmentClass::Work, None) => false,
         };
         let binding_valid = match (&self.binding, self.runtime_kind) {
             (EnvironmentConsoleBinding::Xterm { terminal }, RuntimeKind::Container) => {

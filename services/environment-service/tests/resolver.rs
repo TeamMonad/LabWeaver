@@ -100,6 +100,54 @@ fn funded_owner_and_endpoint_projections_reject_expired_lease() {
 }
 
 #[test]
+fn funded_owner_and_endpoint_projections_reject_missing_future_and_wrong_scope_leases() {
+    let now = timestamp("2026-07-14T02:00:00.000Z");
+    for class in [EnvironmentClass::Experiment, EnvironmentClass::Work] {
+        let original = funded_ready_instance(class);
+        let owner = EnvironmentOwnerResolutionRequest {
+            environment_id: original.id,
+            project_id: original.project_id,
+            course_id: original.course_id,
+            owner_actor_id: original.owner_id,
+            expected_revision: original.revision,
+        };
+        let endpoint = EnvironmentEndpointEligibilityRequest {
+            environment_id: original.id,
+            project_id: original.project_id,
+            course_id: original.course_id,
+            actor_id: original.owner_id,
+            subject_kind: EnvironmentAccessSubjectKind::Owner,
+            expected_revision: original.revision,
+            endpoint_ids: vec![original.endpoints[0].id],
+        };
+        for mutation in 0..8 {
+            let mut instance = original.clone();
+            if mutation == 0 {
+                instance.operation.lease_authorization = None;
+            } else if let Some(auth) = &mut instance.operation.lease_authorization {
+                match mutation {
+                    1 => auth.active_from = timestamp("2026-07-14T03:00:00.000Z"),
+                    2 => auth.lease_id = contracts::LeaseId::new(),
+                    3 => auth.environment_id = contracts::EnvironmentId::new(),
+                    4 => auth.project_id = ProjectId::new(),
+                    5 => auth.course_id = None,
+                    6 => auth.owner_actor_id = ActorId::new(),
+                    _ => auth.capacity_binding = "wrong-capacity".to_owned(),
+                }
+            }
+            assert!(matches!(
+                authorize_owner_resolution(&instance, &owner, now),
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+            assert!(matches!(
+                authorize_endpoint_eligibility(&instance, &endpoint, now),
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+        }
+    }
+}
+
+#[test]
 fn exact_authoritative_tuple_resolves_without_endpoint_or_credential_data()
 -> Result<(), Box<dyn std::error::Error>> {
     let instance = ready_instance();

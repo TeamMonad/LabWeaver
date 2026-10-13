@@ -123,7 +123,7 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .max_connections(4)
         .connect(&url)
         .await?;
-    apply_access_migrations(&pool).await?;
+    support::apply_access_migrations_through(&pool, 7).await?;
 
     let actor = Uuid::now_v7();
     sqlx::query("INSERT INTO access.actors (actor_id,issuer,subject_sha256) VALUES ($1,'https://issuer.example.test','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')")
@@ -351,6 +351,17 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .bind(work_capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(project).bind(course).bind(environment).bind(work_lease_id)
         .bind("1".repeat(64)).bind("2".repeat(64)).bind(vec![9_u8; 32]).bind("3".repeat(64)).execute(&pool).await?;
     let funded_experiment_capability = Uuid::now_v7();
+    support::apply_access_migration(&pool, 8).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM access.console_capabilities WHERE capability_id IN ($1,$2)"
+        )
+        .bind(capability_id)
+        .bind(work_capability_id)
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
     sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) SELECT $1,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,'experiment',environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,$2,$3,encrypted_handoff_secret,encryption_key_id,'actor:funded-experiment',$4 FROM access.console_capabilities WHERE capability_id=$5")
         .bind(funded_experiment_capability).bind("4".repeat(64)).bind("5".repeat(64)).bind("6".repeat(64)).bind(work_capability_id).execute(&pool).await?;
     let funded_fence: (Uuid, i64) = sqlx::query_as("SELECT lease_id,lease_revision FROM access.console_capabilities WHERE capability_id=$1 AND environment_class='experiment'")
@@ -369,7 +380,8 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .bind(funded_experiment_capability)
         .execute(&pool)
         .await
-        .expect_err("partial, expired, or unfunded Work fence must fail");
+        .err()
+        .ok_or("partial, expired, or unfunded Work fence was accepted")?;
         assert_eq!(
             error
                 .as_database_error()

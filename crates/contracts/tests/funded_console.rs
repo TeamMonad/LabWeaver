@@ -13,16 +13,15 @@ use contracts::{
     },
 };
 
-fn fixture() -> Result<
-    (
-        EnvironmentConsoleEligibilityRequest,
-        EnvironmentConsoleEligibility,
-        ConsoleCapabilityAvailability,
-        ConsoleCapability,
-        UtcTimestamp,
-    ),
-    Box<dyn std::error::Error>,
-> {
+struct ConsoleFixture {
+    request: EnvironmentConsoleEligibilityRequest,
+    eligibility: EnvironmentConsoleEligibility,
+    availability: ConsoleCapabilityAvailability,
+    capability: ConsoleCapability,
+    now: UtcTimestamp,
+}
+
+fn fixture() -> Result<ConsoleFixture, Box<dyn std::error::Error>> {
     let now = UtcTimestamp::from_str("2026-10-13T00:00:00.000Z")?;
     let expires = UtcTimestamp::from_str("2026-10-13T00:10:00.000Z")?;
     let revision = Revision::new(3)?;
@@ -81,30 +80,108 @@ fn fixture() -> Result<
         connection_locator: "/connect/console/synthetic-handoff".to_owned(),
         websocket_subprotocol: ConsoleKind::Novnc.websocket_subprotocol().to_owned(),
     };
-    Ok((request, eligibility, availability, capability, now))
+    Ok(ConsoleFixture {
+        request,
+        eligibility,
+        availability,
+        capability,
+        now,
+    })
 }
 
 #[test]
 fn funded_experiment_console_eligibility_retains_its_fence()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (request, eligibility, _, _, now) = fixture()?;
-    eligibility.validate_for(&request, now)?;
-    assert!(eligibility.lease_fence.is_some());
+    let case = fixture()?;
+    case.eligibility.validate_for(&case.request, case.now)?;
+    assert!(case.eligibility.lease_fence.is_some());
     Ok(())
 }
 
 #[test]
 fn funded_experiment_console_availability_is_valid() -> Result<(), Box<dyn std::error::Error>> {
-    let (_, _, availability, _, _) = fixture()?;
-    availability.validate()?;
+    fixture()?.availability.validate()?;
     Ok(())
 }
 
 #[test]
 fn funded_experiment_console_capability_keeps_the_exact_original_fence()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_, _, availability, capability, _) = fixture()?;
-    capability.validate()?;
-    capability.validate_against(&availability)?;
+    let case = fixture()?;
+    case.capability.validate()?;
+    case.capability.validate_against(&case.availability)?;
+    Ok(())
+}
+
+#[test]
+fn funded_console_cannot_drop_or_replace_the_original_fence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let case = fixture()?;
+    for mutation in 0..4 {
+        let mut capability = case.capability.clone();
+        if mutation == 0 {
+            capability.lease_fence = None;
+        } else if let Some(fence) = &mut capability.lease_fence {
+            match mutation {
+                1 => fence.lease_id = LeaseId::new(),
+                2 => fence.lease_revision = Revision::new(5)?,
+                _ => fence.expires_at = UtcTimestamp::from_str("2026-10-13T00:11:00.000Z")?,
+            }
+        }
+        assert!(capability.validate_against(&case.availability).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn expired_lease_denies_console_eligibility_availability_and_capability()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut case = fixture()?;
+    for fence in [
+        &mut case.eligibility.lease_fence,
+        &mut case.availability.lease_fence,
+        &mut case.capability.lease_fence,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        fence.expires_at = case.now;
+    }
+    assert!(
+        case.eligibility
+            .validate_for(&case.request, case.now)
+            .is_err()
+    );
+    assert!(case.availability.validate().is_err());
+    assert!(case.capability.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn both_classes_keep_valid_fences_and_only_legacy_experiment_can_omit_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    for class in [EnvironmentClass::Experiment, EnvironmentClass::Work] {
+        let mut case = fixture()?;
+        case.eligibility.environment_class = class;
+        case.availability.environment_class = class;
+        case.capability.environment_class = class;
+        case.eligibility.validate_for(&case.request, case.now)?;
+        case.capability.validate_against(&case.availability)?;
+        case.eligibility.lease_fence = None;
+        case.availability.lease_fence = None;
+        case.capability.lease_fence = None;
+        let legacy = class == EnvironmentClass::Experiment;
+        assert_eq!(
+            case.eligibility
+                .validate_for(&case.request, case.now)
+                .is_ok(),
+            legacy
+        );
+        assert_eq!(case.availability.validate().is_ok(), legacy);
+        assert_eq!(
+            case.capability.validate_against(&case.availability).is_ok(),
+            legacy
+        );
+    }
     Ok(())
 }

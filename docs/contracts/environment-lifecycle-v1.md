@@ -102,6 +102,18 @@ readable and can stop/delete; creating new compute from them returns
 `LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED` (422). No lease is attached to legacy data
 and no second reservation is opened to bypass admission.
 
+Console, owner and endpoint admission use the instance's stored original Resource
+lease independently of Work/Experiment class. Funded instances return the same
+lease ID, revision and expiry fence; an expired, not-yet-active, missing or
+scope-mismatched lease fails admission. Work requires a lease. A legitimate legacy
+Experiment without a lease retains its existing console/read compatibility.
+Access carries that fence through availability, the 30-second one-time capability,
+the persisted session and the Environment bridge. Capability deadlines cannot
+exceed the lease expiry, and the bridge requires the exact current lease tuple.
+For a funded course Experiment, the console release's authoring project is checked
+against the original approved runtime receipt when it differs from the payer
+project. Work and unscoped Experiment retain the same-project requirement.
+
 The owner and both runtime executors read the same authenticated
 `GET /internal/v1/environment-credit-grants/{leaseId}` authority. The original
 request/lease/claim, project, lease revision and coverage must agree with the runtime

@@ -6,8 +6,7 @@ use contracts::{
     environment::{DesiredEnvironmentState, EnvironmentInstance, ObservedEnvironmentState},
 };
 
-#[path = "../tests/support/mod.rs"]
-mod support;
+use crate::test_support as support;
 use support::{funded_ready_instance, ready_instance, revision, timestamp};
 
 fn identity(instance: &EnvironmentInstance) -> Identity {
@@ -116,4 +115,71 @@ fn bridge_rejects_stale_scope_generation_and_lifecycle() {
             Err(TerminalBridgeError::ScopeDenied)
         ));
     }
+}
+
+#[test]
+fn bridge_rejects_not_yet_active_and_inconsistent_authorizations() {
+    let now = timestamp("2026-07-14T02:00:00.000Z");
+    for class in [EnvironmentClass::Experiment, EnvironmentClass::Work] {
+        for mutation in 0..3 {
+            let mut instance = funded_ready_instance(class);
+            if mutation == 0 {
+                instance.operation.lease_authorization = None;
+            } else if let Some(auth) = &mut instance.operation.lease_authorization {
+                if mutation == 1 {
+                    auth.active_from = timestamp("2026-07-14T03:00:00.000Z");
+                } else {
+                    auth.environment_id = contracts::EnvironmentId::new();
+                }
+            }
+            assert!(matches!(
+                authorize_console_connection(
+                    &instance,
+                    ConsoleKind::Xterm,
+                    &identity(&instance),
+                    now
+                ),
+                Err(TerminalBridgeError::ScopeDenied)
+            ));
+        }
+    }
+}
+
+#[test]
+fn console_release_project_scope_uses_the_original_course_authorization() {
+    let mut instance = funded_ready_instance(EnvironmentClass::Experiment);
+    let mut projection = support::runtime_projection(&instance);
+    projection.release.project_id = contracts::ProjectId::new();
+    instance.runtime_authorization = Some(support::runtime_receipt(&instance, &projection));
+    assert!(crate::resolver::console_release_project_matches(
+        &instance,
+        &projection
+    ));
+    let mut wrong = instance.clone();
+    if let Some(receipt) = &mut wrong.runtime_authorization {
+        receipt.authorization.configuration.authoring_project_id = contracts::ProjectId::new();
+    }
+    assert!(!crate::resolver::console_release_project_matches(
+        &wrong,
+        &projection
+    ));
+    let mut wrong = instance.clone();
+    wrong.class = EnvironmentClass::Work;
+    assert!(!crate::resolver::console_release_project_matches(
+        &wrong,
+        &projection
+    ));
+    let mut wrong = instance.clone();
+    wrong.course_id = None;
+    assert!(!crate::resolver::console_release_project_matches(
+        &wrong,
+        &projection
+    ));
+    let mut wrong = instance;
+    wrong.lease_id = None;
+    wrong.operation.lease_authorization = None;
+    assert!(!crate::resolver::console_release_project_matches(
+        &wrong,
+        &projection
+    ));
 }
