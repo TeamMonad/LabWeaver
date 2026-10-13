@@ -66,8 +66,6 @@ export type InternalApproveWorkConfigurationRequest = InternalApproveWorkConfigu
 
 export type InternalCompleteEvaluationStepRequest = InternalCompleteEvaluationStepRequestSchema;
 
-export type InternalCreateAgentRunRequest = InternalCreateAgentRunRequestSchema;
-
 export type InternalCreateEvaluationRunRequest = InternalCreateEvaluationRunRequestSchema;
 
 export type InternalEvaluationRunMutationRequest = InternalEvaluationRunMutationRequestSchema;
@@ -4417,6 +4415,10 @@ export type CreateAgentRunRequestSchema = {
     policyId: CreateAgentRunRequestSchemaPolicyId;
     policyRevision: CreateAgentRunRequestSchemaRevision;
     projectId: CreateAgentRunRequestSchemaProjectId;
+    /**
+     * Explicit material paths. Missing or empty selection is rejected; never defaults to all files.
+     */
+    selectedPaths?: Array<string> | null;
 };
 
 /**
@@ -4882,6 +4884,10 @@ export type CreateWorkConfigurationRunRequestSchema = {
     preauthorizationId?: WorkConfigurationPreauthorizationId | null;
     preauthorizationRevision?: CreateWorkConfigurationRunRequestSchemaRevision | null;
     projectId: CreateWorkConfigurationRunRequestSchemaProjectId;
+    /**
+     * Explicit material paths. Missing or empty selection is rejected.
+     */
+    selectedPaths?: Array<string> | null;
 };
 
 /**
@@ -8786,7 +8792,7 @@ export type EvaluationExecutionBinding = {
     objectLocators: {
         [key: string]: string;
     };
-    package: InternalPublishEvaluationReleaseRequestSchemaProblemPackage;
+    package: ProblemPackage;
 };
 
 export type InternalPublishEvaluationReleaseRequestSchemaEvaluationKind = 'EvaluationSpec';
@@ -8883,7 +8889,7 @@ export type InternalPublishEvaluationReleaseRequestSchemaManualReviewReason = 'i
 /**
  * One immutable file in a teacher ProblemPackage.
  */
-export type InternalPublishEvaluationReleaseRequestSchemaPackageFile = {
+export type PackageFile = {
     /**
      * Immutable object reference.
      */
@@ -8906,10 +8912,10 @@ export type InternalPublishEvaluationReleaseRequestSchemaPolicyId = string;
 /**
  * Immutable, atomically completed teacher material package.
  */
-export type InternalPublishEvaluationReleaseRequestSchemaProblemPackage = {
+export type ProblemPackage = {
     completedAt: InternalPublishEvaluationReleaseRequestSchemaUtcTimestamp;
     courseId?: InternalPublishEvaluationReleaseRequestSchemaCourseId | null;
-    files: Array<InternalPublishEvaluationReleaseRequestSchemaPackageFile>;
+    files: Array<PackageFile>;
     id: InternalPublishEvaluationReleaseRequestSchemaProblemPackageId;
     projectId: InternalPublishEvaluationReleaseRequestSchemaProjectId;
     retention: InternalPublishEvaluationReleaseRequestSchemaRetentionSnapshot;

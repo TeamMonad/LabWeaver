@@ -162,6 +162,16 @@
         },
         "projectId": {
           "$ref": "#/$defs/ProjectId"
+        },
+        "selectedPaths": {
+          "description": "Explicit material paths. Missing or empty selection is rejected; never defaults to all files.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -228,6 +238,16 @@
         },
         "projectId": {
           "$ref": "#/$defs/ProjectId"
+        },
+        "selectedPaths": {
+          "description": "Explicit material paths. Missing or empty selection is rejected.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -353,6 +373,65 @@
         "timeoutMilliseconds",
         "maxTransientRetries",
         "maxSchemaRepairs"
+      ],
+      "type": "object"
+    },
+    "ModelInputAuthorizationBinding": {
+      "additionalProperties": false,
+      "description": "Control-derived asynchronous recheck input, never accepted from a public create request.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "packageId": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "packageRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "selectionSha256": {
+          "type": "string"
+        },
+        "sessionSha256": {
+          "type": "string"
+        },
+        "validUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "sessionSha256",
+        "actorId",
+        "projectId",
+        "operationId",
+        "validUntil",
+        "packageId",
+        "packageRevision",
+        "policyId",
+        "policyRevision",
+        "selectionSha256"
       ],
       "type": "object"
     },
@@ -661,6 +740,9 @@
         }
       ]
     },
+    "inputAuthorization": {
+      "$ref": "#/$defs/ModelInputAuthorizationBinding"
+    },
     "objectLocators": {
       "additionalProperties": {
         "type": "string"
@@ -701,6 +783,7 @@
     }
   },
   "required": [
+    "inputAuthorization",
     "projectId",
     "actorId",
     "request",

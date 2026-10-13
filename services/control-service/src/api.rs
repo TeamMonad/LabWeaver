@@ -9,6 +9,7 @@ pub mod event_stream;
 mod membership_governance;
 mod object_actions;
 
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -340,6 +341,10 @@ pub fn authenticated_router(state: &Arc<ApiState>, verifier: &Arc<ServiceTokenVe
                 "/internal/v1/agent-runs/{run_id}/work-configuration-admission",
                 get(get_internal_work_configuration_admission),
             )
+            .route(
+                "/internal/v1/model-input-authorizations/resolve",
+                post(resolve_model_input_authorization),
+            )
             .with_state(Arc::clone(state))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(verifier),
@@ -371,6 +376,49 @@ pub fn authenticated_router(state: &Arc<ApiState>, verifier: &Arc<ServiceTokenVe
         .merge(internal)
         .merge(work_admission)
         .merge(evaluation_policy)
+}
+
+async fn resolve_model_input_authorization(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<contracts::http::ModelInputAuthorizationResolveRequest>,
+) -> Result<Json<contracts::http::ModelInputAuthorizationResolution>, ApiError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(
+            contracts::object_authorization::AUTHORIZATION_CHECK_TIMEOUT_SECONDS,
+        ),
+        state.control.resolve_model_input_authorization(&request),
+    )
+    .await
+    .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?
+    .map(Json)
+    .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))
+}
+
+fn model_input_binding(
+    decision: &contracts::AuthorizationDecision,
+    headers: &HeaderMap,
+    operation: &str,
+    package: &contracts::authoring::ProblemPackage,
+    policy: &contracts::authoring::ProjectLlmEgressPolicy,
+    selection: Option<&[String]>,
+) -> Result<contracts::http::ModelInputAuthorizationBinding, ApiError> {
+    let paths = contracts::http::validate_model_input_selection(package, selection)
+        .map_err(|_| ApiError::bad_request("LW_MODEL_INPUT_SELECTION_REQUIRED"))?;
+    let session = parse_header::<BffSessionId>(headers, SESSION_HEADER)?;
+    Ok(contracts::http::ModelInputAuthorizationBinding {
+        session_sha256: format!("{:x}", sha2::Sha256::digest(session.to_string().as_bytes())),
+        actor_id: decision.actor.actor_id,
+        project_id: package.project_id,
+        course_id: package.course_id,
+        operation_id: operation.to_owned(),
+        valid_until: decision.valid_until,
+        package_id: package.id,
+        package_revision: package.revision,
+        policy_id: policy.id,
+        policy_revision: policy.revision,
+        selection_sha256: contracts::http::model_input_selection_sha256(&paths)
+            .map_err(|_| ApiError::bad_request("LW_MODEL_INPUT_SELECTION_REQUIRED"))?,
+    })
 }
 
 async fn require_service_token(
@@ -887,6 +935,14 @@ async fn create_project_work_configuration_run(
         .agent
         .create(
             &InternalCreateAgentRunRequest {
+                input_authorization: model_input_binding(
+                    &decision,
+                    &headers,
+                    "createProjectWorkConfigurationRun",
+                    &package,
+                    &policy,
+                    request.selected_paths.as_deref(),
+                )?,
                 project_id,
                 course_id: project.course_id,
                 actor_id: decision.actor.actor_id,
@@ -962,6 +1018,14 @@ async fn create_project_agent_run_for_class(
         .agent
         .create(
             &InternalCreateAgentRunRequest {
+                input_authorization: model_input_binding(
+                    &decision,
+                    &headers,
+                    authorization_operation,
+                    &package,
+                    &policy,
+                    request.selected_paths.as_deref(),
+                )?,
                 project_id,
                 course_id: project.course_id,
                 actor_id: decision.actor.actor_id,
@@ -1805,7 +1869,7 @@ async fn create_agent_run_for_class(
     expected_environment_class: contracts::authoring::EnvironmentClass,
     authorization_operation: &'static str,
 ) -> Result<Response, ApiError> {
-    let actor_id = authorize(
+    let decision = authorize_decision(
         &state,
         &principal,
         &headers,
@@ -1830,9 +1894,17 @@ async fn create_agent_run_for_class(
         .agent
         .create(
             &InternalCreateAgentRunRequest {
+                input_authorization: model_input_binding(
+                    &decision,
+                    &headers,
+                    authorization_operation,
+                    &package,
+                    &policy,
+                    request.selected_paths.as_deref(),
+                )?,
                 project_id: request.project_id,
                 course_id: request.course_id,
-                actor_id,
+                actor_id: decision.actor.actor_id,
                 request: contracts::http::InternalAgentRunRequest::Authoring(request),
                 purpose: AgentRunPurpose::Authoring {
                     environment_class: expected_environment_class,

@@ -11,6 +11,7 @@ pub mod clients;
 mod material_uploads;
 mod membership_governance;
 pub mod messaging;
+mod model_input_authorization;
 mod object_authorization;
 pub mod platform_configuration;
 pub mod platform_image_jobs;

@@ -130,6 +130,12 @@
       "LogoutBrowserSessionResponse": {
         "$ref": "../contracts/v1/logout-browser-session-response.schema.json"
       },
+      "ModelInputAuthorizationResolution": {
+        "$ref": "../contracts/v1/http/model-input-authorization-resolution.schema.json"
+      },
+      "ModelInputAuthorizationResolveRequest": {
+        "$ref": "../contracts/v1/http/model-input-authorization-resolve-request.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -3790,6 +3796,44 @@
           }
         ],
         "summary": "Persist cancellation for one Agent LLM review"
+      }
+    },
+    "/internal/v1/model-input-authorizations/resolve": {
+      "post": {
+        "operationId": "resolveModelInputAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelInputAuthorizationResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInputAuthorizationResolution"
+                }
+              }
+            },
+            "description": "Current authorization permits this exact input"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.agent_run.read"
+            ]
+          }
+        ],
+        "summary": "Recheck current session, object action and explicitly selected material versions"
       }
     },
     "/internal/v1/platform-configuration/applies/{applyId}": {
