@@ -195,7 +195,10 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             "trace-resource-approve",
         )
         .await?;
-    assert_eq!(allocating.state, ResourceRequestState::Allocating);
+    assert_eq!(
+        store.load(allocating.request_id).await?.state,
+        ResourceRequestState::Allocating
+    );
     let provisioning = store
         .claim_next_capacity_shell()
         .await?
@@ -3462,7 +3465,10 @@ async fn create_allocating_request(
         )
         .await
         .map_err(|error| format!("approve: {error}"))?;
-    assert_eq!(approved.state, ResourceRequestState::Allocating);
+    assert_eq!(
+        store.load(approved.request_id).await?.state,
+        ResourceRequestState::Allocating
+    );
     store
         .claim_next_capacity_shell()
         .await?
@@ -5433,6 +5439,472 @@ async fn estimated_cost_http_uses_signed_user_preview_and_exact_service_scope()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok()),
         Some("application/problem+json")
+    );
+    Ok(())
+}
+
+// Real TCP Resource routes, signed service JWT and signed BFF delegation; only OIDC is external.
+struct MutationHttpFixture {
+    _database: testcontainers::ContainerAsync<Postgres>,
+    _authority: ResourceAuthAuthority,
+    pool: sqlx::PgPool,
+    store: PgResourceStore,
+    request: ResourceRequest,
+    client: reqwest::Client,
+    base: String,
+    token: String,
+    delegation: String,
+    server: tokio::task::JoinHandle<()>,
+}
+impl Drop for MutationHttpFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+impl MutationHttpFixture {
+    fn post(&self, path: &str, key: &str, body: &Value) -> reqwest::RequestBuilder {
+        self.client
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .header("x-labweaver-resource-delegation", &self.delegation)
+            .header("idempotency-key", key)
+            .json(body)
+    }
+    fn approval(&self) -> Value {
+        json!({"expectedRevision":1,"providerBinding":"kubernetes-standard",
+            "resources":self.request.requested_resources,"durationSeconds":600,"reason":"isolated HTTP approval"})
+    }
+    async fn activate(
+        &self,
+    ) -> Result<contracts::resource::ResourceLease, Box<dyn std::error::Error>> {
+        let response = self
+            .post(
+                &format!("/api/v1/resource-requests/{}/approve", self.request.id),
+                "initial-approval",
+                &self.approval(),
+            )
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let accepted: contracts::http::ResourceOperationAccepted = response.json().await?;
+        let lease = accepted.lease_id.ok_or("accepted lease")?;
+        self.store
+            .claim_next_capacity_shell()
+            .await?
+            .ok_or("capacity claim")?;
+        let now = self.store.current_time().await?;
+        Ok(self
+            .store
+            .activate_lease(
+                lease,
+                Revision::new(1)?,
+                now,
+                UtcTimestamp::from_utc(now.get() + time::Duration::seconds(60))?,
+                self.request.requester_id,
+                "http-fixture-activate",
+            )
+            .await?)
+    }
+}
+async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::error::Error>> {
+    let (database, pool) = migrated_pool().await?;
+    let authority =
+        spawn_resource_auth_authority(resource_signing_material("mutation-http")?).await?;
+    let verifier = build_resource_verifier(&authority.issuer).await?;
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
+    let now = store.current_time().await?;
+    let mut request = outbox_request()?;
+    request.created_at = now;
+    request.updated_at = now;
+    request.request_key = Uuid::now_v7().to_string();
+    request.requested_resources = WorkloadResources {
+        cpu_millicores: 1000,
+        memory_bytes: 1,
+        storage_bytes: 1,
+        gpu: None,
+    };
+    request.requested_duration_seconds = 600;
+    store
+        .create(&Uuid::now_v7().to_string(), &request, "http-fixture-create")
+        .await?;
+    for (unit, unit_quantity, amount) in [
+        (ResourceBillingUnit::CpuMillicoreSecond, 1000, "1.000000"),
+        (ResourceBillingUnit::MemoryByteSecond, 1, "0.000000"),
+        (ResourceBillingUnit::StorageByteSecond, 1, "0.000000"),
+    ] {
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    unit,
+                    unit_quantity,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    builder_binding: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::parse(amount)?,
+                    },
+                    effective_from: UtcTimestamp::from_utc(now.get() - time::Duration::hours(1))?,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    resource_service::credits::PgCreditStore::new(pool.clone())
+        .admin(
+            "http-fixture-grant",
+            request.requester_id,
+            &[PlatformRole::PlatformAdmin],
+            &contracts::resource::credits::CreditAdminOperation::Grant {
+                project_id: request.project_id,
+                amount: FixedDecimal::parse("1000.000000")?,
+                reason: "isolated synthetic allowance".into(),
+            },
+        )
+        .await?;
+    let key = [9_u8; 32];
+    let session = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: request.requester_id.as_uuid(),
+        roles: vec![PlatformRole::PlatformAdmin],
+        authorization_revision: 1,
+        expires_at: now.get() + time::Duration::minutes(5),
+        idle_expires_at: now.get() + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-mutation-http".into()),
+    };
+    let delegation = auth::encode_resource_delegation(&key, &session, now.get())?;
+    let token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ACCESS_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.api.invoke"],
+    )?;
+    let state = resource_service::api::ResourceApiState::new(store.clone())
+        .with_service_verifier(Arc::new(verifier))
+        .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
+        .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
+    let router = resource_service::api::with_delegation(
+        resource_service::api::resource_api_router(state),
+        Arc::new(key.to_vec()),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok(MutationHttpFixture {
+        _database: database,
+        _authority: authority,
+        pool,
+        store,
+        request,
+        client: reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()?,
+        base,
+        token,
+        delegation,
+        server,
+    })
+}
+async fn mutation_counts(
+    pool: &sqlx::PgPool,
+) -> Result<(i64, i64, i64, i64, i64, i64), sqlx::Error> {
+    sqlx::query_as("SELECT (SELECT count(*) FROM resource.resource_approvals),(SELECT count(*) FROM resource.capacity_claims),(SELECT count(*) FROM resource.resource_leases),(SELECT count(*) FROM resource.credit_holds),(SELECT count(*) FROM resource.credit_ledger_entries),(SELECT count(*) FROM resource.environment_credit_windows)").fetch_one(pool).await
+}
+async fn wait_for_http_waiters(
+    pool: &sqlx::PgPool,
+    blocker: i32,
+    count: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "WITH RECURSIVE blocked(pid) AS (SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) UNION SELECT a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid=ANY(pg_blocking_pids(a.pid))) SELECT count(DISTINCT pid) FROM blocked",
+            )
+            .bind(blocker)
+            .fetch_one(pool)
+            .await?;
+            if waiting >= count {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_renewal_lost_response_delayed_retry_replays_original_etag_and_funds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let active = f.activate().await?;
+    let path = format!("/api/v1/resource-leases/{}/renew", active.id);
+    let input = json!({"expectedRevision":active.revision,"durationSeconds":120,"reason":"isolated duration renewal"});
+    let first = f.post(&path, "lost-renewal", &input).send().await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first
+        .headers()
+        .get(header::ETAG)
+        .ok_or("renewal ETag")?
+        .clone();
+    drop(first); // First response body is lost after the database commit.
+    let committed = f.store.load_lease(active.id).await?;
+    let credits = resource_service::credits::PgCreditStore::new(f.pool.clone());
+    let balance = credits.account(f.request.project_id).await?;
+    let counts = mutation_counts(&f.pool).await?;
+    let until = f.store.current_time().await?.get() + time::Duration::milliseconds(60);
+    while f.store.current_time().await?.get() < until {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let retry = f.post(&path, "lost-renewal", &input).send().await?;
+    assert_eq!(
+        retry.status(),
+        StatusCode::OK,
+        "same duration body/key must replay after clock advancement"
+    );
+    assert_eq!(retry.headers().get(header::ETAG), Some(&etag));
+    assert_eq!(
+        retry.json::<contracts::resource::ResourceLease>().await?,
+        committed
+    );
+    for changed in [
+        json!({"durationSeconds":121}),
+        json!({"expectedRevision":committed.revision}),
+        json!({"reason":"different reason"}),
+    ] {
+        let mut other = input.clone();
+        for (k, v) in changed.as_object().ok_or("changed body")? {
+            other[k] = v.clone();
+        }
+        assert_eq!(
+            f.post(&path, "lost-renewal", &other).send().await?.status(),
+            StatusCode::CONFLICT
+        );
+    }
+    assert_eq!(mutation_counts(&f.pool).await?, counts);
+    assert_eq!(credits.account(f.request.project_id).await?, balance);
+    assert_eq!(f.store.load_lease(active.id).await?, committed);
+    eprintln!(
+        "synthetic renewal committed receipt: {} ETag={etag:?} rowCounts={counts:?}",
+        serde_json::to_string(&committed)?
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn http_renewal_same_key_concurrent_requests_change_hold_and_lease_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let active = f.activate().await?;
+    let before = mutation_counts(&f.pool).await?;
+    let original_grant = f
+        .store
+        .environment_credit_grant(RESOURCE_ENVIRONMENT_CLIENT_ID, active.id)
+        .await?;
+    let credits = resource_service::credits::PgCreditStore::new(f.pool.clone());
+    let original_balance = credits.account(f.request.project_id).await?;
+    let path = format!("/api/v1/resource-leases/{}/renew", active.id);
+    let input = json!({"expectedRevision":active.revision,"durationSeconds":120,"reason":"concurrent renewal"});
+    let mut guard = f.pool.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *guard)
+        .await?;
+    sqlx::query("SELECT lease_id FROM resource.resource_leases WHERE lease_id=$1 FOR UPDATE")
+        .bind(active.id.as_uuid())
+        .execute(&mut *guard)
+        .await?;
+    let first = f.post(&path, "same-key-renewal", &input);
+    let a = tokio::spawn(async move { first.send().await });
+    wait_for_http_waiters(&f.pool, pid, 1).await?;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let second = f.post(&path, "same-key-renewal", &input);
+    let b = tokio::spawn(async move { second.send().await });
+    wait_for_http_waiters(&f.pool, pid, 2).await?;
+    guard.commit().await?;
+    let one = a.await??;
+    let two = b.await??;
+    assert_eq!(one.status(), StatusCode::OK);
+    assert_eq!(two.status(), StatusCode::OK);
+    assert_eq!(
+        one.headers().get(header::ETAG),
+        two.headers().get(header::ETAG)
+    );
+    let actual = one.json::<contracts::resource::ResourceLease>().await?;
+    assert_eq!(
+        two.json::<contracts::resource::ResourceLease>().await?,
+        actual
+    );
+    assert_eq!(f.store.load_lease(active.id).await?, actual);
+    let after = mutation_counts(&f.pool).await?;
+    assert_eq!(
+        after,
+        (
+            before.0,
+            before.1,
+            before.2,
+            before.3,
+            before.4 + 1,
+            before.5 + 1
+        )
+    );
+    let grant = f
+        .store
+        .environment_credit_grant(RESOURCE_ENVIRONMENT_CLIENT_ID, active.id)
+        .await?;
+    assert_eq!(grant.lease_revision, actual.revision);
+    assert_eq!(grant.hold.id, original_grant.hold.id);
+    assert_eq!(actual.revision.get(), active.revision.get() + 1);
+    let balance = credits.account(f.request.project_id).await?;
+    assert_eq!(balance.reserved, grant.hold.remaining);
+    assert!(balance.reserved > original_balance.reserved);
+    assert_eq!(balance.spent, original_balance.spent);
+    assert_eq!(balance.balance, original_balance.balance);
+    assert_eq!(grant.covered_until, actual.expires_at.ok_or("expiry")?);
+    Ok(())
+}
+#[tokio::test]
+async fn http_approval_lost_response_retry_returns_committed_lease_receipt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let path = format!("/api/v1/resource-requests/{}/approve", f.request.id);
+    let input = f.approval();
+    let first = f.post(&path, "lost-approval", &input).send().await?;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    drop(first);
+    let counts = mutation_counts(&f.pool).await?;
+    let actual: Uuid =
+        sqlx::query_scalar("SELECT lease_id FROM resource.resource_leases WHERE request_id=$1")
+            .bind(f.request.id.as_uuid())
+            .fetch_one(&f.pool)
+            .await?;
+    let retry = f.post(&path, "lost-approval", &input).send().await?;
+    assert_eq!(
+        retry.status(),
+        StatusCode::ACCEPTED,
+        "successful approval replay must pass the revision fence"
+    );
+    let accepted = retry
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    let persisted:Value=sqlx::query_scalar("SELECT result FROM resource.idempotency_ledger WHERE operation='approve_resource_request' AND idempotency_key='lost-approval'").fetch_one(&f.pool).await?;
+    assert_eq!(
+        accepted,
+        serde_json::from_value::<contracts::http::ResourceOperationAccepted>(persisted)?
+    );
+    assert_eq!(
+        f.post(&path, "fresh-stale-approval", &input)
+            .send()
+            .await?
+            .status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    let now = f.store.current_time().await?;
+    let student = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: f.request.requester_id.as_uuid(),
+        roles: vec![PlatformRole::Student],
+        authorization_revision: 1,
+        expires_at: now.get() + time::Duration::minutes(5),
+        idle_expires_at: now.get() + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-denied-replay".into()),
+    };
+    let denied = auth::encode_resource_delegation(&[9_u8; 32], &student, now.get())?;
+    assert_eq!(
+        f.client
+            .post(format!("{}{path}", f.base))
+            .bearer_auth(&f.token)
+            .header("x-labweaver-resource-delegation", denied)
+            .header("idempotency-key", "lost-approval")
+            .json(&input)
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    assert_eq!(accepted.lease_id.ok_or("lease")?.as_uuid(), actual);
+    assert_eq!(accepted.revision, Revision::new(2)?);
+    for changed in [
+        json!({"durationSeconds":601}),
+        json!({"expectedRevision":2}),
+        json!({"reason":"different decision"}),
+    ] {
+        let mut other = input.clone();
+        for (k, v) in changed.as_object().ok_or("changed body")? {
+            other[k] = v.clone();
+        }
+        assert_eq!(
+            f.post(&path, "lost-approval", &other)
+                .send()
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+    assert_eq!(mutation_counts(&f.pool).await?, counts);
+    assert_eq!(counts.0, 1);
+    assert_eq!(counts.1, 1);
+    assert_eq!(counts.2, 1);
+    assert_eq!(counts.3, 0);
+    eprintln!(
+        "synthetic approval persisted receipt: {} rowCounts={counts:?}",
+        serde_json::to_string(&accepted)?
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn http_approval_barrier_replays_one_real_lease_to_both_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let path = format!("/api/v1/resource-requests/{}/approve", f.request.id);
+    let input = f.approval();
+    let before = mutation_counts(&f.pool).await?;
+    let mut guard = f.pool.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *guard)
+        .await?;
+    sqlx::query("SELECT request_id FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE")
+        .bind(f.request.id.as_uuid())
+        .execute(&mut *guard)
+        .await?;
+    let first = f.post(&path, "same-key-approval", &input);
+    let a = tokio::spawn(async move { first.send().await });
+    wait_for_http_waiters(&f.pool, pid, 1).await?;
+    let second = f.post(&path, "same-key-approval", &input);
+    let b = tokio::spawn(async move { second.send().await });
+    wait_for_http_waiters(&f.pool, pid, 2).await?;
+    guard.commit().await?;
+    let one = a.await??;
+    let two = b.await??;
+    assert_eq!(one.status(), StatusCode::ACCEPTED);
+    assert_eq!(two.status(), StatusCode::ACCEPTED);
+    let first = one
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    let second = two
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    assert_eq!(
+        first, second,
+        "both successful receipts must contain the committed lease ID"
+    );
+    let lease = first.lease_id.ok_or("accepted lease")?;
+    assert_eq!(f.store.load_lease(lease).await?.request_id, f.request.id);
+    let after = mutation_counts(&f.pool).await?;
+    assert_eq!(
+        after,
+        (
+            before.0 + 1,
+            before.1 + 1,
+            before.2 + 1,
+            before.3,
+            before.4,
+            before.5
+        )
     );
     Ok(())
 }

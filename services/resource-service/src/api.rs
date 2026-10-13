@@ -475,10 +475,6 @@ async fn approve_request(
     require_admin(&principal)?;
     let approver = principal.actor_id;
     let idempotency = required_header(&headers, "idempotency-key")?;
-    let request = state.store.load(request_id).await?;
-    if request.revision != input.expected_revision {
-        return Err(ResourceApiError::RevisionConflict);
-    }
     let now = state.store.current_time().await?;
     let valid_until = UtcTimestamp::from_utc(
         now.get()
@@ -514,7 +510,7 @@ async fn approve_request(
         claim,
         lease_id: LeaseId::new(),
     };
-    let next = state
+    let accepted = state
         .store
         .approve(
             &idempotency,
@@ -528,12 +524,6 @@ async fn approve_request(
             context.trace_id(),
         )
         .await?;
-    let accepted = ResourceOperationAccepted {
-        request_id: next.id,
-        lease_id: Some(allocation.lease_id),
-        revision: next.revision,
-        status_url: format!("/api/v1/resource-requests/{}", next.id),
-    };
     Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
 }
 
@@ -712,23 +702,10 @@ async fn renew_lease(
     let request = state.store.load(lease.request_id).await?;
     scoped_or_admin(&principal, request.requester_id)?;
     let key = required_header(&headers, "idempotency-key")?;
-    let now = state.store.current_time().await?;
-    let expires = UtcTimestamp::from_utc(
-        now.get()
-            + time::Duration::seconds(
-                i64::try_from(input.duration_seconds).map_err(|_| ResourceApiError::Invalid)?,
-            ),
-    )
-    .map_err(|_| ResourceApiError::Invalid)?;
+    i64::try_from(input.duration_seconds).map_err(|_| ResourceApiError::Invalid)?;
     let lease = state
         .store
-        .renew_lease(
-            &key,
-            lease_id,
-            input.expected_revision,
-            expires,
-            context.trace_id(),
-        )
+        .renew_lease_for_duration(&key, lease_id, &input, context.trace_id())
         .await?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)
