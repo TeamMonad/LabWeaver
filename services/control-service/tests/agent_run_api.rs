@@ -1179,3 +1179,352 @@ async fn agent_cancel_build(
         Revision::new(build.revision.get() + 1).map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(Json(build.clone()))
 }
+
+#[derive(Clone)]
+struct CreationAccessState {
+    permitted: Arc<std::sync::atomic::AtomicBool>,
+    calls: Arc<std::sync::atomic::AtomicU64>,
+    decisions: Arc<tokio::sync::Mutex<Vec<(BffSessionId, UtcTimestamp)>>>,
+}
+async fn creation_access_decision(
+    State(state): State<CreationAccessState>,
+    Json(request): Json<AuthorizationDecisionRequest>,
+) -> Result<Json<AuthorizationDecision>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    if !state.permitted.load(Ordering::SeqCst) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let tick = state.calls.fetch_add(1, Ordering::SeqCst);
+    let now = time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Simulate Access's per-request now + five-second decision cap without sleeping.
+    let valid_until = UtcTimestamp::from_utc(
+        now + time::Duration::seconds(5)
+            + time::Duration::milliseconds(
+                i64::try_from(tick).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            ),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .decisions
+        .lock()
+        .await
+        .push((request.session_id, valid_until));
+    Ok(Json(AuthorizationDecision {
+        actor: AuthenticatedActor {
+            actor_id: request.actor_id,
+            roles: vec![PlatformRole::Teacher],
+            expires_at: "2099-01-01T00:00:00.000Z"
+                .parse()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        },
+        scope: request.scope,
+        authorization_revision: Revision::new(1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        scope_revision: Revision::new(1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        valid_until,
+        diagnostic_code: None,
+    }))
+}
+
+#[derive(Clone)]
+struct CreationAuthorityState {
+    issuer: String,
+    jwk: Value,
+    key: Arc<jsonwebtoken::EncodingKey>,
+}
+async fn creation_authority_discovery(State(state): State<CreationAuthorityState>) -> Json<Value> {
+    authority_discovery(State((state.issuer, state.jwk))).await
+}
+async fn creation_authority_jwks(State(state): State<CreationAuthorityState>) -> Json<Value> {
+    Json(json!({"keys":[state.jwk]}))
+}
+async fn creation_authority_token(
+    State(state): State<CreationAuthorityState>,
+    axum::extract::Form(request): axum::extract::Form<TokenRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    if request.grant_type.as_deref() != Some("client_credentials") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    header.kid = Some("test".to_owned());
+    let token=jsonwebtoken::encode(&header,&json!({"iss":state.issuer,"sub":"synthetic-control","azp":"control-service","aud":["labweaver-agent","labweaver-control","labweaver-access"],"exp":time::OffsetDateTime::now_utc().unix_timestamp()+300,"resource_access":{"labweaver-agent":{"roles":["agent.control.invoke"]},"labweaver-control":{"roles":["access.control.forward"]},"labweaver-access":{"roles":["access.authorization.decide"]}}}),&state.key).map_err(|_|StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        json!({"access_token":token,"token_type":"Bearer","expires_in":300}),
+    ))
+}
+async fn spawn_creation_authority(
+    jwk: Value,
+    key: &str,
+) -> Result<AuthorityHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let issuer = format!("http://localhost:{}/realms/test", address.port());
+    let state = CreationAuthorityState {
+        issuer: issuer.clone(),
+        jwk,
+        key: Arc::new(jsonwebtoken::EncodingKey::from_ec_pem(key.as_bytes())?),
+    };
+    let app = Router::new()
+        .route(
+            "/realms/test/.well-known/openid-configuration",
+            get(creation_authority_discovery),
+        )
+        .route("/realms/test/jwks", get(creation_authority_jwks))
+        .route("/realms/test/token", post(creation_authority_token))
+        .with_state(state);
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        tokio::select! {result=axum::serve(listener,app)=>{let _=result;}, _=&mut shutdown_rx=>{}}
+    });
+    Ok(AuthorityHandle {
+        issuer,
+        shutdown: Some(shutdown_tx),
+        task,
+    })
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "HTTP replay covers the real Control and Agent routes, persisted first binding, and current authorization"
+)]
+async fn model_input_create_replays_stable_intent_without_refreshing_first_dispatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    use agent_service::api::{AgentApiState, router as agent_router, with_service_auth};
+    use agent_service::run_store::PostgresAgentRunStore;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_domain_migrations(&pool).await?;
+    // Use the verified Agent migration catalog rather than a parallel test schema.
+    sqlx::query("CREATE SCHEMA agent").execute(&pool).await?;
+    let migration_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let catalog = persistence_sqlx::MigrationCatalog::load(&migration_root.join("catalog.yaml"))?;
+    let domain = catalog
+        .domains
+        .iter()
+        .find(|domain| domain.name == Domain::Agent)
+        .ok_or("Agent catalog missing")?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET search_path TO agent,public")
+        .execute(&mut *connection)
+        .await?;
+    for migration in &domain.migrations {
+        sqlx::raw_sql(&persistence_sqlx::MigrationCatalog::read_verified_sql(
+            &migration_root,
+            migration,
+        )?)
+        .execute(&mut *connection)
+        .await?;
+    }
+    drop(connection);
+    let now = "2026-10-13T00:00:00.000Z".parse::<UtcTimestamp>()?;
+    let actor = ActorId::new();
+    let project_id = ProjectId::new();
+    let course = CourseId::new();
+    insert_project(&pool, &project(project_id, actor, Some(course), now)?).await?;
+    let mut package = package(project_id, course, now)?;
+    let mut extra = package.files[0].clone();
+    extra.path = "second.md".to_owned();
+    extra.object.artifact_id = ArtifactId::new();
+    package.files.push(extra);
+    insert_package(&pool, &package).await?;
+    let upload = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO control.problem_package_upload_sessions(upload_id,project_id,course_id,revision,state,retention_policy_revision,expires_at,completed_package_id) VALUES($1,$2,$3,1,'completed',1,now()+interval '1 hour',$4)").bind(upload).bind(project_id.as_uuid()).bind(course.as_uuid()).bind(package.id.as_uuid()).execute(&pool).await?;
+    for (ordinal, file) in package.files.iter().enumerate() {
+        sqlx::query("INSERT INTO control.problem_package_upload_files(upload_id,ordinal,path,object_key,artifact_id,object_version,size_bytes,sha256,media_type,verified_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now())").bind(upload).bind(i32::try_from(ordinal)?).bind(&file.path).bind(format!("synthetic/{upload}/{ordinal}")).bind(file.object.artifact_id.as_uuid()).bind(&file.object.object_version).bind(i64::try_from(file.object.size_bytes)?).bind(Sha256Digest::of_bytes(b"x").to_string()).bind(&file.object.media_type).execute(&pool).await?;
+    }
+    let objects = Arc::new(TestObjects {
+        reference: package.files[0].object.clone(),
+        bytes: b"x".to_vec(),
+    });
+    let service = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let policy: contracts::authoring::ProjectLlmEgressPolicy = serde_json::from_value(
+        json!({"id":PolicyId::new(),"projectId":project_id,"courseId":course,"revision":1,"binding":{"runtimeBinding":"claude-code-test","model":"fixture-provider-v1","claudeCodeVersion":"2.1.207","maxInFlightPerWorker":2},"budget":{"maxInputTokens":100_000,"maxOutputTokens":20_000,"maxRequests":10,"maxCostMicrousd":2_000_000,"timeoutMilliseconds":120_000,"maxTransientRetries":2,"maxSchemaRepairs":2},"deniedDataClasses":["secret","token","private_key","personally_identifiable_information","unallowlisted_student_submission"],"studentContentMode":"manifest_allowlist_only","activatedAt":now}),
+    )?;
+    service
+        .activate_project_policy(
+            project_id,
+            policy.clone(),
+            &contracts::http::IdempotencyKey::parse("stable-intent-policy")?,
+            None,
+        )
+        .await?;
+    let (ca, certificate, key, jwk) = tls_material()?;
+    let fixture = tempfile::tempdir()?;
+    let ca_path = fixture.path().join("ca.pem");
+    std::fs::write(&ca_path, &ca)?;
+    let authority = spawn_creation_authority(jwk, &key).await?;
+    let verifier = Arc::new(
+        ServiceTokenVerifier::discover(
+            ServiceAuthConfig::new(
+                &authority.issuer,
+                "labweaver-agent".to_owned(),
+                BTreeSet::from(["control-service".to_owned()]),
+                BTreeSet::new(),
+                BTreeSet::from(["ES256".to_owned()]),
+                3600,
+                1,
+                TransportSecurityMode::InsecureTestOnly,
+            )?,
+            no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?,
+        )
+        .await?,
+    );
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let agent_state = Arc::new(AgentApiState {
+        resource: None,
+        store: store.clone(),
+        build_store: agent_service::build_store::PgBuildStore::new(pool.clone()),
+        generated_artifacts: agent_service::generated_artifacts::GeneratedArtifactStore::new(
+            pool.clone(),
+        ),
+        llm_reviews: agent_service::llm_review::LlmReviewStore::new(pool.clone()),
+        platform_images: agent_service::platform_images::PgPlatformImageCatalog::new(pool.clone()),
+        platform_registry: None,
+        objects,
+        platform_image_import_jobs:
+            agent_service::platform_image_jobs::PlatformImageImportJobStore::new(pool.clone()),
+    });
+    let agent_server = spawn_tls_service(
+        with_service_auth(agent_router(agent_state), verifier.clone()),
+        &certificate,
+        &key,
+    )
+    .await?;
+    let access_state = CreationAccessState {
+        permitted: Arc::new(AtomicBool::new(true)),
+        calls: Arc::new(AtomicU64::new(0)),
+        decisions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let access_server = spawn_tls_service(
+        Router::new()
+            .route("/internal/v1/auth/decision", post(creation_access_decision))
+            .with_state(access_state.clone()),
+        &certificate,
+        &key,
+    )
+    .await?;
+    let token = Arc::new(service_token_client(&authority.issuer).await?);
+    let app = router(Arc::new(ApiState {
+        control: service,
+        access: control_service::clients::AccessClient::new_authenticated(
+            service_config(&access_server.base_url, &ca_path),
+            token.clone(),
+        )?,
+        agent: control_service::clients::AgentClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            token.clone(),
+        )?,
+        environment: control_service::clients::EnvironmentClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            token.clone(),
+        )?,
+        evaluation: control_service::clients::EvaluationClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            token,
+        )?,
+        service_token_verifier: verifier,
+    }))
+    .layer(axum::Extension(GatewayPrincipal {
+        client_id: "access-gateway".to_owned(),
+    }));
+    let body = json!({"projectId":project_id,"courseId":course,"packageId":package.id,"packageRevision":1,"policyId":policy.id,"policyRevision":1,"environmentClass":"experiment","selectedPaths":["README.md"]});
+    let uri = format!("/api/v1/projects/{project_id}/agent-runs");
+    let session = BffSessionId::new();
+    let first = app
+        .clone()
+        .oneshot(public_request(
+            uri.clone(),
+            actor,
+            session,
+            Some(serde_json::to_vec(&body)?),
+        )?)
+        .await?;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first: AgentRun = serde_json::from_slice(&to_bytes(first.into_body(), 65536).await?)?;
+    let dispatch = store
+        .claim_dispatch(std::time::Duration::from_secs(30))
+        .await?
+        .ok_or("first dispatch missing")?;
+    let input_hash = Sha256Digest::of_bytes(b"synthetic prepared input");
+    store.bind_prepared_dispatch(&dispatch, input_hash).await?;
+    let before:(String,String,String,String)=sqlx::query_as("SELECT d.request::text,d.dispatch_sha256,r.input_sha256,d.prepared_input_sha256 FROM agent.agent_run_dispatches d JOIN agent.agent_runs r USING(run_id) WHERE d.run_id=$1").bind(first.id.as_uuid()).fetch_one(&pool).await?;
+    for current_session in [session, BffSessionId::new()] {
+        let replay = app
+            .clone()
+            .oneshot(public_request(
+                uri.clone(),
+                actor,
+                current_session,
+                Some(serde_json::to_vec(&body)?),
+            )?)
+            .await?;
+        assert_eq!(replay.status(), StatusCode::ACCEPTED);
+        let replay: AgentRun = serde_json::from_slice(&to_bytes(replay.into_body(), 65536).await?)?;
+        assert_eq!(replay.id, first.id);
+        let after:(String,String,String,String)=sqlx::query_as("SELECT d.request::text,d.dispatch_sha256,r.input_sha256,d.prepared_input_sha256 FROM agent.agent_run_dispatches d JOIN agent.agent_runs r USING(run_id) WHERE d.run_id=$1").bind(first.id.as_uuid()).fetch_one(&pool).await?;
+        assert_eq!(before, after);
+    }
+    let decisions = access_state.decisions.lock().await;
+    assert_ne!(decisions[0].1, decisions[1].1);
+    assert_ne!(decisions[0].0, decisions[2].0);
+    drop(decisions);
+    access_state.permitted.store(false, Ordering::SeqCst);
+    assert_eq!(
+        app.clone()
+            .oneshot(public_request(
+                uri.clone(),
+                actor,
+                session,
+                Some(serde_json::to_vec(&body)?)
+            )?)
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    access_state.permitted.store(true, Ordering::SeqCst);
+    for (current_actor, changed) in [
+        (ActorId::new(), body.clone()),
+        (actor, {
+            let mut changed = body.clone();
+            changed["selectedPaths"] = json!(["second.md"]);
+            changed
+        }),
+        (actor, {
+            let mut changed = body.clone();
+            changed["packageRevision"] = json!(2);
+            changed
+        }),
+        (actor, {
+            let mut changed = body.clone();
+            changed["environmentClass"] = json!("work");
+            changed
+        }),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(public_request(
+                    uri.clone(),
+                    current_actor,
+                    session,
+                    Some(serde_json::to_vec(&changed)?)
+                )?)
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM agent.agent_runs")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 1);
+    Ok(())
+}
