@@ -1,15 +1,20 @@
 /**
  * Helpers for explicit model-input material path selection (#216).
  * Never defaults to the whole package; callers must pass a non-empty selection.
+ *
+ * Paths are compared and emitted as exact `PackageFile.path` strings.
+ * Do not trim/normalize: contracts::validate_relative_path accepts leading/trailing
+ * spaces, upload preserves them, and validate_model_input_selection matches exact identity.
  */
 
 /** Stable, de-duplicated package-relative paths for Create*RunRequest.selectedPaths. */
 export function buildSelectedPaths(paths: readonly string[]): string[] {
   const seen = new Set<string>()
   const out: string[] = []
-  for (const raw of paths) {
-    const path = raw.trim()
-    if (!path || seen.has(path)) continue
+  for (const path of paths) {
+    // Preserve exact string identity (including leading/trailing spaces).
+    // Skip only the empty string — not whitespace-only paths, which are legal relative paths.
+    if (path === '' || seen.has(path)) continue
     seen.add(path)
     out.push(path)
   }
