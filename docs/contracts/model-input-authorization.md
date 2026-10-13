@@ -14,16 +14,16 @@ Agent 配置生成和已有 Work 配置操作只使用调用方显式选择的�
 
 请求是 `ModelInputAuthorizationResolveRequest`：
 
-- `binding`：Control 从真实已验证 BFF 会话构造的 `sessionSha256`、actor/project/course、原创建 operation、有效期、材料/策略版本和选择摘要。
+- `binding`：Control 从真实已验证 BFF 会话构造的 `sessionSha256`、actor/project/course、原创建 operation、创建当次 decision 的 `validUntil` 证据、材料/策略版本和选择摘要。
 - `selectedPaths`：本次准确的文件选择。
 
 绑定不是独立授权记录，也不保存旧角色。Control 每次读取 Access 的 `current_authorization_sessions` 有效会话及当前角色，并读取当前成员事实，调用现有 `authorize_operation`。项目归档、对象版本或归属不匹配、选择摘要变化、会话过期/撤销、角色或成员权限不足、读取失败和超时均拒绝。成功返回相同 binding；拒绝返回 403、`LW_MODEL_INPUT_AUTHORIZATION_DENIED`。
 
-创建幂等身份绑定稳定业务意图：actor、project/course、公开请求、用途、材料/策略及其版本、对象 locator、预授权和原 operation。动态 `sessionSha256` 和授权 decision 的 `validUntil` 不属于创建意图。同一用户以相同请求和幂等键重放时，Control 仍先检查本次当前授权，然后返回原 run；首次 dispatch JSON、凭据、dispatch 摘要和已经准备的 input 摘要都不被更新。其他用户或不同请求、文件选择、对象版本复用同一键仍冲突。重放不能恢复已撤销的原会话，也不能延长原派发授权。
+创建幂等身份绑定稳定业务意图：actor、project/course、公开请求、用途、材料/策略及其版本、对象 locator、预授权和原 operation。动态 `sessionSha256` 和授权 decision 的 `validUntil` 不属于创建意图。同一用户以相同请求和幂等键重放时，Control 仍先检查本次当前授权，然后返回原 run；首次 dispatch JSON、凭据、dispatch 摘要和已经准备的 input 摘要都不被更新。其他用户或不同请求、文件选择、对象版本复用同一键仍冲突。重放不能恢复已撤销的原会话、替换原会话或重置原任务预算。
 
 Agent 在现有 dispatch `request` JSON 中保存 `{ request, inputAuthorization }`，不新增表、列或权限来源。缺少上下文的旧 dispatch 被逐条拒绝，不推导或回填授权。Agent 准备材料前后复核，且每次实际进程调用（包括 schema repair）前重新复核原有持久化取消状态和 Control 当前授权。准备期间取消能停止准备；读完后取消或撤权也不能启动首次模型调用。运行中的原取消机制继续负责进程停止和清理。恢复或重试派发在准备阶段被拒绝时，沿既有 claim/recovery 规则终止本次可执行动作，保留旧 attempt 的用量和 checkpoint；已完成或仍有有效租约的动作，以及已有 Work execution，不被改写。拒绝不代表旧进程已经停止或清理。需要新的会话或材料选择时，调用方必须新建显式请求；服务不更新旧绑定。
 
-当前 Access 每次将 authorization decision 有效期限制在 `now + environment_owner_resolver.decision_ttl_seconds` 内，示例默认 5 秒，允许范围 1–60 秒。首次派发固定采用这个期限。因此，即使当前会话/成员仍有效，超过首次期限的排队或 repair 仍会被拒绝。创建幂等修复没有改变该长期任务限制；长期任务 binding 的期限语义需由权限 owner 另行决定，不能通过重放刷新旧上下文。
+Access 的短期 authorization decision TTL 只证明创建当次的判断，不作为整个异步任务的截止。排队后的首次进程调用及每次 schema repair 进程调用前，Control 都重新检查首次绑定的原会话仍存在、未撤销、absolute/idle 期限未到，以及当前角色、成员动作权限和对象版本仍许可；不接受新会话替代原会话，也不更新首次 binding。Agent 使用既有 attempt 的固定 `startedAt + policy.budget.timeoutMilliseconds` 截止和剩余预算，repair 不重置它们。任务期限到达时只允许既有终态恢复读取，不能启动新的发送；取消仍阻止新的发送。
 
 ## 部署连接
 
@@ -44,4 +44,4 @@ Agent 复核客户端读取下列四项现有命名的配置：
 
 尚未覆盖学生冻结 advisory 与隐藏 rubric、实时 Work 会话文件许可、逐文件隐藏标签、日志留存切片，以及 Claude Code 单个进程内部的 Read/Bash/tool-result 和后续模型请求逐动作复核。平台进程调用前的检查不能证明这些内部动作已逐项授权。不能据此宣称 #216 全部完成。
 
-本地验证使用真实 PostgreSQL 当前会话/成员事实、原 Agent 持久化取消状态和合成 stdin 捕获进程，证明选择内容、准备期间取消和 repair 前撤权行为。该证据没有调用真实模型，也没有验证 Kubernetes sandbox 或生产 Agent→Control TLS/服务角色接线。
+本地验证使用真实 PostgreSQL 当前会话/成员事实、原 Agent 持久化取消状态和合成 stdin 捕获进程，证明选择内容、准备期间取消、repair 前撤权，以及实际跨越创建当次 5 秒 decision TTL 的排队和 repair 仍按原会话当前权限运行。绝对/idle 期限到期、会话撤销、成员撤销、任务截止和取消均阻止新发送。Access 的 `idle_expires_at <= expires_at` 约束意味着绝对期限到期时 idle 也到期；测试保留该约束，并另外覆盖 absolute 仍未来而 idle 单独到期。该证据没有调用真实模型，也没有验证 Kubernetes sandbox 或生产 Agent→Control TLS/服务角色接线。

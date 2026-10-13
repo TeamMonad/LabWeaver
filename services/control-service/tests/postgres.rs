@@ -4984,3 +4984,515 @@ impl agent_service::claude_code::ProblemPackageReader for BlockingModelCaptureRe
         Ok(b"SYNTHETIC_ALLOWED_CONTENT".to_vec())
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn model_input_queue_outlives_initial_five_second_decision()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_initial_decision_lifetime(false).await
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn model_input_schema_repair_outlives_initial_five_second_decision()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_initial_decision_lifetime(true).await
+}
+
+#[cfg(unix)]
+struct TtlCaptureProcess {
+    inner: agent_service::claude_code::TokioClaudeCodeProcess,
+    delay_first_result: bool,
+    sends: std::sync::atomic::AtomicUsize,
+    recoveries: std::sync::atomic::AtomicUsize,
+    timeouts: tokio::sync::Mutex<Vec<std::time::Duration>>,
+}
+#[cfg(unix)]
+#[async_trait]
+impl agent_service::claude_code::ClaudeCodeProcess for TtlCaptureProcess {
+    async fn version(&self) -> Result<String, agent_service::claude_code::ClaudeCodeProcessError> {
+        self.inner.version().await
+    }
+    async fn execute(
+        &self,
+        scope: &agent_service::claude_code::ExecutionScope,
+        command: agent_service::claude_code::ClaudeCodeCommand,
+        cancellation: agent_service::claude_code::RunCancellation,
+    ) -> Result<
+        agent_service::claude_code::ClaudeCodeProcessOutput,
+        agent_service::claude_code::ClaudeCodeProcessError,
+    > {
+        use std::sync::atomic::Ordering;
+        self.timeouts.lock().await.push(command.timeout());
+        let number = self.sends.fetch_add(1, Ordering::SeqCst);
+        let result = self.inner.execute(scope, command, cancellation).await?;
+        if number == 0 && self.delay_first_result {
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        }
+        Ok(result)
+    }
+    async fn recover_authoring_terminal(
+        &self,
+        scope: &agent_service::claude_code::AuthoringAttemptScope,
+        cancellation: agent_service::claude_code::RunCancellation,
+    ) -> Result<
+        agent_service::claude_code::ClaudeCodeProcessOutput,
+        agent_service::claude_code::ClaudeCodeProcessError,
+    > {
+        self.recoveries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .recover_authoring_terminal(scope, cancellation)
+            .await
+    }
+}
+
+#[cfg(unix)]
+async fn ttl_attempt_scope(
+    pool: &sqlx::PgPool,
+    lease: &agent_service::run_store::AgentTrackLease,
+    actor_id: ActorId,
+    version: &str,
+) -> Result<agent_service::claude_code::AuthoringAttemptScope, Box<dyn std::error::Error>> {
+    let (started_at,lease_token):(time::OffsetDateTime,Uuid)=sqlx::query_as("SELECT attempt_started_at,lease_token FROM agent.agent_track_work_items WHERE run_id=$1 AND track='environment'").bind(lease.run_id.as_uuid()).fetch_one(pool).await?;
+    Ok(agent_service::claude_code::AuthoringAttemptScope {
+        run_id: lease.run_id,
+        project_id: lease.run.project_id,
+        course_id: lease.run.course_id,
+        actor_id,
+        track: lease.track,
+        attempt: lease.attempt,
+        execution_generation: 1,
+        started_at: UtcTimestamp::from_utc(started_at)?,
+        worker_id: lease.worker_id.clone(),
+        lease_token,
+        trace_id: "synthetic-ttl".to_owned(),
+        claude_code_version: version.to_owned(),
+    })
+}
+
+#[cfg(unix)]
+async fn reserve_ttl_attempt(
+    store: &agent_service::run_store::PostgresAgentRunStore,
+    command: &contracts::http::InternalCreateAgentRunRequest,
+    key: &str,
+    input_hash: Sha256Digest,
+    now: UtcTimestamp,
+) -> Result<agent_service::run_store::AgentTrackLease, Box<dyn std::error::Error>> {
+    let agent_service::run_store::AgentRunReservation::Created(run) = store
+        .reserve_internal_dispatch(command, &IdempotencyKey::parse(key)?, now, "synthetic-ttl")
+        .await?
+    else {
+        return Err("new TTL fixture expected".into());
+    };
+    let dispatch = store
+        .claim_dispatch(std::time::Duration::from_secs(30))
+        .await?
+        .ok_or("TTL dispatch missing")?;
+    assert_eq!(dispatch.run.id, run.id);
+    store.bind_prepared_dispatch(&dispatch, input_hash).await?;
+    store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Environment,
+            input_hash,
+            "synthetic-ttl",
+            std::time::Duration::from_secs(30),
+        )
+        .await?
+        .ok_or_else(|| "TTL attempt missing".into())
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "real session facts, elapsed decision TTL, capture and original task deadline form one bounded fixture"
+)]
+async fn exercise_initial_decision_lifetime(
+    repair: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use agent_service::claude_code::{
+        ClaudeCodeRuntime, ProblemPackageEgressGate, RunCancellation, TokioClaudeCodeProcess,
+    };
+    use agent_service::run_store::PostgresAgentRunStore;
+    use contracts::http::{
+        ModelInputAuthorizationBinding, ModelInputAuthorizationResolveRequest,
+        model_input_selection_sha256,
+    };
+    use sha2::Digest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
+        .execute(&pool)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    apply_domain_migrations(&pool, Domain::Agent).await?;
+    let config = control_config()?;
+    let base = config.virtual_machine_bases.clone();
+    let service = Arc::new(ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        config,
+    )?);
+    let actor = ActorId::new();
+    let session = contracts::BffSessionId::new();
+    sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256) VALUES($1,'https://synthetic.invalid',$2)").bind(actor.as_uuid()).bind("c".repeat(64)).execute(&pool).await?;
+    sqlx::query("INSERT INTO access.bff_sessions(session_id,actor_id,platform_roles,authorization_revision,expires_at,idle_expires_at,encrypted_csrf_token,csrf_encryption_key_id) VALUES($1,$2,ARRAY['student'],1,date_trunc('milliseconds',now())+interval '1 hour',date_trunc('milliseconds',now())+interval '1 hour',$3,'synthetic')").bind(session.as_uuid()).bind(actor.as_uuid()).bind(vec![0u8;32]).execute(&pool).await?;
+    let clock = time::OffsetDateTime::now_utc();
+    let now = UtcTimestamp::from_utc(
+        clock.replace_nanosecond(clock.nanosecond() / 1_000_000 * 1_000_000)?,
+    )?;
+    let project = service
+        .create_project(
+            actor,
+            contracts::PlatformRole::Student,
+            &contracts::CreateProjectRequest {
+                name: "synthetic decision TTL".to_owned(),
+                description: None,
+                course_id: None,
+            },
+            &IdempotencyKey::parse("ttl-project")?,
+            now,
+        )
+        .await?;
+    let mut policy = authoring_policy(project.id, None, now)?;
+    policy.budget.timeout_milliseconds = 20_000;
+    service
+        .activate_project_policy(
+            project.id,
+            policy.clone(),
+            &IdempotencyKey::parse("ttl-policy")?,
+            None,
+        )
+        .await?;
+    let package: ProblemPackage = serde_json::from_value(
+        serde_json::json!({"id":contracts::ProblemPackageId::new(),"projectId":project.id,"courseId":null,"revision":1,"files":[{"path":"allowed.md","object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"one","sizeBytes":25,"mediaType":"text/plain"}}],"retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"course_material","retainUntil":"2027-12-31T00:00:00.000Z","disposition":"delete"},"completedAt":now}),
+    )?;
+    sqlx::query("INSERT INTO control.problem_packages(package_id,project_id,course_id,revision,manifest_sha256,contract,completed_at) VALUES($1,$2,NULL,1,$3,$4,$5)").bind(package.id.as_uuid()).bind(project.id.as_uuid()).bind(Sha256Digest::of_canonical(&package.files)?.to_string()).bind(serde_json::to_value(&package)?).bind(now.get()).execute(&pool).await?;
+    let paths = vec!["allowed.md".to_owned()];
+    let request = ModelInputAuthorizationResolveRequest {
+        binding: ModelInputAuthorizationBinding {
+            session_sha256: format!("{:x}", sha2::Sha256::digest(session.to_string().as_bytes())),
+            actor_id: actor,
+            project_id: project.id,
+            course_id: None,
+            operation_id: "createProjectAgentRun".to_owned(),
+            valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::seconds(5))?,
+            package_id: package.id,
+            package_revision: package.revision,
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            selection_sha256: model_input_selection_sha256(&paths)?,
+        },
+        selected_paths: paths.clone(),
+    };
+    let command = contracts::http::InternalCreateAgentRunRequest {
+        input_authorization: request.binding.clone(),
+        project_id: project.id,
+        course_id: None,
+        actor_id: actor,
+        request: contracts::http::InternalAgentRunRequest::Authoring(
+            contracts::http::CreateAgentRunRequest {
+                selected_paths: Some(paths.clone()),
+                project_id: project.id,
+                course_id: None,
+                package_id: package.id,
+                package_revision: package.revision,
+                policy_id: policy.id,
+                policy_revision: policy.revision,
+                environment_class: EnvironmentClass::Work,
+            },
+        ),
+        purpose: AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Work,
+        },
+        package: package.clone(),
+        object_locators: package
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.object.artifact_id,
+                    format!("synthetic/{}", file.object.artifact_id),
+                )
+            })
+            .collect(),
+        policy: policy.clone(),
+        preauthorization: None,
+    };
+    let input = ProblemPackageEgressGate::new(
+        Arc::new(ModelCaptureReader),
+        Arc::new(
+            agent_service::classifier::DeterministicEgressClassifier::new(
+                "synthetic".to_owned(),
+                Revision::new(1)?,
+            )?,
+        ),
+    )
+    .prepare(&package, &policy, &paths)
+    .await?;
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let lease = reserve_ttl_attempt(&store, &command, "ttl-positive", input.sha256(), now).await?;
+    let expired_lease =
+        reserve_ttl_attempt(&store, &command, "ttl-task-timeout", input.sha256(), now).await?;
+    let scope =
+        ttl_attempt_scope(&pool, &lease, actor, &policy.binding.claude_code_version).await?;
+    let snapshot:(String,String,String,String)=sqlx::query_as("SELECT d.request::text,d.dispatch_sha256,r.input_sha256,d.prepared_input_sha256 FROM agent.agent_run_dispatches d JOIN agent.agent_runs r USING(run_id) WHERE d.run_id=$1").bind(lease.run_id.as_uuid()).fetch_one(&pool).await?;
+    let fixture = tempfile::tempdir()?;
+    let binary = fixture.path().join("claude");
+    let capture = fixture.path().join("capture.jsonl");
+    let counter = fixture.path().join("count");
+    let bad = fixture.path().join("bad.jsonl");
+    let good = fixture.path().join("good.jsonl");
+    let candidate = serde_json::to_string(
+        &vm_environment_candidate(project.id, None, &base, EnvironmentClass::Work, now)?.spec,
+    )?;
+    for (output, text) in [(&bad, "{}"), (&good, candidate.as_str())] {
+        let session_id = Uuid::new_v4().to_string();
+        let events = [
+            serde_json::json!({"type":"system","subtype":"init","session_id":session_id}),
+            serde_json::json!({"type":"assistant","session_id":session_id,"message":{"role":"assistant","content":[{"type":"text","text":text}]}}),
+            serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":session_id,"num_turns":1,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1},"permission_denials":[]}),
+        ];
+        std::fs::write(
+            output,
+            events
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n")
+                + "\n",
+        )?;
+    }
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then printf '2.1.207\\n'; exit 0; fi\n/bin/cat >> \"$LABWEAVER_CAPTURE\"\nprintf '\\n' >> \"$LABWEAVER_CAPTURE\"\nif [ -f \"$LABWEAVER_COUNT\" ]; then /bin/cat \"$LABWEAVER_GOOD\"; else printf '1' > \"$LABWEAVER_COUNT\"; /bin/cat \"$LABWEAVER_BAD\"; fi\n",
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
+    if !repair {
+        std::fs::write(&counter, b"1")?;
+    }
+    let process = Arc::new(TtlCaptureProcess {
+        inner: TokioClaudeCodeProcess::new(std::collections::BTreeMap::from([
+            ("PATH".to_owned(), fixture.path().display().to_string()),
+            (
+                "LABWEAVER_CAPTURE".to_owned(),
+                capture.display().to_string(),
+            ),
+            ("LABWEAVER_COUNT".to_owned(), counter.display().to_string()),
+            ("LABWEAVER_BAD".to_owned(), bad.display().to_string()),
+            ("LABWEAVER_GOOD".to_owned(), good.display().to_string()),
+        ])),
+        delay_first_result: repair,
+        sends: AtomicUsize::new(0),
+        recoveries: AtomicUsize::new(0),
+        timeouts: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let authorization = Arc::new(RealModelAuthorization {
+        control: service.clone(),
+        request: request.clone(),
+        store: store.clone(),
+        run_id: lease.run_id,
+    });
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(authorization);
+    if !repair {
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    }
+    let execution = runtime
+        .generate_authoring(
+            &scope,
+            input.clone(),
+            RunCancellation::new(),
+            EnvironmentClass::Work,
+            &[],
+        )
+        .await.inspect_err(|failure| {
+            let captures=if capture.exists() {std::fs::read_to_string(&capture).map_or(usize::MAX,|sent|sent.lines().count())} else {0};
+            let elapsed=(time::OffsetDateTime::now_utc()-now.get()).whole_milliseconds();
+            eprintln!("initial-decision red evidence: repair={repair}, elapsed_ms={elapsed}, actual_stdin_captures={captures}, diagnostic={}",failure.diagnostic_code());
+            assert!(elapsed>5_000);
+            assert_eq!(captures,usize::from(repair));
+        })?;
+    assert!(time::OffsetDateTime::now_utc() > request.binding.valid_until.get());
+    let expected = if repair { 2 } else { 1 };
+    assert_eq!(execution.audit.usage.requests, expected);
+    assert!(execution.audit.usage_observed);
+    assert_eq!(
+        process.sends.load(Ordering::SeqCst),
+        usize::try_from(expected)?
+    );
+    let sent = std::fs::read_to_string(&capture)?;
+    assert_eq!(sent.lines().count(), usize::try_from(expected)?);
+    for line in sent.lines() {
+        assert!(line.contains("SYNTHETIC_ALLOWED_CONTENT"));
+    }
+    let timeouts = process.timeouts.lock().await;
+    assert!(
+        timeouts.iter().all(|timeout| *timeout
+            < std::time::Duration::from_millis(policy.budget.timeout_milliseconds))
+    );
+    if repair {
+        assert!(timeouts[1] < timeouts[0]);
+    }
+    drop(timeouts);
+    let completed_at = time::OffsetDateTime::now_utc();
+    store
+        .complete_track(
+            &lease,
+            Ok(execution),
+            UtcTimestamp::from_utc(
+                completed_at
+                    .replace_nanosecond(completed_at.nanosecond() / 1_000_000 * 1_000_000)?,
+            )?,
+            "synthetic-ttl",
+        )
+        .await?;
+    let after:(String,String,String,String)=sqlx::query_as("SELECT d.request::text,d.dispatch_sha256,r.input_sha256,d.prepared_input_sha256 FROM agent.agent_run_dispatches d JOIN agent.agent_runs r USING(run_id) WHERE d.run_id=$1").bind(lease.run_id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(snapshot, after);
+    std::fs::remove_file(&capture)?;
+    let denied_lease =
+        reserve_ttl_attempt(&store, &command, "ttl-current-denials", input.sha256(), now).await?;
+    let denied_scope = ttl_attempt_scope(
+        &pool,
+        &denied_lease,
+        actor,
+        &policy.binding.claude_code_version,
+    )
+    .await?;
+    let denied_runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(Arc::new(RealModelAuthorization {
+            control: service.clone(),
+            request: request.clone(),
+            store: store.clone(),
+            run_id: denied_lease.run_id,
+        }));
+    for update in [
+        "expires_at=now()-interval '1 second',idle_expires_at=now()-interval '1 second'",
+        "idle_expires_at=now()-interval '1 second'",
+        "revoked_at=now()",
+    ] {
+        sqlx::query(&format!(
+            "UPDATE access.bff_sessions SET {update} WHERE session_id=$1"
+        ))
+        .bind(session.as_uuid())
+        .execute(&pool)
+        .await?;
+        let failure = denied_runtime
+            .generate_authoring(
+                &denied_scope,
+                input.clone(),
+                RunCancellation::new(),
+                EnvironmentClass::Work,
+                &[],
+            )
+            .await
+            .err()
+            .ok_or("current original session must deny")?;
+        assert_eq!(
+            failure.diagnostic_code(),
+            "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        );
+        assert!(!capture.exists());
+        sqlx::query("UPDATE access.bff_sessions SET expires_at=date_trunc('milliseconds',now())+interval '1 hour',idle_expires_at=date_trunc('milliseconds',now())+interval '1 hour',revoked_at=NULL WHERE session_id=$1").bind(session.as_uuid()).execute(&pool).await?;
+    }
+    sqlx::query("UPDATE control.project_memberships SET state='revoked' WHERE project_id=$1 AND actor_id=$2").bind(project.id.as_uuid()).bind(actor.as_uuid()).execute(&pool).await?;
+    assert_eq!(
+        denied_runtime
+            .generate_authoring(
+                &denied_scope,
+                input.clone(),
+                RunCancellation::new(),
+                EnvironmentClass::Work,
+                &[]
+            )
+            .await
+            .err()
+            .ok_or("member withdrawal must deny")?
+            .diagnostic_code(),
+        "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+    );
+    assert!(!capture.exists());
+    sqlx::query(
+        "UPDATE control.project_memberships SET state='active' WHERE project_id=$1 AND actor_id=$2",
+    )
+    .bind(project.id.as_uuid())
+    .bind(actor.as_uuid())
+    .execute(&pool)
+    .await?;
+    store
+        .request_cancellation_revisioned(
+            project.id,
+            None,
+            denied_lease.run_id,
+            denied_lease.run.revision,
+            &IdempotencyKey::parse("ttl-durable-cancel")?,
+            now,
+        )
+        .await?;
+    assert_eq!(
+        denied_runtime
+            .generate_authoring(
+                &denied_scope,
+                input.clone(),
+                RunCancellation::new(),
+                EnvironmentClass::Work,
+                &[]
+            )
+            .await
+            .err()
+            .ok_or("durable cancel must deny")?
+            .diagnostic_code(),
+        "LW_CONFLICT"
+    );
+    assert!(!capture.exists());
+    let expired_scope = ttl_attempt_scope(
+        &pool,
+        &expired_lease,
+        actor,
+        &policy.binding.claude_code_version,
+    )
+    .await?;
+    let deadline = expired_scope.started_at.get()
+        + time::Duration::milliseconds(i64::try_from(policy.budget.timeout_milliseconds)?);
+    if let Ok(wait) = std::time::Duration::try_from(
+        deadline - time::OffsetDateTime::now_utc() + time::Duration::milliseconds(100),
+    ) {
+        tokio::time::sleep(wait).await;
+    }
+    let expired_runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(Arc::new(RealModelAuthorization {
+            control: service,
+            request,
+            store: store.clone(),
+            run_id: expired_lease.run_id,
+        }));
+    let failure = expired_runtime
+        .generate_authoring(
+            &expired_scope,
+            input,
+            RunCancellation::new(),
+            EnvironmentClass::Work,
+            &[],
+        )
+        .await
+        .err()
+        .ok_or("original task deadline must stop sending")?;
+    assert_eq!(failure.diagnostic_code(), "LW_PROVIDER_TIMEOUT");
+    assert!(!capture.exists());
+    assert_eq!(
+        process.sends.load(Ordering::SeqCst),
+        usize::try_from(expected)?
+    );
+    assert_eq!(process.recoveries.load(Ordering::SeqCst), 1);
+    assert_eq!(failure.audit().usage.requests, 0);
+    Ok(())
+}
