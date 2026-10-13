@@ -262,6 +262,19 @@ pub fn revision(value: u64) -> Revision {
     Revision::new(value).unwrap_or_else(|error| panic!("invalid test revision: {error}"))
 }
 
+pub fn funded_ready_instance(class: EnvironmentClass) -> EnvironmentInstance {
+    let mut instance = ready_instance();
+    instance.class = class;
+    let authorization =
+        runtime_receipt(&instance, &runtime_projection(&instance)).lease_authorization;
+    instance.lease_id = Some(authorization.lease_id);
+    instance.capacity_binding = Some(authorization.capacity_binding.clone());
+    instance.operation.lease_authorization = Some(authorization);
+    instance.runtime_authorization =
+        Some(runtime_receipt(&instance, &runtime_projection(&instance)));
+    instance
+}
+
 /// A synthetic immutable release for lifecycle tests whose provider is an external-boundary stub.
 pub fn runtime_projection(instance: &EnvironmentInstance) -> contracts::events::ReleasePublished {
     use contracts::authoring::{CandidateApproval, CandidateDecision};

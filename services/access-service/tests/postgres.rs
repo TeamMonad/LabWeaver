@@ -350,6 +350,34 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,$7,'work',1,$8,3,now()+interval '20 minutes',now(),now()+interval '30 seconds',now()+interval '15 minutes',$9,$10,$11,'test-key','actor:work',$12)")
         .bind(work_capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(project).bind(course).bind(environment).bind(work_lease_id)
         .bind("1".repeat(64)).bind("2".repeat(64)).bind(vec![9_u8; 32]).bind("3".repeat(64)).execute(&pool).await?;
+    let funded_experiment_capability = Uuid::now_v7();
+    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) SELECT $1,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,'experiment',environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,$2,$3,encrypted_handoff_secret,encryption_key_id,'actor:funded-experiment',$4 FROM access.console_capabilities WHERE capability_id=$5")
+        .bind(funded_experiment_capability).bind("4".repeat(64)).bind("5".repeat(64)).bind("6".repeat(64)).bind(work_capability_id).execute(&pool).await?;
+    let funded_fence: (Uuid, i64) = sqlx::query_as("SELECT lease_id,lease_revision FROM access.console_capabilities WHERE capability_id=$1 AND environment_class='experiment'")
+        .bind(funded_experiment_capability).fetch_one(&pool).await?;
+    assert_eq!(funded_fence, (work_lease_id, 3));
+    for mutation in [
+        "lease_id=NULL",
+        "lease_revision=NULL",
+        "lease_expires_at=NULL",
+        "lease_expires_at=issued_at+interval '29 seconds'",
+        "environment_class='work',lease_id=NULL,lease_revision=NULL,lease_expires_at=NULL",
+    ] {
+        let error = sqlx::query(&format!(
+            "UPDATE access.console_capabilities SET {mutation} WHERE capability_id=$1"
+        ))
+        .bind(funded_experiment_capability)
+        .execute(&pool)
+        .await
+        .expect_err("partial, expired, or unfunded Work fence must fail");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("23514")
+        );
+    }
     sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,project_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,$8,1,$9,3,now()+interval '20 minutes','test-proxy','opening',now(),now()+interval '15 minutes')")
         .bind(Uuid::now_v7()).bind(work_capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(project).bind(course).bind(environment).bind(work_lease_id).execute(&pool).await?;
     let console_columns: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema='access' AND table_name IN ('console_capabilities','console_sessions')")

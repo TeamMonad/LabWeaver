@@ -169,31 +169,7 @@ async fn upgrade(
             EnvironmentStoreError::EnvironmentNotFound => TerminalBridgeError::ScopeDenied,
             _ => TerminalBridgeError::AuthorityUnavailable,
         })?;
-    if instance.revision != identity.environment_revision
-        || instance.runtime_kind
-            != match kind {
-                ConsoleKind::Xterm => RuntimeKind::Container,
-                ConsoleKind::Novnc => RuntimeKind::VirtualMachine,
-            }
-        || instance.desired_state != DesiredEnvironmentState::Running
-        || instance.observed_state != ObservedEnvironmentState::Ready
-        || instance.observed_generation != instance.generation
-        || instance
-            .eligibility_expires_at
-            .is_some_and(|deadline| deadline <= now)
-    {
-        return Err(TerminalBridgeError::ScopeDenied);
-    }
-    match (
-        instance.class,
-        &instance.operation.lease_authorization,
-        identity.lease,
-    ) {
-        (EnvironmentClass::Experiment, None, None) => {}
-        (EnvironmentClass::Work, Some(auth), Some((id, revision)))
-            if auth.lease_id == id && auth.lease_revision == revision && auth.expires_at > now => {}
-        _ => return Err(TerminalBridgeError::ScopeDenied),
-    }
+    authorize_console_connection(&instance, kind, &identity, now)?;
     let release = state
         .authority
         .releases
@@ -235,6 +211,40 @@ async fn upgrade(
         };
         if let Err(code) = bridge(state.gateway, request, browser).await { tracing::warn!(event="environment.console.closed", diagnostic=code, console_kind=?kind, console_session_id=%identity.session_id, access_grant_id=%identity.grant_id, access_grant_revision=identity.grant_revision.get(), environment_id=%environment_id); }
     }))
+}
+
+fn authorize_console_connection(
+    instance: &contracts::environment::EnvironmentInstance,
+    kind: ConsoleKind,
+    identity: &Identity,
+    now: contracts::UtcTimestamp,
+) -> Result<(), TerminalBridgeError> {
+    if instance.revision != identity.environment_revision
+        || instance.runtime_kind
+            != match kind {
+                ConsoleKind::Xterm => RuntimeKind::Container,
+                ConsoleKind::Novnc => RuntimeKind::VirtualMachine,
+            }
+        || instance.desired_state != DesiredEnvironmentState::Running
+        || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.observed_generation != instance.generation
+        || instance
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= now)
+    {
+        return Err(TerminalBridgeError::ScopeDenied);
+    }
+    match (
+        instance.class,
+        &instance.operation.lease_authorization,
+        identity.lease,
+    ) {
+        (EnvironmentClass::Experiment, None, None) => {}
+        (EnvironmentClass::Work, Some(auth), Some((id, revision)))
+            if auth.lease_id == id && auth.lease_revision == revision && auth.expires_at > now => {}
+        _ => return Err(TerminalBridgeError::ScopeDenied),
+    }
+    Ok(())
 }
 
 async fn bridge(
@@ -414,3 +424,7 @@ impl IntoResponse for TerminalBridgeError {
         (status, self.to_string()).into_response()
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_bridge_tests.rs"]
+mod tests;
