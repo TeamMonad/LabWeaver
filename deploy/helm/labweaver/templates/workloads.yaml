@@ -13,6 +13,16 @@
 {{- fail (printf "workloadInputs.%s requires env and secretEnv" $name) }}
 {{- end }}
 {{- end }}
+{{- if eq $name "agent-service" }}
+{{- $env := deepCopy $input.env }}
+{{- range $key, $value := (include "labweaver.agentControlConnection" $root | fromYaml) }}
+{{- if or (hasKey $input.secretEnv $key) (and (hasKey $env $key) (ne (index $env $key) $value)) }}
+{{- fail (printf "Agent Control connection owns %s" $key) }}
+{{- end }}
+{{- $_ := set $env $key $value }}
+{{- end }}
+{{- $input = dict "env" $env "secretEnv" $input.secretEnv }}
+{{- end }}
 {{- $imageKey := required (printf "workloads.%s.imageKey is required" $name) $configuration.imageKey }}
 {{- $image := index $root.Values.images $imageKey }}
 ---
