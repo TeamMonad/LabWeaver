@@ -1,6 +1,12 @@
 import axios from 'axios'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createLabWeaverApiClient } from '@/api/client'
+import {
+  acknowledgeBffSessionRefreshed,
+  isBffWriteBlocked,
+  resetBffSessionBarrierForTests,
+  subscribeBffCsrfSessionInvalidation,
+} from '@/api/bffSessionBarrier'
+import { createBffCsrfTokenProvider, createLabWeaverApiClient } from '@/api/client'
 
 vi.mock('@/config', () => ({
   API_AUTH_MODE: 'bearer',
@@ -41,6 +47,7 @@ function csrfProblem(diagnosticCode: string, status = 403) {
 }
 
 afterEach(() => {
+  resetBffSessionBarrierForTests()
   vi.restoreAllMocks()
 })
 
@@ -162,7 +169,7 @@ describe('createLabWeaverApiClient', () => {
     expect(adapter.mock.calls[1][0].headers['X-CSRF-Token']).toBe('csrf-cached')
   })
 
-  it('after cross-tab session replacement, invalidates CSRF cache on LW_AUTH_CSRF_REJECTED without replaying the write, then recovers', async () => {
+  it('on LW_AUTH_CSRF_REJECTED: invalidates cache, notifies session barrier, does not replay write, and blocks further writes until acknowledge', async () => {
     let sessionToken = 'csrf-session-a'
     const csrfGet = vi.spyOn(axios, 'get').mockImplementation(async () => ({
       data: {
@@ -170,6 +177,9 @@ describe('createLabWeaverApiClient', () => {
         expiresAt: new Date(Date.now() + 120_000).toISOString(),
       },
     }))
+
+    const sessionInvalidated = vi.fn()
+    const unsubscribe = subscribeBffCsrfSessionInvalidation(sessionInvalidated)
 
     const client = makeClient('/', { mode: 'bff' })
     const adapter = vi.fn(async (config) => {
@@ -227,13 +237,36 @@ describe('createLabWeaverApiClient', () => {
     expect(JSON.parse(adapter.mock.calls[1][0].data as string)).toEqual({ as: 'user-a-ui-stale' })
     // No silent retry: still a single CSRF fetch from before the switch.
     expect(csrfGet).toHaveBeenCalledTimes(1)
+    expect(sessionInvalidated).toHaveBeenCalledTimes(1)
+    expect(isBffWriteBlocked()).toBe(true)
 
-    // Next write refetches session-B token and succeeds (no old-user silent submit).
-    await client.post({ url: '/api/v1/resource-requests', body: { as: 'user-b' } })
+    // Subsequent writes are blocked until the authenticated UI refreshes identity.
+    // This is what prevents a tab still showing A's form from silently POSTing as B
+    // after merely refetching B's CSRF token.
+    await expect(
+      client.post({
+        url: '/api/v1/resource-requests',
+        body: { as: 'user-a-ui-stale' },
+        throwOnError: true,
+      }),
+    ).rejects.toMatchObject({
+      name: 'LabWeaverApiError',
+      diagnosticCode: 'LW_SDK_SESSION_REFRESH_REQUIRED',
+    })
+    expect(adapter).toHaveBeenCalledTimes(2)
+    expect(csrfGet).toHaveBeenCalledTimes(1)
+
+    // After UI/session refresh acknowledges, writes may resume with a fresh CSRF.
+    acknowledgeBffSessionRefreshed()
+    expect(isBffWriteBlocked()).toBe(false)
+
+    await client.post({ url: '/api/v1/resource-requests', body: { as: 'user-b-after-refresh' } })
     expect(csrfGet).toHaveBeenCalledTimes(2)
     expect(adapter).toHaveBeenCalledTimes(3)
     expect(adapter.mock.calls[2][0].headers['X-CSRF-Token']).toBe('csrf-session-b')
-    expect(JSON.parse(adapter.mock.calls[2][0].data as string)).toEqual({ as: 'user-b' })
+    expect(JSON.parse(adapter.mock.calls[2][0].data as string)).toEqual({ as: 'user-b-after-refresh' })
+
+    unsubscribe()
   })
 
   it('does not invalidate BFF CSRF cache on unrelated 403 diagnostics', async () => {
@@ -282,11 +315,54 @@ describe('createLabWeaverApiClient', () => {
 
     expect(csrfGet).toHaveBeenCalledTimes(1)
     expect(adapter.mock.calls[1][0].headers['X-CSRF-Token']).toBe('csrf-keep')
+    expect(isBffWriteBlocked()).toBe(false)
   })
 
   it('rejects a contract-prefixed API base URL', () => {
     expect(() => makeClient('/api/v1', { mode: 'bearer', accessToken: async () => 'token' })).toThrowError(
       'Public API base URL must identify the origin, not repeat the /api/v1 contract prefix.',
     )
+  })
+})
+
+describe('createBffCsrfTokenProvider in-flight invalidation', () => {
+  it('does not repopulate the cache from a CSRF response that completed after invalidate', async () => {
+    let releaseInFlight!: (value: unknown) => void
+    const inFlightResponse = new Promise((resolve) => {
+      releaseInFlight = resolve
+    })
+    let csrfCalls = 0
+    const csrfGet = vi.spyOn(axios, 'get').mockImplementation(async () => {
+      csrfCalls += 1
+      if (csrfCalls === 1) return inFlightResponse as never
+      return {
+        data: {
+          csrfToken: 'csrf-after-invalidate',
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+        },
+      } as never
+    })
+
+    const provider = createBffCsrfTokenProvider('', 5_000)
+    const first = provider.getToken()
+    // Invalidate while the first fetch is still in flight (epoch bump).
+    provider.invalidate()
+    releaseInFlight({
+      data: {
+        csrfToken: 'csrf-stale-in-flight',
+        expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      },
+    })
+    // The in-flight caller still receives the body, but it must not be cached.
+    await expect(first).resolves.toBe('csrf-stale-in-flight')
+
+    const second = await provider.getToken()
+    expect(second).toBe('csrf-after-invalidate')
+    expect(csrfGet).toHaveBeenCalledTimes(2)
+
+    // Third call should hit the post-invalidate cache, not the stale in-flight token.
+    const third = await provider.getToken()
+    expect(third).toBe('csrf-after-invalidate')
+    expect(csrfGet).toHaveBeenCalledTimes(2)
   })
 })

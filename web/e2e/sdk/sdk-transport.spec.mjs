@@ -352,3 +352,212 @@ test('SSE rejects missing bearer before any network request', async ({ page }) =
   expect(networkRequests).toBe(0)
 })
 
+
+/**
+ * Cross-tab BFF session switch regression (mocked BFF).
+ *
+ * CI limitation: full multi-user Keycloak login is not exercised here. Two pages
+ * share one browser context (shared cookies) while route mocks flip the session
+ * actor + CSRF token — the strongest feasible proof that tab A cannot silently
+ * POST a preserved form body as user B after CSRF rejection.
+ */
+test('cross-tab session switch: CSRF reject blocks stale form submit until session refresh', async ({ page, context }) => {
+  await context.addCookies([
+    { name: 'labweaver_test_session', value: 'session-a', url: 'http://127.0.0.1:4174' },
+  ])
+
+  /** @type {{ actorId: string, csrfToken: string }} */
+  const identity = { actorId: 'actor-a', csrfToken: 'csrf-a' }
+  /** @type {Array<{ method: string, csrf?: string, body?: unknown, url: string }>} */
+  const writes = []
+  let csrfFetches = 0
+
+  await page.route('**/api/v1/auth/csrf', async (route) => {
+    csrfFetches += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        csrfToken: identity.csrfToken,
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      }),
+    })
+  })
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        actor: {
+          actorId: identity.actorId,
+          roles: ['teacher'],
+          expiresAt: '2099-01-01T00:00:00.000Z',
+        },
+        authorizationRevision: 1,
+        expiresAt: '2099-01-01T00:00:00.000Z',
+        scopes: [{ kind: 'global' }],
+      }),
+    })
+  })
+
+  await page.route('**/api/v1/resource-requests', async (route) => {
+    const request = route.request()
+    if (request.method() !== 'POST') {
+      await route.fulfill({ status: 405, body: 'method not allowed' })
+      return
+    }
+    const csrf = request.headers()['x-csrf-token']
+    const body = request.postDataJSON()
+    writes.push({ method: 'POST', csrf, body, url: request.url() })
+    // Reject when the synchronizer token does not match the current session.
+    if (csrf !== identity.csrfToken) {
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/problem+json',
+        body: JSON.stringify({
+          type: 'about:blank',
+          title: 'Forbidden',
+          status: 403,
+          detail: 'CSRF token is not valid for the current session.',
+          instance: '/api/v1/resource-requests',
+          diagnosticCode: 'LW_AUTH_CSRF_REJECTED',
+          requestId: 'e2e-csrf-reject',
+          retryable: false,
+        }),
+      })
+      return
+    }
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, actorId: identity.actorId }),
+    })
+  })
+
+  // Tab A: cache CSRF for actor A and preserve an in-DOM form body.
+  await page.evaluate(async () => {
+    const api = await import('/src/api/client.ts')
+    const barrier = await import('/src/api/bffSessionBarrier.ts')
+    const client = api.createLabWeaverApiClient({
+      baseUrl: window.location.origin,
+      authentication: { mode: 'bff' },
+    })
+    window.__csrfRegression = {
+      client,
+      api,
+      barrier,
+      formBody: { note: 'composed-as-user-a', amount: 42 },
+      events: [],
+      unsubscribe: barrier.subscribeBffCsrfSessionInvalidation(() => {
+        window.__csrfRegression.events.push('session-invalidated')
+      }),
+    }
+    await client.post({
+      url: '/api/v1/resource-requests',
+      body: { probe: 'warm-cache-as-a' },
+      throwOnError: true,
+    })
+  })
+
+  expect(csrfFetches).toBe(1)
+  expect(writes).toHaveLength(1)
+  expect(writes[0].csrf).toBe('csrf-a')
+
+  // Tab B (same shared cookie jar): switch authenticated identity.
+  identity.actorId = 'actor-b'
+  identity.csrfToken = 'csrf-b'
+  await context.addCookies([
+    { name: 'labweaver_test_session', value: 'session-b', url: 'http://127.0.0.1:4174' },
+  ])
+
+  // Tab A still holds the old form; first submit uses stale csrf-a → rejected.
+  const firstRetry = await page.evaluate(async () => {
+    const { client, formBody, events } = window.__csrfRegression
+    try {
+      await client.post({
+        url: '/api/v1/resource-requests',
+        body: formBody,
+        throwOnError: true,
+      })
+      return { ok: true, events: [...events] }
+    } catch (error) {
+      return {
+        ok: false,
+        status: error?.response?.status ?? null,
+        diagnosticCode: error?.response?.data?.diagnosticCode ?? error?.diagnosticCode ?? null,
+        events: [...events],
+        writeBlocked: window.__csrfRegression.barrier.isBffWriteBlocked(),
+      }
+    }
+  })
+
+  expect(firstRetry).toMatchObject({
+    ok: false,
+    status: 403,
+    diagnosticCode: 'LW_AUTH_CSRF_REJECTED',
+    writeBlocked: true,
+  })
+  expect(firstRetry.events).toContain('session-invalidated')
+  expect(writes).toHaveLength(2)
+  expect(writes[1]).toMatchObject({
+    csrf: 'csrf-a',
+    body: { note: 'composed-as-user-a', amount: 42 },
+  })
+
+  // Blind second click must NOT fetch B's CSRF and POST A's form as B.
+  const blockedRetry = await page.evaluate(async () => {
+    const { client, formBody, api } = window.__csrfRegression
+    try {
+      await client.post({
+        url: '/api/v1/resource-requests',
+        body: formBody,
+        throwOnError: true,
+      })
+      return { ok: true }
+    } catch (error) {
+      return {
+        ok: false,
+        diagnosticCode: error?.diagnosticCode ?? null,
+        name: error?.name ?? null,
+        writeBlocked: window.__csrfRegression.barrier.isBffWriteBlocked(),
+      }
+    }
+  })
+
+  expect(blockedRetry).toEqual({
+    ok: false,
+    diagnosticCode: 'LW_SDK_SESSION_REFRESH_REQUIRED',
+    name: 'LabWeaverApiError',
+    writeBlocked: true,
+  })
+  expect(writes).toHaveLength(2)
+  expect(csrfFetches).toBe(1)
+
+  // Simulate useAuth session refresh: reload identity, clear preserved form, acknowledge.
+  const afterRefresh = await page.evaluate(async () => {
+    const state = window.__csrfRegression
+    const session = await (await fetch('/api/v1/auth/session', { credentials: 'include' })).json()
+    // Pending form cleared as App.vue sessionEpoch remount would do.
+    state.formBody = null
+    state.barrier.acknowledgeBffSessionRefreshed()
+    const blocked = state.barrier.isBffWriteBlocked()
+    // A fresh form composed as the refreshed actor may proceed.
+    await state.client.post({
+      url: '/api/v1/resource-requests',
+      body: { note: 'composed-as-user-b', actorId: session.actor.actorId },
+      throwOnError: true,
+    })
+    return { sessionActor: session.actor.actorId, blockedBeforeWrite: blocked }
+  })
+
+  expect(afterRefresh).toEqual({ sessionActor: 'actor-b', blockedBeforeWrite: false })
+  expect(csrfFetches).toBe(2)
+  expect(writes).toHaveLength(3)
+  expect(writes[2]).toMatchObject({
+    csrf: 'csrf-b',
+    body: { note: 'composed-as-user-b', actorId: 'actor-b' },
+  })
+  // Prove the old A form body never landed under B's token.
+  expect(writes.some((w) => w.csrf === 'csrf-b' && w.body?.note === 'composed-as-user-a')).toBe(false)
+})

@@ -2,6 +2,10 @@ import { ref, computed } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
+import {
+  acknowledgeBffSessionRefreshed,
+  subscribeBffCsrfSessionInvalidation,
+} from '@/api/bffSessionBarrier'
 
 interface BffUser {
   expired: boolean
@@ -24,6 +28,9 @@ const userManager = API_AUTH_MODE === 'bearer' && DIRECT_OIDC_ENABLED
 const user = ref<CurrentUser | null>(null)
 const isLoading = ref(false)
 const error = ref<Error | null>(null)
+/** Bumped on CSRF session invalidation so App can remount views and clear pending forms. */
+const sessionEpoch = ref(0)
+let bffCsrfSessionListenerInstalled = false
 type TopLevelNavigate = (url: string) => void
 
 const navigateTopLevel: TopLevelNavigate = (url) => {
@@ -64,6 +71,32 @@ async function loadBffSession(): Promise<void> {
   user.value = bffUser(await response.json() as AuthSession)
 }
 
+/**
+ * CSRF rejection means the shared cookie may now belong to another actor.
+ * Clear the stale UI actor, bump sessionEpoch (pending forms remount away),
+ * re-fetch /api/v1/auth/session, then lift the write gate — never replay writes.
+ */
+async function handleBffCsrfSessionInvalidation(): Promise<void> {
+  user.value = null
+  sessionEpoch.value += 1
+  try {
+    await loadBffSession()
+  } catch (err) {
+    user.value = null
+    error.value = err instanceof Error ? err : new Error(String(err))
+  } finally {
+    acknowledgeBffSessionRefreshed()
+  }
+}
+
+function ensureBffCsrfSessionListener(): void {
+  if (bffCsrfSessionListenerInstalled || API_AUTH_MODE !== 'bff') return
+  bffCsrfSessionListenerInstalled = true
+  subscribeBffCsrfSessionInvalidation(() => {
+    void handleBffCsrfSessionInvalidation()
+  })
+}
+
 /** Returns the current non-expired OIDC bearer for bearer-mode deployments. */
 export async function getOidcAccessToken(): Promise<string | undefined> {
   if (!userManager) return undefined
@@ -74,6 +107,7 @@ export async function getOidcAccessToken(): Promise<string | undefined> {
 }
 
 export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
+  ensureBffCsrfSessionListener()
   const isAuthenticated = computed(() => user.value?.expired === false)
 
   async function login() {
@@ -177,6 +211,7 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
     isLoading,
     error,
     isAuthenticated,
+    sessionEpoch,
     login,
     logout,
     handleCallback,

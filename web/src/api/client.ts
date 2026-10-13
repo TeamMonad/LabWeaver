@@ -1,6 +1,10 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios'
 import { API_AUTH_MODE, API_BASE_URL } from '@/config'
 import { getOidcAccessToken } from '@/composables/useAuth'
+import {
+  isBffWriteBlocked,
+  notifyBffCsrfSessionInvalidation,
+} from '@/api/bffSessionBarrier'
 import type { ProblemDetails } from '@/generated/contracts'
 import type { Auth } from '@/generated/contracts/core/auth.gen'
 import { createClient, type Client } from '@/generated/contracts/client'
@@ -22,6 +26,7 @@ export interface LabWeaverApiClientOptions {
 export type LabWeaverClientDiagnostic =
   | 'LW_SDK_CONFIGURATION_INVALID'
   | 'LW_SDK_AUTH_TOKEN_UNAVAILABLE'
+  | 'LW_SDK_SESSION_REFRESH_REQUIRED'
   | 'LW_SDK_PROBLEM_INVALID'
   | 'LW_SDK_REQUEST_CANCELLED'
   | 'LW_SDK_REQUEST_TIMEOUT'
@@ -93,7 +98,7 @@ type BffCsrfTokenCache = {
  * Session cookies are HttpOnly, so cross-tab login/logout cannot be keyed from JS;
  * callers invalidate when Access returns a CSRF rejection diagnostic.
  */
-function createBffCsrfTokenProvider(baseUrl: string, timeout: number): BffCsrfTokenCache {
+export function createBffCsrfTokenProvider(baseUrl: string, timeout: number): BffCsrfTokenCache {
   let cached: { token: string; expiresAt: number } | undefined
   let inFlight: Promise<string | undefined> | undefined
   // Bumps on invalidate so a fetch that started before a session switch cannot
@@ -174,6 +179,14 @@ function attachAuthInterceptor(
         config.headers.Authorization = `Bearer ${token}`
       }
     } else if (isUnsafeMethod(config.method)) {
+      // After a CSRF session rejection, block writes until useAuth (or tests)
+      // acknowledge a refreshed identity — prevents re-submitting a stale form as B.
+      if (isBffWriteBlocked()) {
+        throw new LabWeaverApiError(
+          'LW_SDK_SESSION_REFRESH_REQUIRED',
+          'BFF session changed; refresh the authenticated UI before retrying this write.',
+        )
+      }
       const token = await csrf?.getToken()
       if (!token) {
         throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
@@ -250,7 +263,14 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
   })
 
   const { invalidateCsrf } = attachAuthInterceptor(instance, options.authentication)
-  attachResponseInterceptor(instance, { onCsrfRejection: invalidateCsrf })
+  attachResponseInterceptor(instance, {
+    onCsrfRejection: invalidateCsrf
+      ? () => {
+          invalidateCsrf()
+          notifyBffCsrfSessionInvalidation()
+        }
+      : undefined,
+  })
 
   // Axios interceptors cover REST; generated SSE uses fetch via createSseClient
   // and only picks up Authorization through the generated `auth` resolver.
@@ -297,7 +317,14 @@ const { invalidateCsrf: invalidateSdkCsrf } = attachAuthInterceptor(
     ? { mode: 'bff' }
     : { mode: 'bearer', accessToken: getOidcAccessToken },
 )
-attachResponseInterceptor(sdkTransport, { onCsrfRejection: invalidateSdkCsrf })
+attachResponseInterceptor(sdkTransport, {
+  onCsrfRejection: invalidateSdkCsrf
+    ? () => {
+        invalidateSdkCsrf()
+        notifyBffCsrfSessionInvalidation()
+      }
+    : undefined,
+})
 
 /** Initialize the generated SDK client transport before the Vue app mounts. */
 export async function initializeSdkClient(): Promise<void> {
