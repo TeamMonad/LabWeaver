@@ -19,7 +19,11 @@ Agent 配置生成和已有 Work 配置操作只使用调用方显式选择的�
 
 绑定不是独立授权记录，也不保存旧角色。Control 每次读取 Access 的 `current_authorization_sessions` 有效会话及当前角色，并读取当前成员事实，调用现有 `authorize_operation`。项目归档、对象版本或归属不匹配、选择摘要变化、会话过期/撤销、角色或成员权限不足、读取失败和超时均拒绝。成功返回相同 binding；拒绝返回 403、`LW_MODEL_INPUT_AUTHORIZATION_DENIED`。
 
+创建幂等身份绑定稳定业务意图：actor、project/course、公开请求、用途、材料/策略及其版本、对象 locator、预授权和原 operation。动态 `sessionSha256` 和授权 decision 的 `validUntil` 不属于创建意图。同一用户以相同请求和幂等键重放时，Control 仍先检查本次当前授权，然后返回原 run；首次 dispatch JSON、凭据、dispatch 摘要和已经准备的 input 摘要都不被更新。其他用户或不同请求、文件选择、对象版本复用同一键仍冲突。重放不能恢复已撤销的原会话，也不能延长原派发授权。
+
 Agent 在现有 dispatch `request` JSON 中保存 `{ request, inputAuthorization }`，不新增表、列或权限来源。缺少上下文的旧 dispatch 被逐条拒绝，不推导或回填授权。Agent 准备材料前后复核，且每次实际进程调用（包括 schema repair）前重新复核原有持久化取消状态和 Control 当前授权。准备期间取消能停止准备；读完后取消或撤权也不能启动首次模型调用。运行中的原取消机制继续负责进程停止和清理。恢复或重试派发在准备阶段被拒绝时，沿既有 claim/recovery 规则终止本次可执行动作，保留旧 attempt 的用量和 checkpoint；已完成或仍有有效租约的动作，以及已有 Work execution，不被改写。拒绝不代表旧进程已经停止或清理。需要新的会话或材料选择时，调用方必须新建显式请求；服务不更新旧绑定。
+
+当前 Access 每次将 authorization decision 有效期限制在 `now + environment_owner_resolver.decision_ttl_seconds` 内，示例默认 5 秒，允许范围 1–60 秒。首次派发固定采用这个期限。因此，即使当前会话/成员仍有效，超过首次期限的排队或 repair 仍会被拒绝。创建幂等修复没有改变该长期任务限制；长期任务 binding 的期限语义需由权限 owner 另行决定，不能通过重放刷新旧上下文。
 
 ## 部署连接
 

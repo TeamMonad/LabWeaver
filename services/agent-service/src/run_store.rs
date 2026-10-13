@@ -304,8 +304,22 @@ impl PostgresAgentRunStore {
         {
             return Err(AgentRunStoreError::IdentityMismatch);
         }
-        let request_hash =
-            Sha256Digest::of_canonical(command).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        // A currently authorized replay has the same business intent even when Access caps a
+        // fresh decision at a new deadline or the actor signs in again. The first dispatch still
+        // freezes its original session and deadline; replay never refreshes that authority.
+        let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "projectId": command.project_id,
+            "courseId": command.course_id,
+            "actorId": command.actor_id,
+            "request": command.request,
+            "purpose": command.purpose,
+            "package": command.package,
+            "objectLocators": command.object_locators,
+            "policy": command.policy,
+            "preauthorization": command.preauthorization,
+            "operationId": command.input_authorization.operation_id,
+        }))
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
         let dispatch_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
             "request": command.request,
             "inputAuthorization": command.input_authorization,
