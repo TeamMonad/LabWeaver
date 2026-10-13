@@ -5908,3 +5908,73 @@ async fn http_approval_barrier_replays_one_real_lease_to_both_requests()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn http_approval_legacy_request_json_replays_original_approval_version()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let path = format!("/api/v1/resource-requests/{}/approve", f.request.id);
+    let body = f.approval();
+    let first = f.post(&path, "legacy-approval", &body).send().await?;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let original = first
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    let legacy = f.store.load(f.request.id).await?;
+    let legacy_json = serde_json::to_value(&legacy)?;
+    // Seed exactly the previous completed-result shape; preserve its stable hash and all facts.
+    sqlx::query("UPDATE resource.idempotency_ledger SET result=$1 WHERE operation='approve_resource_request' AND idempotency_key='legacy-approval'").bind(&legacy_json).execute(&f.pool).await?;
+    // A later approval for the same request must not replace the original version during replay.
+    let old: Value =
+        sqlx::query_scalar("SELECT contract FROM resource.resource_approvals WHERE request_id=$1")
+            .bind(f.request.id.as_uuid())
+            .fetch_one(&f.pool)
+            .await?;
+    let mut later: ResourceApproval = serde_json::from_value(old)?;
+    later.id = ResourceApprovalId::new();
+    later.request_revision = Revision::new(9)?;
+    sqlx::query("INSERT INTO resource.resource_approvals(approval_id,request_id,request_revision,approver_id,provider_binding,approved_cpu_millicores,approved_memory_bytes,approved_storage_bytes,approved_duration_seconds,reason,valid_until,created_at,contract) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+        .bind(later.id.as_uuid()).bind(later.request_id.as_uuid()).bind(i64::try_from(later.request_revision.get())?).bind(later.approver_id.as_uuid()).bind(&later.provider_binding)
+        .bind(i32::try_from(later.approved_resources.cpu_millicores)?).bind(i64::try_from(later.approved_resources.memory_bytes)?).bind(i64::try_from(later.approved_resources.storage_bytes)?)
+        .bind(i64::try_from(later.approved_duration_seconds)?).bind(&later.reason).bind(later.valid_until.get()).bind(later.created_at.get()).bind(serde_json::to_value(&later)?).execute(&f.pool).await?;
+    let before = mutation_counts(&f.pool).await?;
+    let retry = f.post(&path, "legacy-approval", &body).send().await?;
+    assert_eq!(
+        retry.status(),
+        StatusCode::ACCEPTED,
+        "old ResourceRequest JSON must replay without 500"
+    );
+    assert_eq!(
+        retry
+            .json::<contracts::http::ResourceOperationAccepted>()
+            .await?,
+        original
+    );
+    assert_eq!(
+        f.store
+            .load_lease(original.lease_id.ok_or("original lease")?)
+            .await?
+            .request_id,
+        legacy.id
+    );
+    assert_eq!(mutation_counts(&f.pool).await?, before);
+    assert_eq!(sqlx::query_scalar::<_,Value>("SELECT result FROM resource.idempotency_ledger WHERE operation='approve_resource_request' AND idempotency_key='legacy-approval'").fetch_one(&f.pool).await?,legacy_json);
+    // If the exact historical approval link is unavailable, do not substitute a current lease.
+    sqlx::query("UPDATE resource.resource_approvals SET request_revision=10,contract=jsonb_set(contract,'{requestRevision}','10') WHERE approval_id=(SELECT approval_id FROM resource.capacity_claims WHERE claim_id=(SELECT claim_id FROM resource.resource_leases WHERE lease_id=$1))")
+        .bind(original.lease_id.ok_or("original lease")?.as_uuid()).execute(&f.pool).await?;
+    let denied = f.post(&path, "legacy-approval", &body).send().await?;
+    assert_eq!(denied.status(), StatusCode::CONFLICT);
+    let problem: contracts::ProblemDetails = denied.json().await?;
+    assert_eq!(
+        problem.diagnostic_code.as_str(),
+        "LW_RESOURCE_ALLOCATION_MISMATCH"
+    );
+    assert_eq!(mutation_counts(&f.pool).await?, before);
+    assert_eq!(sqlx::query_scalar::<_,Value>("SELECT result FROM resource.idempotency_ledger WHERE operation='approve_resource_request' AND idempotency_key='legacy-approval'").fetch_one(&f.pool).await?,legacy_json);
+    eprintln!(
+        "synthetic legacy approval original receipt: {} legacyRevision={} rowCounts={before:?}",
+        serde_json::to_string(&original)?,
+        legacy.revision.get()
+    );
+    Ok(())
+}
