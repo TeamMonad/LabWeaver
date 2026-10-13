@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use auth::{CreateBffSession, ServiceTokenClient, ServiceTokenClientConfig};
+use auth::{CreateBffSession, ServiceTokenClient, ServiceTokenClientConfig, create_bff_session};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -31,6 +31,9 @@ use url::Url;
 
 use super::*;
 
+#[path = "oidc_login_tests.rs"]
+mod oidc_login_tests;
+
 #[path = "../tests/support/mod.rs"]
 mod support;
 
@@ -48,6 +51,178 @@ impl Drop for Tasks {
             task.abort();
         }
     }
+}
+
+async fn assert_problem_response(
+    response: reqwest::Response,
+    status: StatusCode,
+    diagnostic: &str,
+) -> Result<contracts::ProblemDetails, Box<dyn Error>> {
+    assert_eq!(response.status(), status);
+    let headers = response.headers().clone();
+    let body = response.json::<Value>().await?;
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json"),
+        "actual error body: {body}"
+    );
+    let problem: contracts::ProblemDetails = serde_json::from_value(body)?;
+    assert_eq!(problem.status, status.as_u16());
+    assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
+    assert!(!problem.problem_type.is_empty());
+    assert!(!problem.title.is_empty());
+    assert!(!problem.detail.is_empty());
+    assert_eq!(
+        problem.instance,
+        format!("urn:labweaver:request:{}", problem.request_id)
+    );
+    assert_eq!(
+        headers.get("x-request-id").and_then(|v| v.to_str().ok()),
+        Some(problem.request_id.as_str())
+    );
+    let trace_id = headers
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split('-').nth(1));
+    assert!(trace_id.is_some());
+    assert_eq!(problem.trace_id.as_deref(), trace_id);
+    Ok(problem)
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn stale_csrf_write_returns_problem_details_without_writing_to_replacement_session()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let actor_a = Uuid::now_v7();
+    let (state, _) = Box::pin(state(pool, actor_a, &mut tasks)).await?;
+    let a = session(
+        &state.pool,
+        &state.key_ring,
+        actor_a,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let actor_b = Uuid::now_v7();
+    let b = session(
+        &state.pool,
+        &state.key_ring,
+        actor_b,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, b.session_id
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(Arc::clone(&state));
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let endpoint = format!("{base}/api/v1/me/ssh-public-keys");
+    let request = json!({
+        "publicKeyOpenssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA synthetic-contract-test"
+    });
+    let anonymous = assert_problem_response(
+        client
+            .get(format!("{base}/api/v1/auth/session"))
+            .send()
+            .await?,
+        StatusCode::UNAUTHORIZED,
+        "LW_AUTH_REQUIRED",
+    )
+    .await?;
+    assert!(!anonymous.retryable);
+    for (origin, csrf, diagnostic) in [
+        (
+            Some(ORIGIN),
+            Some(a.csrf_token.expose()),
+            "LW_AUTH_CSRF_REJECTED",
+        ),
+        (Some(ORIGIN), None, "LW_AUTH_CSRF_REJECTED"),
+        (
+            Some("https://attacker.example.invalid"),
+            Some(b.csrf_token.expose()),
+            "LW_AUTH_CSRF_REJECTED",
+        ),
+        (None, Some(b.csrf_token.expose()), "LW_AUTH_CSRF_REJECTED"),
+    ] {
+        let request_id = format!("csrf-contract-{}", Uuid::now_v7());
+        let mut post = client
+            .post(&endpoint)
+            .header(header::COOKIE, &cookie)
+            .header("x-request-id", &request_id)
+            .header("Idempotency-Key", Uuid::now_v7().to_string())
+            .json(&request);
+        if let Some(origin) = origin {
+            post = post.header(header::ORIGIN, origin);
+        }
+        if let Some(csrf) = csrf {
+            post = post.header("x-csrf-token", csrf);
+        }
+        let problem =
+            assert_problem_response(post.send().await?, StatusCode::FORBIDDEN, diagnostic).await?;
+        assert_eq!(problem.request_id, request_id);
+        assert!(
+            !problem.retryable,
+            "a stale write must not be retried unchanged"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM access.ssh_public_keys")
+            .fetch_one(&state.pool)
+            .await?;
+        assert_eq!(rows, 0, "CSRF rejection must happen before key writes");
+        let ledger: i64 = sqlx::query_scalar("SELECT count(*) FROM access.idempotency_ledger")
+            .fetch_one(&state.pool)
+            .await?;
+        assert_eq!(
+            ledger, 0,
+            "CSRF rejection must happen before idempotency reservation"
+        );
+    }
+    let response = client
+        .get(format!("{base}/api/v1/auth/session"))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let identity: contracts::AuthSession = response.json().await?;
+    assert_eq!(identity.actor.actor_id.to_string(), actor_b.to_string());
+    let response = client
+        .post(&endpoint)
+        .header(header::COOKIE, &cookie)
+        .header(header::ORIGIN, ORIGIN)
+        .header("x-csrf-token", b.csrf_token.expose())
+        .header("Idempotency-Key", Uuid::now_v7().to_string())
+        .json(&request)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+    let owner: Uuid = sqlx::query_scalar("SELECT actor_id FROM access.ssh_public_keys")
+        .fetch_one(&state.pool)
+        .await?;
+    assert_eq!(owner, actor_b);
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -581,6 +756,222 @@ async fn state(
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
+async fn oidc_wrong_browser_cannot_consume_login_transaction() -> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let (state, _) = Box::pin(state(pool, Uuid::now_v7(), &mut tasks)).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let login = client.get(format!("{base}/auth/login")).send().await?;
+    assert_eq!(login.status(), StatusCode::TEMPORARY_REDIRECT);
+    let authorization = Url::parse(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .ok_or("missing authorization redirect")?
+            .to_str()?,
+    )?;
+    let returned_state = authorization
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .ok_or("missing authorization state")?
+        .1
+        .into_owned();
+    let set_cookie = login
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("login did not issue transaction cookie")?
+        .to_str()?
+        .to_owned();
+    for attribute in [
+        "__Host-labweaver_oidc_",
+        "; Path=/",
+        "; Secure",
+        "; HttpOnly",
+        "; SameSite=Lax",
+        "; Max-Age=300",
+    ] {
+        assert!(set_cookie.contains(attribute));
+    }
+    assert_eq!(
+        login
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .ok_or("missing cache policy")?,
+        "no-store"
+    );
+    let cookie = set_cookie.split(';').next().ok_or("missing cookie pair")?;
+    let cookie_name = cookie.split_once('=').ok_or("missing cookie value")?.0;
+    let rejected = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[("state", returned_state.as_str()), ("code", "invalid")])
+        .send()
+        .await?;
+    let consumed: bool = sqlx::query_scalar(
+        "SELECT consumed_at IS NOT NULL FROM access.oidc_transactions WHERE state_sha256=$1",
+    )
+    .bind(Sha256Digest::of_bytes(returned_state.as_bytes()).to_string())
+    .fetch_one(&state.pool)
+    .await?;
+    assert!(
+        !consumed,
+        "a browser without transaction proof consumed another browser's login"
+    );
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert_problem_response(
+        rejected,
+        StatusCode::UNAUTHORIZED,
+        "LW_AUTH_OIDC_BROWSER_REJECTED",
+    )
+    .await?;
+    // A forged cookie with the correct transaction name is still not browser proof.
+    let rejected = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[("state", returned_state.as_str()), ("code", "invalid")])
+        .header(header::COOKIE, format!("{cookie_name}={returned_state}"))
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert_problem_response(
+        rejected,
+        StatusCode::UNAUTHORIZED,
+        "LW_AUTH_OIDC_BROWSER_REJECTED",
+    )
+    .await?;
+    // Start another tab, then reject the first at the identity provider.
+    let other = client.get(format!("{base}/auth/login")).send().await?;
+    let other_cookie = other
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("missing second tab cookie")?
+        .to_str()?
+        .split(';')
+        .next()
+        .ok_or("invalid cookie")?;
+    assert_ne!(
+        cookie.split_once('=').map(|p| p.0),
+        other_cookie.split_once('=').map(|p| p.0)
+    );
+    let refused = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[
+            ("state", returned_state.as_str()),
+            ("error", "access_denied"),
+        ])
+        .header(header::COOKIE, format!("{cookie}; {other_cookie}"))
+        .send()
+        .await?;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let cleared = refused
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("missing cookie cleanup")?
+        .to_str()?;
+    assert!(cleared.starts_with(&format!("{cookie_name}=")) && cleared.contains("Max-Age=0"));
+    assert_eq!(
+        refused.headers().get_all(header::SET_COOKIE).iter().count(),
+        1
+    );
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access.oidc_transactions WHERE consumed_at IS NULL",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    assert_eq!(live, 1, "provider refusal invalidated a different tab");
+    let replay = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[("state", returned_state.as_str()), ("code", "invalid")])
+        .header(header::COOKIE, cookie)
+        .send()
+        .await?;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    assert_problem_response(
+        replay,
+        StatusCode::UNAUTHORIZED,
+        "LW_AUTH_OIDC_STATE_REJECTED",
+    )
+    .await?;
+    for target in [
+        "//attacker.invalid/",
+        "/\\attacker.invalid/",
+        "https://attacker.invalid/",
+    ] {
+        let response = client
+            .get(format!("{base}/auth/login"))
+            .query(&[("return_to", target)])
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+    }
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM access.oidc_transactions")
+        .fetch_one(&state.pool)
+        .await?;
+    assert_eq!(
+        total, 2,
+        "invalid return target created an orphan login transaction"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn session_cookie_headers_support_http2_and_reject_duplicates() -> Result<(), Box<dyn Error>>
+{
+    // The parser needs configuration only; it never connects to this lazy pool.
+    let pool = PgPoolOptions::new().connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")?;
+    let mut tasks = Tasks(Vec::new());
+    let (state, _) = Box::pin(state(pool, Uuid::now_v7(), &mut tasks)).await?;
+    let session_id = Uuid::now_v7();
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_static("__Host-labweaver_oidc_other=pending"),
+    );
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{}={session_id}",
+            state.deployment.browser.session_cookie_name
+        ))?,
+    );
+    assert_eq!(
+        cookie_session_id(&state, &headers),
+        Some(session_id),
+        "HTTP/2 can split independent cookies into separate fields"
+    );
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{}={session_id}",
+            state.deployment.browser.session_cookie_name
+        ))?,
+    );
+    assert!(
+        cookie_session_id(&state, &headers).is_none(),
+        "duplicate session cookies must not choose a value"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn browser_logout_rejects_csrf_and_returns_exact_provider_url_after_revocation()
 -> Result<(), Box<dyn Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
@@ -633,10 +1024,7 @@ async fn browser_logout_rejects_csrf_and_returns_exact_provider_url_after_revoca
             .send()
             .await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            response.json::<Value>().await?,
-            json!({"diagnosticCode": "LW_AUTH_CSRF_REJECTED"})
-        );
+        assert_problem_response(response, StatusCode::FORBIDDEN, "LW_AUTH_CSRF_REJECTED").await?;
     }
     let still_active: bool = sqlx::query_scalar(
         "SELECT revoked_at IS NULL FROM access.bff_sessions WHERE session_id=$1",
@@ -1116,10 +1504,7 @@ async fn project_usage_reaches_resource_with_session_auth() -> Result<(), Box<dy
         .send()
         .await?;
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        denied.json::<Value>().await?,
-        json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
-    );
+    assert_problem_response(denied, StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED").await?;
     let response = client
         .get(format!("{base}{path}"))
         .header(header::COOKIE, &cookie)
@@ -1252,10 +1637,16 @@ async fn platform_admin_project_reads_reach_their_distinct_upstreams_without_mem
             .send()
             .await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            response.json::<Value>().await?,
-            json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
-        );
+        if path.starts_with("/api/v1/environments") {
+            assert_problem_response(response, StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED")
+                .await?;
+        } else {
+            // The external Control fixture's response is forwarded unchanged.
+            assert_eq!(
+                response.json::<Value>().await?,
+                json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
+            );
+        }
     }
 
     let requests = requests.lock().await;
@@ -1355,10 +1746,7 @@ async fn non_owner_membership_add_is_rejected_before_directory_resolution()
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        response.json::<Value>().await?,
-        json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
-    );
+    assert_problem_response(response, StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED").await?;
 
     let actor_count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM access.actors")
         .fetch_one(&state.pool)
@@ -1464,10 +1852,12 @@ async fn organization_directory_is_teacher_visible_and_student_denied_without_lo
         .send()
         .await?;
     assert_eq!(student_response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        student_response.json::<Value>().await?,
-        json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
-    );
+    assert_problem_response(
+        student_response,
+        StatusCode::FORBIDDEN,
+        "LW_AUTH_SCOPE_DENIED",
+    )
+    .await?;
 
     let actor_count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM access.actors")
         .fetch_one(&state.pool)
