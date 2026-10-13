@@ -30,6 +30,11 @@ const isLoading = ref(false)
 const error = ref<Error | null>(null)
 /** Bumped on CSRF session invalidation so App can remount views and clear pending forms. */
 const sessionEpoch = ref(0)
+/**
+ * Monotonic generation for CSRF-driven identity refresh. A failed or superseded
+ * refresh must not acknowledge the write gate while a newer refresh is pending.
+ */
+let bffSessionRefreshGeneration = 0
 let bffCsrfSessionListenerInstalled = false
 type TopLevelNavigate = (url: string) => void
 
@@ -58,34 +63,42 @@ function bffUser(session: AuthSession): BffUser {
   }
 }
 
-async function loadBffSession(): Promise<void> {
+/** Fetch the current BFF session without mutating module state (caller decides apply). */
+async function fetchBffSession(): Promise<BffUser | null> {
   const response = await fetch('/api/v1/auth/session', {
     credentials: 'include',
     headers: { Accept: 'application/json, application/problem+json' },
   })
-  if (response.status === 401) {
-    user.value = null
-    return
-  }
+  if (response.status === 401) return null
   if (!response.ok) throw new Error(`BFF session lookup failed with HTTP ${response.status}`)
-  user.value = bffUser(await response.json() as AuthSession)
+  return bffUser(await response.json() as AuthSession)
+}
+
+async function loadBffSession(): Promise<void> {
+  user.value = await fetchBffSession()
 }
 
 /**
  * CSRF rejection means the shared cookie may now belong to another actor.
  * Clear the stale UI actor, bump sessionEpoch (pending forms remount away),
- * re-fetch /api/v1/auth/session, then lift the write gate — never replay writes.
+ * re-fetch /api/v1/auth/session, then lift the write gate only if this refresh
+ * is still the latest and succeeded — never replay writes; never acknowledge on
+ * failed refresh or after a newer invalidation has started.
  */
 async function handleBffCsrfSessionInvalidation(): Promise<void> {
+  const generation = ++bffSessionRefreshGeneration
   user.value = null
   sessionEpoch.value += 1
   try {
-    await loadBffSession()
+    const next = await fetchBffSession()
+    if (generation !== bffSessionRefreshGeneration) return
+    user.value = next
+    acknowledgeBffSessionRefreshed()
   } catch (err) {
+    if (generation !== bffSessionRefreshGeneration) return
     user.value = null
     error.value = err instanceof Error ? err : new Error(String(err))
-  } finally {
-    acknowledgeBffSessionRefreshed()
+    // Keep the write gate closed: a failed refresh must not reopen writes.
   }
 }
 
