@@ -67,6 +67,7 @@ pub struct ReserveAgentRun<'a> {
 /// Immutable Control dispatch retained before any object read or LLM invocation.
 #[derive(Clone, Debug)]
 pub struct AgentRunDispatchLease {
+    pub input_authorization: contracts::http::ModelInputAuthorizationBinding,
     /// Authoritative reserved run.
     pub run: AgentRun,
     /// Immutable public create request.
@@ -91,6 +92,13 @@ pub struct AgentRunDispatchLease {
     pub dispatch_sha256: Sha256Digest,
     /// Opaque preparation fencing token.
     pub lease_token: Uuid,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedAgentDispatchRequest {
+    request: InternalAgentRunRequest,
+    input_authorization: contracts::http::ModelInputAuthorizationBinding,
 }
 
 /// Result of atomically reserving an `AgentRun` request.
@@ -300,6 +308,7 @@ impl PostgresAgentRunStore {
             Sha256Digest::of_canonical(command).map_err(|_| AgentRunStoreError::InvalidContract)?;
         let dispatch_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
             "request": command.request,
+            "inputAuthorization": command.input_authorization,
             "purpose": command.purpose,
             "preauthorization": command.preauthorization,
             "package": command.package,
@@ -409,7 +418,7 @@ impl PostgresAgentRunStore {
         .bind(run.id.as_uuid())
         .bind(dispatch_sha256.to_string())
         .bind(idempotency_key.as_str())
-        .bind(serde_json::to_value(&command.request).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(serde_json::to_value(PersistedAgentDispatchRequest { request: command.request.clone(), input_authorization: command.input_authorization.clone() }).map_err(|_| AgentRunStoreError::InvalidContract)?)
         .bind(purpose)
         .bind(preauthorization)
         .bind(serde_json::to_value(&command.package).map_err(|_| AgentRunStoreError::InvalidContract)?)
@@ -517,13 +526,38 @@ impl PostgresAgentRunStore {
         sqlx::query("UPDATE agent.agent_run_dispatches SET state='preparing',lease_token=$2,lease_expires_at=now()+($3*interval '1 millisecond'),updated_at=now() WHERE run_id=$1")
             .bind(run_id.as_uuid()).bind(lease_token).bind(lease_milliseconds)
             .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
-        let lease = AgentRunDispatchLease {
-            run: load_run_for_update(&mut transaction, run_id).await?,
-            request: serde_json::from_value(
-                row.try_get("request")
-                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+        let persisted: PersistedAgentDispatchRequest = if let Ok(value) = serde_json::from_value(
+            row.try_get("request")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+        ) {
+            value
+        } else {
+            let trace_id: String = row
+                .try_get("trace_id")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            self.fail_dispatch_identity(
+                run_id,
+                lease_token,
+                &trace_id,
+                "LW_MODEL_INPUT_AUTHORIZATION_REQUIRED",
+                UtcTimestamp::from_utc(
+                    time::OffsetDateTime::now_utc()
+                        .replace_nanosecond(0)
+                        .map_err(|_| AgentRunStoreError::InvalidContract)?,
+                )
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
             )
-            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            .await?;
+            return Ok(None);
+        };
+        let lease = AgentRunDispatchLease {
+            input_authorization: persisted.input_authorization,
+            run: load_run_for_update(&mut transaction, run_id).await?,
+            request: persisted.request,
             purpose: serde_json::from_value(
                 row.try_get("purpose")
                     .map_err(|_| AgentRunStoreError::InvalidContract)?,
@@ -632,6 +666,28 @@ impl PostgresAgentRunStore {
         diagnostic_code: &str,
         now: UtcTimestamp,
     ) -> Result<AgentRun, AgentRunStoreError> {
+        self.fail_dispatch_identity(
+            lease.run.id,
+            lease.lease_token,
+            &lease.trace_id,
+            diagnostic_code,
+            now,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "preflight refusal shares the original fenced recovery transaction and preserves prior attempts"
+    )]
+    async fn fail_dispatch_identity(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        trace_id: &str,
+        diagnostic_code: &str,
+        now: UtcTimestamp,
+    ) -> Result<AgentRun, AgentRunStoreError> {
         if diagnostic_code.trim().is_empty() {
             return Err(AgentRunStoreError::InvalidContract);
         }
@@ -641,11 +697,11 @@ impl PostgresAgentRunStore {
             .await
             .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let fenced = sqlx::query_scalar::<_, bool>("SELECT lease_expires_at>now() FROM agent.agent_run_dispatches WHERE run_id=$1 AND state='preparing' AND lease_token=$2 FOR UPDATE")
-            .bind(lease.run.id.as_uuid()).bind(lease.lease_token).fetch_optional(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            .bind(run_id.as_uuid()).bind(lease_token).fetch_optional(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         if fenced != Some(true) {
             return Err(AgentRunStoreError::LeaseLost);
         }
-        let mut run = load_run_for_update(&mut transaction, lease.run.id).await?;
+        let mut run = load_run_for_update(&mut transaction, run_id).await?;
         let cancellation_requested = sqlx::query_scalar::<_, bool>(
             "SELECT cancellation_requested_at IS NOT NULL FROM agent.agent_runs WHERE run_id=$1",
         )
@@ -654,7 +710,103 @@ impl PostgresAgentRunStore {
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         if run.tracks.iter().any(|track| !track.attempts.is_empty()) {
-            return Err(AgentRunStoreError::StateConflict);
+            let terminal_diagnostic = if cancellation_requested {
+                "LW_LLM_CANCELLED"
+            } else {
+                diagnostic_code
+            };
+            let kinds = run
+                .tracks
+                .iter()
+                .map(|track| track.kind)
+                .collect::<Vec<_>>();
+            for kind in kinds {
+                let row = sqlx::query("SELECT work.state,work.input_sha256,work.attempt_number,work.next_retry_at<=now() AS due,work.lease_expires_at>now() AS lease_current,run.plan IS NOT NULL AS has_plan,work.execution_request IS NOT NULL AS has_execution_request,run.cancellation_requested_at IS NOT NULL AS cancellation_requested FROM agent.agent_track_work_items work JOIN agent.agent_runs run ON run.run_id=work.run_id WHERE work.run_id=$1 AND work.track=$2 FOR UPDATE OF work")
+                    .bind(run_id.as_uuid()).bind(track_name(kind)).fetch_one(&mut *transaction).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?;
+                if kind == AgentTrackKind::WorkConfiguration
+                    && (row
+                        .try_get::<bool, _>("has_plan")
+                        .map_err(|_| AgentRunStoreError::InvalidContract)?
+                        || row
+                            .try_get::<bool, _>("has_execution_request")
+                            .map_err(|_| AgentRunStoreError::InvalidContract)?)
+                {
+                    continue;
+                }
+                let state: String = row
+                    .try_get("state")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                if !matches!(state.as_str(), "requested" | "running") {
+                    continue;
+                }
+                let input_sha256 = Sha256Digest::from_str(
+                    &row.try_get::<String, _>("input_sha256")
+                        .map_err(|_| AgentRunStoreError::InvalidContract)?,
+                )
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let Some(claim) = decode_claimable_track(&row, input_sha256)? else {
+                    continue;
+                };
+                // Reuse the original recovery rule: retain an expired attempt, then append only
+                // the new preflight action. No old provider usage or cleanup receipt is replaced.
+                let number = append_claimed_attempt(&mut run, kind, input_sha256, &claim)?;
+                let attempt = run
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.kind == kind)
+                    .and_then(|track| track.attempts.last_mut())
+                    .ok_or(AgentRunStoreError::InvalidContract)?;
+                attempt.state = if cancellation_requested {
+                    AgentAttemptState::Cancelled
+                } else {
+                    AgentAttemptState::Failed
+                };
+                attempt.diagnostic_code = Some(terminal_diagnostic.to_owned());
+                sqlx::query("UPDATE agent.agent_track_work_items SET state=$3,attempt_number=$4,worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now() WHERE run_id=$1 AND track=$2")
+                    .bind(run_id.as_uuid()).bind(track_name(kind)).bind(if cancellation_requested {"cancelled"} else {"failed"}).bind(i64::from(number)).execute(&mut *transaction).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?;
+                let derived = run
+                    .derived_state()
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                run.state = if cancellation_requested && derived == AgentRunState::Running {
+                    AgentRunState::Cancelling
+                } else {
+                    derived
+                };
+                run.validate()
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                // append_claimed_attempt increments exactly one revision; persist that revision
+                // before another track appends through the existing optimistic update contract.
+                update_run(&mut transaction, &run).await?;
+            }
+            sqlx::query("UPDATE agent.agent_run_dispatches SET state='failed',terminal_diagnostic=$3,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE run_id=$1 AND lease_token=$2")
+                .bind(run_id.as_uuid()).bind(lease_token).bind(terminal_diagnostic).execute(&mut *transaction).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?;
+            if is_terminal_run(run.state) {
+                let (subject, diagnostic) = terminal_event(&run);
+                let sequence = next_outbox_sequence(&mut transaction, run.id).await?;
+                let attempt = run
+                    .tracks
+                    .iter()
+                    .flat_map(|track| track.attempts.iter())
+                    .map(|attempt| attempt.number)
+                    .max()
+                    .unwrap_or(0);
+                enqueue_run_event(
+                    &mut transaction,
+                    &run,
+                    subject,
+                    sequence,
+                    u64::from(attempt),
+                    diagnostic,
+                    now,
+                    trace_id,
+                )
+                .await?;
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            return Ok(run);
         }
         let terminal_diagnostic = if cancellation_requested {
             "LW_LLM_CANCELLED"
@@ -698,7 +850,7 @@ impl PostgresAgentRunStore {
             return Err(AgentRunStoreError::StateConflict);
         }
         sqlx::query("UPDATE agent.agent_run_dispatches SET state='failed',terminal_diagnostic=$3,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE run_id=$1 AND lease_token=$2")
-            .bind(run.id.as_uuid()).bind(lease.lease_token).bind(terminal_diagnostic).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            .bind(run.id.as_uuid()).bind(lease_token).bind(terminal_diagnostic).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let sequence = next_outbox_sequence(&mut transaction, run.id).await?;
         enqueue_run_event(
             &mut transaction,
@@ -708,7 +860,7 @@ impl PostgresAgentRunStore {
             1,
             Some(terminal_diagnostic),
             now,
-            &lease.trace_id,
+            trace_id,
         )
         .await?;
         transaction
@@ -932,6 +1084,20 @@ impl PostgresAgentRunStore {
                 .map_err(|_| AgentRunStoreError::InvalidContract)?,
             cancellation_requested: claim.cancellation_requested,
         }))
+    }
+
+    /// Reads the existing durable run cancellation fact; errors fail closed.
+    pub async fn cancellation_requested(
+        &self,
+        run_id: AgentRunId,
+    ) -> Result<bool, AgentRunStoreError> {
+        sqlx::query_scalar(
+            "SELECT cancellation_requested_at IS NOT NULL FROM agent.agent_runs WHERE run_id=$1",
+        )
+        .bind(run_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)
     }
 
     /// Renews one exact track lease and reports durable cancellation state.

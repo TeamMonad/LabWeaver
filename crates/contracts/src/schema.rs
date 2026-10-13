@@ -592,6 +592,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::auth::AuthorizationDecisionRequest
     );
     document!(
+        "schemas/contracts/v1/http/model-input-authorization-resolve-request.schema.json",
+        crate::http::ModelInputAuthorizationResolveRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/model-input-authorization-resolution.schema.json",
+        crate::http::ModelInputAuthorizationResolution
+    );
+    document!(
         "schemas/contracts/v1/http/internal-create-agent-run-request.schema.json",
         crate::http::InternalCreateAgentRunRequest
     );
@@ -1548,7 +1556,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
     } else {
         json!({"serviceJwt": {"type":"http","scheme":"bearer","bearerFormat":"JWT","description":"Short-lived service-account JWT validated against the configured issuer, audience, signature, expiry, and route permission. Service-to-service transport is protected by TLS."}})
     };
-    let value = json!({
+    let mut value = json!({
         "openapi": "3.1.0",
         "info": {"title": title, "version": "1.0.0", "description": "Generated from the contracts Rust crate. Runtime implementation is outside this artifact."},
         "servers": [{"url": if surface == ApiSurface::Public { "/" } else { "https://gateway-control.internal" }}],
@@ -1576,6 +1584,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
                 ,"EnvironmentWorkConfigurationTargetQuery": contract_ref("http/environment-work-configuration-target-query")
+                 ,"ModelInputAuthorizationResolveRequest": contract_ref("http/model-input-authorization-resolve-request")
+                 ,"ModelInputAuthorizationResolution": contract_ref("http/model-input-authorization-resolution")
                  ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
                  ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
                  ,"InternalAgentLlmReviewRequest": contract_ref("http/internal-agent-llm-review-request")
@@ -1619,6 +1629,15 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
     });
+    if surface == ApiSurface::Public
+        && let Some(schemas) = value
+            .pointer_mut("/components/schemas")
+            .and_then(Value::as_object_mut)
+    {
+        schemas.remove("ModelInputAuthorizationResolveRequest");
+        schemas.remove("ModelInputAuthorizationResolution");
+        schemas.remove("InternalCreateAgentRunRequest");
+    }
     let document: utoipa::openapi::OpenApi = serde_json::from_value(value)?;
     Ok(serde_json::to_value(document)?)
 }
@@ -1652,6 +1671,7 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
         }
         ApiSurface::GatewayInternal => {
+            paths.insert("/internal/v1/model-input-authorizations/resolve".to_owned(),json!({"post":{"operationId":"resolveModelInputAuthorization","summary":"Recheck current session, object action and explicitly selected material versions","security":internal_security("control.agent_run.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolveRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
             paths.insert(
                 "/internal/v1/auth/decision".to_owned(),
                 json!({"post":{"operationId":"decideAuthorization","summary":"Evaluate an actor session and exact resource scope for a service JWT caller","security": internal_security("authorization:decide"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecisionRequest"}}}},"responses":{"200":{"description":"Expiry-bounded authorization decision","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecision"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
