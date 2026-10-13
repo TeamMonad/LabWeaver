@@ -34,6 +34,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+agent-service = { path = "../agent-service" }
 environment-service = { path = "../environment-service" }
 resource-service = { path = "../resource-service" }
 jsonwebtoken.workspace = true

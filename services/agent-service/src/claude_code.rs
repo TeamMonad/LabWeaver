@@ -251,6 +251,12 @@ pub trait EgressClassifier: Send + Sync {
     ) -> Result<BTreeSet<DeniedDataClass>, EgressClassificationError>;
 }
 
+/// Current authorization at a real invocation boundary; production checks Control and durable cancellation.
+#[async_trait]
+pub trait ModelInputAuthorization: Send + Sync {
+    async fn check(&self) -> Result<(), ClaudeCodeRuntimeError>;
+}
+
 /// Service-owned gate that is the only constructor for Claude Code egress input.
 pub struct ProblemPackageEgressGate {
     reader: Arc<dyn ProblemPackageReader>,
@@ -287,7 +293,15 @@ impl ProblemPackageEgressGate {
         &self,
         package: &ProblemPackage,
         policy: &ProjectLlmEgressPolicy,
+        selected_paths: &[String],
     ) -> Result<ImmutableEgressInput, EgressPreparationError> {
+        let paths = contracts::http::validate_model_input_selection(package, Some(selected_paths))
+            .map_err(|_| EgressPreparationError::PackageInvalid)?;
+        let mut selected_package = package.clone();
+        selected_package
+            .files
+            .retain(|file| paths.contains(&file.path));
+        let package = &selected_package;
         policy
             .validate()
             .map_err(|_| EgressPreparationError::PolicyInvalid)?;
@@ -520,7 +534,7 @@ impl RunCancellation {
         *self.sender.borrow()
     }
 
-    pub(crate) async fn cancelled(&self) {
+    pub async fn cancelled(&self) {
         let mut receiver = self.sender.subscribe();
         while !*receiver.borrow() {
             if receiver.changed().await.is_err() {
@@ -1370,6 +1384,7 @@ pub struct ClaudeCodeRuntime {
     /// unregistered binding can never be provisioned, so the authoring prompt
     /// states them explicitly.
     provider_bindings: Vec<String>,
+    input_authorization: Option<Arc<dyn ModelInputAuthorization>>,
 }
 
 /// Validated advisory review returned by one Claude Code invocation.
@@ -1443,7 +1458,15 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
+            input_authorization: None,
         })
+    }
+
+    /// Attaches the current authorization check used before every process invocation.
+    #[must_use]
+    pub fn with_input_authorization(mut self, check: Arc<dyn ModelInputAuthorization>) -> Self {
+        self.input_authorization = Some(check);
+        self
     }
 
     /// Declares the container provider bindings this deployment registers.
@@ -1479,6 +1502,7 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
+            input_authorization: None,
         })
     }
 
@@ -1558,6 +1582,17 @@ impl ClaudeCodeRuntime {
         platform_images: &[PlatformImageEntry],
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
         let authoring = matches!(scope, ExecutionScope::Authoring(_));
+        if authoring && self.input_authorization.is_none() {
+            return Err(self.failure(
+                track,
+                &input,
+                &Value::Null,
+                "",
+                tool_policy_sha256(true),
+                ClaudeCodeRuntimeError::InputAuthorizationDenied,
+                None,
+            ));
+        }
         let tool_policy = tool_policy_sha256(authoring);
         // VM evaluations are executed by the deployment-owned Evaluation worker against the
         // running guest.  Only Container evaluations need an Agent-materialized runner image.
@@ -1727,6 +1762,41 @@ impl ClaudeCodeRuntime {
                     &current_prompt,
                     tool_policy,
                     ClaudeCodeRuntimeError::TimedOut,
+                    None,
+                );
+                failure.audit.usage = total_usage;
+                failure.audit.usage_observed = all_usage_observed && total_usage.requests > 0;
+                return Err(failure);
+            }
+            if let Some(check) = &self.input_authorization {
+                let checked = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => Err(ClaudeCodeRuntimeError::Cancelled),
+                    result = check.check() => result,
+                };
+                if let Err(error) = checked {
+                    let mut failure = self.failure(
+                        track,
+                        &input,
+                        &schema,
+                        &current_prompt,
+                        tool_policy,
+                        error,
+                        None,
+                    );
+                    failure.audit.usage = total_usage;
+                    failure.audit.usage_observed = all_usage_observed && total_usage.requests > 0;
+                    return Err(failure);
+                }
+            }
+            if cancellation.is_cancelled() {
+                let mut failure = self.failure(
+                    track,
+                    &input,
+                    &schema,
+                    &current_prompt,
+                    tool_policy,
+                    ClaudeCodeRuntimeError::Cancelled,
                     None,
                 );
                 failure.audit.usage = total_usage;
@@ -3874,6 +3944,8 @@ fn decimal_to_microusd(value: &str) -> Option<u64> {
 /// Stable runtime failures. Display strings never include provider responses or input material.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ClaudeCodeRuntimeError {
+    #[error("LW_MODEL_INPUT_AUTHORIZATION_DENIED")]
+    InputAuthorizationDenied,
     /// Policy or binding is invalid.
     #[error("LW_AGENT_RUNTIME_IDENTITY_INVALID: Claude Code runtime configuration is invalid")]
     ConfigurationInvalid,
@@ -3943,6 +4015,7 @@ impl ClaudeCodeRuntimeError {
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
+            Self::InputAuthorizationDenied => "LW_MODEL_INPUT_AUTHORIZATION_DENIED",
             Self::ConfigurationInvalid => diagnostic::INVALID_REQUEST,
             Self::InputLimitExceeded | Self::BudgetExceeded | Self::OutputLimitExceeded => {
                 diagnostic::RESOURCE_EXHAUSTED

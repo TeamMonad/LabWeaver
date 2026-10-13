@@ -66,8 +66,6 @@ export type InternalApproveWorkConfigurationRequest = InternalApproveWorkConfigu
 
 export type InternalCompleteEvaluationStepRequest = InternalCompleteEvaluationStepRequestSchema;
 
-export type InternalCreateAgentRunRequest = InternalCreateAgentRunRequestSchema;
-
 export type InternalCreateEvaluationRunRequest = InternalCreateEvaluationRunRequestSchema;
 
 export type InternalEvaluationRunMutationRequest = InternalEvaluationRunMutationRequestSchema;
@@ -4448,6 +4446,10 @@ export type CreateAgentRunRequestSchema = {
     policyId: CreateAgentRunRequestSchemaPolicyId;
     policyRevision: CreateAgentRunRequestSchemaRevision;
     projectId: CreateAgentRunRequestSchemaProjectId;
+    /**
+     * Explicit material paths. Missing or empty selection is rejected; never defaults to all files.
+     */
+    selectedPaths?: Array<string> | null;
 };
 
 /**
@@ -4920,6 +4922,10 @@ export type CreateWorkConfigurationRunRequestSchema = {
     preauthorizationId?: WorkConfigurationPreauthorizationId | null;
     preauthorizationRevision?: CreateWorkConfigurationRunRequestSchemaRevision | null;
     projectId: CreateWorkConfigurationRunRequestSchemaProjectId;
+    /**
+     * Explicit material paths. Missing or empty selection is rejected.
+     */
+    selectedPaths?: Array<string> | null;
 };
 
 /**
@@ -8054,356 +8060,6 @@ export type InternalCompleteEvaluationStepRequestSchemaGoalReviewSchemaVersion =
 export type InternalCompleteEvaluationStepRequestSchemaProjectId = string;
 
 /**
- * InternalCreateAgentRunRequest
- *
- * Control-to-Agent command carried only over an allowlisted mTLS service identity.
- */
-export type InternalCreateAgentRunRequestSchema = {
-    /**
-     * Control-authenticated actor that initiated this run.
-     *
-     * The actor authorizes and is attributed for the one-shot Resource task reservation that a
-     * sandboxed authoring attempt creates; it is never derived from browser input.
-     */
-    actorId: InternalCreateAgentRunRequestSchemaActorId;
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    /**
-     * Internal artifact ID to opaque object-key mapping; keys never contain original paths.
-     */
-    objectLocators: {
-        [key: string]: string;
-    };
-    /**
-     * Completed Control-owned package; Agent re-reads and re-hashes every object.
-     */
-    package: ProblemPackage;
-    /**
-     * Active immutable Project policy.
-     */
-    policy: InternalCreateAgentRunRequestSchemaProjectLlmEgressPolicy;
-    /**
-     * Optional concrete grant for reusing one exact approved Work configuration plan.
-     */
-    preauthorization?: InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorization | null;
-    /**
-     * Authoritative Project ownership and optional teaching association.
-     */
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    /**
-     * Control-derived immutable purpose. Agent rejects a request whose purpose does not agree
-     * with its typed request variant and target identities.
-     */
-    purpose: InternalCreateAgentRunRequestSchemaAgentRunPurpose;
-    /**
-     * Public immutable request whose idempotency key remains an HTTP header.
-     */
-    request: InternalAgentRunRequest;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type InternalCreateAgentRunRequestSchemaActorId = string;
-
-/**
- * Immutable purpose selected by Control for one Agent run.
- *
- * The purpose is authoritative: callers cannot substitute an environment class, target
- * environment, actor, or runtime through an untyped request field. Experiment Authoring creates
- * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
- * WorkConfiguration targets one existing Work environment and produces one configuration plan.
- */
-export type InternalCreateAgentRunRequestSchemaAgentRunPurpose = {
-    environmentClass: InternalCreateAgentRunRequestSchemaEnvironmentClass;
-    kind: 'authoring';
-} | {
-    actorId: InternalCreateAgentRunRequestSchemaActorId;
-    environmentId: InternalCreateAgentRunRequestSchemaEnvironmentId;
-    environmentRevision: InternalCreateAgentRunRequestSchemaRevision;
-    kind: 'work_configuration';
-    /**
-     * Runtime selected by the authoritative Work environment.
-     *
-     * Control resolves this value from the environment instance before dispatching the
-     * run. Agent uses it as the immutable execution routing key, so a missing or altered
-     * runtime cannot silently select a different executor.
-     */
-    runtimeKind: InternalCreateAgentRunRequestSchemaRuntimeKind;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type InternalCreateAgentRunRequestSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type InternalCreateAgentRunRequestSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: InternalCreateAgentRunRequestSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Immutable Claude Code worker binding.
- *
- * Provider-specific transport and authentication remain deployment-owned Claude Code
- * configuration. The contract binds only a sanitized profile identity, exact model, CLI version,
- * worker image, effective non-secret runtime configuration hash, and per-worker admission limit.
- */
-export type InternalCreateAgentRunRequestSchemaClaudeCodeBindingV1 = {
-    /**
-     * Exact Claude Code CLI version baked into the worker image.
-     */
-    claudeCodeVersion: string;
-    /**
-     * Maximum concurrent Claude Code child processes admitted by one worker instance.
-     */
-    maxInFlightPerWorker: number;
-    /**
-     * Exact model identifier passed to Claude Code; moving aliases are rejected.
-     */
-    model: string;
-    /**
-     * Deployment-owned opaque runtime profile; never a credential or endpoint URL.
-     */
-    runtimeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type InternalCreateAgentRunRequestSchemaCourseId = string;
-
-export type CreateAgentRunRequest = {
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    environmentClass: InternalCreateAgentRunRequestSchemaEnvironmentClass;
-    packageId: InternalCreateAgentRunRequestSchemaProblemPackageId;
-    packageRevision: InternalCreateAgentRunRequestSchemaRevision;
-    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
-    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-};
-
-/**
- * Public request for a configuration run against one existing Resource-managed Work environment.
- */
-export type CreateWorkConfigurationRunRequest = {
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    environmentId: InternalCreateAgentRunRequestSchemaEnvironmentId;
-    environmentRevision: InternalCreateAgentRunRequestSchemaRevision;
-    packageId: InternalCreateAgentRunRequestSchemaProblemPackageId;
-    packageRevision: InternalCreateAgentRunRequestSchemaRevision;
-    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
-    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
-    preauthorizationId?: InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorizationId | null;
-    preauthorizationRevision?: InternalCreateAgentRunRequestSchemaRevision | null;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-};
-
-/**
- * Non-overridable content classifications at the LLM boundary.
- */
-export type InternalCreateAgentRunRequestSchemaDeniedDataClass = 'secret' | 'token' | 'private_key' | 'personally_identifiable_information' | 'unallowlisted_student_submission';
-
-/**
- * Environment business class retained from the v2.1 architecture.
- */
-export type InternalCreateAgentRunRequestSchemaEnvironmentClass = 'experiment' | 'work';
-
-/**
- * Strongly typed UUIDv7 identifier for `EnvironmentId`.
- */
-export type InternalCreateAgentRunRequestSchemaEnvironmentId = string;
-
-/**
- * Control-to-Agent command carried only over an allowlisted mTLS service identity.
- */
-export type InternalAgentRunRequest = {
-    kind: 'authoring';
-    request: CreateAgentRunRequest;
-} | {
-    kind: 'work_configuration';
-    request: CreateWorkConfigurationRunRequest;
-};
-
-/**
- * Per-attempt bounded LLM budget.
- */
-export type InternalCreateAgentRunRequestSchemaLlmBudget = {
-    maxCostMicrousd: number;
-    maxInputTokens: number;
-    maxOutputTokens: number;
-    maxRequests: number;
-    maxSchemaRepairs: number;
-    maxTransientRetries: number;
-    timeoutMilliseconds: number;
-};
-
-/**
- * One immutable file in a teacher ProblemPackage.
- */
-export type PackageFile = {
-    /**
-     * Immutable object reference.
-     */
-    object: InternalCreateAgentRunRequestSchemaArtifactRef;
-    /**
-     * Normalized package-relative file path.
-     */
-    path: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type InternalCreateAgentRunRequestSchemaPolicyId = string;
-
-/**
- * Immutable, atomically completed teacher material package.
- */
-export type ProblemPackage = {
-    completedAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    files: Array<PackageFile>;
-    id: InternalCreateAgentRunRequestSchemaProblemPackageId;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    retention: InternalCreateAgentRunRequestSchemaRetentionSnapshot;
-    revision: InternalCreateAgentRunRequestSchemaRevision;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
- */
-export type InternalCreateAgentRunRequestSchemaProblemPackageId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type InternalCreateAgentRunRequestSchemaProjectId = string;
-
-/**
- * Versioned project policy governing all LLM egress. A course is optional teaching context.
- */
-export type InternalCreateAgentRunRequestSchemaProjectLlmEgressPolicy = {
-    activatedAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
-    binding: InternalCreateAgentRunRequestSchemaClaudeCodeBindingV1;
-    budget: InternalCreateAgentRunRequestSchemaLlmBudget;
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    deniedDataClasses: Array<InternalCreateAgentRunRequestSchemaDeniedDataClass>;
-    id: InternalCreateAgentRunRequestSchemaPolicyId;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    revision: InternalCreateAgentRunRequestSchemaRevision;
-    studentContentMode: InternalCreateAgentRunRequestSchemaStudentContentMode;
-};
-
-/**
- * Retention classes with distinct privacy and recovery requirements.
- */
-export type InternalCreateAgentRunRequestSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
-
-/**
- * Required action after retention expires.
- */
-export type InternalCreateAgentRunRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
-
-/**
- * Frozen data-retention decision for an immutable resource.
- */
-export type InternalCreateAgentRunRequestSchemaRetentionSnapshot = {
-    /**
-     * Stable retention class.
-     */
-    class: InternalCreateAgentRunRequestSchemaRetentionClass;
-    /**
-     * Required terminal disposition.
-     */
-    disposition: InternalCreateAgentRunRequestSchemaRetentionDisposition;
-    /**
-     * Policy identity.
-     */
-    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
-    /**
-     * Exact policy revision used at creation.
-     */
-    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
-    /**
-     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
-     * material decision whose disposition is `RetainUntilRevoked`.
-     */
-    retainUntil: string | null;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type InternalCreateAgentRunRequestSchemaRevision = number;
-
-/**
- * Runtime kind shared by candidates, releases, and instances.
- */
-export type InternalCreateAgentRunRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
-
-/**
- * Only explicit SubmissionManifest paths may disclose student content.
- */
-export type InternalCreateAgentRunRequestSchemaStudentContentMode = 'manifest_allowlist_only';
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type InternalCreateAgentRunRequestSchemaUtcTimestamp = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.
- */
-export type InternalCreateAgentRunRequestSchemaWorkConfigurationPlanId = string;
-
-/**
- * Concrete per-Work grant for executing one exact immutable configuration plan.
- *
- * The grant binds both script artifacts and the plan revision. It therefore cannot authorize a
- * newly generated script, a changed verification script, or a plan whose restart requirement was
- * altered after approval.
- */
-export type InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorization = {
-    actorId: InternalCreateAgentRunRequestSchemaActorId;
-    environmentId: InternalCreateAgentRunRequestSchemaEnvironmentId;
-    environmentRevision: InternalCreateAgentRunRequestSchemaRevision;
-    expiresAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
-    id: InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorizationId;
-    planId: InternalCreateAgentRunRequestSchemaWorkConfigurationPlanId;
-    planRevision: InternalCreateAgentRunRequestSchemaRevision;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    revision: InternalCreateAgentRunRequestSchemaRevision;
-    scriptArtifact: InternalCreateAgentRunRequestSchemaArtifactRef;
-    verificationScriptArtifact?: InternalCreateAgentRunRequestSchemaArtifactRef | null;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `WorkConfigurationPreauthorizationId`.
- */
-export type InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorizationId = string;
-
-/**
  * InternalCreateEvaluationRunRequest
  *
  * Control-to-Evaluation command that starts one run from a release and frozen submission.
@@ -8842,7 +8498,7 @@ export type EvaluationExecutionBinding = {
     objectLocators: {
         [key: string]: string;
     };
-    package: InternalPublishEvaluationReleaseRequestSchemaProblemPackage;
+    package: ProblemPackage;
 };
 
 export type InternalPublishEvaluationReleaseRequestSchemaEvaluationKind = 'EvaluationSpec';
@@ -8939,7 +8595,7 @@ export type InternalPublishEvaluationReleaseRequestSchemaManualReviewReason = 'i
 /**
  * One immutable file in a teacher ProblemPackage.
  */
-export type InternalPublishEvaluationReleaseRequestSchemaPackageFile = {
+export type PackageFile = {
     /**
      * Immutable object reference.
      */
@@ -8958,10 +8614,10 @@ export type InternalPublishEvaluationReleaseRequestSchemaPolicyId = string;
 /**
  * Immutable, atomically completed teacher material package.
  */
-export type InternalPublishEvaluationReleaseRequestSchemaProblemPackage = {
+export type ProblemPackage = {
     completedAt: InternalPublishEvaluationReleaseRequestSchemaUtcTimestamp;
     courseId?: InternalPublishEvaluationReleaseRequestSchemaCourseId | null;
-    files: Array<InternalPublishEvaluationReleaseRequestSchemaPackageFile>;
+    files: Array<PackageFile>;
     id: InternalPublishEvaluationReleaseRequestSchemaProblemPackageId;
     projectId: InternalPublishEvaluationReleaseRequestSchemaProjectId;
     retention: InternalPublishEvaluationReleaseRequestSchemaRetentionSnapshot;
