@@ -19,6 +19,7 @@ import sys
 import tarfile
 import tempfile
 from typing import Any, Iterator
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -108,6 +109,81 @@ def _unique_mapping(loader: StrictLoader, node: yaml.MappingNode) -> dict[str, A
             raise BundleError("LW_BUNDLE_DOCUMENT_INVALID")
         result[key] = loader.construct_object(value_node)
     return result
+
+
+def _agent_control_inputs(
+    application: dict[str, Any],
+    inputs: dict[str, Any],
+    workloads: dict[str, Any],
+    overrides: dict[str, Any],
+) -> None:
+    """Reuse the existing Control connection while retaining Agent's own identity."""
+    if not overrides.get("agent-service", {}).get(
+        "enabled", workloads["agent-service"]["enabled"]
+    ):
+        return
+    environment = inputs["environment-service"]["env"]
+    control = inputs["control-service"]["env"]
+    agent = inputs["agent-service"]
+    connection = {
+        key: environment.get(key)
+        for key in (
+            "LABWEAVER_CONTROL_SERVICE_BASE_URI",
+            "LABWEAVER_CONTROL_SERVICE_CA_PATH",
+            "LABWEAVER_CONTROL_SERVICE_AUDIENCE",
+            "LABWEAVER_CONTROL_SERVICE_TIMEOUT_MILLISECONDS",
+        )
+    }
+    if not all(isinstance(value, str) for value in connection.values()):
+        raise BundleError("LW_BUNDLE_AGENT_CONTROL_INVALID")
+    try:
+        origin = urlsplit(connection["LABWEAVER_CONTROL_SERVICE_BASE_URI"])
+        timeout = int(connection["LABWEAVER_CONTROL_SERVICE_TIMEOUT_MILLISECONDS"])
+        valid_port = origin.port
+    except ValueError as error:
+        raise BundleError("LW_BUNDLE_AGENT_CONTROL_INVALID") from error
+    if (
+        origin.scheme != "https"
+        or not origin.hostname
+        or origin.username is not None
+        or origin.password is not None
+        or origin.path not in {"", "/"}
+        or origin.query
+        or origin.fragment
+        or valid_port == 0
+        or not re.fullmatch(
+            r"[0-9]+", connection["LABWEAVER_CONTROL_SERVICE_TIMEOUT_MILLISECONDS"]
+        )
+        or not 1 <= timeout <= 5000
+        or connection["LABWEAVER_CONTROL_SERVICE_AUDIENCE"]
+        != control.get("LABWEAVER_SERVICE_AUDIENCE")
+        or connection["LABWEAVER_CONTROL_SERVICE_CA_PATH"]
+        != "/etc/labweaver/secrets/mtls-ca.pem"
+    ):
+        raise BundleError("LW_BUNDLE_AGENT_CONTROL_INVALID")
+    if (
+        "control.agent_run.read"
+        not in {
+            s.strip()
+            for s in agent["env"].get("LABWEAVER_SERVICE_SCOPES", "").split(",")
+        }
+        or agent["env"].get("LABWEAVER_SERVICE_CLIENT_ID")
+        not in {
+            s.strip()
+            for s in control.get("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS", "").split(",")
+        }
+        or application["secrets"][workloads["agent-service"]["secret"]]["mtls-ca.pem"]
+        != application["secrets"][workloads["environment-service"]["secret"]][
+            "mtls-ca.pem"
+        ]
+    ):
+        raise BundleError("LW_BUNDLE_AGENT_CONTROL_IDENTITY_MISMATCH")
+    env = dict(agent["env"])
+    for key, value in connection.items():
+        if key in agent["secretEnv"] or (key in env and env[key] != value):
+            raise BundleError("LW_BUNDLE_AGENT_CONTROL_CONFLICT")
+        env[key] = value
+    inputs["agent-service"] = {"env": env, "secretEnv": agent["secretEnv"]}
 
 
 StrictLoader.add_constructor(
@@ -519,6 +595,8 @@ def _workload_inputs(
             ):
                 raise BundleError("LW_BUNDLE_SECRET_REFERENCE_INVALID")
         result[name] = source
+    if names is None:
+        _agent_control_inputs(application, result, workloads, overrides)
     return result
 
 
