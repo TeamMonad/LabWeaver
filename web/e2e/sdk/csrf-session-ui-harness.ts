@@ -3,73 +3,12 @@
  * apiClient path (same pieces App.vue wires: sessionEpoch remount + write gate).
  *
  * Kept minimal (no AppShell/router) so Playwright can mock BFF only; production
- * App.vue uses the same sessionEpoch remount contract.
+ * App.vue uses the same sessionEpoch remount contract via <RouterView :key>.
  */
-import { createApp, defineComponent, onMounted, ref, computed, h } from 'vue'
-import { initializeSdkClient, apiClient } from '@/api/client'
+import { createApp, defineComponent, onMounted, computed, h } from 'vue'
+import { initializeSdkClient } from '@/api/client'
 import { useAuth } from '@/composables/useAuth'
-
-const SessionForm = defineComponent({
-  name: 'SessionForm',
-  setup() {
-    const note = ref('')
-    const lastResult = ref('')
-    const submitting = ref(false)
-
-    async function submit() {
-      submitting.value = true
-      lastResult.value = ''
-      try {
-        const response = await apiClient.post({
-          url: '/api/v1/resource-requests',
-          body: { note: note.value },
-          throwOnError: true,
-        })
-        lastResult.value = `ok:${JSON.stringify(response.data ?? null)}`
-      } catch (error: unknown) {
-        const err = error as {
-          diagnosticCode?: string
-          response?: { status?: number; data?: { diagnosticCode?: string } }
-          message?: string
-        }
-        const code =
-          err?.diagnosticCode
-          ?? err?.response?.data?.diagnosticCode
-          ?? err?.message
-          ?? 'unknown'
-        lastResult.value = `error:${code}`
-      } finally {
-        submitting.value = false
-      }
-    }
-
-    return () =>
-      h('section', { 'data-testid': 'session-form' }, [
-        h('label', { for: 'note-input' }, 'Note'),
-        h('input', {
-          id: 'note-input',
-          'data-testid': 'note-input',
-          value: note.value,
-          onInput: (event: Event) => {
-            note.value = (event.target as HTMLInputElement).value
-          },
-        }),
-        h(
-          'button',
-          {
-            type: 'button',
-            'data-testid': 'submit-note',
-            disabled: submitting.value,
-            onClick: () => {
-              void submit()
-            },
-          },
-          'Submit',
-        ),
-        h('p', { 'data-testid': 'submit-result', role: 'status' }, lastResult.value),
-      ])
-  },
-})
+import { SessionNoteForm } from './csrf-session-ui-form'
 
 const HarnessApp = defineComponent({
   name: 'CsrfSessionUiHarness',
@@ -106,9 +45,8 @@ const HarnessApp = defineComponent({
             'Switch shared session to B',
           ),
         ]),
-        // Mirrors App.vue: <RouterView :key="sessionEpoch" /> so pending form state
-        // cannot survive a CSRF-driven actor switch.
-        h(SessionForm, { key: auth.sessionEpoch.value }),
+        // Mirrors App.vue: <RouterView :key="sessionEpoch" />
+        h(SessionNoteForm, { key: auth.sessionEpoch.value }),
       ])
   },
 })
