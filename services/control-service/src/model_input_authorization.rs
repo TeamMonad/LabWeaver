@@ -22,7 +22,8 @@ impl ControlService {
         ) {
             return Err(ControlError::ContractInvalid);
         }
-        let row = sqlx::query("SELECT platform_roles, LEAST(expires_at,idle_expires_at) AS valid_until FROM access.current_authorization_sessions WHERE session_sha256=$1 AND actor_id=$2 AND expires_at>clock_timestamp() AND idle_expires_at>clock_timestamp()")
+        // Contract timestamps use milliseconds; floor only the projection, never the live expiry predicates.
+        let row = sqlx::query("SELECT platform_roles, date_trunc('milliseconds',LEAST(expires_at,idle_expires_at)) AS valid_until FROM access.current_authorization_sessions WHERE session_sha256=$1 AND actor_id=$2 AND expires_at>clock_timestamp() AND idle_expires_at>clock_timestamp()")
             .bind(&binding.session_sha256).bind(binding.actor_id.as_uuid()).fetch_optional(&self.pool).await.map_err(db)?.ok_or(ControlError::ContractInvalid)?;
         let roles: Vec<String> = row.try_get("platform_roles").map_err(db)?;
         let roles = roles

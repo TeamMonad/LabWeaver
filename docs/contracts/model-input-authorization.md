@@ -23,7 +23,7 @@ Agent 配置生成和已有 Work 配置操作只使用调用方显式选择的�
 
 Agent 在现有 dispatch `request` JSON 中保存 `{ request, inputAuthorization }`，不新增表、列或权限来源。缺少上下文的旧 dispatch 被逐条拒绝，不推导或回填授权。Agent 准备材料前后复核，且每次实际进程调用（包括 schema repair）前重新复核原有持久化取消状态和 Control 当前授权。准备期间取消能停止准备；读完后取消或撤权也不能启动首次模型调用。运行中的原取消机制继续负责进程停止和清理。恢复或重试派发在准备阶段被拒绝时，沿既有 claim/recovery 规则终止本次可执行动作，保留旧 attempt 的用量和 checkpoint；已完成或仍有有效租约的动作，以及已有 Work execution，不被改写。拒绝不代表旧进程已经停止或清理。需要新的会话或材料选择时，调用方必须新建显式请求；服务不更新旧绑定。
 
-Access 的短期 authorization decision TTL 只证明创建当次的判断，不作为整个异步任务的截止。排队后的首次进程调用及每次 schema repair 进程调用前，Control 都重新检查首次绑定的原会话仍存在、未撤销、absolute/idle 期限未到，以及当前角色、成员动作权限和对象版本仍许可；不接受新会话替代原会话，也不更新首次 binding。Agent 使用既有 attempt 的固定 `startedAt + policy.budget.timeoutMilliseconds` 截止和剩余预算，repair 不重置它们。任务期限到达时只允许既有终态恢复读取，不能启动新的发送；取消仍阻止新的发送。
+Access 的短期 authorization decision TTL 只证明创建当次的判断，不作为整个异步任务的截止。排队后的首次进程调用及每次 schema repair 进程调用前，Control 都重新检查首次绑定的原会话仍存在、未撤销、absolute/idle 期限未到，以及当前角色、成员动作权限和对象版本仍许可；不接受新会话替代原会话，也不更新首次 binding。当前会话期限从 PostgreSQL 微秒精度向下截断到契约毫秒精度；数据库到期筛选保持原精度，不延长会话期限。Agent 使用既有 attempt 的固定 `startedAt + policy.budget.timeoutMilliseconds` 截止和剩余预算，repair 不重置它们。任务期限到达时只允许既有终态恢复读取，不能启动新的发送；取消仍阻止新的发送。
 
 ## 部署连接
 
