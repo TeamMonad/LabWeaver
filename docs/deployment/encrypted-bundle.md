@@ -111,6 +111,20 @@ CI 显式运行 `metering::bundle_configuration_tests::authenticated_bundle_load
 
 原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照。它们不会把 Environment 配置渲染或上述本地消费测试当作其他服务已经部署、已加载或已应用的事实。
 
+## Agent 的当前模型输入复核连接
+
+Agent 的四项 `LABWEAVER_CONTROL_SERVICE_BASE_URI`、`CA_PATH`、`AUDIENCE`、`TIMEOUT_MILLISECONDS` 从本 Bundle 已有的 environment-service Control 连接派生。使用 HTTPS origin，不带用户信息、额外路径、query 或 fragment；timeout 为1至5000毫秒。audience 必须等于 Control 的入站 audience。Agent 可以省略这四个副本字段；若保留，必须与该来源相同。独立覆盖在 Bundle 校验或 Helm 渲染时失败。
+
+Agent 保留自己的 service client ID、OIDC CA 与 client secret。其 `mtls-ca.pem` 必须和已有 Control 连接引用同一源文件；不复制 Environment 的身份。Agent scope 输入包含已有 `control.agent_run.read`，Control caller 输入包含该 Agent client ID。该名称已用于 Environment→Control 读取，本次不增加新 scope 或通配权限。
+
+既有 identity_foundation 角色输入增加 Agent→Control 的单个 `control.agent_run.read`。Bundle 静态 inventory 可通过原 `identity_service_role_assignments` 传递完整已评审配置；它仍位于同一加密目录。自定义 assignment 覆盖 defaults 时，必须保留正确 caller/target 的这条只读关系，并与 service client、audience 和 caller 输入相符。渲染这些输入不会证明 Keycloak 已存在该授权，也不会签发凭据。
+
+角色变更实施前，由维护者确认真实 issuer/client/audience、受信 CA、既有密钥挂载、最小角色 assignment、Control caller 与网络可达性，再由既有操作者在批准窗口执行。不要因为 scope 字符串或渲染成功就宣称服务已获授权。本切片没有执行 identity Job、修改真实权限或部署。
+
+消费验证固定使用已发表的 #216/#207 `50a812768a67f14e7107282c6ab8394d82998410`（含 PR264 `83f7ef6c`），把本候选的配置和合成 fixture 放入隔离工作树。`tools/check_agent_control_consumer.py` 临时添加单个 cfg(test) 模块，调用原 `ModelInputAuthorizationClient::from_env/resolve`，结束后逐字恢复生产模块。CI 显式执行该目标，不把 ignored 计通过。
+
+该目标通过真实 age、同源派生文件、HTTPS/OIDC、签名 JWT 与原 Control 使用的 verifier/只读 permission 检查消费配置；缺角色、错 caller/audience/secret/CA、超时越界、部分配置和 redirect 均拒绝。issuer 与对象响应为隔离合成边界，没有运行完整 Control 对象授权、真实模型、Keycloak 实例或 Kubernetes。原 #216 当前会话/成员/对象/取消语义及其历史结果不变；当前 #203 独立分支尚未包含该业务消费者，需要包含它的镜像或冻结组合。
+
 ## 同一目录中的 Resource profile
 
 在 `config/bundle.yaml` 中添加 `resource`。该字段不建立第二个配置目录或秘密仓库。

@@ -346,7 +346,7 @@ class DeploymentBundleTests(unittest.TestCase):
             (self.private / "rendered-inputs/helm-values.yaml").read_bytes()
         )
         for name in inputs:
-            if name not in {"container-executor", "kubevirt-executor"}:
+            if name not in {"container-executor", "kubevirt-executor", "agent-service"}:
                 self.assertEqual(values["workloadInputs"][name], inputs[name])
         self.assertNotIn("workloads", values)
         del inputs["control-service"]["env"]["LABWEAVER_SERVICE_SCOPES"]

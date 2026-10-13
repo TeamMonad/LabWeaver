@@ -40,6 +40,8 @@ def main():
             if key == "database-url":
                 for role in ("container-executor", "kubevirt-executor"):
                     app["secrets"][role + "-secrets"][key] = reference
+            elif key == "mtls-ca.pem":
+                app["secrets"]["agent-service-secrets"][key] = reference
         f.save_model()
         fixtures.bundle.seal_bundle(f.root, f.archive, [f.key()], f.runtime)
         with fixtures.bundle.opened_bundle(f.archive, f.identity, f.runtime) as (
