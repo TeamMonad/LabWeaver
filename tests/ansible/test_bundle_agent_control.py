@@ -16,6 +16,42 @@ class BundleAgentControlTests(unittest.TestCase):
         self.f.setUp()
         self.addCleanup(self.f.tearDown)
 
+    def test_original_non_bundle_chart_renders_without_agent_secret_env(self):
+        result = subprocess.run(
+            [
+                "helm",
+                "template",
+                "labweaver",
+                str(fixtures.bundle.WORKLOADS_FILE.parent),
+                "--namespace",
+                "labweaver-system",
+                "--set-string",
+                "deploymentIdentity.configurationBundleSha256=sha256:" + "a" * 64,
+                "--values",
+                str(fixtures.REPOSITORY / "tests/fixtures/platform-images-values.yaml"),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deployment = next(
+            o
+            for o in yaml.safe_load_all(result.stdout)
+            if o
+            and o["kind"] == "Deployment"
+            and o["metadata"]["name"] == "agent-service"
+        )
+        env = {
+            e["name"]: e["value"]
+            for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+            if "value" in e
+        }
+        self.assertEqual(env["LABWEAVER_CONTROL_SERVICE_TIMEOUT_MILLISECONDS"], "5000")
+        self.assertEqual(
+            env["LABWEAVER_CONTROL_SERVICE_BASE_URI"], "https://control-service:9444/"
+        )
+        self.assertEqual(env["LABWEAVER_SERVICE_CLIENT_ID"], "labweaver-agent")
+
     def test_actual_age_and_helm_use_one_control_connection_and_agent_identity(self):
         f = self.f
         app = f.model["application"]
