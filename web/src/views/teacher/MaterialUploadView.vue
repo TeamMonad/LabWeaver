@@ -329,13 +329,21 @@
       </h3>
 
       <p class="section-subtitle">
-        材料包就绪后启动生成，页面刷新后会从项目服务恢复最近一次任务。
+        材料包就绪后，先显式勾选要送入模型的材料文件，再启动生成；页面刷新后会从项目服务恢复最近一次任务。
       </p>
+
+      <ModelInputPathPicker
+        v-if="uploadedPackage"
+        :model-value="modelInputSelection.selectedPaths"
+        :files="uploadedPackage.files"
+        @update:model-value="modelInputSelection.setSelected"
+      />
 
       <button
         type="button"
         class="filled-button"
         :disabled="!canStartRun"
+        data-testid="material-start-run"
         @click="startRun"
       >
         {{ agent.acting === 'start' ? '提交中…' : '启动实验生成' }}
@@ -525,8 +533,11 @@ import { useProjects } from '@/composables/useProjects'
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
+import { useModelInputPathSelection } from '@/composables/useModelInputPathSelection'
+import { modelInputSelectionAction } from '@/utils/modelInputSelection'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
@@ -576,6 +587,7 @@ const restoreDiagnostic = ref<DiagnosticViewModel | null>(null)
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed(() => (upload.state.kind === 'done' ? upload.state.package : null))
+const modelInputSelection = useModelInputPathSelection(uploadedPackage)
 const retentionChoiceEditable = computed(() => (
   upload.session === null
   && !packageDone.value
@@ -591,6 +603,7 @@ const displayRun = computed(() => {
 
 const canStartRun = computed(() => {
   if (!packageDone.value || !uploadedPackage.value || policy.state.kind !== 'success' || agent.acting) return false
+  if (!modelInputSelection.hasSelection) return false
   if (agent.run.kind !== 'success' || agent.run.data.packageId !== uploadedPackage.value.id) return true
   return !runIsInFlight(agent.run.data.state)
 })
@@ -629,8 +642,12 @@ function diagnosticAction(code: string): string | null {
     case 'PROJECT_APPROVAL_STALE_CONTEXT':
     case 'UPLOAD_PACKAGE_STALE_CONTEXT':
       return '请从当前项目重新选择材料并启动任务，旧链接不会被当作当前项目状态。'
+    case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_DENIED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
+      return modelInputSelectionAction(code)
     default:
-      return null
+      return modelInputSelectionAction(code)
   }
 }
 
@@ -822,12 +839,14 @@ async function startRun() {
   const pkg = uploadedPackage.value
   const policyData = policy.state.kind === 'success' ? policy.state.data : undefined
   if (!pkg || !policyData || !canStartRun.value) return
+  if (!modelInputSelection.hasSelection) return
   const started = await agent.start({
     packageId: pkg.id,
     packageRevision: pkg.revision,
     policyId: policyData.id,
     policyRevision: policyData.revision,
     environmentClass: 'experiment',
+    selectedPaths: modelInputSelection.selectedPaths,
   })
   if (started && agent.run.kind === 'success') {
     restoredContextKey = `${projectId.value}:${pkg.id}:${agent.run.data.id}`
