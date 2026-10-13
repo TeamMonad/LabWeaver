@@ -27,6 +27,19 @@ function installSuccessfulAdapter(client: ReturnType<typeof createLabWeaverApiCl
   return adapter
 }
 
+function csrfProblem(diagnosticCode: string, status = 403) {
+  return {
+    type: 'about:blank',
+    title: 'Forbidden',
+    status,
+    detail: 'CSRF token is not valid for the current session.',
+    instance: '/api/v1/resource-requests',
+    diagnosticCode,
+    requestId: 'req-csrf-test',
+    retryable: false,
+  }
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -127,6 +140,148 @@ describe('createLabWeaverApiClient', () => {
     expect(auth).toBeTypeOf('function')
     await expect(auth!({ type: 'http', scheme: 'bearer' })).resolves.toBe('sse-bearer-token')
     expect(accessToken).toHaveBeenCalledOnce()
+  })
+
+
+  it('caches BFF CSRF until near expiry on the happy path', async () => {
+    const csrfGet = vi.spyOn(axios, 'get').mockResolvedValue({
+      data: {
+        csrfToken: 'csrf-cached',
+        expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      },
+    } as never)
+    const client = makeClient('/', { mode: 'bff' })
+    const adapter = installSuccessfulAdapter(client)
+
+    await client.post({ url: '/api/v1/resource-requests', body: { n: 1 } })
+    await client.post({ url: '/api/v1/resource-requests', body: { n: 2 } })
+
+    expect(csrfGet).toHaveBeenCalledTimes(1)
+    expect(adapter).toHaveBeenCalledTimes(2)
+    expect(adapter.mock.calls[0][0].headers['X-CSRF-Token']).toBe('csrf-cached')
+    expect(adapter.mock.calls[1][0].headers['X-CSRF-Token']).toBe('csrf-cached')
+  })
+
+  it('after cross-tab session replacement, invalidates CSRF cache on LW_AUTH_CSRF_REJECTED without replaying the write, then recovers', async () => {
+    let sessionToken = 'csrf-session-a'
+    const csrfGet = vi.spyOn(axios, 'get').mockImplementation(async () => ({
+      data: {
+        csrfToken: sessionToken,
+        expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      },
+    }))
+
+    const client = makeClient('/', { mode: 'bff' })
+    const adapter = vi.fn(async (config) => {
+      const sent = config.headers['X-CSRF-Token']
+      // Simulate Access rejecting a token that belongs to the previous session.
+      if (sent === 'csrf-session-a' && sessionToken === 'csrf-session-b') {
+        const error = new axios.AxiosError(
+          'Request failed with status code 403',
+          'ERR_BAD_REQUEST',
+          config,
+          null,
+          {
+            status: 403,
+            statusText: 'Forbidden',
+            headers: {},
+            config,
+            data: csrfProblem('LW_AUTH_CSRF_REJECTED'),
+          },
+        )
+        throw error
+      }
+      return {
+        data: { ok: true, actor: sessionToken },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    })
+    client.instance.defaults.adapter = adapter
+
+    // Tab A caches csrf-A and completes a write as user A.
+    await client.post({ url: '/api/v1/resource-requests', body: { as: 'user-a' } })
+    expect(csrfGet).toHaveBeenCalledTimes(1)
+    expect(adapter.mock.calls[0][0].headers['X-CSRF-Token']).toBe('csrf-session-a')
+
+    // Other tab logout/login switches the shared cookie to session B.
+    sessionToken = 'csrf-session-b'
+
+    // Stale-cache write fails; must not auto-replay the non-idempotent body.
+    await expect(
+      client.post({
+        url: '/api/v1/resource-requests',
+        body: { as: 'user-a-ui-stale' },
+        throwOnError: true,
+      }),
+    ).rejects.toMatchObject({
+      response: {
+        status: 403,
+        data: { diagnosticCode: 'LW_AUTH_CSRF_REJECTED' },
+      },
+    })
+    expect(adapter).toHaveBeenCalledTimes(2)
+    expect(adapter.mock.calls[1][0].headers['X-CSRF-Token']).toBe('csrf-session-a')
+    expect(JSON.parse(adapter.mock.calls[1][0].data as string)).toEqual({ as: 'user-a-ui-stale' })
+    // No silent retry: still a single CSRF fetch from before the switch.
+    expect(csrfGet).toHaveBeenCalledTimes(1)
+
+    // Next write refetches session-B token and succeeds (no old-user silent submit).
+    await client.post({ url: '/api/v1/resource-requests', body: { as: 'user-b' } })
+    expect(csrfGet).toHaveBeenCalledTimes(2)
+    expect(adapter).toHaveBeenCalledTimes(3)
+    expect(adapter.mock.calls[2][0].headers['X-CSRF-Token']).toBe('csrf-session-b')
+    expect(JSON.parse(adapter.mock.calls[2][0].data as string)).toEqual({ as: 'user-b' })
+  })
+
+  it('does not invalidate BFF CSRF cache on unrelated 403 diagnostics', async () => {
+    const csrfGet = vi.spyOn(axios, 'get').mockResolvedValue({
+      data: {
+        csrfToken: 'csrf-keep',
+        expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      },
+    } as never)
+    const client = makeClient('/', { mode: 'bff' })
+    let calls = 0
+    const adapter = vi.fn(async (config) => {
+      calls += 1
+      if (calls === 1) {
+        const error = new axios.AxiosError(
+          'Request failed with status code 403',
+          'ERR_BAD_REQUEST',
+          config,
+          null,
+          {
+            status: 403,
+            statusText: 'Forbidden',
+            headers: {},
+            config,
+            data: csrfProblem('LW_AUTHZ_DENIED'),
+          },
+        )
+        throw error
+      }
+      return {
+        data: { ok: true },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    })
+    client.instance.defaults.adapter = adapter
+
+    await expect(
+      client.post({ url: '/api/v1/resource-requests', body: {}, throwOnError: true }),
+    ).rejects.toMatchObject({
+      response: { status: 403, data: { diagnosticCode: 'LW_AUTHZ_DENIED' } },
+    })
+    await client.post({ url: '/api/v1/resource-requests', body: {} })
+
+    expect(csrfGet).toHaveBeenCalledTimes(1)
+    expect(adapter.mock.calls[1][0].headers['X-CSRF-Token']).toBe('csrf-keep')
   })
 
   it('rejects a contract-prefixed API base URL', () => {
