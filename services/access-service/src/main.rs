@@ -1699,10 +1699,15 @@ impl IntoResponse for ApiError {
             "status" => self.status.as_u16().to_string()
         )
         .increment(1);
+        // Gateway heartbeat/close has an existing strict revision-conflict body.
+        // Keep explicitly supplied domain responses intact.
+        if let Some(body) = self.body {
+            return (self.status, Json(body)).into_response();
+        }
         let context = telemetry::current_request_context()
             .unwrap_or_else(telemetry::RequestContext::generate);
         let request_id = context.request_id().to_owned();
-        let mut body = serde_json::json!(ProblemDetails {
+        let body = ProblemDetails {
             problem_type: format!(
                 "urn:labweaver:problem:{}",
                 self.diagnostic.to_ascii_lowercase()
@@ -1716,16 +1721,7 @@ impl IntoResponse for ApiError {
             trace_id: Some(context.trace_id().to_owned()),
             retryable,
             violations: Vec::new(),
-        });
-        // Preserve bounded revision/state hints without allowing extensions to replace
-        // the authoritative status, diagnostic or request correlation fields.
-        if let Some(serde_json::Value::Object(extensions)) = self.body
-            && let Some(object) = body.as_object_mut()
-        {
-            for (key, value) in extensions {
-                object.entry(key).or_insert(value);
-            }
-        }
+        };
         (
             self.status,
             [(header::CONTENT_TYPE, "application/problem+json")],
@@ -1918,7 +1914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_errors_preserve_status_retry_semantics_and_revision_extensions()
+    async fn api_errors_preserve_status_diagnostics_and_retry_semantics()
     -> Result<(), Box<dyn std::error::Error>> {
         use axum::{body::to_bytes, http::header, response::IntoResponse};
 
@@ -1932,20 +1928,9 @@ mod tests {
             ApiError::unprocessable("LW_ACCESS_SSH_KEY_REJECTED"),
             ApiError::internal("LW_ACCESS_STORE_CORRUPT"),
             ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"),
-            ApiError::precondition_with_body(
-                "LW_REVISION_CONFLICT",
-                serde_json::json!({
-                    "currentRevision": 7,
-                    "state": "terminating",
-                    "status": 200,
-                    "diagnosticCode": "LW_WRONG_DIAGNOSTIC",
-                    "retryable": true
-                }),
-            ),
         ] {
             let status = error.status;
             let diagnostic = error.diagnostic;
-            let has_extensions = error.body.is_some();
             let response = error.into_response();
             assert_eq!(response.status(), status);
             assert_eq!(
@@ -1953,7 +1938,6 @@ mod tests {
                 "application/problem+json"
             );
             let body = to_bytes(response.into_body(), 16_384).await?;
-            let value: serde_json::Value = serde_json::from_slice(&body)?;
             let problem: contracts::ProblemDetails = serde_json::from_slice(&body)?;
             assert_eq!(problem.status, status.as_u16());
             assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
@@ -1962,10 +1946,6 @@ mod tests {
                 status == axum::http::StatusCode::SERVICE_UNAVAILABLE
             );
             assert!(!problem.request_id.is_empty());
-            if has_extensions {
-                assert_eq!(value["currentRevision"], 7);
-                assert_eq!(value["state"], "terminating");
-            }
         }
         Ok(())
     }
