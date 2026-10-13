@@ -17,8 +17,8 @@ use agent_service::build_store::{BuildWorker, PgBuildStore};
 use agent_service::candidate_materializer::S3EnvironmentCandidateMaterializer;
 use agent_service::classifier::DeterministicEgressClassifier;
 use agent_service::claude_code::{
-    ClaudeCodeProcess, EgressClassifier, PackageObjectReadError, ProblemPackageEgressGate,
-    ProblemPackageReader, RunCancellation, TokioClaudeCodeProcess,
+    ClaudeCodeProcess, EgressClassifier, ModelInputAuthorization, PackageObjectReadError,
+    ProblemPackageEgressGate, ProblemPackageReader, RunCancellation, TokioClaudeCodeProcess,
 };
 use agent_service::generated_artifacts::GeneratedArtifactStore;
 use agent_service::llm_review::{LlmReviewStore, LlmReviewWorker};
@@ -26,6 +26,9 @@ use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
 use agent_service::model_gateway::{GatewayState, ModelGatewayRuntime, ScopedTokenIssuer};
+use agent_service::model_input_authorization::{
+    DispatchInputAuthorization, ModelInputAuthorizationClient,
+};
 use agent_service::oci_registry::RegistryCredentials;
 use agent_service::platform_image_jobs::{PlatformImageImportJobStore, PlatformImageImportWorker};
 use agent_service::platform_images::{
@@ -505,7 +508,11 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let work_execution_store = store.clone();
     let work_execution_objects = Arc::clone(&objects);
     let work_execution_artifacts = generated_artifacts.clone();
+    let input_authorization_client =
+        ModelInputAuthorizationClient::from_env(Arc::clone(&service_token_client))
+            .map_err(|_| StartupError::Configuration)?;
     let worker = Worker {
+        input_authorization_client,
         store,
         objects,
         generated_artifacts,
@@ -898,6 +905,7 @@ async fn outbox_loop(
 
 #[derive(Clone)]
 struct Worker {
+    input_authorization_client: Option<ModelInputAuthorizationClient>,
     store: PostgresAgentRunStore,
     objects: Arc<S3ImmutableObjectStore>,
     generated_artifacts: GeneratedArtifactStore,
@@ -940,20 +948,98 @@ impl Worker {
 
     #[allow(
         clippy::large_futures,
+        clippy::too_many_lines,
         reason = "one reserved dispatch owns preparation and execution as one durable boundary"
     )]
     async fn tick(&self) -> Result<(), StartupError> {
-        let Some(lease) = self.store.claim_dispatch(self.dispatch_lease).await? else {
+        let Some(mut lease) = self.store.claim_dispatch(self.dispatch_lease).await? else {
             return Ok(());
         };
         tracing::info!(event = "agent.dispatch.claimed", run_id = %lease.run.id);
+        let Some(client) = &self.input_authorization_client else {
+            self.store
+                .fail_dispatch_preparation(
+                    &lease,
+                    "LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE",
+                    timestamp()?,
+                )
+                .await?;
+            return Ok(());
+        };
+        let selected = match &lease.request {
+            contracts::http::InternalAgentRunRequest::Authoring(request) => {
+                request.selected_paths.as_deref()
+            }
+            contracts::http::InternalAgentRunRequest::WorkConfiguration(request) => {
+                request.selected_paths.as_deref()
+            }
+        };
+        let Ok(paths) = contracts::http::validate_model_input_selection(&lease.package, selected)
+        else {
+            self.store
+                .fail_dispatch_preparation(
+                    &lease,
+                    "LW_MODEL_INPUT_SELECTION_REQUIRED",
+                    timestamp()?,
+                )
+                .await?;
+            return Ok(());
+        };
+        let authorization: Arc<dyn ModelInputAuthorization> =
+            Arc::new(DispatchInputAuthorization {
+                client: client.clone(),
+                store: self.store.clone(),
+                run_id: lease.run.id,
+                request: contracts::http::ModelInputAuthorizationResolveRequest {
+                    binding: lease.input_authorization.clone(),
+                    selected_paths: paths.clone(),
+                },
+            });
+        if let Err(error) = authorization.check().await {
+            self.store
+                .fail_dispatch_preparation(&lease, error.diagnostic_code(), timestamp()?)
+                .await?;
+            return Ok(());
+        }
+        // No unselected bytes or metadata enter either stdin, sandbox materials or build materialization.
+        lease
+            .package
+            .files
+            .retain(|file| paths.contains(&file.path));
+        lease.object_locators.retain(|id, _| {
+            lease
+                .package
+                .files
+                .iter()
+                .any(|file| file.object.artifact_id == *id)
+        });
+        let cancellation = RunCancellation::new();
+        let watch_cancellation = cancellation.clone();
+        let watch_store = self.store.clone();
+        let watch_id = lease.run.id;
+        let _watcher = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                if watch_store
+                    .cancellation_requested(watch_id)
+                    .await
+                    .unwrap_or(true)
+                {
+                    watch_cancellation.cancel();
+                    return;
+                }
+            }
+        }));
+
         let reader: Arc<dyn ProblemPackageReader> = Arc::new(DispatchReader {
             objects: Arc::clone(&self.objects),
             locators: lease.object_locators.clone(),
         });
         let gate = ProblemPackageEgressGate::new(reader, Arc::clone(&self.classifier));
         let now = timestamp()?;
-        let input = match gate.prepare(&lease.package, &lease.policy).await {
+        let prepared = tokio::select! { biased; () = cancellation.cancelled() => { self.store.fail_dispatch_preparation(&lease,"LW_LLM_CANCELLED",timestamp()?).await?; return Ok(()); }, result = gate.prepare(&lease.package, &lease.policy, &paths) => result };
+        let input = match prepared {
             Ok(input) => input,
             Err(error) => {
                 let run = self
@@ -964,6 +1050,12 @@ impl Worker {
                 return Ok(());
             }
         };
+        if let Err(error) = authorization.check().await {
+            self.store
+                .fail_dispatch_preparation(&lease, error.diagnostic_code(), timestamp()?)
+                .await?;
+            return Ok(());
+        }
         self.store
             .bind_prepared_dispatch(&lease, input.sha256())
             .await?;
@@ -978,7 +1070,8 @@ impl Worker {
             self.process.clone(),
             materializer,
         )?
-        .with_provider_bindings(self.provider_bindings.clone());
+        .with_provider_bindings(self.provider_bindings.clone())
+        .with_input_authorization(authorization);
         let service = AgentRunService::new(
             self.store.clone(),
             runtime,
@@ -986,7 +1079,7 @@ impl Worker {
             self.track_lease,
         )?;
         let outcome = service
-            .execute_reserved_dispatch(lease, input, RunCancellation::new(), now)
+            .execute_reserved_dispatch(lease, input, cancellation, now)
             .await?;
         let run_id = match &outcome {
             agent_service::run_store::AgentRunDispatch::Executed(value) => value.run.id,

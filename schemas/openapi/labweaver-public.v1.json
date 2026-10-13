@@ -109,9 +109,6 @@
       "InternalCompleteEvaluationStepRequest": {
         "$ref": "../contracts/v1/http/internal-complete-evaluation-step-request.schema.json"
       },
-      "InternalCreateAgentRunRequest": {
-        "$ref": "../contracts/v1/http/internal-create-agent-run-request.schema.json"
-      },
       "InternalCreateEvaluationRunRequest": {
         "$ref": "../contracts/v1/http/internal-create-evaluation-run-request.schema.json"
       },

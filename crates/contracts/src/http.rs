@@ -753,6 +753,8 @@ pub struct CompleteAuthoringApprovalRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAgentRunRequest {
+    /// Explicit material paths. Missing or empty selection is rejected; never defaults to all files.
+    pub selected_paths: Option<Vec<String>>,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub package_id: ProblemPackageId,
@@ -766,6 +768,8 @@ pub struct CreateAgentRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateWorkConfigurationRunRequest {
+    /// Explicit material paths. Missing or empty selection is rejected.
+    pub selected_paths: Option<Vec<String>>,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub package_id: ProblemPackageId,
@@ -1004,6 +1008,10 @@ pub struct WithdrawEnvironmentTemplateReleaseRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelInputAuthorizationContext {
+/// Control-derived asynchronous recheck input, never accepted from a public create request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationBinding {
     pub session_sha256: String,
     pub actor_id: ActorId,
     pub project_id: ProjectId,
@@ -1030,6 +1038,48 @@ impl ModelInputAuthorizationContext {
         }
         Ok(())
     }
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub selection_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationResolveRequest {
+    pub binding: ModelInputAuthorizationBinding,
+    pub selected_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationResolution {
+    pub binding: ModelInputAuthorizationBinding,
+}
+
+pub fn model_input_selection_sha256(paths: &[String]) -> Result<String, HttpContractError> {
+    use sha2::Digest;
+    let bytes =
+        serde_json::to_vec(paths).map_err(|_| HttpContractError::InvalidModelInputSelection)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+/// Validates an explicit selection against an immutable package without guessing hidden filenames.
+pub fn validate_model_input_selection(
+    package: &crate::authoring::ProblemPackage,
+    selected: Option<&[String]>,
+) -> Result<Vec<String>, HttpContractError> {
+    let paths = selected.ok_or(HttpContractError::InvalidModelInputSelection)?;
+    let mut seen = BTreeSet::new();
+    if paths.is_empty()
+        || paths.iter().any(|path| {
+            !seen.insert(path.clone()) || !package.files.iter().any(|file| &file.path == path)
+        })
+    {
+        return Err(HttpContractError::InvalidModelInputSelection);
+    }
+    Ok(seen.into_iter().collect())
 }
 
 /// Control-to-Agent command carried only over an allowlisted mTLS service identity.
@@ -1049,6 +1099,7 @@ pub enum InternalAgentRunRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalCreateAgentRunRequest {
+    pub input_authorization: ModelInputAuthorizationBinding,
     /// Authoritative Project ownership and optional teaching association.
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
@@ -1146,6 +1197,37 @@ impl InternalCreateAgentRunRequest {
             || request_identity.4 != self.policy.revision
             || request_identity.3 != self.policy.id
             || !actor_matches
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        let (selection, revision, operation_matches) = match &self.request {
+            InternalAgentRunRequest::Authoring(request) => (
+                request.selected_paths.as_deref(),
+                request.package_revision,
+                matches!(
+                    self.input_authorization.operation_id.as_str(),
+                    "createProjectAgentRun" | "createAgentRun"
+                ),
+            ),
+            InternalAgentRunRequest::WorkConfiguration(request) => (
+                request.selected_paths.as_deref(),
+                request.package_revision,
+                self.input_authorization.operation_id == "createProjectWorkConfigurationRun",
+            ),
+        };
+        let paths = validate_model_input_selection(&self.package, selection)?;
+        let binding = &self.input_authorization;
+        if !operation_matches
+            || !is_sha256(&binding.session_sha256)
+            || binding.actor_id != self.actor_id
+            || binding.project_id != self.project_id
+            || binding.course_id != self.course_id
+            || binding.package_id != self.package.id
+            || binding.package_revision != self.package.revision
+            || revision != self.package.revision
+            || binding.policy_id != self.policy.id
+            || binding.policy_revision != self.policy.revision
+            || model_input_selection_sha256(&paths)? != binding.selection_sha256
         {
             return Err(HttpContractError::InvalidInternalIdentity);
         }
@@ -4979,6 +5061,8 @@ pub struct EventStreamQuery {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpContractError {
+    #[error("explicit model input selection is missing or invalid")]
+    InvalidModelInputSelection,
     #[error("invalid Idempotency-Key")]
     InvalidIdempotencyKey,
     #[error("weak ETag is not accepted")]
