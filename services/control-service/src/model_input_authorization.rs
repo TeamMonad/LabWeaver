@@ -14,12 +14,12 @@ impl ControlService {
     ) -> Result<ModelInputAuthorizationResolution, ControlError> {
         let binding = &request.binding;
         let now = time::OffsetDateTime::now_utc();
-        if binding.valid_until.get() <= now
-            || !matches!(
-                binding.operation_id.as_str(),
-                "createProjectAgentRun" | "createProjectWorkConfigurationRun" | "createAgentRun"
-            )
-        {
+        // valid_until is evidence for the original create decision, not this task's deadline.
+        // Every invocation below reauthorizes the same original session against current facts.
+        if !matches!(
+            binding.operation_id.as_str(),
+            "createProjectAgentRun" | "createProjectWorkConfigurationRun" | "createAgentRun"
+        ) {
             return Err(ControlError::ContractInvalid);
         }
         let row = sqlx::query("SELECT platform_roles, LEAST(expires_at,idle_expires_at) AS valid_until FROM access.current_authorization_sessions WHERE session_sha256=$1 AND actor_id=$2 AND expires_at>clock_timestamp() AND idle_expires_at>clock_timestamp()")
