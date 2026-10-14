@@ -46,6 +46,15 @@ sshGatewayService:
   loadBalancerIP: ""
   sharedIPKey: ""
 
+# An encrypted Bundle supplies this complete map. Its environment inputs replace
+# the legacy workload environment below. Layout, probes and resource limits remain
+# in workloads. Do not edit a generated Bundle values file.
+workloadInputs: {}
+
+# Filled only by the authenticated encrypted Bundle opening path.
+managedControlConfiguration: {}
+environmentExecutorAuthority: {}
+
 workloads:
   control-service:
     enabled: true
@@ -66,7 +75,7 @@ workloads:
       LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
       LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
       LABWEAVER_SERVICE_AUDIENCE: labweaver-control
-      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-environment,labweaver-evaluation
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-environment,labweaver-evaluation,labweaver-agent
       LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
       LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
       LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
@@ -137,7 +146,7 @@ workloads:
       LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
       LABWEAVER_SERVICE_CLIENT_ID: labweaver-agent
       LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
-      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,environment.work.configure,environment:resolve_work_execution_binding,resource.task.create,resource.task.read,resource.task.claim,resource.task.ack,resource.task.release,resource.task.cancel,resource.usage.record
+      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,control.agent_run.read,environment.work.configure,environment:resolve_work_execution_binding,resource.task.create,resource.task.read,resource.task.claim,resource.task.ack,resource.task.release,resource.task.cancel,resource.usage.record
       LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: mtls, containerPort: 9445, servicePort: 9445}

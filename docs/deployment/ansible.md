@@ -6,6 +6,10 @@ LabWeaver 使用 Ansible 调用 Helm 和 Kubernetes 模块。应用安装面向�
 
 ## 配置
 
+可携带配置使用[加密 Bundle](encrypted-bundle.md)。它从同一目录派生应用与独立 Resource profile 的对象、Helm values 和角色 vars。可选 infrastructure profile 携带静态 inventory、SSH/控制器凭据引用、Vault 密码和身份 locator。xtask 在 Bundle 执行中使用派生 inventory，不再查找另一份环境 inventory 或 Vault 密码。
+
+Cluster network、identity、verify、admin tools、foundation、Harbor、sandbox runtime 和 BuildKit 角色从 `labweaver_versions_lock_file` 读取 Bundle 的版本锁。应用和 Resource 使用各自已派生的版本锁路径。旧入口未设置这些字段时仍读仓库版本锁；这不能证明旧调用者已经迁入 Bundle。
+
 Inventory 声明目标集群、命名空间、存储类、镜像引用和依赖端点。数据库、NATS、Keycloak、对象存储和 Registry 可以使用已有实例；部署前检查所需能力与权限，缺失配置直接报错。配置样例使用项目相对路径或 Secret 挂载位置，不包含个人机器路径和私有拓扑。
 
 内部 HTTP 使用服务端 TLS 与 Keycloak client credentials。每个服务使用自己的客户端身份，令牌包含目标 audience 和受限客户端角色；网络策略不能替代令牌验证。用户的项目与课程权限仍由 Access 判断。Secret、私钥和客户端口令以文件注入，不进入镜像构建参数、普通配置、日志或 Git。

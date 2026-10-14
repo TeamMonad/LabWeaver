@@ -1,0 +1,96 @@
+{
+  "$defs": {
+    "ControlConfigurationReplicaObservation": {
+      "additionalProperties": false,
+      "description": "Facts returned by a running Control process, rather than a reread of mounted files.",
+      "properties": {
+        "configurationSha256": {
+          "type": "string"
+        },
+        "desiredRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "encryptedBundleSha256": {
+          "type": "string"
+        },
+        "instanceId": {
+          "description": "Changes on process restart even if Kubernetes reuses the same Pod UID.",
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "podName": {
+          "type": "string"
+        },
+        "podUid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "podName",
+        "podUid",
+        "namespace",
+        "instanceId",
+        "desiredRevision",
+        "configurationSha256",
+        "encryptedBundleSha256",
+        "observedAt"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An authorized executor's current Deployment roster and actual per-process readbacks.",
+  "properties": {
+    "deploymentGeneration": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "deploymentUid": {
+      "type": "string"
+    },
+    "expectedReplicas": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "namespace": {
+      "type": "string"
+    },
+    "releaseName": {
+      "type": "string"
+    },
+    "replicas": {
+      "items": {
+        "$ref": "#/$defs/ControlConfigurationReplicaObservation"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "deploymentUid",
+    "deploymentGeneration",
+    "expectedReplicas",
+    "namespace",
+    "releaseName",
+    "replicas"
+  ],
+  "title": "ControlConfigurationDeploymentObservation",
+  "type": "object"
+}

@@ -27,6 +27,7 @@ pub mod events;
 pub mod execution;
 pub mod foundation;
 pub mod http;
+pub mod platform_configuration;
 pub mod project;
 pub mod resource;
 pub mod schema;

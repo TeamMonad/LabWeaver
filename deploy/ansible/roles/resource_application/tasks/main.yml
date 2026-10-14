@@ -1,4 +1,10 @@
 ---
+- name: Load reviewed Resource inputs from the controller Bundle
+  ansible.builtin.include_vars:
+    file: "{{ resource_application_vars_file }}"
+  when: resource_application_vars_file | length > 0
+  no_log: true
+
 - name: Validate Resource deployment inputs
   ansible.builtin.assert:
     that:
@@ -7,7 +13,6 @@
         resource_application_run_id is match('^[a-z0-9][a-z0-9-]{7,95}$')
       - resource_application_package_manifest | length > 0
       - resource_application_configuration_bundle | length > 0
-      - resource_application_access_seed_file | length > 0
       - resource_application_postgres_service | length > 0
       - resource_application_postgres_service_file | length > 0
       - resource_application_values_file | length > 0
@@ -16,21 +21,19 @@
 - name: Load the immutable application identities
   ansible.builtin.set_fact:
     resource_application_lock: >-
-      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
+      {{ lookup('ansible.builtin.file', resource_application_versions_lock_file) | from_yaml }}
   no_log: true
 
 - name: Verify controller-owned Resource deployment inputs
   ansible.builtin.stat:
     path: "{{ item }}"
     checksum_algorithm: sha256
-  loop:
-    - "{{ resource_application_package_manifest }}"
-    - "{{ resource_application_configuration_bundle }}"
-    - "{{ resource_application_access_seed_file }}"
-    - "{{ resource_application_configuration_manifest }}"
-    - "{{ resource_application_values_file }}"
-    - "{{ resource_application_chart_source }}"
-    - "{{ resource_application_postgres_service_file }}"
+  loop: >-
+    {{ [resource_application_package_manifest, resource_application_configuration_bundle,
+        resource_application_configuration_manifest, resource_application_values_file,
+        resource_application_chart_source, resource_application_postgres_service_file]
+       + ([resource_application_access_seed_file]
+          if resource_application_access_seed_file | length > 0 else []) }}
   register: resource_application_inputs
 
 - name: Reject missing Resource deployment inputs
@@ -51,6 +54,7 @@
     resource_application_access_seed: >-
       {{ lookup('ansible.builtin.file', resource_application_access_seed_file) | from_json }}
   no_log: true
+  when: resource_application_access_seed_file | length > 0
 
 - name: Create bounded Resource bootstrap workspace
   ansible.builtin.file:
@@ -60,6 +64,7 @@
     group: root
     mode: '0700'
   become: true
+  when: resource_application_access_seed_file | length > 0
 
 - name: Render conflict-detecting Access bootstrap
   ansible.builtin.template:
@@ -70,6 +75,7 @@
     mode: '0600'
   become: true
   no_log: true
+  when: resource_application_access_seed_file | length > 0
 
 - name: Apply or verify Resource Access bootstrap
   labweaver_postgres_apply:
@@ -78,6 +84,7 @@
     service_file: "{{ resource_application_postgres_service_file }}"
     service: "{{ resource_application_postgres_service }}"
     sql_file: "{{ resource_application_work_root }}/access-seed-adopt.sql"
+  when: resource_application_access_seed_file | length > 0
 
 - name: Enforce exact Resource package and configuration boundaries
   ansible.builtin.assert:
