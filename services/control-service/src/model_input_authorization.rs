@@ -13,6 +13,10 @@ impl ControlService {
         request: &ModelInputAuthorizationResolveRequest,
     ) -> Result<ModelInputAuthorizationResolution, ControlError> {
         let binding = &request.binding;
+        binding
+            .context()
+            .validate()
+            .map_err(|_| ControlError::ContractInvalid)?;
         let now = time::OffsetDateTime::now_utc();
         // valid_until is evidence for the original create decision, not this task's deadline.
         // Every invocation below reauthorizes the same original session against current facts.
