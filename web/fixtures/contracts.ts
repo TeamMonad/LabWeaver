@@ -241,6 +241,7 @@ function environmentInstance(id: string): EnvironmentInstanceSchema {
     providerBinding: 'fixture-kubernetes',
     capacityBinding: 'fixture-capacity-claim',
     leaseId: 'lease-env-physics',
+    approvedResources: { ...resource },
     generation: 1,
     observedGeneration: 1,
     revision: 12,
