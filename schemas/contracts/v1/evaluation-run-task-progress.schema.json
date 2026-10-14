@@ -1,0 +1,217 @@
+{
+  "$defs": {
+    "EvaluationRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationRunId`.",
+      "type": "string"
+    },
+    "EvaluationRunState": {
+      "description": "Public run lifecycle.",
+      "enum": [
+        "queued",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "EvaluationStepRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.",
+      "type": "string"
+    },
+    "EvaluationStepTaskProgress": {
+      "additionalProperties": false,
+      "description": "A step identity and the progress of its real attempt, without private step contents.",
+      "properties": {
+        "progress": {
+          "$ref": "#/$defs/TaskAttemptProgress"
+        },
+        "stepRunId": {
+          "$ref": "#/$defs/EvaluationStepRunId"
+        }
+      },
+      "required": [
+        "stepRunId",
+        "progress"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "ResourceRequestState": {
+      "description": "Request lifecycle owned by Resource Service.",
+      "enum": [
+        "reviewing",
+        "allocating",
+        "active",
+        "expiring",
+        "expired",
+        "rejected",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "TaskAttemptPhase": {
+      "description": "Display phase derived from an owner's attempt and Resource facts.\nThis projection has no independent transitions or persistent authority.",
+      "enum": [
+        "queued",
+        "preparing",
+        "waiting_resource_approval",
+        "allocating",
+        "executing",
+        "awaiting_review",
+        "cleanup_pending",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "blocked"
+      ],
+      "type": "string"
+    },
+    "TaskAttemptProgress": {
+      "additionalProperties": false,
+      "description": "Payload-free read projection of one real attempt.",
+      "properties": {
+        "attempt": {
+          "description": "Native attempt number. Evaluation uses zero until the step is first claimed.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diagnosticCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nextSteps": {
+          "description": "Existing operation IDs appropriate to the phase, without granting authorization.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "phase": {
+          "$ref": "#/$defs/TaskAttemptPhase"
+        },
+        "resourceRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resourceState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceRequestState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "taskRunId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "phase",
+        "nextSteps"
+      ],
+      "type": "object"
+    },
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read-only current attempts and bounded history. No grading inputs or scores are included.",
+  "properties": {
+    "current": {
+      "items": {
+        "$ref": "#/$defs/EvaluationStepTaskProgress"
+      },
+      "type": "array"
+    },
+    "hasMore": {
+      "type": "boolean"
+    },
+    "history": {
+      "items": {
+        "$ref": "#/$defs/EvaluationStepTaskProgress"
+      },
+      "type": "array"
+    },
+    "page": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pageSize": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "runId": {
+      "$ref": "#/$defs/EvaluationRunId"
+    },
+    "state": {
+      "$ref": "#/$defs/EvaluationRunState"
+    }
+  },
+  "required": [
+    "runId",
+    "projectId",
+    "revision",
+    "state",
+    "current",
+    "history",
+    "page",
+    "pageSize",
+    "hasMore"
+  ],
+  "title": "EvaluationRunTaskProgress",
+  "type": "object"
+}

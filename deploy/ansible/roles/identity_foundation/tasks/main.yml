@@ -3,7 +3,7 @@
   ansible.builtin.set_fact:
     identity_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') }}"
     identity_secret_locator: "{{ lookup('env', 'LABWEAVER_IDENTITY_SECRET_LOCATOR') }}"
-    identity_lock: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).identity_foundation }}"
+    identity_lock: "{{ (lookup('file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml).identity_foundation }}"
     identity_run_suffix: "{{ lookup('env', 'LABWEAVER_RUN_ID') | hash('sha256') | truncate(12, true, '') }}"
 
 - name: Reject incomplete or mutable identity-foundation configuration
@@ -31,12 +31,19 @@
       - identity_lock.images.values() | reject('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 0
     fail_msg: IDENTITY_CONFIGURATION_INVALID
 
-- name: Hash the root-managed identity secret locator on the controller
+- name: Hash the selected private identity secret locator
   ansible.builtin.stat:
     path: "{{ identity_secret_locator }}"
     checksum_algorithm: sha256
-  become: true
-  delegate_to: "{{ groups['routers'][0] }}"
+  become: "{{ not (identity_secret_locator_controller | bool) }}"
+  delegate_to: "{{ 'localhost' if (identity_secret_locator_controller | bool) else groups['routers'][0] }}"
+  vars:
+    ansible_connection: >-
+      {{ 'local' if (identity_secret_locator_controller | bool)
+         else hostvars[groups['routers'][0]].ansible_connection | default('ssh') }}
+    ansible_remote_tmp: >-
+      {{ identity_secret_locator_controller_tmp if (identity_secret_locator_controller | bool)
+         else hostvars[groups['routers'][0]].ansible_remote_tmp | default('~/.ansible/tmp') }}
   register: identity_locator_stat
   no_log: true
 
@@ -44,7 +51,7 @@
   ansible.builtin.assert:
     that:
       - identity_locator_stat.stat.exists
-      - identity_locator_stat.stat.pw_name == 'root'
+      - (identity_secret_locator_controller | bool) or identity_locator_stat.stat.pw_name == 'root'
       - identity_locator_stat.stat.mode == '0600'
       - ('sha256:' ~ identity_locator_stat.stat.checksum) == identity_secret_locator_sha256
     fail_msg: IDENTITY_SECRET_LOCATOR_INVALID
@@ -52,8 +59,15 @@
 - name: Read the identity bootstrap locator without logging it
   ansible.builtin.slurp:
     src: "{{ identity_secret_locator }}"
-  become: true
-  delegate_to: "{{ groups['routers'][0] }}"
+  become: "{{ not (identity_secret_locator_controller | bool) }}"
+  delegate_to: "{{ 'localhost' if (identity_secret_locator_controller | bool) else groups['routers'][0] }}"
+  vars:
+    ansible_connection: >-
+      {{ 'local' if (identity_secret_locator_controller | bool)
+         else hostvars[groups['routers'][0]].ansible_connection | default('ssh') }}
+    ansible_remote_tmp: >-
+      {{ identity_secret_locator_controller_tmp if (identity_secret_locator_controller | bool)
+         else hostvars[groups['routers'][0]].ansible_remote_tmp | default('~/.ansible/tmp') }}
   register: identity_locator_raw
   no_log: true
 

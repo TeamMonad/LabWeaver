@@ -411,6 +411,15 @@ impl ResourceClient {
             return Err(ResourceClientError::Denied);
         }
         if status == StatusCode::CONFLICT || status == StatusCode::PRECONDITION_FAILED {
+            let body = read_bounded_body(response, self.max_response_bytes).await?;
+            if serde_json::from_slice::<contracts::ProblemDetails>(&body)
+                .ok()
+                .is_some_and(|problem| {
+                    problem.diagnostic_code.as_str() == "LW_RESOURCE_TASK_LEASE_EXPIRED"
+                })
+            {
+                return Err(ResourceClientError::LeaseExpired);
+            }
             return Err(ResourceClientError::Conflict);
         }
         if status == StatusCode::PAYLOAD_TOO_LARGE {
@@ -456,6 +465,7 @@ fn validate_create_request(
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
         })
         || request.duration_seconds == 0
+        || !(1..=3_600_000).contains(&request.approval_timeout_milliseconds)
     {
         return Err(ResourceClientError::RequestInvalid);
     }
@@ -622,9 +632,9 @@ fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ResourceCli
 
 use contracts::{
     ActorId, CourseId, ProjectId,
-    resource::{CapacityClaimState, ResourceLeaseState, ResourceRequestState, WorkloadResources},
+    resource::{ResourceRequestState, WorkloadResources},
 };
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// A Resource reservation bound to one durable Evaluation attempt.
@@ -708,7 +718,10 @@ impl TaskResourceLifecycle {
     /// wait below either settles the call or returns an explicit uncertain result; an uncertain
     /// result remains a worker error and therefore cannot complete the Evaluation step or claim
     /// cleanup was confirmed.
-    pub async fn create(&self) -> Result<ResourceRequest, TaskResourceError> {
+    pub async fn create(
+        &self,
+        approval_timeout: Duration,
+    ) -> Result<ResourceRequest, TaskResourceError> {
         let request = InternalCreateTaskResourceRequest {
             task_run_id: self.task_run_id,
             project_id: self.project_id,
@@ -717,6 +730,8 @@ impl TaskResourceLifecycle {
             request_key: self.request_key.clone(),
             resources: self.resources.clone(),
             duration_seconds: self.duration_seconds,
+            approval_timeout_milliseconds: u64::try_from(approval_timeout.as_millis())
+                .map_err(|_| TaskResourceError::RequestInvalid)?,
         };
         let result = timeout(
             Self::CREATE_SETTLE_TIMEOUT,
@@ -752,13 +767,11 @@ impl TaskResourceLifecycle {
     pub async fn claim_after_approval(
         &self,
         poll_interval: Duration,
-        timeout: Duration,
         cancellation: &CancellationToken,
     ) -> Result<contracts::http::TaskResourceStatus, TaskResourceError> {
-        if poll_interval.is_zero() || timeout.is_zero() {
+        if poll_interval.is_zero() {
             return Err(TaskResourceError::RequestInvalid);
         }
-        let deadline = Instant::now() + timeout;
         loop {
             if cancellation.is_cancelled() {
                 self.cancel_or_release_request(
@@ -777,31 +790,35 @@ impl TaskResourceLifecycle {
             };
             match request.state {
                 ResourceRequestState::Reviewing => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        self.cancel_or_release_request(
-                            "evaluation resource approval deadline exceeded",
-                        )
-                        .await?;
-                        return Err(TaskResourceError::ResourceApprovalTimeout);
-                    }
                     tokio::select! {
                         () = cancellation.cancelled() => {
                             self.cancel_or_release_request("evaluation step lease cancelled before resource claim")
                                 .await?;
                             return Err(TaskResourceError::Cancelled);
                         }
-                        () = tokio::time::sleep(poll_interval.min(deadline - now)) => {}
+                        () = tokio::time::sleep(poll_interval) => {}
                     }
                 }
                 ResourceRequestState::Allocating | ResourceRequestState::Active => {
-                    let status = tokio::select! {
-                        result = self.client.claim_task_resource(self.task_run_id) => result?,
-                        () = cancellation.cancelled() => {
-                            self.cancel_or_release_request("evaluation step lease cancelled before resource claim")
+                    if request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+                    {
+                        return Err(TaskResourceError::ResourceLeaseExpired);
+                    }
+                    // Settle the bounded claim POST before cancellation cleanup.
+                    // Dropping it can let a later commit race the release fence.
+                    let status = match self.client.claim_task_resource(self.task_run_id).await {
+                        Ok(status) => status,
+                        Err(ResourceClientError::Conflict) => {
+                            let current = self
+                                .client
+                                .get_task_resource_request(self.task_run_id)
                                 .await?;
-                            return Err(TaskResourceError::Cancelled);
+                            if current.state.is_terminal() {
+                                return Err(task_terminal_error(&current));
+                            }
+                            return Err(ResourceClientError::Conflict.into());
                         }
+                        Err(error) => return Err(error.into()),
                     };
                     if cancellation.is_cancelled() {
                         self.release(&status).await?;
@@ -813,7 +830,7 @@ impl TaskResourceLifecycle {
                 | ResourceRequestState::Expired
                 | ResourceRequestState::Rejected
                 | ResourceRequestState::Cancelled => {
-                    return Err(TaskResourceError::ResourceTerminal);
+                    return Err(task_terminal_error(&request));
                 }
             }
         }
@@ -869,7 +886,21 @@ impl TaskResourceLifecycle {
                     }
                 }
                 ResourceRequestState::Allocating | ResourceRequestState::Active => {
-                    let status = self.client.claim_task_resource(self.task_run_id).await?;
+                    let status = if request.state == ResourceRequestState::Active {
+                        self.load_status().await?
+                    } else {
+                        match self.client.claim_task_resource(self.task_run_id).await {
+                            Ok(status) => status,
+                            Err(ResourceClientError::Conflict) => {
+                                request = self
+                                    .client
+                                    .get_task_resource_request(self.task_run_id)
+                                    .await?;
+                                continue;
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    };
                     let released = self.release(&status).await?;
                     if !released.cleanup_confirmed {
                         return Err(TaskResourceError::ResponseInvalid);
@@ -908,26 +939,33 @@ impl TaskResourceLifecycle {
         {
             return Err(TaskResourceError::IdentityMismatch);
         }
-        // A worker can crash after Resource commits the handoff and before the
-        // Evaluation execution checkpoint is written.  Reconcile that durable
-        // state instead of attempting the one-way Allocating -> Active
-        // transition a second time.
-        if status.execution_namespace.as_deref() == Some(execution_namespace)
-            && status.request.state == ResourceRequestState::Active
-            && status.claim.state == CapacityClaimState::HandedOff
-            && status.lease.state == ResourceLeaseState::Active
-        {
-            return Ok(status.clone());
-        }
+        // Resource revalidates even an Active snapshot: expiry or release may
+        // have won since the read. Its idempotent handoff returns the same
+        // valid reservation after a crash without extending the lease.
         let request = AcknowledgeTaskResourceRequest {
             expected_claim_revision: status.claim_revision,
             expected_lease_revision: status.lease_revision,
             execution_namespace: execution_namespace.to_owned(),
         };
-        self.client
+        match self
+            .client
             .acknowledge_task_resource(self.task_run_id, &request)
             .await
-            .map_err(Into::into)
+        {
+            Ok(status) => Ok(status),
+            Err(ResourceClientError::LeaseExpired) => Err(TaskResourceError::ResourceLeaseExpired),
+            Err(ResourceClientError::Conflict) => {
+                let current = self
+                    .client
+                    .get_task_resource_request(self.task_run_id)
+                    .await?;
+                if current.state.is_terminal() {
+                    return Err(task_terminal_error(&current));
+                }
+                Err(ResourceClientError::Conflict.into())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Loads the authoritative task resource state while resuming an attempt.
@@ -973,6 +1011,14 @@ impl TaskResourceLifecycle {
     }
 }
 
+fn task_terminal_error(request: &ResourceRequest) -> TaskResourceError {
+    match request.diagnostic_code.as_deref() {
+        Some("LW_TASK_RESOURCE_APPROVAL_TIMEOUT") => TaskResourceError::ResourceApprovalTimeout,
+        Some("LW_RESOURCE_APPROVAL_EXPIRED") => TaskResourceError::ResourceApprovalExpired,
+        _ => TaskResourceError::ResourceTerminal,
+    }
+}
+
 fn validate_request(
     current: &ResourceRequest,
     expected: &InternalCreateTaskResourceRequest,
@@ -1009,6 +1055,10 @@ pub enum TaskResourceError {
     ResourceTerminal,
     #[error("LW_TASK_RESOURCE_APPROVAL_TIMEOUT")]
     ResourceApprovalTimeout,
+    #[error("LW_RESOURCE_APPROVAL_EXPIRED")]
+    ResourceApprovalExpired,
+    #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
+    ResourceLeaseExpired,
     #[error("LW_TASK_RESOURCE_CANCELLED")]
     Cancelled,
     #[error("LW_TASK_RESOURCE_CREATE_UNCERTAIN")]
@@ -1042,6 +1092,8 @@ pub enum ResourceClientError {
     Denied,
     #[error("LW_TASK_RESOURCE_HTTP_CONFLICT")]
     Conflict,
+    #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
+    LeaseExpired,
     #[error("LW_TASK_RESOURCE_HTTP_REJECTED")]
     Rejected,
     #[error("LW_TASK_RESOURCE_HTTP_UNAVAILABLE")]

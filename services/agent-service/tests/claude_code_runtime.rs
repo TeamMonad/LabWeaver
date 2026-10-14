@@ -1802,6 +1802,24 @@ async fn postgres_work_configuration_lifecycle_fences_generation_approval_and_ex
         .await?
         .ok_or("approved Work execution was not claimable")?;
     eprintln!("work lifecycle: execution claimed");
+    let progress = store
+        .task_progress(
+            approved.id,
+            None,
+            &contracts::http::PageQuery {
+                page: Some(1),
+                page_size: Some(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        progress.current[0].progress.phase,
+        contracts::execution::TaskAttemptPhase::Executing
+    );
+    assert!(
+        progress.current[0].progress.task_run_id.is_none(),
+        "configuration execution uses the admitted Work environment, not a new sandbox Task"
+    );
     assert!(lease.fresh);
     assert_eq!(lease.request, request);
     assert!(
@@ -2819,6 +2837,43 @@ async fn assert_failed_authoring_retry_dispatch_executes(
         contracts::authoring::AgentAttemptState::Succeeded
     );
     assert_eq!(success_process.commands().len(), 1);
+    let progress_query = contracts::http::PageQuery {
+        page: Some(1),
+        page_size: Some(1),
+    };
+    let progress = store
+        .task_progress(result.run.id, None, &progress_query)
+        .await?;
+    let current = progress
+        .current
+        .iter()
+        .find(|entry| entry.track == AgentTrackKind::Environment)
+        .ok_or("current Environment attempt missing")?;
+    assert_eq!(current.progress.attempt, 2);
+    assert_eq!(
+        current.progress.phase,
+        contracts::execution::TaskAttemptPhase::Succeeded
+    );
+    assert!(current.progress.diagnostic_code.is_none());
+    assert_eq!(progress.history.len(), 1);
+    assert_eq!(progress.history[0].progress.attempt, 1);
+    assert_eq!(
+        progress.history[0].progress.phase,
+        contracts::execution::TaskAttemptPhase::Failed
+    );
+    assert!(progress.history[0].progress.diagnostic_code.is_some());
+    let later = store
+        .task_progress(
+            result.run.id,
+            None,
+            &contracts::http::PageQuery {
+                page: Some(2),
+                page_size: Some(1),
+            },
+        )
+        .await?;
+    assert!(later.history.is_empty());
+    assert_eq!(later.current, progress.current);
     assert!(
         store
             .claim_dispatch(Duration::from_secs(1))

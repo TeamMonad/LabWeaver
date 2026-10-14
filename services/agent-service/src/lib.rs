@@ -25,4 +25,5 @@ pub mod platform_images;
 pub mod run_store;
 pub mod sandbox;
 pub mod sandbox_process;
+pub mod task_progress;
 pub mod work_execution;

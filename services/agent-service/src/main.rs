@@ -422,7 +422,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
             object_store_ca_file: sandbox.object_store_ca_file.clone().map(Into::into),
             worker_environment: worker_environment.clone(),
         },
-        resource_client,
+        resource_client.clone(),
         store.clone(),
         Arc::clone(&objects),
     )?);
@@ -442,6 +442,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let platform_images = PgPlatformImageCatalog::new(store.pool().clone());
     let platform_image_import_jobs = PlatformImageImportJobStore::new(store.pool().clone());
     let state = Arc::new(AgentApiState {
+        resource: Some(resource_client),
         store: store.clone(),
         build_store: build_store.clone(),
         generated_artifacts: generated_artifacts.clone(),

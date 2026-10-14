@@ -13,11 +13,11 @@ use auth::{
 };
 use axum::{
     body::{Body, Bytes, to_bytes},
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{HeaderMap, Method, Uri, header},
     response::Response,
 };
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Certificate, Client, Url};
 use serde_json::Value;
 use sqlx::Row;
@@ -67,10 +67,61 @@ struct ForwardRequest {
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: ForwardBody,
     valid_path: fn(&str) -> bool,
     scope: Option<EvaluationScope>,
     gateway: GatewayAuthority,
+}
+
+enum ForwardBody {
+    Buffered(Bytes),
+    Bundle(Body),
+}
+
+/// Used only by the exact new Bundle route; other requests retain their existing budget.
+pub(super) async fn forward_control_bundle(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (parts, body) = request.into_parts();
+    forward(
+        &state,
+        &state.control_proxy,
+        ForwardRequest {
+            method: parts.method,
+            uri: parts.uri,
+            headers: parts.headers,
+            body: ForwardBody::Bundle(body),
+            valid_path: valid_bundle_path,
+            scope: None,
+            gateway: GatewayAuthority::Control,
+        },
+    )
+    .await
+}
+
+fn bounded_bundle_body(body: Body) -> reqwest::Body {
+    let stream = body.into_data_stream().scan(0_u64, |size, chunk| {
+        let result = chunk
+            .map_err(|_| io::Error::other("LW_AUTH_CONTROL_REQUEST_FAILED"))
+            .and_then(|chunk| {
+                *size = size
+                    .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        io::Error::other("LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE")
+                    })?;
+                if *size
+                    > contracts::platform_configuration::PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES
+                {
+                    return Err(io::Error::other(
+                        "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+                    ));
+                }
+                Ok(chunk)
+            });
+        std::future::ready(Some(result))
+    });
+    reqwest::Body::wrap_stream(stream)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -303,6 +354,8 @@ pub(super) async fn forward_control(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     authorize_evaluation_release_path(&state, &method, &uri, &headers).await?;
+    let body = super::membership_governance::resolve_request(&state, &method, &uri, &headers, body)
+        .await?;
     let body = if method == Method::POST {
         if let Some(project_id) = project_membership_path(uri.path()) {
             resolve_project_membership_request(&state, &headers, project_id, &body).await?
@@ -319,7 +372,7 @@ pub(super) async fn forward_control(
             method,
             uri,
             headers,
-            body,
+            body: ForwardBody::Buffered(body),
             valid_path: valid_control_path,
             scope: None,
             gateway: GatewayAuthority::Control,
@@ -382,6 +435,7 @@ async fn resolve_project_membership_request(
             .parse()
             .map_err(|_| ApiError::internal("LW_AUTH_ACTOR_INVALID"))?,
         role: request.role,
+        object_role: request.object_role,
         expires_at: request.expires_at,
     })
     .map(Bytes::from)
@@ -393,7 +447,7 @@ async fn resolve_project_membership_request(
 /// decides whether the already-authenticated caller may proceed to resolve the
 /// provider username.  This ordering prevents a non-owner from using the
 /// provider directory as an account-existence oracle.
-async fn authorize_project_membership_governance(
+pub(super) async fn authorize_project_membership_governance(
     state: &AppState,
     headers: &HeaderMap,
     project_id: contracts::ProjectId,
@@ -409,7 +463,7 @@ async fn authorize_project_membership_governance(
             method: Method::GET,
             uri,
             headers: headers.clone(),
-            body: Bytes::new(),
+            body: ForwardBody::Buffered(Bytes::new()),
             valid_path: valid_control_path,
             scope: None,
             gateway: GatewayAuthority::Control,
@@ -430,15 +484,23 @@ async fn authorize_project_membership_governance(
     )
     .map_err(|_| ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_INVALID"))?;
     let actor = super::actor_from_session(session)?;
-    if project.id != project_id
-        || project.state == contracts::ProjectState::Archived
-        || (!actor
-            .roles
-            .contains(&contracts::PlatformRole::PlatformAdmin)
-            && project.owner_actor_id != actor.actor_id)
-    {
+    if project.id != project_id || project.state == contracts::ProjectState::Archived {
         return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
     }
+    let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
+        .await
+        .map_err(ApiError::from)?;
+    auth::object_authorization::authorize_project_action(
+        &auth::AuthorizationContext {
+            actor,
+            course_memberships: memberships.course_memberships,
+            project_memberships: memberships.project_memberships,
+            now: OffsetDateTime::now_utc(),
+        },
+        project_id,
+        contracts::object_authorization::ObjectAction::ManageMembers,
+    )
+    .map_err(ApiError::from)?;
     Ok(())
 }
 
@@ -509,6 +571,35 @@ pub(super) async fn forward_environment(
         authorize_environment_project(&state, &headers, query.project_id, "listEnvironments")
             .await?;
     }
+    if let Some((environment_id, action)) =
+        super::object_authorization::environment_route_action(&method, uri.path())?
+    {
+        let instance = read_owned_environment(&state, &headers, environment_id).await?;
+        super::object_authorization::authorize_current_project(
+            &state,
+            &headers,
+            instance.project_id,
+            instance.course_id,
+            action,
+        )
+        .await?;
+    }
+    if method == Method::POST
+        && (uri.path() == "/api/v1/environments"
+            || uri.path().ends_with("/start")
+            || uri.path().ends_with("/restart")
+            || uri.path().ends_with("/reset")
+            || uri.path().ends_with("/retry"))
+    {
+        let status = auth::runtime_authorization::load_runtime_policy(&state.pool)
+            .await
+            .map_err(|_| ApiError::unavailable("LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE"))?;
+        contracts::runtime_authorization::check_policy_use(
+            &status,
+            contracts::runtime_authorization::RuntimePolicyUse::Admission,
+        )
+        .map_err(|_| ApiError::unavailable("LW_RUNTIME_POLICY_NOT_VERIFIED"))?;
+    }
     forward(
         &state,
         &state.environment_proxy,
@@ -516,7 +607,7 @@ pub(super) async fn forward_environment(
             method,
             uri,
             headers,
-            body,
+            body: ForwardBody::Buffered(body),
             valid_path: valid_environment_path,
             scope: None,
             gateway: GatewayAuthority::Environment,
@@ -587,14 +678,20 @@ pub(super) async fn forward_evaluation(
             "projects",
             project,
             "me",
-            "evaluation-results",
+            kind @ ("evaluation-results" | "evaluation-tasks"),
             rest @ ..,
         ] = segments.as_slice()
         {
             let project_id = project
                 .parse()
                 .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-            let operation = if rest.is_empty() {
+            let operation = if *kind == "evaluation-tasks" {
+                if rest.first() == Some(&"submissions") {
+                    "getOwnProjectEvaluationTaskForSubmission"
+                } else {
+                    "getOwnProjectEvaluationTaskProgress"
+                }
+            } else if rest.is_empty() {
                 "listOwnProjectEvaluationResults"
             } else {
                 "getOwnProjectEvaluationResult"
@@ -613,7 +710,7 @@ pub(super) async fn forward_evaluation(
             method,
             uri,
             headers,
-            body,
+            body: ForwardBody::Buffered(body),
             valid_path: valid_evaluation_path,
             scope,
             gateway: GatewayAuthority::Evaluation,
@@ -983,6 +1080,22 @@ async fn resource_target_request(
 ) -> Result<(contracts::resource::ResourceRequest, &'static str), ApiError> {
     let segments = path.split('/').collect::<Vec<_>>();
     match segments.as_slice() {
+        [
+            "",
+            "api",
+            "v1",
+            "resource-requests",
+            request_id,
+            "runtime-authorization",
+        ] if *method == Method::GET => {
+            let id = request_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            Ok((
+                fetch_resource_request(state, session, id).await?,
+                "getResourceRuntimeAuthorization",
+            ))
+        }
         ["", "api", "v1", "resource-requests", request_id] if *method == Method::GET => {
             let id = request_id
                 .parse()
@@ -1129,7 +1242,7 @@ fn authorize_resource_actor(
     now: OffsetDateTime,
 ) -> Result<(), auth::AuthorizationError> {
     let scope = resource_authorization_scope(&actor, scope, policy);
-    auth::authorize(
+    auth::object_authorization::authorize_operation(
         &auth::AuthorizationContext {
             actor,
             course_memberships: memberships.course_memberships,
@@ -1137,7 +1250,7 @@ fn authorize_resource_actor(
             now,
         },
         scope,
-        &policy.allowed_roles.iter().copied().collect(),
+        policy,
     )
     .map(|_| ())
 }
@@ -1244,7 +1357,17 @@ pub(super) async fn forward_runtime(
     }
     let (endpoint_grant_id, runtime_path) = parse_runtime_path(uri.path())?;
     let session = authenticated_session(&state, &headers).await?;
-    let target = authorize_runtime(&state, session.actor_id, endpoint_grant_id).await?;
+    let target = authorize_runtime(
+        &state,
+        session.actor_id,
+        endpoint_grant_id,
+        if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+            contracts::object_authorization::ObjectAction::Browse
+        } else {
+            contracts::object_authorization::ObjectAction::Edit
+        },
+    )
+    .await?;
     let mut upstream = Url::parse(&format!(
         "http://runtime.lw-env-{}.svc.cluster.local:8080/",
         target.environment_id
@@ -1334,15 +1457,16 @@ async fn authorize_runtime(
     state: &AppState,
     actor_id: uuid::Uuid,
     endpoint_grant_id: contracts::EndpointGrantId,
+    action: contracts::object_authorization::ObjectAction,
 ) -> Result<RuntimeTarget, ApiError> {
     let now = OffsetDateTime::now_utc();
     let row = sqlx::query(
-        "SELECT g.project_id,g.course_id,g.environment_id,g.environment_revision,g.contract,\
+        "SELECT g.project_id,g.course_id,g.environment_id,g.environment_revision,g.contract,pm.object_role,\
                 eg.endpoint_id,eg.endpoint_revision,eg.protocol,eg.expires_at,\
                 pm.expires_at AS project_membership_expires_at,cm.expires_at AS course_membership_expires_at \
          FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
-         JOIN access.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
-         LEFT JOIN access.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+         JOIN control.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
+         LEFT JOIN control.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
            AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
          WHERE eg.endpoint_grant_id=$1 AND g.actor_id=$2 AND g.state='active' \
             AND g.not_before<=$3 AND g.expires_at>$3 AND eg.expires_at>$3 \
@@ -1359,6 +1483,12 @@ async fn authorize_runtime(
     .await
     .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
     .ok_or_else(|| ApiError::forbidden("LW_ACCESS_RUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorization::ProjectObjectRole =
+        serde_json::from_value(serde_json::Value::String(row.get("object_role")))
+            .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    if !object_role.actions().contains(&action) {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
     let environment_id = row
         .get::<uuid::Uuid, _>("environment_id")
         .to_string()
@@ -1476,7 +1606,7 @@ async fn forward(
     if !valid_path(path) {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_PATH_REJECTED"));
     }
-    if body.len() > proxy.max_request_bytes {
+    if matches!(&body, ForwardBody::Buffered(bytes) if bytes.len() > proxy.max_request_bytes) {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_REQUEST_TOO_LARGE"));
     }
     let session = authenticated_session(state, &headers).await?;
@@ -1487,6 +1617,16 @@ async fn forward(
             .and_then(|value| value.to_str().ok());
         auth::verify_csrf_token(&session.csrf_token, supplied).map_err(ApiError::from)?;
     }
+
+    let body = match body {
+        ForwardBody::Buffered(bytes) => reqwest::Body::from(bytes),
+        ForwardBody::Bundle(body) => {
+            if method != Method::POST || !valid_bundle_path(path) {
+                return Err(ApiError::bad_request("LW_AUTH_CONTROL_PATH_REJECTED"));
+            }
+            bounded_bundle_body(body)
+        }
+    };
 
     let mut upstream = proxy.base_uri.clone();
     upstream.set_path(path);
@@ -1656,7 +1796,7 @@ async fn authorize_environment_project(
         .map_err(ApiError::from)?;
     let policy = contracts::operation_contract(operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
-    auth::authorize(
+    auth::object_authorization::authorize_operation(
         &auth::AuthorizationContext {
             actor,
             course_memberships: memberships.course_memberships,
@@ -1664,7 +1804,7 @@ async fn authorize_environment_project(
             now: time::OffsetDateTime::now_utc(),
         },
         contracts::AuthorizationScope::Project { project_id },
-        &policy.allowed_roles.iter().copied().collect(),
+        policy,
     )
     .map_err(ApiError::from)?;
     Ok(())
@@ -1849,9 +1989,11 @@ fn rewrite_runtime_location(
 fn valid_control_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     (path.starts_with("/api/v1/courses/")
+        || super::membership_governance::valid_invitation_path(path)
         || path == "/api/v1/projects"
         || path.starts_with("/api/v1/projects/")
-        || valid_admin_image_path(path))
+        || valid_admin_image_path(path)
+        || valid_platform_configuration_path(path))
         && !path.contains("//")
         && !path.contains('\\')
         && !lowercase.contains("%2f")
@@ -1859,6 +2001,70 @@ fn valid_control_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|segment| segment != "." && segment != "..")
+}
+
+fn valid_platform_configuration_path(path: &str) -> bool {
+    if !safe_path(path) {
+        return false;
+    }
+    if valid_bundle_path(path) {
+        return true;
+    }
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["", "api", "v1", "admin", "platform-configuration"]
+        | [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "applies",
+        ] => true,
+        [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "versions",
+            revision,
+        ] => revision
+            .parse::<u64>()
+            .ok()
+            .and_then(|v| contracts::Revision::new(v).ok())
+            .is_some(),
+        [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "applies",
+            id,
+        ] => id.parse::<contracts::OperationId>().is_ok(),
+        _ => false,
+    }
+}
+
+fn valid_bundle_path(path: &str) -> bool {
+    if !safe_path(path) {
+        return false;
+    }
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "platform-configuration",
+            "versions",
+            revision,
+            "bundle",
+        ] => revision
+            .parse::<u64>()
+            .is_ok_and(|revision| (1..=i64::MAX.unsigned_abs()).contains(&revision)),
+        _ => false,
+    }
 }
 
 fn valid_admin_image_path(path: &str) -> bool {
@@ -1911,7 +2117,18 @@ fn valid_evaluation_path(path: &str) -> bool {
                     "projects",
                     _,
                     "me",
-                    "evaluation-results",
+                    "evaluation-tasks",
+                    "submissions",
+                    _
+                ]
+                | [
+                    "",
+                    "api",
+                    "v1",
+                    "projects",
+                    _,
+                    "me",
+                    "evaluation-tasks" | "evaluation-results",
                     _
                 ]
         ))
@@ -1940,7 +2157,7 @@ fn valid_resource_path(path: &str) -> bool {
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-requests", _, action]
-            if matches!(*action, "approve" | "resize-and-approve" | "cancel" | "reject" | "retry")
+            if matches!(*action, "approve" | "resize-and-approve" | "cancel" | "reject" | "retry" | "runtime-authorization")
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-leases", _, action]
@@ -1974,6 +2191,54 @@ pub(super) enum ControlGatewayError {
     Config,
     #[error("LW_AUTH_CONFIG_BINDING_MISSING")]
     Certificate,
+}
+
+/// Reads the actual Environment owner projection before a project action check.
+/// User input cannot choose the project. No original mutation is forwarded until this check succeeds.
+async fn read_owned_environment(
+    state: &AppState,
+    headers: &HeaderMap,
+    environment_id: contracts::EnvironmentId,
+) -> Result<contracts::environment::EnvironmentInstance, ApiError> {
+    let uri = Uri::from_str(&format!("/api/v1/environments/{environment_id}"))
+        .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+    let response = forward(
+        state,
+        &state.environment_proxy,
+        ForwardRequest {
+            method: Method::GET,
+            uri,
+            headers: headers.clone(),
+            body: ForwardBody::Buffered(Bytes::new()),
+            valid_path: valid_environment_path,
+            scope: None,
+            gateway: GatewayAuthority::Environment,
+        },
+    )
+    .await?;
+    if response.status().is_server_error() {
+        return Err(ApiError::unavailable("LW_AUTH_ENVIRONMENT_UNAVAILABLE"));
+    }
+    if !response.status().is_success() {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
+    let bytes = to_bytes(
+        response.into_body(),
+        state.environment_proxy.max_response_bytes,
+    )
+    .await
+    .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    let instance =
+        contracts::parse_strict_json::<contracts::environment::EnvironmentInstance>(&bytes)
+            .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    instance
+        .validate()
+        .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    let actor = authenticated_session(state, headers).await?;
+    if instance.id != environment_id || instance.owner_id.as_uuid() != actor.actor_id {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
+    Ok(instance)
 }
 
 #[cfg(test)]
@@ -2020,6 +2285,7 @@ mod tests {
         role: PlatformRole,
     ) -> ProjectMembership {
         ProjectMembership {
+            object_role: contracts::object_authorization::ProjectObjectRole::Editor,
             course_id: None,
             project_id,
             actor_id,
@@ -2053,6 +2319,48 @@ mod tests {
             policy,
             now,
         )
+    }
+
+    #[test]
+    fn platform_configuration_proxy_bounds_ids_and_never_exposes_executor_routes() {
+        let root = "/api/v1/admin/platform-configuration";
+        assert!(valid_control_path(root));
+        assert!(valid_control_path(&format!("{root}/applies")));
+        assert!(valid_control_path(&format!("{root}/versions/1")));
+        assert!(valid_control_path(&format!("{root}/versions/1/bundle")));
+        assert!(valid_control_path(&format!(
+            "{root}/applies/{}",
+            contracts::OperationId::new()
+        )));
+        for invalid in [
+            format!("{root}/versions/0"),
+            format!("{root}/versions/nope"),
+            format!("{root}/versions/0/bundle"),
+            format!("{root}/versions/1/bundle/extra"),
+            format!("{root}/versions/1/bundle%2fsecret"),
+            format!("{root}/applies/not-an-id"),
+            format!("{root}/applies/../secret"),
+            format!("{root}/applies%2fsecret"),
+            "/internal/v1/platform-configuration/applies".to_owned(),
+        ] {
+            assert!(!valid_control_path(&invalid));
+        }
+    }
+
+    #[tokio::test]
+    async fn bundle_proxy_stream_preserves_bytes_and_enforces_its_upload_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::body::{Body, Bytes, to_bytes};
+        use std::io;
+        let original = Bytes::from_static(b"synthetic-ciphertext-bytes");
+        let body = super::bounded_bundle_body(Body::from(original.clone()));
+        assert_eq!(to_bytes(Body::new(body), 1024).await?, original);
+        let stream = futures_util::stream::iter(
+            (0..71).map(|_| Ok::<_, io::Error>(Bytes::from(vec![0_u8; 1024 * 1024]))),
+        );
+        let body = super::bounded_bundle_body(Body::from_stream(stream));
+        assert!(to_bytes(Body::new(body), 80 * 1024 * 1024).await.is_err());
+        Ok(())
     }
 
     #[test]
@@ -2171,6 +2479,18 @@ mod tests {
 
     #[test]
     fn evaluation_paths_are_exact_and_injection_safe() {
+        assert!(valid_evaluation_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/me/evaluation-tasks/01900000-0000-7000-8000-000000000003"
+        ));
+        assert!(!valid_evaluation_path(
+            "/api/v1/projects/p/me/evaluation-tasks"
+        ));
+        assert!(!valid_evaluation_path(
+            "/api/v1/projects/p/me/evaluation-tasks/r/cancel"
+        ));
+        assert!(!valid_evaluation_path(
+            "/api/v1/projects/p/me/evaluation-tasks/.."
+        ));
         assert!(valid_evaluation_path(
             "/api/v1/environments/01900000-0000-7000-8000-000000000001/freeze"
         ));

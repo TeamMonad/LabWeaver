@@ -168,7 +168,7 @@
         },
         {
           "const": "platform_admin",
-          "description": "Platform operator; course scope is still required for course data.",
+          "description": "Global operator when an operation explicitly permits administrator access.",
           "type": "string"
         }
       ]

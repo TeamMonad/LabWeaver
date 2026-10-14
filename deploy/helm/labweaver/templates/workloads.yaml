@@ -1,6 +1,16 @@
 {{- $root := . -}}
 {{- range $name, $configuration := .Values.workloads }}
 {{- if $configuration.enabled }}
+{{- $input := $configuration }}
+{{- if $root.Values.workloadInputs }}
+{{- if not (hasKey $root.Values.workloadInputs $name) }}
+{{- fail (printf "workloadInputs.%s is required" $name) }}
+{{- end }}
+{{- $input = index $root.Values.workloadInputs $name }}
+{{- if or (not (hasKey $input "env")) (not (hasKey $input "secretEnv")) }}
+{{- fail (printf "workloadInputs.%s requires env and secretEnv" $name) }}
+{{- end }}
+{{- end }}
 {{- $imageKey := required (printf "workloads.%s.imageKey is required" $name) $configuration.imageKey }}
 {{- $image := index $root.Values.images $imageKey }}
 ---
@@ -64,7 +74,7 @@ spec:
           args:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or $configuration.env $configuration.secretEnv (eq $name "kubevirt-executor") }}
+          {{- if or $input.env $input.secretEnv (eq $name "kubevirt-executor") }}
           env:
             {{- if eq $name "kubevirt-executor" }}
             - name: LABWEAVER_EXECUTOR_POD_NAME
@@ -76,11 +86,11 @@ spec:
             - name: LABWEAVER_EXECUTOR_CONTAINER_NAME
               value: {{ $name | quote }}
             {{- end }}
-            {{- range $key, $value := $configuration.env }}
+            {{- range $key, $value := $input.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            {{- range $key, $reference := $configuration.secretEnv }}
+            {{- range $key, $reference := $input.secretEnv }}
             - name: {{ $key }}
               valueFrom:
                 secretKeyRef:

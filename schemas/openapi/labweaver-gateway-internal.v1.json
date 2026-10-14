@@ -19,6 +19,9 @@
       "AgentRunHistoryPage": {
         "$ref": "../contracts/v1/agent-run-history-page.schema.json"
       },
+      "AgentRunTaskProgress": {
+        "$ref": "../contracts/v1/agent-run-task-progress.schema.json"
+      },
       "AgentWorkExecutionIntentMetadata": {
         "$ref": "../contracts/v1/http/agent-work-execution-intent-metadata.schema.json"
       },
@@ -69,6 +72,9 @@
       },
       "EvaluationRun": {
         "$ref": "../contracts/v1/evaluation-run.schema.json"
+      },
+      "EvaluationRunTaskProgress": {
+        "$ref": "../contracts/v1/evaluation-run-task-progress.schema.json"
       },
       "GeneratedArtifactRecord": {
         "$ref": "../contracts/v1/http/generated-artifact-record.schema.json"
@@ -244,6 +250,9 @@
       },
       "StudentEvaluationResult": {
         "$ref": "../contracts/v1/student-evaluation-result.schema.json"
+      },
+      "TaskAttemptProgress": {
+        "$ref": "../contracts/v1/task-attempt-progress.schema.json"
       },
       "WorkConfigurationAdmissionBinding": {
         "$ref": "../contracts/v1/http/work-configuration-admission-binding.schema.json"
@@ -465,6 +474,121 @@
           }
         ],
         "summary": "Resolve the authoritative run and retained candidate checkpoints"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/task-progress": {
+      "get": {
+        "description": "Permission: agent.control.invoke. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getInternalAgentTaskProgress",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/agent-run-task-progress.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.control.invoke"
+            ]
+          }
+        ],
+        "summary": "getInternalAgentTaskProgress",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_TASK_PROGRESS_PAGE_INVALID",
+          "LW_TASK_PROGRESS_CHANGED",
+          "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+          "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "agent.control.invoke",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
       }
     },
     "/internal/v1/agent-runs/{runId}/tracks/{track}/retry": {
@@ -2638,6 +2762,137 @@
           }
         ],
         "summary": "Persist cancellation for one Agent LLM review"
+      }
+    },
+    "/internal/v1/platform-configuration/applies/{applyId}": {
+      "put": {
+        "description": "Permission: control.platform_configuration.apply. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "reportPlatformConfigurationApply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "applyId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/report-platform-configuration-apply-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.platform_configuration.apply"
+            ]
+          }
+        ],
+        "summary": "reportPlatformConfigurationApply",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "control.platform_configuration.apply",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
       }
     },
     "/internal/v1/platform-images/import-jobs": {

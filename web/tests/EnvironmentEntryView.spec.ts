@@ -23,12 +23,14 @@ import {
   restartEnvironment,
   freezeSubmission,
   getFrozenSubmission,
+  getProjectAvailableActions,
 } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
+    getProjectAvailableActions: vi.fn(),
     listEnvironmentTemplateReleases: vi.fn(),
     listProjects: vi.fn(),
     listProjectResourceLeases: vi.fn(),
@@ -206,6 +208,16 @@ describe('EnvironmentEntryView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.resetAllMocks()
+    vi.mocked(getProjectAvailableActions).mockResolvedValue({
+      data: {
+        projectId: 'project-1',
+        actorId: 'actor-1',
+        membershipRevision: 1,
+        validUntil: '2099-01-01T00:00:00.000Z',
+        actions: ['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs'],
+      },
+      error: undefined,
+    } as never)
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject], error: undefined as never })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
@@ -1015,6 +1027,7 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(getEnvironment).mockResolvedValue({
       data: {
         id: 'env-1',
+        projectId: 'project-1',
         courseId: 'demo-course-1',
         class: 'experiment',
         displayLabel: 'Demo environment',
@@ -1065,7 +1078,7 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
 
-    await vi.waitFor(() => expect(wrapper.findAll('button').find((b) => b.text() === '启动')).toBeDefined())
+    await vi.waitFor(() => expect(wrapper.findAll('button').find((b) => b.text() === '启动' && !b.attributes('disabled'))).toBeDefined())
     const startButton = wrapper.findAll('button').find((b) => b.text() === '启动')
     await startButton!.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('ENVIRONMENT_LIFECYCLE_FAILED'))

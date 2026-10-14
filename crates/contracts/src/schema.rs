@@ -22,6 +22,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         };
     }
     document!(
+        "schemas/contracts/v1/runtime-authorization-binding.schema.json",
+        crate::runtime_authorization::RuntimeAuthorizationBinding
+    );
+    document!(
         "schemas/contracts/v1/problem-package.schema.json",
         crate::authoring::ProblemPackage
     );
@@ -34,8 +38,72 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProjectLlmPolicyOptions
     );
     document!(
+        "schemas/contracts/v1/available-object-actions.schema.json",
+        crate::object_authorization::AvailableObjectActions
+    );
+    document!(
+        "schemas/contracts/v1/membership-invitation.schema.json",
+        crate::membership_governance::MembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/membership-invitation-page.schema.json",
+        crate::membership_governance::MembershipInvitationPage
+    );
+    document!(
+        "schemas/contracts/v1/course-membership-page.schema.json",
+        crate::membership_governance::CourseMembershipPage
+    );
+    document!(
+        "schemas/contracts/v1/http/create-project-membership-invitation.schema.json",
+        crate::membership_governance::CreateProjectMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/create-course-membership-invitation.schema.json",
+        crate::membership_governance::CreateCourseMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/accept-membership-invitation.schema.json",
+        crate::membership_governance::AcceptMembershipInvitation
+    );
+    document!(
         "schemas/contracts/v1/project.schema.json",
         crate::project::Project
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-desired.schema.json",
+        crate::platform_configuration::PlatformConfigurationDesired
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-status.schema.json",
+        crate::platform_configuration::PlatformConfigurationStatus
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-version.schema.json",
+        crate::platform_configuration::PlatformConfigurationVersion
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-apply.schema.json",
+        crate::platform_configuration::PlatformConfigurationApply
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-bundle.schema.json",
+        crate::platform_configuration::PlatformConfigurationBundle
+    );
+    document!(
+        "schemas/contracts/v1/http/register-platform-configuration-bundle-request.schema.json",
+        crate::platform_configuration::RegisterPlatformConfigurationBundleRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/update-platform-configuration-request.schema.json",
+        crate::platform_configuration::UpdatePlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/apply-platform-configuration-request.schema.json",
+        crate::platform_configuration::ApplyPlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/report-platform-configuration-apply-request.schema.json",
+        crate::platform_configuration::ReportPlatformConfigurationApplyRequest
     );
     document!(
         "schemas/contracts/v1/agent-run.schema.json",
@@ -44,6 +112,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/agent-run-history-page.schema.json",
         crate::authoring::AgentRunHistoryPage
+    );
+    document!(
+        "schemas/contracts/v1/agent-run-task-progress.schema.json",
+        crate::authoring::AgentRunTaskProgress
+    );
+    document!(
+        "schemas/contracts/v1/task-attempt-progress.schema.json",
+        crate::execution::TaskAttemptProgress
     );
     document!(
         "schemas/contracts/v1/environment-candidate.schema.json",
@@ -86,6 +162,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/evaluation-run.schema.json",
         crate::evaluation::EvaluationRun
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-run-task-progress.schema.json",
+        crate::evaluation::EvaluationRunTaskProgress
     );
     document!(
         "schemas/contracts/v1/student-evaluation-result.schema.json",
@@ -1038,6 +1118,22 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let mut parameters = path_parameters(operation.path);
         if matches!(
             operation.operation_id,
+            "getPlatformConfigurationVersion"
+                | "getPlatformConfigurationBundle"
+                | "registerPlatformConfigurationBundle"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "revision" {
+                    parameter["schema"] = json!({"type":"integer","minimum":1,"maximum":9_223_372_036_854_775_807_u64});
+                }
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            parameters.push(json!({"name":"expectedRevision","in":"query","required":true,"schema":{"type":"integer","minimum":0,"maximum":9_223_372_036_854_775_807_u64}}));
+            parameters.push(json!({"name":"configurationSha256","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9a-f]{64}$"}}));
+        }
+        if matches!(
+            operation.operation_id,
             "getProjectCandidateBuild" | "cancelProjectCandidateBuild"
         ) {
             for parameter in &mut parameters {
@@ -1078,7 +1174,16 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if matches!(
             operation.operation_id,
-            "listProjectAgentRuns" | "listProjectResourceUsage"
+            "listProjectAgentRuns"
+                | "listProjectResourceUsage"
+                | "listCourseMemberships"
+                | "listProjectMembershipInvitations"
+                | "listCourseMembershipInvitations"
+                | "listIncomingMembershipInvitations"
+                | "getProjectAgentTaskProgress"
+                | "getOwnProjectEvaluationTaskProgress"
+                | "getOwnProjectEvaluationTaskForSubmission"
+                | "getInternalAgentTaskProgress"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -1174,6 +1279,35 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ,"x-labweaver-problem-content-type":"application/problem+json"
             ,"x-labweaver-errors":["LW_CONTRACT_DOCUMENT_INVALID","LW_ACCESS_DENIED","LW_IDEMPOTENCY_CONFLICT","LW_REVISION_CONFLICT"]
         });
+        if matches!(
+            operation.operation_id,
+            "getPlatformConfiguration"
+                | "updatePlatformConfiguration"
+                | "getPlatformConfigurationVersion"
+                | "applyPlatformConfiguration"
+                | "getPlatformConfigurationApply"
+                | "reportPlatformConfigurationApply"
+                | "registerPlatformConfigurationBundle"
+                | "getPlatformConfigurationBundle"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_PLATFORM_CONFIGURATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+                "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+                "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+                "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+                "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+                "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_OPERATION_IN_PROGRESS"
+            ]);
+        }
         if operation.operation_id == "resolveEnvironmentOwner" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1196,6 +1330,26 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
                 "LW_ACCESS_DENIED",
                 "LW_AGENT_PERSISTENCE_FAILED",
+            ]);
+        }
+        if operation.scope == OperationScopeKind::Project
+            && let Some(action) =
+                crate::object_authorization::project_operation_action(operation.operation_id)
+        {
+            operation_json["x-labweaver-object-action"] = json!(action);
+        }
+        if matches!(
+            operation.operation_id,
+            "getProjectAgentTaskProgress"
+                | "getInternalAgentTaskProgress"
+                | "getOwnProjectEvaluationTaskProgress"
+                | "getOwnProjectEvaluationTaskForSubmission"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_TASK_PROGRESS_PAGE_INVALID",
+                "LW_TASK_PROGRESS_CHANGED",
+                "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+                "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
             ]);
         }
         if operation.operation_id == "addProjectMembership" {
@@ -1251,6 +1405,18 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if let Some(schema) = request_schema(operation.operation_id) {
             operation_json["requestBody"] =
                 json!({"required":true,"content":{"application/json":{"schema":schema}}});
+            if operation.operation_id == "updatePlatformConfiguration" {
+                operation_json["requestBody"]["content"]["application/yaml"] =
+                    json!({"schema":request_schema(operation.operation_id)});
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            operation_json["requestBody"] = json!({"required":true,"content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}});
+            operation_json["responses"]["413"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["responses"]["415"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["description"] = json!(
+                "Register received ciphertext and an administrator-declared binding to the current desired settings. Control computes the ciphertext digest but does not decrypt or approve deployment. Maximum upload: 73400320 bytes."
+            );
         }
         let entry = paths
             .entry(operation.path.to_owned())
@@ -1287,6 +1453,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"OrganizationUser": contract_ref("organization-user")
                  ,"OrganizationUserPage": contract_ref("organization-user-page")
                  ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
+                 ,"AgentRunTaskProgress": contract_ref("agent-run-task-progress")
+                 ,"TaskAttemptProgress": contract_ref("task-attempt-progress")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
                 ,"LogoutBrowserSessionResponse": contract_ref("logout-browser-session-response")
                 ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
@@ -1316,6 +1484,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"AgentWorkExecutionIntentQuery": contract_ref("http/agent-work-execution-intent-query")
                 ,"EvaluationRelease": contract_ref("evaluation-release")
                 ,"EvaluationRun": contract_ref("evaluation-run")
+                ,"EvaluationRunTaskProgress": contract_ref("evaluation-run-task-progress")
                 ,"StudentEvaluationResult": contract_ref("student-evaluation-result")
                 ,"InternalPublishEvaluationReleaseRequest": contract_ref("http/internal-publish-evaluation-release-request")
                 ,"InternalWithdrawEvaluationReleaseRequest": contract_ref("http/internal-withdraw-evaluation-release-request")
@@ -1600,10 +1769,18 @@ fn contract_ref(name: &str) -> Value {
 
 fn request_schema(operation_id: &str) -> Option<Value> {
     let name = match operation_id {
+        "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
+        "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
+        "acceptMembershipInvitation" => "http/accept-membership-invitation",
+        "revokeMembershipInvitation" | "removeCourseMembership" | "removeProjectMembership" => {
+            "http/remove-project-membership-request"
+        }
+        "updatePlatformConfiguration" => "http/update-platform-configuration-request",
+        "applyPlatformConfiguration" => "http/apply-platform-configuration-request",
+        "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
         "createProject" => "http/create-project-request",
         "updateProject" => "http/update-project-request",
         "addProjectMembership" => "http/add-project-membership-request",
-        "removeProjectMembership" => "http/remove-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
         "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
@@ -1673,6 +1850,26 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "getResourceRuntimeAuthorization" => contract_ref("runtime-authorization-binding"),
+        "createProjectMembershipInvitation"
+        | "createCourseMembershipInvitation"
+        | "getMembershipInvitation"
+        | "acceptMembershipInvitation"
+        | "revokeMembershipInvitation" => contract_ref("membership-invitation"),
+        "listIncomingMembershipInvitations"
+        | "listProjectMembershipInvitations"
+        | "listCourseMembershipInvitations" => contract_ref("membership-invitation-page"),
+        "listCourseMemberships" => contract_ref("course-membership-page"),
+        "removeCourseMembership" => contract_ref("course-membership"),
+        "getProjectAvailableActions" => contract_ref("available-object-actions"),
+        "getPlatformConfiguration"
+        | "updatePlatformConfiguration"
+        | "applyPlatformConfiguration"
+        | "registerPlatformConfigurationBundle"
+        | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
+        "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
+        "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
+        "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")
         }
@@ -1686,6 +1883,12 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }),
         "listOrganizationUsers" => contract_ref("organization-user-page"),
         "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
+        "getProjectAgentTaskProgress" | "getInternalAgentTaskProgress" => {
+            contract_ref("agent-run-task-progress")
+        }
+        "getOwnProjectEvaluationTaskProgress" | "getOwnProjectEvaluationTaskForSubmission" => {
+            contract_ref("evaluation-run-task-progress")
+        }
         "addProjectMembership" | "removeProjectMembership" => contract_ref("project-membership"),
         "createProjectProblemPackageUpload" => contract_ref("http/problem-package-upload-session"),
         "getProjectProblemPackage" | "completeProjectProblemPackageUpload" => {

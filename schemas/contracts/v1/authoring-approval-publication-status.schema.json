@@ -75,6 +75,17 @@
         },
         "revision": {
           "$ref": "#/$defs/Revision"
+        },
+        "teacherScope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseTeacherApprovalScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Course teacher authority captured in the same Control approval transaction."
         }
       },
       "required": [
@@ -116,6 +127,27 @@
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
+    },
+    "CourseTeacherApprovalScope": {
+      "additionalProperties": false,
+      "description": "Captured by Control while the verified teacher and current course instructor are checked.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "membershipRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "actorId",
+        "courseId",
+        "membershipRevision"
+      ],
+      "type": "object"
     },
     "DiagnosticCode": {
       "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",

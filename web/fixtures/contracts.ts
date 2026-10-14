@@ -241,6 +241,7 @@ function environmentInstance(id: string): EnvironmentInstanceSchema {
     providerBinding: 'fixture-kubernetes',
     capacityBinding: 'fixture-capacity-claim',
     leaseId: 'lease-env-physics',
+    approvedResources: { ...resource },
     generation: 1,
     observedGeneration: 1,
     revision: 12,
@@ -697,3 +698,79 @@ export async function listResourceRates(_options?: FixtureOptions): Promise<Fixt
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
 export async function createResourceRate() { return unsupportedResponse('创建资源费率') }
 export async function endResourceRate() { return unsupportedResponse('结束资源费率') }
+
+/** #199 object actions: restricted preview read. Only browse; no fabricated write/permission facts. */
+export async function getProjectAvailableActions(options?: FixtureOptions): Promise<FixtureResult<{
+  actions: Array<'browse' | 'edit' | 'start' | 'stop' | 'configure_agent' | 'grant_access' | 'manage_members' | 'view_costs' | 'request_runtime_permissions' | 'approve_runtime_permissions' | 'manage_runtime_policy'>
+  actorId: string
+  membershipRevision: number
+  projectId: string
+  validUntil: string
+}>> {
+  const projectId = options?.path?.projectId
+  if (!projectId) return notFoundResponse('读取项目可用动作', projectId)
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取项目可用动作', projectId)
+  return fixtureResponse({
+    projectId,
+    actorId: 'fixture-actor',
+    membershipRevision: 1,
+    validUntil: later,
+    actions: ['browse'],
+  })
+}
+
+export async function appendProjectEnvironmentCandidateDecision(_options?: FixtureOptions) { return unsupportedResponse('追加环境候选决策') }
+
+export async function approveProjectWorkConfigurationRun(_options?: FixtureOptions) { return unsupportedResponse('批准工作配置运行') }
+
+export async function cancelProjectAgentRun(_options?: FixtureOptions) { return unsupportedResponse('取消 Agent 运行') }
+
+export async function cancelProjectCandidateBuild(_options?: FixtureOptions) { return unsupportedResponse('取消候选构建') }
+
+export async function cancelProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('取消题包上传') }
+
+export async function completeProjectAuthoringApproval(_options?: FixtureOptions) { return unsupportedResponse('完成命题审批') }
+
+export async function completeProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('完成题包上传') }
+
+export async function createEnvironmentTemplateRelease(_options?: FixtureOptions) { return unsupportedResponse('创建环境模板发布') }
+
+export async function createProjectAgentRun(_options?: FixtureOptions) { return unsupportedResponse('创建 Agent 运行') }
+
+export async function createProjectLlmPolicy(_options?: FixtureOptions) { return unsupportedResponse('创建项目 LLM 策略') }
+
+export async function createProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('创建题包上传') }
+
+export async function createProjectWorkConfigurationRun(_options?: FixtureOptions) { return unsupportedResponse('创建工作配置运行') }
+
+export async function getActiveProjectLlmPolicy(_options?: FixtureOptions) { return unsupportedResponse('读取生效项目 LLM 策略') }
+
+export async function getEnvironmentTemplateRelease(_options?: FixtureOptions) { return unsupportedResponse('读取环境模板发布') }
+
+export async function getOwnProjectEvaluationResult(_options?: FixtureOptions) { return unsupportedResponse('读取本人评测结果') }
+
+export async function getProjectAgentRun(_options?: FixtureOptions) { return unsupportedResponse('读取 Agent 运行') }
+
+export async function getProjectAuthoringApproval(_options?: FixtureOptions) { return unsupportedResponse('读取命题审批') }
+
+export async function getProjectCandidateBuild(_options?: FixtureOptions) { return unsupportedResponse('读取候选构建') }
+
+export async function getProjectEnvironmentCandidate(_options?: FixtureOptions) { return unsupportedResponse('读取环境候选') }
+
+export async function getProjectEvaluationCandidate(_options?: FixtureOptions) { return unsupportedResponse('读取评测候选') }
+
+export async function getProjectLlmPolicyOptions(_options?: FixtureOptions) { return unsupportedResponse('读取项目 LLM 策略选项') }
+
+export async function getProjectProblemPackage(_options?: FixtureOptions) { return unsupportedResponse('读取题包') }
+
+export async function getProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('读取题包上传会话') }
+
+export async function getProjectWorkConfigurationPlan(_options?: FixtureOptions) { return unsupportedResponse('读取工作配置计划') }
+
+export async function listOwnProjectEvaluationResults(_options?: FixtureOptions) { return unsupportedResponse('列出本人评测结果') }
+
+export async function listProjectResourceUsage(_options?: FixtureOptions) { return unsupportedResponse('列出项目资源用量') }
+
+export async function retryProjectAgentRunTrack(_options?: FixtureOptions) { return unsupportedResponse('重试 Agent 运行轨道') }
+
+export async function withdrawEnvironmentTemplateRelease(_options?: FixtureOptions) { return unsupportedResponse('撤回环境模板发布') }
