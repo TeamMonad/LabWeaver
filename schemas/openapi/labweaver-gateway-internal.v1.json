@@ -52,6 +52,9 @@
       "ContainerWorkExecutionRequest": {
         "$ref": "../contracts/v1/http/container-work-execution-request.schema.json"
       },
+      "CreateFrozenModelInputAuthorizationRequest": {
+        "$ref": "../contracts/v1/http/create-frozen-model-input-authorization-request.schema.json"
+      },
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
@@ -989,6 +992,80 @@
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/authoring/frozen-model-input-authorizations": {
+      "post": {
+        "operationId": "createFrozenModelInputAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateFrozenModelInputAuthorizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInputAuthorizationResolution"
+                }
+              }
+            },
+            "description": "Current authorization permits this exact frozen input"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.authoring.read"
+            ]
+          }
+        ]
+      }
+    },
+    "/internal/v1/authoring/model-input-authorizations/resolve": {
+      "post": {
+        "operationId": "resolveFrozenModelInputAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelInputAuthorizationResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInputAuthorizationResolution"
+                }
+              }
+            },
+            "description": "Current authorization permits this exact frozen input"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.authoring.read"
+            ]
+          }
+        ]
       }
     },
     "/internal/v1/build-cost-admissions": {

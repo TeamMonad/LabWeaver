@@ -2468,16 +2468,23 @@ async fn postgres_llm_review_completion_preserves_claim_start_and_cancellation()
     assert_eq!(cancelling.state, AgentLlmReviewState::Cancelling);
     assert_eq!(cancelling.started_at, Some(cancellation_started_at));
     assert_eq!(cancelling.finished_at, None);
+    let observed_usage = contracts::authoring::LlmUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        requests: 1,
+        cost_microusd: 1000,
+    };
     let cancelled = store
         .complete(
             &cancellation_lease,
             None,
-            None,
+            Some(observed_usage),
             Some("ignored-after-cancellation"),
             cancellation_finished_at,
         )
         .await?;
     assert_eq!(cancelled.state, AgentLlmReviewState::Cancelled);
+    assert_eq!(cancelled.usage, Some(observed_usage));
     assert_eq!(cancelled.started_at, Some(cancellation_started_at));
     assert_eq!(cancelled.finished_at, Some(cancellation_finished_at));
 
@@ -2497,20 +2504,88 @@ fn review_request(
     policy: &ProjectLlmEgressPolicy,
     deadline_at: UtcTimestamp,
 ) -> InternalAgentLlmReviewRequest {
+    let project_id = policy.project_id;
+    let course_id = policy.course_id;
     let submission = "submission";
     let rubric = "rubric";
-    InternalAgentLlmReviewRequest {
-        task_run_id: TaskRunId::new(),
-        project_id: policy.project_id,
-        course_id: policy.course_id,
-        frozen_submission_id: FrozenSubmissionId::new(),
-        submission_artifact: ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "minio-primary".to_owned(),
-            object_version: "version-1".to_owned(),
-            size_bytes: submission.len() as u64,
-            media_type: "text/plain".to_owned(),
+    let task_run_id = TaskRunId::new();
+    let frozen_submission_id = FrozenSubmissionId::new();
+    let submission_artifact = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "minio-primary".to_owned(),
+        object_version: "version-1".to_owned(),
+        size_bytes: submission.len() as u64,
+        media_type: "text/plain".to_owned(),
+    };
+    let rubric_artifact = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "minio-primary".to_owned(),
+        object_version: "version-1".to_owned(),
+        size_bytes: rubric.len() as u64,
+        media_type: "text/plain".to_owned(),
+    };
+    let source = contracts::http::FrozenModelInputSource {
+        task_run_id,
+        frozen_submission_id,
+        manifest_revision: contracts::Revision::new(1).expect("revision"),
+        manifest_sha256: "a".repeat(64),
+        archive: submission_artifact.clone(),
+        content_sha256: "b".repeat(64),
+        evaluation_release_id: contracts::EvaluationReleaseId::new(),
+        evaluation_release_revision: contracts::Revision::new(1).expect("revision"),
+        environment: contracts::submission::FrozenEnvironmentIdentity {
+            environment_id: contracts::EnvironmentId::new(),
+            environment_revision: contracts::Revision::new(1).expect("revision"),
+            release_id: contracts::ReleaseId::new(),
+            release_version: 1,
+            runtime_kind: contracts::authoring::RuntimeKind::Container,
+            build_request_id: None,
         },
+        rubric: contracts::http::ModelInputRubricIdentity {
+            package_id: contracts::ProblemPackageId::new(),
+            package_revision: contracts::Revision::new(1).expect("revision"),
+            path: "rubric.md".to_owned(),
+            artifact: rubric_artifact.clone(),
+            sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
+        },
+        rubric_permission: Some(contracts::http::ModelInputRubricPermissionRef {
+            authoring_project_id: project_id,
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            approved_by: contracts::ActorId::new(),
+            approver_course_membership_revision: contracts::Revision::new(1).expect("revision"),
+        }),
+    };
+    let selection_sha256 = contracts::http::frozen_model_input_selection_sha256(
+        &source,
+        &[(
+            "submission.md".to_owned(),
+            Sha256Digest::of_bytes(submission.as_bytes()).to_string(),
+        )],
+    )
+    .expect("selection");
+    InternalAgentLlmReviewRequest {
+        input_authorization: contracts::http::ModelInputAuthorizationBinding {
+            session_sha256: "c".repeat(64),
+            actor_id: contracts::ActorId::new(),
+            project_id,
+            course_id,
+            operation_id: "freezeSubmission".to_owned(),
+            valid_until: deadline_at,
+            source: contracts::http::ModelInputAuthorizationSource::FrozenSubmission(Box::new(
+                source,
+            )),
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)
+                .expect("policy hash"),
+            selection_sha256,
+        },
+        task_run_id,
+        project_id,
+        course_id,
+        frozen_submission_id,
+        submission_artifact,
         policy: policy.clone(),
         files: vec![AgentLlmReviewFile {
             path: "submission.md".to_owned(),
@@ -2518,13 +2593,7 @@ fn review_request(
             content: submission.to_owned(),
         }],
         rubric: AgentLlmReviewRubric {
-            artifact: ArtifactRef {
-                artifact_id: ArtifactId::new(),
-                store_binding: "minio-primary".to_owned(),
-                object_version: "version-1".to_owned(),
-                size_bytes: rubric.len() as u64,
-                media_type: "text/plain".to_owned(),
-            },
+            artifact: rubric_artifact,
             path: "rubric.md".to_owned(),
             sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
             content: rubric.to_owned(),
@@ -4821,6 +4890,65 @@ async fn advisory_review_restricts_evidence_to_submission_files() -> Result<(), 
 }
 
 #[tokio::test]
+async fn frozen_review_rechecks_authority_before_first_call_and_repair()
+-> Result<(), Box<dyn Error>> {
+    for allowed in [0, 1] {
+        let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenSuccess));
+        let authority = Arc::new(LimitedAuthorization {
+            calls: AtomicUsize::new(0),
+            allowed,
+        });
+        let runtime = ClaudeCodeRuntime::new(valid_policy()?, process.clone())?
+            .with_input_authorization(authority.clone());
+        let failure = runtime
+            .review_with_usage(
+                b"SYNTHETIC_FROZEN_INPUT".to_vec(),
+                &["submission.md".to_owned()],
+                RunCancellation::new(),
+            )
+            .await
+            .expect_err("revocation must prevent the next model call");
+        assert_eq!(
+            failure.error.diagnostic_code(),
+            "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        );
+        assert_eq!(process.total_calls(), allowed);
+        assert_eq!(authority.calls.load(Ordering::SeqCst), allowed + 1);
+        if allowed == 0 {
+            assert!(failure.usage.is_none());
+        } else {
+            assert_eq!(
+                failure
+                    .usage
+                    .expect("retain observed first-call usage")
+                    .requests,
+                1
+            );
+        }
+    }
+    let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenSuccess));
+    let authority = Arc::new(LimitedAuthorization {
+        calls: AtomicUsize::new(0),
+        allowed: 1,
+    });
+    let runtime = ClaudeCodeRuntime::new(valid_policy()?, process.clone())?
+        .with_input_authorization(authority.clone());
+    let cancellation = RunCancellation::new();
+    cancellation.cancel();
+    runtime
+        .review_with_usage(
+            b"SYNTHETIC_FROZEN_INPUT".to_vec(),
+            &["submission.md".to_owned()],
+            cancellation,
+        )
+        .await
+        .expect_err("cancelled request must not send input");
+    assert_eq!(process.total_calls(), 0);
+    assert_eq!(authority.calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn advisory_review_accumulates_repair_usage_and_enforces_total_budget()
 -> Result<(), Box<dyn Error>> {
     let (runtime, process, _policy) = runtime(FakeMode::ReviewRepairThenSuccess)?;
@@ -5312,10 +5440,13 @@ fn placeholder_binding() -> contracts::http::ModelInputAuthorizationBinding {
                 + time::Duration::hours(1),
         )
         .expect("fixture time"),
-        package_id: contracts::ProblemPackageId::new(),
-        package_revision: Revision::new(1).expect("fixture revision"),
+        source: contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+            package_id: contracts::ProblemPackageId::new(),
+            package_revision: Revision::new(1).expect("fixture revision"),
+        },
         policy_id: PolicyId::new(),
         policy_revision: Revision::new(1).expect("fixture revision"),
+        policy_sha256: "a".repeat(64),
         selection_sha256: "a".repeat(64),
     }
 }
@@ -5343,13 +5474,76 @@ fn test_authorized_command(
     binding.actor_id = command.actor_id;
     binding.project_id = command.project_id;
     binding.course_id = command.course_id;
-    binding.package_id = command.package.id;
-    binding.package_revision = command.package.revision;
+    binding.source = contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+        package_id: command.package.id,
+        package_revision: command.package.revision,
+    };
     binding.policy_id = command.policy.id;
     binding.policy_revision = command.policy.revision;
+    binding.policy_sha256 =
+        contracts::http::model_input_policy_sha256(&command.policy).expect("fixture policy hash");
     binding.selection_sha256 =
         contracts::http::model_input_selection_sha256(&paths).expect("fixture selection");
     command
+}
+
+#[test]
+fn persisted_dispatch_rejects_context_and_material_identity_substitution()
+-> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let package = package(policy.project_id, policy.course_id, b"synthetic input")?;
+    let command = work_dispatch_command(
+        &policy,
+        &package,
+        EnvironmentId::new(),
+        Revision::new(1)?,
+        ActorId::new(),
+    );
+    command.validate()?;
+    let stored = serde_json::to_value(&command)?;
+    let replay: InternalCreateAgentRunRequest = serde_json::from_value(stored.clone())?;
+    replay.validate()?;
+    assert_eq!(replay.input_authorization, command.input_authorization);
+    let mut altered_budget = replay.clone();
+    altered_budget.policy.budget.max_requests += 1;
+    altered_budget.policy.validate()?;
+    assert!(altered_budget.validate().is_err());
+    let mut altered_model = replay;
+    altered_model.policy.binding.model.push_str("-different");
+    altered_model.policy.validate()?;
+    assert!(altered_model.validate().is_err());
+
+    for (field, replacement) in [
+        ("actorId", json!(ActorId::new())),
+        ("projectId", json!(ProjectId::new())),
+        ("courseId", json!(contracts::CourseId::new())),
+        ("operationId", json!("freezeSubmission")),
+        ("sessionSha256", json!("not-a-session-digest")),
+        ("policyId", json!(PolicyId::new())),
+        ("policyRevision", json!(2)),
+        ("selectionSha256", json!("b".repeat(64))),
+    ] {
+        let mut tampered = stored.clone();
+        tampered["inputAuthorization"][field] = replacement;
+        let replay: InternalCreateAgentRunRequest = serde_json::from_value(tampered)?;
+        assert!(replay.validate().is_err(), "accepted substituted {field}");
+    }
+    for (field, replacement) in [
+        ("packageId", json!(contracts::ProblemPackageId::new())),
+        ("packageRevision", json!(2)),
+    ] {
+        let mut tampered = stored.clone();
+        tampered["inputAuthorization"]["source"][field] = replacement;
+        let replay: InternalCreateAgentRunRequest = serde_json::from_value(tampered)?;
+        assert!(replay.validate().is_err(), "accepted substituted {field}");
+    }
+    let mut missing = stored;
+    missing
+        .as_object_mut()
+        .ok_or("not an object")?
+        .remove("inputAuthorization");
+    assert!(serde_json::from_value::<InternalCreateAgentRunRequest>(missing).is_err());
+    Ok(())
 }
 
 struct LimitedAuthorization {
