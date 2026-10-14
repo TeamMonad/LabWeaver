@@ -52,6 +52,6 @@ Agent 复核客户端读取下列四项现有命名的配置：
 
 本切片覆盖教师材料包，以及私人/共享 Work 的材料包选择和实时项目动作权限。前端材料选择交互由 Grok 接续，当前三处旧创建入口没有传 `selectedPaths`，会明确失败。
 
-完整冻结链路仍需串行组合 Evaluation 的 metadata-only/context/content-SHA 变更、Access 的真实 context 生产入口及 Evaluation 读取前消费者接线，并验收 rubric 规则的真实数据库变更与撤权行为。本切片不能单独证明完整冻结链路通过。实时 Work 会话文件许可、逐文件隐藏标签、日志留存切片，以及 Claude Code 单个进程内部的 Read/Bash/tool-result 和后续模型请求逐动作复核仍不在本切片覆盖内。
+完整冻结链路仍需串行组合 Evaluation 的 metadata-only/context/content-SHA 变更、Access 的真实 context 生产入口及 Evaluation 读取前消费者接线，并验收完整链路和真实网络角色。本切片不能单独证明完整冻结链路通过。rubric 规则的真实 PostgreSQL 测试覆盖公开声明与批准分离、精确内容身份、教师/助教/管理员区别、项目 Edit、撤回、隐藏、离任/重入、成员过期、并发 revision 冲突、幂等重放和通用策略更新保留撤权，且规则操作不读取对象。测试发布内容是合成依赖边界，内容 SHA 生产入口仍由 Evaluation/材料 owner 提供。实时 Work 会话文件许可、逐文件隐藏标签、日志留存切片，以及 Claude Code 单个进程内部的 Read/Bash/tool-result 和后续模型请求逐动作复核仍不在本切片覆盖内。
 
 本地验证使用真实 PostgreSQL 当前会话/成员事实、原 Agent 持久化取消状态和合成 stdin 捕获进程，证明选择内容、准备期间取消、repair 前撤权，以及实际跨越创建当次 5 秒 decision TTL 的排队和 repair 仍按原会话当前权限运行。绝对/idle 期限到期、会话撤销、成员撤销、任务截止和取消均阻止新发送。Access 的 `idle_expires_at <= expires_at` 约束意味着绝对期限到期时 idle 也到期；测试保留该约束，并另外覆盖 absolute 仍未来而 idle 单独到期。该证据没有调用真实模型，也没有验证 Kubernetes sandbox 或生产 Agent→Control TLS/服务角色接线。
