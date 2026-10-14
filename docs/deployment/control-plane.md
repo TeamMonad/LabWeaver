@@ -135,3 +135,42 @@ The local v1 build and release path is implemented. Connected BuildKit, Harbor,
 Container and KubeVirt replay under one deployment identity is still
 required before the deployment can claim verified operation. Fixtures and static
 reports are not production publication evidence.
+
+## BuildKit Credits admission
+
+The build-executor configuration requires the `resource` block from
+`deploy/config/build-executor.yaml.example`: HTTPS URI, trusted Resource CA,
+request/response size bounds, timeout, and `labweaver-resource` audience.
+Its existing Agent service account requests `resource.credits.hold` and
+`resource.usage.record`. Mount the OIDC CA, Resource CA and service-client-secret;
+configure `LABWEAVER_SERVICE_OIDC_ISSUER`, `LABWEAVER_SERVICE_OIDC_CA`,
+`LABWEAVER_SERVICE_CLIENT_ID`, `LABWEAVER_SERVICE_CLIENT_SECRET_FILE`,
+`LABWEAVER_SERVICE_SCOPES` and token refresh skew. Resource separately sets
+`LABWEAVER_AGENT_SERVICE_CLIENT_ID` to the authorized client. Missing configuration
+rejects BuildKit execution; it does not select a free or anonymous path.
+
+Apply Resource migration 0019 and Agent migration 0021. Agent 0021 grants Resource
+only the specific read columns needed to verify the authoritative build command;
+Agent has no wallet write access. Bundle/profile configuration must provide the
+same Resource client block and secret mounts before connected deployment validation.
+Configure an explicit `CREDITS` price with `build_second`, `builderBinding` and
+`unitQuantity` before admitting builds. Existing USD compute/storage rates do not
+price this operation and are not automatically changed.
+
+### Original Environment lease funding
+
+Apply Resource migration 0020 with the verified migration catalog before starting
+Resource. It adds immutable funding windows and seeds no operating rates or
+balances. The existing LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID binds the original
+hold owner and the grant reader; service JWT/TLS and resource.environment.resolve
+remain required. Configure complete CREDITS rates and project allowances before
+activating a lease. A missing rate, insufficient funds or an expired original
+approval leaves activation uncommitted.
+
+Renewal reuses the same hold and funds only a cumulative shortfall. The accounting
+loop also handles expired financial coverage and unactivated holds whose original
+approval expired. Financial release does not confirm physical cleanup.
+The Environment owner must consume the original grant and runtime receipt before
+new compute, while continuing stop/cleanup without new funds. The #207 lifecycle
+integration and cluster validation remain separate delivery work; see
+[original lease coverage](../contracts/project-credits.md#原-environment-lease-的资金覆盖).

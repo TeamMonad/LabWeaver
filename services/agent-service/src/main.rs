@@ -255,6 +255,7 @@ struct BuildExecutorDeploymentFile {
     object_store_session_token_file: Option<String>,
     nats: BuildExecutorNatsFileConfig,
     executor: ProductionBuildExecutorConfig,
+    resource: task_execution::resource::ResourceClientConfiguration,
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,6 +665,41 @@ async fn discover_service_auth(
     Ok((verifier, client))
 }
 
+async fn discover_build_resource_token_client() -> Result<Arc<ServiceTokenClient>, StartupError> {
+    let scopes = required_set("LABWEAVER_SERVICE_SCOPES")?;
+    if !["resource.credits.hold", "resource.usage.record"]
+        .iter()
+        .all(|scope| scopes.contains(*scope))
+    {
+        return Err(StartupError::Configuration);
+    }
+    let ca = std::fs::read(required_env("LABWEAVER_SERVICE_OIDC_CA")?)
+        .map_err(|_| StartupError::Configuration)?;
+    let http = auth::no_redirect_http_client(Some(&ca), TransportSecurityMode::Strict)
+        .map_err(|_| StartupError::Configuration)?;
+    let config = ServiceTokenClientConfig::new(
+        &required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?,
+        required_env("LABWEAVER_SERVICE_CLIENT_ID")?,
+        read_trimmed(&required_env("LABWEAVER_SERVICE_CLIENT_SECRET_FILE")?)?,
+        "labweaver-resource".to_owned(),
+        [
+            "resource.credits.hold".to_owned(),
+            "resource.usage.record".to_owned(),
+        ]
+        .into_iter()
+        .collect(),
+        required_env("LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS")?
+            .parse()
+            .map_err(|_| StartupError::Configuration)?,
+        TransportSecurityMode::Strict,
+    )
+    .map_err(StartupError::ServiceToken)?;
+    ServiceTokenClient::discover(config, http)
+        .await
+        .map(Arc::new)
+        .map_err(StartupError::ServiceToken)
+}
+
 async fn run_build_executor() -> Result<(), StartupError> {
     let deployment = load_build_executor_deployment()?;
     if deployment.database_max_connections == 0 || deployment.database_max_connections > 32 {
@@ -707,7 +743,19 @@ async fn run_build_executor() -> Result<(), StartupError> {
     .await?;
     let backend = ProductionBuildExecutor::new(deployment.executor, pool.clone(), objects)
         .map_err(|_| StartupError::Configuration)?;
-    let executor = FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool), backend);
+    let token_client = discover_build_resource_token_client().await?;
+    let billing = task_execution::resource::ResourceClient::from_configuration(
+        deployment.resource,
+        token_client,
+        [
+            "resource.credits.hold".to_owned(),
+            "resource.usage.record".to_owned(),
+        ]
+        .into_iter()
+        .collect(),
+    )?;
+    let executor = FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool), backend)
+        .with_billing_client(billing);
     let server = NatsBuildExecutorServer::new(nats, deployment.nats.request_subject, executor)?;
     tokio::try_join!(
         async { server.serve().await.map_err(StartupError::BuildExecutor) },

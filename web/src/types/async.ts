@@ -26,6 +26,12 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '材料保留期限已过期。请重新上传材料，并重新生成、审批和发布；重试当前过期版本无法恢复。'
     case 'LW_RESOURCE_GPU_CAPACITY_EXHAUSTED':
       return 'GPU 容量当前不可用，可能已被其他任务占用。请稍后重试或调整资源申请。'
+    case 'LW_RESOURCE_RATE_UNCONFIGURED':
+      return '缺少适用费率：估价或结算无法完成，不会按免费处理。'
+    case 'LW_RESOURCE_GPU_CATALOG_MISSING':
+      return '缺少 GPU 目录项：无法完成资源计价。'
+    case 'LW_RESOURCE_ESTIMATE_CHANGED':
+      return '报价已过期或规格/费率已变化：请重新估价后再继续。'
     default:
       return message
   }

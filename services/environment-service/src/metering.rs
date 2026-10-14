@@ -753,8 +753,7 @@ fn elapsed_milliseconds(
 fn multiply_milliseconds(value: u64, milliseconds: u128) -> Result<u64, EnvironmentStoreError> {
     let quantity = u128::from(value)
         .checked_mul(milliseconds)
-        .ok_or(EnvironmentStoreError::NumericOverflow("usage quantity"))?
-        / 1_000;
+        .ok_or(EnvironmentStoreError::NumericOverflow("usage quantity"))?;
     u64::try_from(quantity).map_err(|_| EnvironmentStoreError::NumericOverflow("usage quantity"))
 }
 
@@ -766,6 +765,7 @@ fn quantities(
 ) -> Result<ResourceUsageQuantities, EnvironmentStoreError> {
     let milliseconds = elapsed_milliseconds(measured_from, measured_until)?;
     Ok(ResourceUsageQuantities {
+        quantity_divisor: 1000,
         cpu_millicore_seconds: multiply_milliseconds(
             resources.cpu_millicores.into(),
             milliseconds,
@@ -786,6 +786,7 @@ fn storage_quantities(
 ) -> Result<ResourceUsageQuantities, EnvironmentStoreError> {
     let milliseconds = elapsed_milliseconds(measured_from, measured_until)?;
     Ok(ResourceUsageQuantities {
+        quantity_divisor: 1000,
         cpu_millicore_seconds: 0,
         memory_byte_seconds: 0,
         storage_byte_seconds: multiply_milliseconds(resources.storage_bytes, milliseconds)?,
@@ -1633,7 +1634,7 @@ mod tests {
         assert!(state.storage_known);
 
         let storage = storage_quantities(&state.approved_resources, ready, deletion)?;
-        assert_eq!(storage.storage_byte_seconds, 20);
+        assert_eq!(storage.storage_byte_seconds, 20_000);
         Ok(())
     }
 
@@ -1661,16 +1662,16 @@ mod tests {
             timestamp_millis(0),
             timestamp_millis(1_200),
         )?;
-        assert_eq!(known.cpu_millicore_seconds, 600);
-        assert_eq!(known.memory_byte_seconds, 2_400);
-        assert_eq!(known.gpu_unit_seconds, 2);
+        assert_eq!(known.cpu_millicore_seconds, 600_000);
+        assert_eq!(known.memory_byte_seconds, 2_400_000);
+        assert_eq!(known.gpu_unit_seconds, 2_400);
 
         let subsecond = storage_quantities(
             &state.approved_resources,
             timestamp_millis(0),
             timestamp_millis(400),
         )?;
-        assert_eq!(subsecond.storage_byte_seconds, 2_800);
+        assert_eq!(subsecond.storage_byte_seconds, 2_800_000);
         Ok(())
     }
 }

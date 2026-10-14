@@ -124,7 +124,8 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
 async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenced_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool.clone());
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let now = store.current_time().await?;
     let resources = WorkloadResources {
         cpu_millicores: 500,
@@ -194,7 +195,10 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             "trace-resource-approve",
         )
         .await?;
-    assert_eq!(allocating.state, ResourceRequestState::Allocating);
+    assert_eq!(
+        store.load(allocating.request_id).await?.state,
+        ResourceRequestState::Allocating
+    );
     let provisioning = store
         .claim_next_capacity_shell()
         .await?
@@ -236,18 +240,17 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         .await?;
     assert_eq!(ready.state, contracts::resource::CapacityClaimState::Ready);
     assert!(store.claim_next_capacity_shell().await?.is_none());
-    let active_from = store.current_time().await?;
-    let active_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?;
-    let active = store
-        .activate_lease(
-            allocation.lease_id,
-            Revision::new(1)?,
-            active_from,
-            active_expires,
-            approval.approver_id,
-            "trace-resource-activate",
-        )
-        .await?;
+    let active = activate_synthetic_environment(
+        &pool,
+        &store,
+        allocation.lease_id,
+        approval.approver_id,
+        request.project_id,
+        now,
+        600,
+        false,
+    )
+    .await?;
     assert_eq!(
         store.load(request.id).await?.state,
         ResourceRequestState::Active
@@ -302,7 +305,9 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         i64::try_from(handoff.lease.revision.get())?
     );
     assert!(store.next_ready_capacity_handoff().await?.is_none());
-    let renewed_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(15))?;
+    let renewed_expires = UtcTimestamp::from_utc(
+        active.active_from.ok_or("active start")?.get() + time::Duration::minutes(15),
+    )?;
     let renewed = store
         .renew_lease(
             "resource-renew-1",
@@ -479,7 +484,8 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
 async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool.clone());
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let now = store.current_time().await?;
     let resources = WorkloadResources {
         cpu_millicores: 500,
@@ -562,18 +568,17 @@ async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
             "quota-uid",
         )
         .await?;
-    let active_from = store.current_time().await?;
-    let active_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?;
-    let active = store
-        .activate_lease(
-            allocation.lease_id,
-            Revision::new(1)?,
-            active_from,
-            active_expires,
-            approval.approver_id,
-            "trace-activate-cleanup",
-        )
-        .await?;
+    let active = activate_synthetic_environment(
+        &pool,
+        &store,
+        allocation.lease_id,
+        approval.approver_id,
+        request.project_id,
+        now,
+        600,
+        false,
+    )
+    .await?;
     let handoff = store
         .next_ready_capacity_handoff()
         .await?
@@ -648,6 +653,31 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     let (_container, pool) = migrated_pool().await?;
     let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
+    for unit in [
+        ResourceBillingUnit::CpuMillicoreSecond,
+        ResourceBillingUnit::MemoryByteSecond,
+        ResourceBillingUnit::StorageByteSecond,
+    ] {
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    builder_binding: None,
+                    unit,
+                    unit_quantity: 1,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::zero(),
+                    },
+                    effective_from: now,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+
     let owner_id = ActorId::new();
     let project_id = ProjectId::new();
     let task_run_id = TaskRunId::new();
@@ -750,11 +780,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     assert!(!claimed.cleanup_confirmed);
 
     let stale_ack = store
-        .acknowledge_task_resource(
+        .acknowledge_funded_task_resource(
             task_run_id,
-            Revision::new(1)?,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
+            &contracts::http::AcknowledgeTaskResourceRequest {
+                expected_claim_revision: Revision::new(1)?,
+                expected_lease_revision: claimed.lease_revision,
+                execution_namespace: "labweaver-evaluation-runs".into(),
+            },
+            "synthetic-task-owner",
             "trace-task-stale-ack",
         )
         .await;
@@ -772,11 +805,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     .execute(&pool)
     .await?;
     let expired_ack = store
-        .acknowledge_task_resource(
+        .acknowledge_funded_task_resource(
             task_run_id,
-            claimed.claim_revision,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
+            &contracts::http::AcknowledgeTaskResourceRequest {
+                expected_claim_revision: claimed.claim_revision,
+                expected_lease_revision: claimed.lease_revision,
+                execution_namespace: "labweaver-evaluation-runs".into(),
+            },
+            "synthetic-task-owner",
             "trace-task-expired-ack",
         )
         .await;
@@ -793,11 +829,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     .execute(&pool)
     .await?;
     let acknowledged = store
-        .acknowledge_task_resource(
+        .acknowledge_funded_task_resource(
             task_run_id,
-            claimed.claim_revision,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
+            &contracts::http::AcknowledgeTaskResourceRequest {
+                expected_claim_revision: claimed.claim_revision,
+                expected_lease_revision: claimed.lease_revision,
+                execution_namespace: "labweaver-evaluation-runs".into(),
+            },
+            "synthetic-task-owner",
             "trace-task-ack",
         )
         .await?;
@@ -998,7 +1037,7 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
 async fn gpu_catalog_rejects_cross_mode_binding_collision() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let exclusive = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
         class: "a100-exclusive".into(),
@@ -1036,7 +1075,7 @@ async fn gpu_catalog_rejects_cross_mode_binding_collision() -> Result<(), Box<dy
 async fn gpu_catalog_rejects_cross_provider_active_alias() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let first = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
         class: "a100-provider-one".into(),
@@ -1107,7 +1146,7 @@ fn reviewed_seed_json() -> Value {
 async fn gpu_catalog_seed_provisions_reviewed_class_once() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let seed = review_seed("nvidia-cuda");
 
     let created = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
@@ -1130,7 +1169,7 @@ async fn gpu_catalog_seed_provisions_reviewed_class_once() -> Result<(), Box<dyn
 async fn gpu_catalog_seed_is_idempotent_and_never_bumps_revision()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let seed = review_seed("nvidia-cuda");
 
     let first = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
@@ -1149,7 +1188,7 @@ async fn gpu_catalog_seed_is_idempotent_and_never_bumps_revision()
 async fn gpu_catalog_seed_conflict_fails_and_leaves_existing_row_untouched()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let seed = review_seed("nvidia-cuda");
     store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
 
@@ -1186,7 +1225,7 @@ async fn gpu_catalog_seed_conflict_fails_and_leaves_existing_row_untouched()
 async fn gpu_catalog_seed_does_not_reactivate_disabled_class()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let disabled = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
         class: "nvidia-cuda".to_owned(),
@@ -1275,7 +1314,7 @@ fn gpu_catalog_seed_parses_the_shipped_capacity_example() {
 async fn gpu_time_slice_approval_rejects_count_above_one_with_stable_catalog_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let project_id = ProjectId::new();
     let course_id = Some(CourseId::new());
@@ -1388,7 +1427,7 @@ async fn gpu_time_slice_approval_rejects_count_above_one_with_stable_catalog_err
 async fn gpu_reservation_counts_across_catalog_revisions_for_one_physical_pool()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let project_id = ProjectId::new();
     let provider_binding = "kubernetes-standard".to_owned();
@@ -1611,12 +1650,13 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     .execute(&pool)
     .await?;
     let base_rate = |unit| CreateResourceRateRequest {
+        builder_binding: None,
         unit,
         unit_quantity: 1,
         gpu_class: None,
         gpu_mode: None,
         unit_price: Money {
-            currency: "USD".to_owned(),
+            currency: "CREDITS".to_owned(),
             amount: FixedDecimal::parse("1.000000").expect("fixed GPU test rate"),
         },
         effective_from: now,
@@ -1638,12 +1678,13 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
         .create_rate(
             "environment-gpu-rate-gpu",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::GpuUnitSecond,
                 unit_quantity: 1,
                 gpu_class: Some(catalog.class.clone()),
                 gpu_mode: Some(catalog.mode),
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("1.000000")?,
                 },
                 effective_from: now,
@@ -1679,6 +1720,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
                 measured_until: usage_end,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 1,
                         memory_byte_seconds: 1,
                         storage_byte_seconds: 0,
@@ -1792,6 +1834,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
                 measured_until: suspended_usage_end,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 0,
                         memory_byte_seconds: 0,
                         storage_byte_seconds: 1,
@@ -2106,6 +2149,31 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     );
     assert!(reservation_contract["allocation"].is_null());
 
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0016_project_credits.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0017_cost_estimates.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0018_unknown_usage_deadline.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0019_build_metering.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0020_environment_funding.sql"
+    ))
+    .execute(&pool)
+    .await?;
     let store = PgResourceStore::new(pool.clone());
     let resolve_request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
@@ -2142,6 +2210,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     let usage_start = store.current_time().await?;
     let usage_end = UtcTimestamp::from_utc(usage_start.get() + time::Duration::seconds(1))?;
     let compute_quantities = ResourceUsageQuantities {
+        quantity_divisor: 1,
         cpu_millicore_seconds: u64::from(approved_resources.cpu_millicores),
         memory_byte_seconds: approved_resources.memory_bytes,
         storage_byte_seconds: 0,
@@ -2158,12 +2227,13 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         },
     };
     let rate_input = |unit, unit_quantity, amount| CreateResourceRateRequest {
+        builder_binding: None,
         unit,
         unit_quantity,
         gpu_class: None,
         gpu_mode: None,
         unit_price: Money {
-            currency: "USD".to_owned(),
+            currency: "CREDITS".to_owned(),
             amount: FixedDecimal::parse(amount).expect("fixed test rate"),
         },
         effective_from: usage_start,
@@ -2325,6 +2395,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         measured_until: storage_end,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 0,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: approved_resources.storage_bytes,
@@ -2384,7 +2455,7 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
 async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let provider_binding = "kubernetes-standard".to_owned();
     let catalog = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
@@ -2437,7 +2508,7 @@ async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
 async fn concurrent_gpu_approvals_serialize_on_the_shared_admission_lock()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let catalog = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
@@ -2545,11 +2616,11 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
                 project_id,
                 course_id: None,
                 limit: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("10.000000")?,
                 },
                 warning_at: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("5.000000")?,
                 },
             },
@@ -2559,7 +2630,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     assert_eq!(budget.spent.amount.as_str(), "0.000000");
 
     let (request, lease) =
-        create_active_request(&store, now, project_id, actor_id, "billing-workload").await?;
+        create_active_request(&pool, &store, now, project_id, actor_id, "billing-workload").await?;
     assert_eq!(lease.state, contracts::resource::ResourceLeaseState::Active);
 
     let boundary = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
@@ -2568,12 +2639,13 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         .create_rate(
             "billing-rate-cpu-1",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
                 gpu_mode: None,
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.100000")?,
                 },
                 effective_from: now,
@@ -2593,6 +2665,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         measured_until: boundary,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 10,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -2608,12 +2681,13 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         .create_rate(
             "billing-rate-cpu-2",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
                 gpu_mode: None,
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.200000")?,
                 },
                 effective_from: boundary,
@@ -2628,6 +2702,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         measured_until: end,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 5,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -2638,6 +2713,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     };
     let second_usage = store.record_usage(&second_input, end).await?;
     let (crossing_request, crossing_lease) = create_active_request(
+        &pool,
         &store,
         now,
         project_id,
@@ -2655,6 +2731,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         measured_until: end,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 10,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -2747,6 +2824,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         )?,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 0,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 7,
@@ -2780,7 +2858,7 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     assert_eq!(unconfigured_charge_count, 0);
 
     let adjustment_amount = Money {
-        currency: "USD".to_owned(),
+        currency: "CREDITS".to_owned(),
         amount: FixedDecimal::parse("-0.250000")?,
     };
     let adjustment = store
@@ -2844,11 +2922,11 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
                 project_id,
                 course_id: None,
                 limit: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("100.000000")?,
                 },
                 warning_at: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("50.000000")?,
                 },
             },
@@ -2857,12 +2935,13 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
         .await?;
 
     let rate_input = |unit, price| CreateResourceRateRequest {
+        builder_binding: None,
         unit,
         unit_quantity: 1,
         gpu_class: None,
         gpu_mode: None,
         unit_price: Money {
-            currency: "USD".to_owned(),
+            currency: "CREDITS".to_owned(),
             amount: FixedDecimal::parse(price).expect("fixed test price"),
         },
         effective_from: now,
@@ -2890,12 +2969,13 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
         .create_rate(
             "rate-end-replay",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::GpuUnitSecond,
                 unit_quantity: 1,
                 gpu_class: Some("replay-gpu".to_owned()),
                 gpu_mode: Some(GpuAllocationMode::ContainerTimeSlice),
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.030000")?,
                 },
                 effective_from: now,
@@ -2959,8 +3039,15 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
         Err(ResourceStoreError::IdempotencyConflict)
     ));
 
-    let (request, lease) =
-        create_active_request(&store, now, project_id, actor_id, "rate-end-workload").await?;
+    let (request, lease) = create_active_request(
+        &pool,
+        &store,
+        now,
+        project_id,
+        actor_id,
+        "rate-end-workload",
+    )
+    .await?;
     let usage_until = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(2))?;
     let usage = store
         .record_usage(
@@ -2975,6 +3062,7 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
                 measured_until: usage_until,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 0,
                         memory_byte_seconds: 2,
                         storage_byte_seconds: 0,
@@ -3027,12 +3115,19 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
 async fn concurrent_usage_and_lease_revoke_keep_foreign_key_lock_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let project_id = ProjectId::new();
     let actor_id = ActorId::new();
-    let (request, lease) =
-        create_active_request(&store, now, project_id, actor_id, "usage-revoke-lock-order").await?;
+    let (request, lease) = create_active_request(
+        &pool,
+        &store,
+        now,
+        project_id,
+        actor_id,
+        "usage-revoke-lock-order",
+    )
+    .await?;
     let measured_until = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
     let usage_input = RecordResourceUsageRequest {
         kind: ResourceUsageKind::Compute,
@@ -3045,6 +3140,7 @@ async fn concurrent_usage_and_lease_revoke_keep_foreign_key_lock_order()
         measured_until,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 1,
                 memory_byte_seconds: 0,
                 storage_byte_seconds: 0,
@@ -3095,11 +3191,11 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
                 project_id,
                 course_id: None,
                 limit: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("100.000000")?,
                 },
                 warning_at: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("50.000000")?,
                 },
             },
@@ -3110,12 +3206,13 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
         .create_rate(
             "rate-concurrent-create",
             &CreateResourceRateRequest {
+                builder_binding: None,
                 unit: ResourceBillingUnit::MemoryByteSecond,
                 unit_quantity: 1,
                 gpu_class: None,
                 gpu_mode: None,
                 unit_price: Money {
-                    currency: "USD".to_owned(),
+                    currency: "CREDITS".to_owned(),
                     amount: FixedDecimal::parse("0.010000")?,
                 },
                 effective_from: now,
@@ -3124,6 +3221,7 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
         )
         .await?;
     let (request, lease) = create_active_request(
+        &pool,
         &store,
         now,
         project_id,
@@ -3145,6 +3243,7 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
                 measured_until,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 0,
                         memory_byte_seconds: 2,
                         storage_byte_seconds: 0,
@@ -3216,6 +3315,7 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
     let actor_id = ActorId::new();
     let now = store.current_time().await?;
     let (request, lease) = create_active_request(
+        &pool,
         &store,
         now,
         project_id,
@@ -3237,6 +3337,7 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
                 measured_until,
                 measurement: UsageMeasurement::Known {
                     quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
                         cpu_millicore_seconds: 1,
                         memory_byte_seconds: 0,
                         storage_byte_seconds: 0,
@@ -3285,13 +3386,13 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
     Ok(())
 }
 
-async fn create_active_request(
+async fn create_allocating_request(
     store: &PgResourceStore,
     now: UtcTimestamp,
     project_id: ProjectId,
     requester_id: ActorId,
     request_key: &str,
-) -> Result<(ResourceRequest, contracts::resource::ResourceLease), Box<dyn std::error::Error>> {
+) -> Result<(ResourceRequest, LeaseId), Box<dyn std::error::Error>> {
     let resources = WorkloadResources {
         cpu_millicores: 1000,
         memory_bytes: 1024 * 1024 * 1024,
@@ -3364,21 +3465,184 @@ async fn create_active_request(
         )
         .await
         .map_err(|error| format!("approve: {error}"))?;
-    assert_eq!(approved.state, ResourceRequestState::Allocating);
-    let active_from = store.current_time().await?;
-    let expires_at = UtcTimestamp::from_utc(active_from.get() + time::Duration::hours(1))?;
+    assert_eq!(
+        store.load(approved.request_id).await?.state,
+        ResourceRequestState::Allocating
+    );
+    store
+        .claim_next_capacity_shell()
+        .await?
+        .ok_or("reserved billing claim")?;
+    Ok((request, lease_id))
+}
+
+async fn create_active_request(
+    pool: &sqlx::PgPool,
+    store: &PgResourceStore,
+    now: UtcTimestamp,
+    project_id: ProjectId,
+    requester_id: ActorId,
+    request_key: &str,
+) -> Result<(ResourceRequest, contracts::resource::ResourceLease), Box<dyn std::error::Error>> {
+    let (request, lease_id) =
+        create_allocating_request(store, now, project_id, requester_id, request_key).await?;
+    let lease = activate_synthetic_environment(
+        pool,
+        store,
+        lease_id,
+        requester_id,
+        project_id,
+        now,
+        3600,
+        true,
+    )
+    .await?;
+    Ok((request, lease))
+}
+
+// Prices here are explicit isolated fixture data, not an unconfigured free-execution fallback.
+// Remove fixture-only coverage after activation so existing missing-rate tests retain that behavior.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit isolated finance fixture inputs"
+)]
+async fn activate_synthetic_environment(
+    pool: &sqlx::PgPool,
+    store: &PgResourceStore,
+    lease_id: LeaseId,
+    actor: ActorId,
+    project: ProjectId,
+    usage_boundary: UtcTimestamp,
+    seconds: i64,
+    end_fixture_rates: bool,
+) -> Result<contracts::resource::ResourceLease, Box<dyn std::error::Error>> {
+    let store = store
+        .clone()
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
+    let from = store.current_time().await?;
+    let until = UtcTimestamp::from_utc(from.get() + time::Duration::seconds(seconds))?;
+    let rates = store.list_rates().await?;
+    let mut synthetic_rates = Vec::new();
+    for (unit, gpu_class, gpu_mode) in [
+        (ResourceBillingUnit::CpuMillicoreSecond, None, None),
+        (ResourceBillingUnit::MemoryByteSecond, None, None),
+        (ResourceBillingUnit::StorageByteSecond, None, None),
+        (
+            ResourceBillingUnit::GpuUnitSecond,
+            Some("handoff-gpu".to_owned()),
+            Some(GpuAllocationMode::Exclusive),
+        ),
+    ] {
+        let dimension = rates
+            .iter()
+            .filter(|r| r.unit == unit && r.gpu_class == gpu_class && r.gpu_mode == gpu_mode)
+            .collect::<Vec<_>>();
+        if dimension
+            .iter()
+            .any(|r| r.effective_until.is_none_or(|end| end >= until))
+        {
+            continue;
+        }
+        let effective_from = dimension
+            .iter()
+            .filter_map(|r| r.effective_until)
+            .max()
+            .unwrap_or(UtcTimestamp::from_utc(
+                usage_boundary.get() - time::Duration::days(1),
+            )?);
+        synthetic_rates.push(
+            store
+                .create_rate(
+                    &Uuid::now_v7().to_string(),
+                    &CreateResourceRateRequest {
+                        unit,
+                        unit_quantity: 1,
+                        gpu_class,
+                        gpu_mode,
+                        builder_binding: None,
+                        unit_price: Money {
+                            currency: "CREDITS".into(),
+                            amount: FixedDecimal::zero(),
+                        },
+                        effective_from,
+                        effective_until: None,
+                    },
+                )
+                .await?,
+        );
+    }
+    // Existing nonzero prices also require real synthetic funds; never relax the production guard.
+    let original = store.load_lease(lease_id).await?;
+    let request = store.load(original.request_id).await?;
+    let quote = store
+        .estimate_cost(
+            project,
+            &contracts::resource::costing::ResourceCostEstimateRequest {
+                resources: request.requested_resources,
+                compute_from: from,
+                compute_until: until,
+                storage_from: from,
+                storage_until: until,
+            },
+        )
+        .await?;
+    let credits = resource_service::credits::PgCreditStore::new(pool.clone());
+    if quote.total.amount.scaled() > credits.account(project).await?.available.scaled() {
+        credits
+            .admin(
+                &Uuid::now_v7().to_string(),
+                actor,
+                &[PlatformRole::PlatformAdmin],
+                &contracts::resource::credits::CreditAdminOperation::Grant {
+                    project_id: project,
+                    amount: quote.total.amount,
+                    reason: "isolated legacy fixture priced allowance".into(),
+                },
+            )
+            .await?;
+    }
     let lease = store
         .activate_lease(
             lease_id,
             Revision::new(1)?,
-            active_from,
-            expires_at,
-            approval.approver_id,
-            "billing-activate-trace",
+            from,
+            until,
+            actor,
+            "synthetic-financed-activation",
         )
-        .await
-        .map_err(|error| format!("activate: {error}"))?;
-    Ok((request, lease))
+        .await?;
+    for rate in synthetic_rates.into_iter().filter(|_| end_fixture_rates) {
+        let ended_from = if rate.effective_from < usage_boundary {
+            UtcTimestamp::from_utc(usage_boundary.get() - time::Duration::milliseconds(1))?
+        } else {
+            let current = store.current_time().await?;
+            if rate.effective_from > current {
+                continue;
+            }
+            current
+        };
+        let ended_until = if ended_from < usage_boundary {
+            usage_boundary
+        } else {
+            UtcTimestamp::from_utc(ended_from.get() + time::Duration::milliseconds(1))?
+        };
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    unit: rate.unit,
+                    unit_quantity: rate.unit_quantity,
+                    gpu_class: rate.gpu_class,
+                    gpu_mode: rate.gpu_mode,
+                    builder_binding: rate.builder_binding,
+                    unit_price: rate.unit_price,
+                    effective_from: ended_from,
+                    effective_until: Some(ended_until),
+                },
+            )
+            .await?;
+    }
+    Ok(lease)
 }
 
 // A real GPU reservation makes cleanup/admission assertions exercise the pool authority.
@@ -3394,7 +3658,8 @@ async fn work_handoff_fixture(
     ),
     Box<dyn std::error::Error>,
 > {
-    let store = PgResourceStore::new(pool.clone());
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let now = store.current_time().await?;
     let catalog = GpuCatalogEntry {
         id: GpuCatalogEntryId::new(),
@@ -3450,17 +3715,17 @@ async fn work_handoff_fixture(
             "quota-uid",
         )
         .await?;
-    let active_from = store.current_time().await?;
-    let lease = store
-        .activate_lease(
-            allocation.lease_id,
-            Revision::new(1)?,
-            active_from,
-            UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?,
-            approval.approver_id,
-            "trace-activate",
-        )
-        .await?;
+    let lease = activate_synthetic_environment(
+        pool,
+        &store,
+        allocation.lease_id,
+        approval.approver_id,
+        request.project_id,
+        now,
+        60,
+        false,
+    )
+    .await?;
     Ok((
         store.clone(),
         store.load(request.id).await?,
@@ -3947,6 +4212,31 @@ async fn migrated_pool()
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         )
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0016_project_credits.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0017_cost_estimates.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0018_unknown_usage_deadline.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0019_build_metering.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0020_environment_funding.sql"
     ))
     .execute(&pool)
     .await?;
@@ -4561,4 +4851,1130 @@ fn public_project_list_request(
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header("x-labweaver-resource-delegation", delegation)
         .body(Body::empty())?)
+}
+
+#[tokio::test]
+async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::credits::{CreditAdminOperation, CreditHoldRequest};
+    use resource_service::credits::PgCreditStore;
+    let (_container, pool) = migrated_pool().await?;
+    let resource = PgResourceStore::new(pool.clone());
+    let credits = PgCreditStore::new(pool.clone());
+    let project = ProjectId::new();
+    let actor = ActorId::new();
+    let now = resource.current_time().await?;
+    credits
+        .admin(
+            "bridge-grant",
+            actor,
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Grant {
+                project_id: project,
+                amount: FixedDecimal::parse("10.000000")?,
+                reason: "synthetic allowance".into(),
+            },
+        )
+        .await?;
+    let (request, lease_id) =
+        create_allocating_request(&resource, now, project, actor, "credit-metered-work").await?;
+    let _hold = credits
+        .hold(
+            "bridge-hold",
+            RESOURCE_ENVIRONMENT_CLIENT_ID,
+            &CreditHoldRequest {
+                project_id: project,
+                request_id: request.id,
+                business_key: "metered-usage".into(),
+                amount: FixedDecimal::parse("4.000000")?,
+            },
+        )
+        .await?;
+    let lease =
+        activate_synthetic_environment(&pool, &resource, lease_id, actor, project, now, 3600, true)
+            .await?;
+    resource
+        .create_rate(
+            "bridge-rate",
+            &CreateResourceRateRequest {
+                builder_binding: None,
+                unit: ResourceBillingUnit::CpuMillicoreSecond,
+                unit_quantity: 1,
+                gpu_class: None,
+                gpu_mode: None,
+                unit_price: Money {
+                    currency: "CREDITS".into(),
+                    amount: FixedDecimal::parse("1.000000")?,
+                },
+                effective_from: now,
+                effective_until: None,
+            },
+        )
+        .await?;
+    let end = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(10))?;
+    let usage = resource
+        .record_usage(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease.id),
+                },
+                source_event_id: EventId::new(),
+                measured_from: now,
+                measured_until: end,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1,
+                        cpu_millicore_seconds: 2,
+                        memory_byte_seconds: 0,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            end,
+        )
+        .await?;
+    let charge = resource
+        .settle_usage(usage.id)
+        .await?
+        .ok_or("charge missing")?;
+    assert_eq!(charge.total.amount.as_str(), "2.000000");
+    resource.settle_usage(usage.id).await?;
+    assert_eq!(credits.account(project).await?.balance.as_str(), "8.000000");
+    assert_eq!(
+        credits.account(project).await?.reserved.as_str(),
+        "2.000000"
+    );
+    let unknown_end = UtcTimestamp::from_utc(end.get() + time::Duration::seconds(10))?;
+    resource
+        .record_usage(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease.id),
+                },
+                source_event_id: EventId::new(),
+                measured_from: end,
+                measured_until: unknown_end,
+                measurement: UsageMeasurement::Unknown {
+                    reason: "final interval is missing".into(),
+                },
+            },
+            unknown_end,
+        )
+        .await?;
+    let expiring = resource
+        .revoke_lease(
+            "bridge-revoke",
+            lease.id,
+            lease.revision,
+            "synthetic cleanup".into(),
+            actor,
+            "bridge-trace",
+        )
+        .await?;
+    // Marking expiring does not release funds before provider cleanup.
+    assert_eq!(
+        credits.account(project).await?.reserved.as_str(),
+        "2.000000"
+    );
+    let cleanup = resource
+        .next_lease_cleanup(actor)
+        .await?
+        .ok_or("cleanup missing")?;
+    let releasing = resource
+        .mark_capacity_releasing(cleanup.claim.id, cleanup.claim.revision)
+        .await?;
+    resource
+        .complete_capacity_release(
+            cleanup.claim.id,
+            releasing.revision,
+            expiring.id,
+            expiring.revision,
+            actor,
+            "bridge-cleaned",
+        )
+        .await?;
+    let account = credits.account(project).await?;
+    assert_eq!(account.reserved.as_str(), "0.000000");
+    assert_eq!(account.unknown_count, 1);
+    assert!(credits.holds(project, 1, 25, 0).await?.items[0].measurement_unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn credits_http_requires_signed_admin_and_exact_workload_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::credits::{CreditAdminOperation, CreditHold, CreditHoldRequest};
+    let (_container, pool) = migrated_pool().await?;
+    let authority =
+        spawn_resource_auth_authority(resource_signing_material("credits-auth")?).await?;
+    let verifier = build_resource_verifier(&authority.issuer).await?;
+    let store = PgResourceStore::new(pool.clone());
+    let key = [7_u8; 32];
+    let actor = ActorId::new();
+    let project = ProjectId::new();
+    let now = store.current_time().await?;
+    let (request, lease) =
+        create_active_request(&pool, &store, now, project, actor, "credits-http-work").await?;
+    let state = resource_service::api::ResourceApiState::new(store)
+        .with_service_verifier(Arc::new(verifier))
+        .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
+        .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.into())
+        .with_task_service_client_ids(
+            [
+                RESOURCE_EVALUATION_CLIENT_ID.into(),
+                RESOURCE_AGENT_CLIENT_ID.into(),
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let router = resource_service::api::with_delegation(
+        resource_service::api::resource_api_router(state),
+        Arc::new(key.to_vec()),
+    );
+    let access = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ACCESS_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.api.invoke", "resource.credits.hold"],
+    )?;
+    let timestamp = time::OffsetDateTime::now_utc();
+    let mut session = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: actor.as_uuid(),
+        roles: vec![PlatformRole::Student],
+        authorization_revision: 1,
+        expires_at: timestamp + time::Duration::minutes(5),
+        idle_expires_at: timestamp + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-credits-csrf".into()),
+    };
+    let member = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let grant = serde_json::to_value(CreditAdminOperation::Grant {
+        project_id: project,
+        amount: FixedDecimal::parse("5.000000")?,
+        reason: "synthetic grant".into(),
+    })?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            Some(&member),
+            "/api/v1/resource/credits/operations",
+            &grant,
+            "http-member-grant",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    session.roles = vec![PlatformRole::PlatformAdmin];
+    let admin = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            Some(&admin),
+            "/api/v1/resource/credits/operations",
+            &grant,
+            "http-admin-grant",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let hold = serde_json::to_value(CreditHoldRequest {
+        project_id: project,
+        request_id: request.id,
+        business_key: "http-cost".into(),
+        amount: FixedDecimal::parse("3.000000")?,
+    })?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            None,
+            "/internal/v1/credits/holds",
+            &hold,
+            "http-gateway-hold",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let missing = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ENVIRONMENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.usage.record"],
+    )?;
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &missing,
+            None,
+            "/internal/v1/credits/holds",
+            &hold,
+            "http-missing-scope",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let env = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ENVIRONMENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.hold", "resource.credits.resolve"],
+    )?;
+    let grant_path = format!("/internal/v1/environment-credit-grants/{}", lease.id);
+    for (client, permissions, expected) in [
+        (
+            RESOURCE_ENVIRONMENT_CLIENT_ID,
+            vec!["resource.environment.resolve"],
+            StatusCode::OK,
+        ),
+        (
+            RESOURCE_ACCESS_CLIENT_ID,
+            vec!["resource.environment.resolve"],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            RESOURCE_AGENT_CLIENT_ID,
+            vec!["resource.environment.resolve"],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            RESOURCE_ENVIRONMENT_CLIENT_ID,
+            vec!["resource.usage.record"],
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let token = signed_resource_token(
+            &authority.material,
+            &authority.issuer,
+            client,
+            RESOURCE_AUTH_AUDIENCE,
+            &permissions,
+        )?;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&grant_path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            let grant: contracts::resource::environment_funding::EnvironmentCreditGrant =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+            assert_eq!(grant.request_id, request.id);
+            assert_eq!(grant.lease_id, lease.id);
+            assert_eq!(grant.lease_revision, lease.revision);
+            assert_eq!(grant.hold.project_id, project);
+            assert!(grant.can_authorize_execution);
+        }
+    }
+    let anonymous = router
+        .clone()
+        .oneshot(Request::builder().uri(&grant_path).body(Body::empty())?)
+        .await?;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let mut invalid_amount = hold.clone();
+    invalid_amount["amount"] = json!("1.0");
+    let malformed = router
+        .clone()
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            "/internal/v1/credits/holds",
+            &invalid_amount,
+            "http-invalid-amount",
+        )?)
+        .await?;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        malformed
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let problem: contracts::ProblemDetails =
+        serde_json::from_slice(&to_bytes(malformed.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(problem.diagnostic_code.as_str(), "LW_CREDITS_INVALID");
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            "/internal/v1/credits/holds",
+            &hold,
+            "http-owner-hold",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: CreditHold =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+    let other = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_AGENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.resolve"],
+    )?;
+    let path = format!("/internal/v1/credits/holds/{}/resolve", saved.id);
+    let release = json!({"action":"release","reason":"cleanup confirmed"});
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &other,
+            None,
+            &path,
+            &release,
+            "http-other-owner",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = router
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            &path,
+            &release,
+            "http-owner-release",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        resource_service::credits::PgCreditStore::new(pool)
+            .account(project)
+            .await?
+            .available
+            .as_str(),
+        "5.000000"
+    );
+    Ok(())
+}
+fn credit_http_request(
+    token: &str,
+    delegation: Option<&str>,
+    path: &str,
+    body: &Value,
+    key: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", key);
+    if let Some(delegation) = delegation {
+        request = request.header("x-labweaver-resource-delegation", delegation);
+    }
+    Ok(request.body(Body::from(serde_json::to_vec(body)?))?)
+}
+
+#[tokio::test]
+async fn estimated_cost_http_uses_signed_user_preview_and_exact_service_scope()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::costing::{EstimatedCreditHoldRequest, ResourceCostEstimateRequest};
+    use contracts::resource::credits::CreditAdminOperation;
+    let (_container, pool) = migrated_pool().await?;
+    let authority =
+        spawn_resource_auth_authority(resource_signing_material("estimate-auth")?).await?;
+    let verifier = build_resource_verifier(&authority.issuer).await?;
+    let store = PgResourceStore::new(pool.clone());
+    let project = ProjectId::new();
+    let actor = ActorId::new();
+    let now = store.current_time().await?;
+    let (request, _lease) =
+        create_allocating_request(&store, now, project, actor, "estimate-http-work").await?;
+    for unit in [
+        ResourceBillingUnit::CpuMillicoreSecond,
+        ResourceBillingUnit::MemoryByteSecond,
+        ResourceBillingUnit::StorageByteSecond,
+    ] {
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    builder_binding: None,
+                    unit,
+                    unit_quantity: 1,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::parse("1.000000")?,
+                    },
+                    effective_from: now,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    let from = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
+    let until = UtcTimestamp::from_utc(
+        from.get() + time::Duration::seconds(i64::try_from(request.requested_duration_seconds)?),
+    )?;
+    let input = ResourceCostEstimateRequest {
+        resources: request.requested_resources.clone(),
+        compute_from: from,
+        compute_until: until,
+        storage_from: from,
+        storage_until: until,
+    };
+    let quote = store.estimate_cost(project, &input).await?;
+    resource_service::credits::PgCreditStore::new(pool.clone())
+        .admin(
+            "http-estimate-grant",
+            actor,
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Grant {
+                project_id: project,
+                amount: quote.total.amount.clone(),
+                reason: "synthetic estimate allowance".into(),
+            },
+        )
+        .await?;
+    let key = [9_u8; 32];
+    let state = resource_service::api::ResourceApiState::new(store)
+        .with_service_verifier(Arc::new(verifier))
+        .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
+        .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.into())
+        .with_task_service_client_ids(
+            [
+                RESOURCE_AGENT_CLIENT_ID.into(),
+                RESOURCE_EVALUATION_CLIENT_ID.into(),
+            ]
+            .into_iter()
+            .collect(),
+        );
+    let router = resource_service::api::with_delegation(
+        resource_service::api::resource_api_router(state),
+        Arc::new(key.to_vec()),
+    );
+    let access = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ACCESS_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.api.invoke", "resource.credits.hold"],
+    )?;
+    let env = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ENVIRONMENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.hold"],
+    )?;
+    let agent = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_AGENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.credits.hold"],
+    )?;
+    let timestamp = time::OffsetDateTime::now_utc();
+    let session = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: actor.as_uuid(),
+        roles: vec![PlatformRole::Student],
+        authorization_revision: 1,
+        expires_at: timestamp + time::Duration::minutes(5),
+        idle_expires_at: timestamp + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-estimate-csrf".into()),
+    };
+    let delegation = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let preview_path = format!("/api/v1/projects/{project}/resource-cost-estimate");
+    let response = router
+        .clone()
+        .oneshot(credit_http_request(
+            &access,
+            Some(&delegation),
+            &preview_path,
+            &serde_json::to_value(&input)?,
+            "preview",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: contracts::resource::costing::ResourceCostEstimate =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(preview, quote);
+    let body = serde_json::to_value(EstimatedCreditHoldRequest {
+        request_id: request.id,
+        expected_estimate: preview,
+    })?;
+    for (token, expected) in [
+        (&access, StatusCode::FORBIDDEN),
+        (&agent, StatusCode::FORBIDDEN),
+        (&env, StatusCode::OK),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(credit_http_request(
+                token,
+                None,
+                "/internal/v1/credits/estimated-holds",
+                &body,
+                "estimated-http-hold",
+            )?)
+            .await?;
+        assert_eq!(response.status(), expected);
+    }
+    let malformed = router
+        .oneshot(credit_http_request(
+            &env,
+            None,
+            "/internal/v1/credits/estimated-holds",
+            &json!({"amount":"1.000000"}),
+            "bad-estimate",
+        )?)
+        .await?;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        malformed
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json")
+    );
+    Ok(())
+}
+
+// Real TCP Resource routes, signed service JWT and signed BFF delegation; only OIDC is external.
+struct MutationHttpFixture {
+    _database: testcontainers::ContainerAsync<Postgres>,
+    _authority: ResourceAuthAuthority,
+    pool: sqlx::PgPool,
+    store: PgResourceStore,
+    request: ResourceRequest,
+    client: reqwest::Client,
+    base: String,
+    token: String,
+    delegation: String,
+    server: tokio::task::JoinHandle<()>,
+}
+impl Drop for MutationHttpFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+impl MutationHttpFixture {
+    fn post(&self, path: &str, key: &str, body: &Value) -> reqwest::RequestBuilder {
+        self.client
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .header("x-labweaver-resource-delegation", &self.delegation)
+            .header("idempotency-key", key)
+            .json(body)
+    }
+    fn approval(&self) -> Value {
+        json!({"expectedRevision":1,"providerBinding":"kubernetes-standard",
+            "resources":self.request.requested_resources,"durationSeconds":600,"reason":"isolated HTTP approval"})
+    }
+    async fn activate(
+        &self,
+    ) -> Result<contracts::resource::ResourceLease, Box<dyn std::error::Error>> {
+        let response = self
+            .post(
+                &format!("/api/v1/resource-requests/{}/approve", self.request.id),
+                "initial-approval",
+                &self.approval(),
+            )
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let accepted: contracts::http::ResourceOperationAccepted = response.json().await?;
+        let lease = accepted.lease_id.ok_or("accepted lease")?;
+        self.store
+            .claim_next_capacity_shell()
+            .await?
+            .ok_or("capacity claim")?;
+        let now = self.store.current_time().await?;
+        Ok(self
+            .store
+            .activate_lease(
+                lease,
+                Revision::new(1)?,
+                now,
+                UtcTimestamp::from_utc(now.get() + time::Duration::seconds(60))?,
+                self.request.requester_id,
+                "http-fixture-activate",
+            )
+            .await?)
+    }
+}
+async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::error::Error>> {
+    let (database, pool) = migrated_pool().await?;
+    let authority =
+        spawn_resource_auth_authority(resource_signing_material("mutation-http")?).await?;
+    let verifier = build_resource_verifier(&authority.issuer).await?;
+    let store = PgResourceStore::new(pool.clone())
+        .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
+    let now = store.current_time().await?;
+    let mut request = outbox_request()?;
+    request.created_at = now;
+    request.updated_at = now;
+    request.request_key = Uuid::now_v7().to_string();
+    request.requested_resources = WorkloadResources {
+        cpu_millicores: 1000,
+        memory_bytes: 1,
+        storage_bytes: 1,
+        gpu: None,
+    };
+    request.requested_duration_seconds = 600;
+    store
+        .create(&Uuid::now_v7().to_string(), &request, "http-fixture-create")
+        .await?;
+    for (unit, unit_quantity, amount) in [
+        (ResourceBillingUnit::CpuMillicoreSecond, 1000, "1.000000"),
+        (ResourceBillingUnit::MemoryByteSecond, 1, "0.000000"),
+        (ResourceBillingUnit::StorageByteSecond, 1, "0.000000"),
+    ] {
+        store
+            .create_rate(
+                &Uuid::now_v7().to_string(),
+                &CreateResourceRateRequest {
+                    unit,
+                    unit_quantity,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    builder_binding: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::parse(amount)?,
+                    },
+                    effective_from: UtcTimestamp::from_utc(now.get() - time::Duration::hours(1))?,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    resource_service::credits::PgCreditStore::new(pool.clone())
+        .admin(
+            "http-fixture-grant",
+            request.requester_id,
+            &[PlatformRole::PlatformAdmin],
+            &contracts::resource::credits::CreditAdminOperation::Grant {
+                project_id: request.project_id,
+                amount: FixedDecimal::parse("1000.000000")?,
+                reason: "isolated synthetic allowance".into(),
+            },
+        )
+        .await?;
+    let key = [9_u8; 32];
+    let session = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: request.requester_id.as_uuid(),
+        roles: vec![PlatformRole::PlatformAdmin],
+        authorization_revision: 1,
+        expires_at: now.get() + time::Duration::minutes(5),
+        idle_expires_at: now.get() + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-mutation-http".into()),
+    };
+    let delegation = auth::encode_resource_delegation(&key, &session, now.get())?;
+    let token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ACCESS_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.api.invoke"],
+    )?;
+    let state = resource_service::api::ResourceApiState::new(store.clone())
+        .with_service_verifier(Arc::new(verifier))
+        .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
+        .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
+    let router = resource_service::api::with_delegation(
+        resource_service::api::resource_api_router(state),
+        Arc::new(key.to_vec()),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok(MutationHttpFixture {
+        _database: database,
+        _authority: authority,
+        pool,
+        store,
+        request,
+        client: reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()?,
+        base,
+        token,
+        delegation,
+        server,
+    })
+}
+async fn mutation_counts(
+    pool: &sqlx::PgPool,
+) -> Result<(i64, i64, i64, i64, i64, i64), sqlx::Error> {
+    sqlx::query_as("SELECT (SELECT count(*) FROM resource.resource_approvals),(SELECT count(*) FROM resource.capacity_claims),(SELECT count(*) FROM resource.resource_leases),(SELECT count(*) FROM resource.credit_holds),(SELECT count(*) FROM resource.credit_ledger_entries),(SELECT count(*) FROM resource.environment_credit_windows)").fetch_one(pool).await
+}
+async fn wait_for_http_waiters(
+    pool: &sqlx::PgPool,
+    blocker: i32,
+    count: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "WITH RECURSIVE blocked(pid) AS (SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) UNION SELECT a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid=ANY(pg_blocking_pids(a.pid))) SELECT count(DISTINCT pid) FROM blocked",
+            )
+            .bind(blocker)
+            .fetch_one(pool)
+            .await?;
+            if waiting >= count {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_renewal_lost_response_delayed_retry_replays_original_etag_and_funds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let active = f.activate().await?;
+    let path = format!("/api/v1/resource-leases/{}/renew", active.id);
+    let input = json!({"expectedRevision":active.revision,"durationSeconds":120,"reason":"isolated duration renewal"});
+    let first = f.post(&path, "lost-renewal", &input).send().await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first
+        .headers()
+        .get(header::ETAG)
+        .ok_or("renewal ETag")?
+        .clone();
+    drop(first); // First response body is lost after the database commit.
+    let committed = f.store.load_lease(active.id).await?;
+    let credits = resource_service::credits::PgCreditStore::new(f.pool.clone());
+    let balance = credits.account(f.request.project_id).await?;
+    let counts = mutation_counts(&f.pool).await?;
+    let until = f.store.current_time().await?.get() + time::Duration::milliseconds(60);
+    while f.store.current_time().await?.get() < until {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let retry = f.post(&path, "lost-renewal", &input).send().await?;
+    assert_eq!(
+        retry.status(),
+        StatusCode::OK,
+        "same duration body/key must replay after clock advancement"
+    );
+    assert_eq!(retry.headers().get(header::ETAG), Some(&etag));
+    assert_eq!(
+        retry.json::<contracts::resource::ResourceLease>().await?,
+        committed
+    );
+    for changed in [
+        json!({"durationSeconds":121}),
+        json!({"expectedRevision":committed.revision}),
+        json!({"reason":"different reason"}),
+    ] {
+        let mut other = input.clone();
+        for (k, v) in changed.as_object().ok_or("changed body")? {
+            other[k] = v.clone();
+        }
+        assert_eq!(
+            f.post(&path, "lost-renewal", &other).send().await?.status(),
+            StatusCode::CONFLICT
+        );
+    }
+    assert_eq!(mutation_counts(&f.pool).await?, counts);
+    assert_eq!(credits.account(f.request.project_id).await?, balance);
+    assert_eq!(f.store.load_lease(active.id).await?, committed);
+    eprintln!(
+        "synthetic renewal committed receipt: {} ETag={etag:?} rowCounts={counts:?}",
+        serde_json::to_string(&committed)?
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn http_renewal_same_key_concurrent_requests_change_hold_and_lease_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let active = f.activate().await?;
+    let before = mutation_counts(&f.pool).await?;
+    let original_grant = f
+        .store
+        .environment_credit_grant(RESOURCE_ENVIRONMENT_CLIENT_ID, active.id)
+        .await?;
+    let credits = resource_service::credits::PgCreditStore::new(f.pool.clone());
+    let original_balance = credits.account(f.request.project_id).await?;
+    let path = format!("/api/v1/resource-leases/{}/renew", active.id);
+    let input = json!({"expectedRevision":active.revision,"durationSeconds":120,"reason":"concurrent renewal"});
+    let mut guard = f.pool.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *guard)
+        .await?;
+    sqlx::query("SELECT lease_id FROM resource.resource_leases WHERE lease_id=$1 FOR UPDATE")
+        .bind(active.id.as_uuid())
+        .execute(&mut *guard)
+        .await?;
+    let first = f.post(&path, "same-key-renewal", &input);
+    let a = tokio::spawn(async move { first.send().await });
+    wait_for_http_waiters(&f.pool, pid, 1).await?;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let second = f.post(&path, "same-key-renewal", &input);
+    let b = tokio::spawn(async move { second.send().await });
+    wait_for_http_waiters(&f.pool, pid, 2).await?;
+    guard.commit().await?;
+    let one = a.await??;
+    let two = b.await??;
+    assert_eq!(one.status(), StatusCode::OK);
+    assert_eq!(two.status(), StatusCode::OK);
+    assert_eq!(
+        one.headers().get(header::ETAG),
+        two.headers().get(header::ETAG)
+    );
+    let actual = one.json::<contracts::resource::ResourceLease>().await?;
+    assert_eq!(
+        two.json::<contracts::resource::ResourceLease>().await?,
+        actual
+    );
+    assert_eq!(f.store.load_lease(active.id).await?, actual);
+    let after = mutation_counts(&f.pool).await?;
+    assert_eq!(
+        after,
+        (
+            before.0,
+            before.1,
+            before.2,
+            before.3,
+            before.4 + 1,
+            before.5 + 1
+        )
+    );
+    let grant = f
+        .store
+        .environment_credit_grant(RESOURCE_ENVIRONMENT_CLIENT_ID, active.id)
+        .await?;
+    assert_eq!(grant.lease_revision, actual.revision);
+    assert_eq!(grant.hold.id, original_grant.hold.id);
+    assert_eq!(actual.revision.get(), active.revision.get() + 1);
+    let balance = credits.account(f.request.project_id).await?;
+    assert_eq!(balance.reserved, grant.hold.remaining);
+    assert!(balance.reserved.scaled() > original_balance.reserved.scaled());
+    assert_eq!(balance.spent, original_balance.spent);
+    assert_eq!(balance.balance, original_balance.balance);
+    assert_eq!(grant.covered_until, actual.expires_at.ok_or("expiry")?);
+    Ok(())
+}
+#[tokio::test]
+async fn http_approval_lost_response_retry_returns_committed_lease_receipt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let path = format!("/api/v1/resource-requests/{}/approve", f.request.id);
+    let input = f.approval();
+    let first = f.post(&path, "lost-approval", &input).send().await?;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    drop(first);
+    let counts = mutation_counts(&f.pool).await?;
+    let actual: Uuid =
+        sqlx::query_scalar("SELECT lease_id FROM resource.resource_leases WHERE request_id=$1")
+            .bind(f.request.id.as_uuid())
+            .fetch_one(&f.pool)
+            .await?;
+    let retry = f.post(&path, "lost-approval", &input).send().await?;
+    assert_eq!(
+        retry.status(),
+        StatusCode::ACCEPTED,
+        "successful approval replay must pass the revision fence"
+    );
+    let accepted = retry
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    let persisted:Value=sqlx::query_scalar("SELECT result FROM resource.idempotency_ledger WHERE operation='approve_resource_request' AND idempotency_key='lost-approval'").fetch_one(&f.pool).await?;
+    assert_eq!(
+        accepted,
+        serde_json::from_value::<contracts::http::ResourceOperationAccepted>(persisted)?
+    );
+    assert_eq!(
+        f.post(&path, "fresh-stale-approval", &input)
+            .send()
+            .await?
+            .status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    let now = f.store.current_time().await?;
+    let student = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: f.request.requester_id.as_uuid(),
+        roles: vec![PlatformRole::Student],
+        authorization_revision: 1,
+        expires_at: now.get() + time::Duration::minutes(5),
+        idle_expires_at: now.get() + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("synthetic-denied-replay".into()),
+    };
+    let denied = auth::encode_resource_delegation(&[9_u8; 32], &student, now.get())?;
+    assert_eq!(
+        f.client
+            .post(format!("{}{path}", f.base))
+            .bearer_auth(&f.token)
+            .header("x-labweaver-resource-delegation", denied)
+            .header("idempotency-key", "lost-approval")
+            .json(&input)
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    assert_eq!(accepted.lease_id.ok_or("lease")?.as_uuid(), actual);
+    assert_eq!(accepted.revision, Revision::new(2)?);
+    for changed in [
+        json!({"durationSeconds":601}),
+        json!({"expectedRevision":2}),
+        json!({"reason":"different decision"}),
+    ] {
+        let mut other = input.clone();
+        for (k, v) in changed.as_object().ok_or("changed body")? {
+            other[k] = v.clone();
+        }
+        assert_eq!(
+            f.post(&path, "lost-approval", &other)
+                .send()
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+    assert_eq!(mutation_counts(&f.pool).await?, counts);
+    assert_eq!(counts.0, 1);
+    assert_eq!(counts.1, 1);
+    assert_eq!(counts.2, 1);
+    assert_eq!(counts.3, 0);
+    eprintln!(
+        "synthetic approval persisted receipt: {} rowCounts={counts:?}",
+        serde_json::to_string(&accepted)?
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn http_approval_barrier_replays_one_real_lease_to_both_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let path = format!("/api/v1/resource-requests/{}/approve", f.request.id);
+    let input = f.approval();
+    let before = mutation_counts(&f.pool).await?;
+    let mut guard = f.pool.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *guard)
+        .await?;
+    sqlx::query("SELECT request_id FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE")
+        .bind(f.request.id.as_uuid())
+        .execute(&mut *guard)
+        .await?;
+    let first = f.post(&path, "same-key-approval", &input);
+    let a = tokio::spawn(async move { first.send().await });
+    wait_for_http_waiters(&f.pool, pid, 1).await?;
+    let second = f.post(&path, "same-key-approval", &input);
+    let b = tokio::spawn(async move { second.send().await });
+    wait_for_http_waiters(&f.pool, pid, 2).await?;
+    guard.commit().await?;
+    let one = a.await??;
+    let two = b.await??;
+    assert_eq!(one.status(), StatusCode::ACCEPTED);
+    assert_eq!(two.status(), StatusCode::ACCEPTED);
+    let first = one
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    let second = two
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    assert_eq!(
+        first, second,
+        "both successful receipts must contain the committed lease ID"
+    );
+    let lease = first.lease_id.ok_or("accepted lease")?;
+    assert_eq!(f.store.load_lease(lease).await?.request_id, f.request.id);
+    let after = mutation_counts(&f.pool).await?;
+    assert_eq!(
+        after,
+        (
+            before.0 + 1,
+            before.1 + 1,
+            before.2 + 1,
+            before.3,
+            before.4,
+            before.5
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_approval_legacy_request_json_replays_original_approval_version()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = mutation_http_fixture().await?;
+    let path = format!("/api/v1/resource-requests/{}/approve", f.request.id);
+    let body = f.approval();
+    let first = f.post(&path, "legacy-approval", &body).send().await?;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let original = first
+        .json::<contracts::http::ResourceOperationAccepted>()
+        .await?;
+    let legacy = f.store.load(f.request.id).await?;
+    let legacy_json = serde_json::to_value(&legacy)?;
+    // Seed exactly the previous completed-result shape; preserve its stable hash and all facts.
+    sqlx::query("UPDATE resource.idempotency_ledger SET result=$1 WHERE operation='approve_resource_request' AND idempotency_key='legacy-approval'").bind(&legacy_json).execute(&f.pool).await?;
+    // A later approval for the same request must not replace the original version during replay.
+    let old: Value =
+        sqlx::query_scalar("SELECT contract FROM resource.resource_approvals WHERE request_id=$1")
+            .bind(f.request.id.as_uuid())
+            .fetch_one(&f.pool)
+            .await?;
+    let mut later: ResourceApproval = serde_json::from_value(old)?;
+    later.id = ResourceApprovalId::new();
+    later.request_revision = Revision::new(9)?;
+    sqlx::query("INSERT INTO resource.resource_approvals(approval_id,request_id,request_revision,approver_id,provider_binding,approved_cpu_millicores,approved_memory_bytes,approved_storage_bytes,approved_duration_seconds,reason,valid_until,created_at,contract) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+        .bind(later.id.as_uuid()).bind(later.request_id.as_uuid()).bind(i64::try_from(later.request_revision.get())?).bind(later.approver_id.as_uuid()).bind(&later.provider_binding)
+        .bind(i32::try_from(later.approved_resources.cpu_millicores)?).bind(i64::try_from(later.approved_resources.memory_bytes)?).bind(i64::try_from(later.approved_resources.storage_bytes)?)
+        .bind(i64::try_from(later.approved_duration_seconds)?).bind(&later.reason).bind(later.valid_until.get()).bind(later.created_at.get()).bind(serde_json::to_value(&later)?).execute(&f.pool).await?;
+    let before = mutation_counts(&f.pool).await?;
+    let retry = f.post(&path, "legacy-approval", &body).send().await?;
+    assert_eq!(
+        retry.status(),
+        StatusCode::ACCEPTED,
+        "old ResourceRequest JSON must replay without 500"
+    );
+    assert_eq!(
+        retry
+            .json::<contracts::http::ResourceOperationAccepted>()
+            .await?,
+        original
+    );
+    assert_eq!(
+        f.store
+            .load_lease(original.lease_id.ok_or("original lease")?)
+            .await?
+            .request_id,
+        legacy.id
+    );
+    assert_eq!(mutation_counts(&f.pool).await?, before);
+    assert_eq!(sqlx::query_scalar::<_,Value>("SELECT result FROM resource.idempotency_ledger WHERE operation='approve_resource_request' AND idempotency_key='legacy-approval'").fetch_one(&f.pool).await?,legacy_json);
+    // If the exact historical approval link is unavailable, do not substitute a current lease.
+    sqlx::query("UPDATE resource.resource_approvals SET request_revision=10,contract=jsonb_set(contract,'{requestRevision}','10') WHERE approval_id=(SELECT approval_id FROM resource.capacity_claims WHERE claim_id=(SELECT claim_id FROM resource.resource_leases WHERE lease_id=$1))")
+        .bind(original.lease_id.ok_or("original lease")?.as_uuid()).execute(&f.pool).await?;
+    let denied = f.post(&path, "legacy-approval", &body).send().await?;
+    assert_eq!(denied.status(), StatusCode::CONFLICT);
+    let problem: contracts::ProblemDetails = denied.json().await?;
+    assert_eq!(
+        problem.diagnostic_code.as_str(),
+        "LW_RESOURCE_ALLOCATION_MISMATCH"
+    );
+    assert_eq!(mutation_counts(&f.pool).await?, before);
+    assert_eq!(sqlx::query_scalar::<_,Value>("SELECT result FROM resource.idempotency_ledger WHERE operation='approve_resource_request' AND idempotency_key='legacy-approval'").fetch_one(&f.pool).await?,legacy_json);
+    eprintln!(
+        "synthetic legacy approval original receipt: {} legacyRevision={} rowCounts={before:?}",
+        serde_json::to_string(&original)?,
+        legacy.revision.get()
+    );
+    Ok(())
 }
