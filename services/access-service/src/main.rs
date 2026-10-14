@@ -373,6 +373,14 @@ fn project_browser_router() -> Router<Arc<AppState>> {
             axum::routing::any(proxy::forward_control),
         )
         .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads/{upload_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads/{upload_id}/cancel",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects/{project_id}/problem-packages/{package_id}",
             axum::routing::any(proxy::forward_control),
         )

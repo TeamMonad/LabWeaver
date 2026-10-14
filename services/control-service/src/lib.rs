@@ -8,6 +8,7 @@
 pub mod api;
 mod candidate_builds;
 pub mod clients;
+mod material_uploads;
 pub mod messaging;
 pub mod platform_image_jobs;
 
@@ -44,8 +45,8 @@ use contracts::http::{
     PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES, PlatformImageEntry, PlatformImageKind,
     PlatformImageStatus, PlatformImageUploadPartTarget, PlatformImageUploadSession,
     PlatformImageUploadState, PlatformImageUploadStatus, PlatformImageUploadTarget,
-    PlatformImageUploadedPart, ProblemPackageRetentionChoice, ProblemPackageUploadFile,
-    ProblemPackageUploadSession, ProblemPackageUploadTarget, RemoveProjectMembershipRequest,
+    PlatformImageUploadedPart, ProblemPackageRetentionChoice, ProblemPackageUploadSession,
+    ProblemPackageUploadState, ProblemPackageUploadTarget, RemoveProjectMembershipRequest,
     ResolvedProjectMembershipRequest, WorkConfigurationAdmissionBinding,
     WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
 };
@@ -403,6 +404,7 @@ pub struct ControlService {
     pool: PgPool,
     objects: Arc<dyn ImmutableObjectStore>,
     config: ControlConfig,
+    material_verification: Arc<tokio::sync::Semaphore>,
 }
 
 enum CompletionReservation {
@@ -441,6 +443,7 @@ impl ControlService {
             pool,
             objects,
             config,
+            material_verification: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
@@ -1126,6 +1129,12 @@ impl ControlService {
             files: files.clone(),
             upload_targets: targets,
             expires_at,
+            state: ProblemPackageUploadState::Pending,
+            uploaded_paths: Vec::new(),
+            completed_package: None,
+            terminal_diagnostic: None,
+            completion_idempotency_key: None,
+            completion_expected_revision: None,
         };
         let result = serde_json::to_value(&session).map_err(|_| ControlError::ContractInvalid)?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
@@ -1166,14 +1175,13 @@ impl ControlService {
             sqlx::query(
                 "INSERT INTO control.problem_package_upload_files \
                  (upload_id,ordinal,path,object_key,size_bytes,sha256,media_type) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                 VALUES ($1,$2,$3,$4,$5,NULL,$6)",
             )
             .bind(upload_id.as_uuid())
             .bind(i32::try_from(ordinal).map_err(|_| ControlError::ContractInvalid)?)
             .bind(&file.path)
             .bind(key)
             .bind(i64::try_from(file.size_bytes).map_err(|_| ControlError::ContractInvalid)?)
-            .bind(Sha256Digest::of_bytes(file.path.as_bytes()).to_string())
             .bind(&file.media_type)
             .execute(&mut *transaction)
             .await
@@ -1251,6 +1259,12 @@ impl ControlService {
             "uploadId": upload_id,
             "expectedRevision": expected_revision,
         }))?;
+        // Bound concurrent temporary files and copy buffers before reserving a database lease.
+        let _verification_permit = self
+            .material_verification
+            .acquire()
+            .await
+            .map_err(|_| ControlError::OperationInProgress)?;
         let completion_lease = match self
             .reserve_completion(
                 project_id,
@@ -1284,28 +1298,6 @@ impl ControlService {
                 )
                 .await;
         }
-        let _declared_manifest = rows
-            .iter()
-            .map(|row| {
-                Ok(ProblemPackageUploadFile {
-                    path: row.try_get("path").map_err(db)?,
-                    size_bytes: u64::try_from(row.try_get::<i64, _>("size_bytes").map_err(db)?)
-                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-                    media_type: row.try_get("media_type").map_err(db)?,
-                })
-            })
-            .collect::<Result<Vec<_>, ControlError>>()?;
-        if false {
-            return self
-                .fail_upload(
-                    upload_id,
-                    completion_lease,
-                    idempotency_key,
-                    "LW_PACKAGE_HASH_MISMATCH",
-                    &[],
-                )
-                .await;
-        }
         let mut package_files = Vec::with_capacity(rows.len());
         let mut frozen_versions = Vec::with_capacity(rows.len());
         for row in rows {
@@ -1315,11 +1307,7 @@ impl ControlService {
             let key: String = row.try_get("object_key").map_err(db)?;
             let size = u64::try_from(row.try_get::<i64, _>("size_bytes").map_err(db)?)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-            let _sha256 = row
-                .try_get::<String, _>("sha256")
-                .map_err(db)?
-                .parse::<Sha256Digest>()
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+            let stored_sha256: Option<String> = row.try_get("sha256").map_err(db)?;
             let media_type: String = row.try_get("media_type").map_err(db)?;
             let stored_version: Option<String> = row.try_get("object_version").map_err(db)?;
             let stored_artifact: Option<Uuid> = row.try_get("artifact_id").map_err(db)?;
@@ -1333,17 +1321,29 @@ impl ControlService {
                         media_type,
                     };
                     self.objects
-                        .read_verified(&key, &expected)
+                        .read_verified_file(&key, &expected)
                         .await
                         .map_err(ControlError::from)
                 }
                 (None, None) => self
                     .objects
-                    .freeze_current(&key, size, &media_type)
+                    .freeze_current_file(&key, size, &media_type)
                     .await
                     .map_err(ControlError::from),
                 _ => Err(ControlError::PersistenceIdentityMismatch),
             };
+            if let Err(ControlError::ObjectStore(
+                error @ (ObjectStoreError::ObjectUnavailable | ObjectStoreError::ObjectNotFound),
+            )) = &verified
+            {
+                // Retain the original intent and frozen versions. The same request can reclaim it.
+                sqlx::query(
+                    "UPDATE control.problem_package_upload_sessions \
+                     SET completion_lease_expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 millisecond' \
+                     WHERE upload_id=$1 AND state='completing' AND completion_lease_token=$2",
+                ).bind(upload_id.as_uuid()).bind(completion_lease).execute(&self.pool).await.map_err(db)?;
+                return Err(ControlError::ObjectStore(error.clone()));
+            }
             let Ok(object) = verified else {
                 tracing::warn!(
                     event = "control.problem_package.object_verification_failed",
@@ -1368,19 +1368,42 @@ impl ControlService {
                     )
                     .await;
             };
-            self.record_frozen_version(upload_id, completion_lease, &key, &object.reference, now)
-                .await?;
+            let sha256 = object.sha256().to_owned();
+            if object.reference().size_bytes != size
+                || stored_sha256
+                    .as_ref()
+                    .is_some_and(|expected| expected != &sha256)
+            {
+                return self
+                    .fail_upload(
+                        upload_id,
+                        completion_lease,
+                        idempotency_key,
+                        "LW_PACKAGE_HASH_MISMATCH",
+                        &frozen_versions,
+                    )
+                    .await;
+            }
+            self.record_frozen_version(
+                upload_id,
+                completion_lease,
+                &key,
+                object.reference(),
+                &sha256,
+                now,
+            )
+            .await?;
             frozen_versions.push((
                 key,
-                object.reference.object_version.clone(),
-                object.reference.artifact_id,
+                object.reference().object_version.clone(),
+                object.reference().artifact_id,
             ));
             package_files.push(PackageFile {
                 path,
-                object: object.reference,
+                object: object.reference().clone(),
+                sha256,
             });
         }
-        let _package_manifest_sha256 = canonical_hash(&package_files)?;
         let session = sqlx::query(
             "SELECT project_id,course_id,retention_policy_revision,retention_choice FROM control.problem_package_upload_sessions \
              WHERE upload_id=$1 AND ($2::uuid IS NULL OR project_id=$2) AND course_id IS NOT DISTINCT FROM $3 \
@@ -6561,12 +6584,48 @@ impl ControlService {
             }
             IdempotencyDecision::Reserved => {}
         }
+        let completed = sqlx::query(
+            "SELECT completed_package_id,completion_request_sha256 FROM control.problem_package_upload_sessions \
+             WHERE upload_id=$1 AND ($2::uuid IS NULL OR project_id=$2) \
+             AND course_id IS NOT DISTINCT FROM $3 AND state='completed'",
+        ).bind(upload_id.as_uuid()).bind(project_id.map(ProjectId::as_uuid))
+        .bind(course_id.map(CourseId::as_uuid)).fetch_optional(&mut *transaction).await.map_err(db)?;
+        if let Some(completed) = completed {
+            if completed
+                .try_get::<String, _>("completion_request_sha256")
+                .map_err(db)?
+                != request_hash.to_string()
+            {
+                return Err(ControlError::IdempotencyConflict);
+            }
+            let package_id: Uuid = completed.try_get("completed_package_id").map_err(db)?;
+            let contract: Value = sqlx::query_scalar(
+                "SELECT contract FROM control.problem_packages WHERE package_id=$1",
+            )
+            .bind(package_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(db)?;
+            let package = serde_json::from_value(contract.clone())
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+            IdempotencyStore::complete(
+                &mut transaction,
+                Domain::Control,
+                COMPLETE_UPLOAD,
+                idempotency_key.as_str(),
+                &contract,
+            )
+            .await
+            .map_err(|_| ControlError::PersistenceFailed)?;
+            transaction.commit().await.map_err(db)?;
+            return Ok(CompletionReservation::Replay(package));
+        }
         let lease_token = Uuid::now_v7();
         let lease_seconds = i64::try_from(self.config.completion_lease_seconds)
             .map_err(|_| ControlError::ConfigurationInvalid)?;
         let result = sqlx::query(
             "UPDATE control.problem_package_upload_sessions \
-             SET state='completing',revision=revision+1,completion_idempotency_key=$5,completion_request_sha256=$6,completion_lease_token=$7,completion_lease_expires_at=date_trunc('milliseconds',clock_timestamp())+($8*interval '1 second'),updated_at=now() \
+             SET state='completing',revision=revision+1,completion_idempotency_key=$5,completion_request_sha256=$6,completion_lease_token=$7,completion_lease_expires_at=date_trunc('milliseconds',clock_timestamp())+($8*interval '1 second'),completion_expected_revision=$4,updated_at=now() \
              WHERE upload_id=$1 AND ($2::uuid IS NULL OR project_id=$2) AND course_id IS NOT DISTINCT FROM $3 \
                AND state='pending' AND expires_at>date_trunc('milliseconds',clock_timestamp()) AND revision=$4 \
              RETURNING upload_id",
@@ -6613,17 +6672,22 @@ impl ControlService {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "persist the exact version and digest under one completion lease"
+    )]
     async fn record_frozen_version(
         &self,
         upload_id: UploadSessionId,
         lease_token: Uuid,
         object_key: &str,
         reference: &contracts::ArtifactRef,
+        sha256: &str,
         now: UtcTimestamp,
     ) -> Result<(), ControlError> {
         let updated = sqlx::query(
             "UPDATE control.problem_package_upload_files files \
-             SET object_version=$4,artifact_id=$5,verified_at=$6 \
+             SET object_version=$4,artifact_id=$5,verified_at=$6,sha256=$7 \
              WHERE files.upload_id=$1 AND files.object_key=$2 \
                AND (files.object_version IS NULL OR (files.object_version=$4 AND files.artifact_id=$5)) \
                AND EXISTS (SELECT 1 FROM control.problem_package_upload_sessions sessions \
@@ -6636,6 +6700,7 @@ impl ControlService {
         .bind(&reference.object_version)
         .bind(reference.artifact_id.as_uuid())
         .bind(now.get())
+        .bind(sha256)
         .execute(&self.pool)
         .await
         .map_err(db)?;

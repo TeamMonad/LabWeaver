@@ -1,0 +1,45 @@
+{
+  "candidateCommit": "f6e16444ddfaefc3b63c058a40a42393201d253a",
+  "candidateTree": "148584b29e44b3e31d6ff08865938b118ac388ac",
+  "sourceDateEpoch": 1791791504,
+  "component": "evaluation-service",
+  "entrypoint": [
+    "/usr/local/bin/labweaver-service",
+    "--mode",
+    "freeze-worker"
+  ],
+  "platform": "linux/amd64",
+  "containerfile": "containers/Containerfile.rust",
+  "containerfileBlob": "46abb4790269ab4f0ce77270921448e7c8a19990",
+  "buildTarget": "runtime",
+  "localTag": "localhost/labweaver-197/evaluation-service:f6e16444",
+  "candidateImageDigest": null,
+  "candidateImageBuild": "not-built-in-this-cloud-preparation",
+  "runtimeBase": "gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa",
+  "builderBase": "docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3",
+  "deployedCommitReportedByParent": "9b5c21f6",
+  "reportedCluster": {
+    "kubernetes": "1.35.6",
+    "kubevirt": "1.8.4",
+    "cdi": "1.65.0",
+    "readyNodes": 3
+  },
+  "schemas": [
+    {
+      "source": "schemas/contracts/v1/submission-manifest.schema.json",
+      "gitBlob": "59affca7336da42d0694274f0ae62c883e7552f5",
+      "sha256": "dd248ccedc432b504b3902aefabfd915e3a83583fb9fe3875f12cdeebebedab9"
+    },
+    {
+      "source": "schemas/contracts/v1/internal/environment-freeze-binding.schema.json",
+      "gitBlob": "9d112d58477dee8b9a563f5e058b6fd9b526e424",
+      "sha256": "86263d581dabf889a1d7ca071e27a36ac5b062ac9e0666a75e575fef5b4e40d2"
+    },
+    {
+      "source": "schemas/contracts/v1/frozen-submission.schema.json",
+      "gitBlob": "6ab5e9dd02db2ae13c57be3388d0551a4969f692",
+      "sha256": "6e4952a4eb40fcb739e628a48f49d11dfa2d692ae4c532d887dacb608aa05ffc"
+    }
+  ],
+  "status": "TEST_SUPPORT_ONLY_NOT_CLUSTER_EXECUTED"
+}

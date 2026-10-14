@@ -65,6 +65,10 @@ async fn pvc_preflight_and_freeze_are_deterministic_and_include_empty_files()
         vec!["README.md", "src/empty.txt", "src/main.rs"]
     );
     assert_eq!(preflight.files[1].size_bytes, 0);
+    assert_eq!(
+        preflight.files[1].sha256,
+        Sha256Digest::of_bytes(b"").to_string()
+    );
     assert!(
         preflight
             .files
@@ -76,6 +80,31 @@ async fn pvc_preflight_and_freeze_are_deterministic_and_include_empty_files()
     assert_eq!(frozen.manifest_sha256, preflight.manifest_sha256);
     assert_eq!(Sha256Digest::of_bytes(&frozen.bytes), frozen.sha256);
     assert!(!frozen.bytes.is_empty());
+    fs::write(directory.path().join("src/main.rs"), b"edited after freeze")?;
+    assert_eq!(Sha256Digest::of_bytes(&frozen.bytes), frozen.sha256);
+    Ok(())
+}
+
+#[tokio::test]
+async fn freeze_rejects_same_size_rewrite_and_allows_a_new_preview()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = fixture()?;
+    let source = PvcSnapshotSource::open(directory.path(), Sha256Digest::of_bytes(b"pvc"))?;
+    let collector = SnapshotCollector::default();
+    let manifest = manifest(1_024, 10)?;
+    let before = collector.preflight(&source, &manifest).await?;
+    fs::write(directory.path().join("src/main.rs"), b"fn main() []\n")?;
+    let after = collector.preflight(&source, &manifest).await?;
+    assert_eq!(before.total_bytes, after.total_bytes);
+    assert_eq!(before.files[2].size_bytes, after.files[2].size_bytes);
+    assert_ne!(before.files[2].sha256, after.files[2].sha256);
+    assert_ne!(before.manifest_sha256, after.manifest_sha256);
+    assert_eq!(
+        collector.freeze(&source, &manifest, &before).await,
+        Err(CollectError::SourceChanged)
+    );
+    let frozen = collector.freeze(&source, &manifest, &after).await?;
+    assert_eq!(frozen.files, after.files);
     Ok(())
 }
 

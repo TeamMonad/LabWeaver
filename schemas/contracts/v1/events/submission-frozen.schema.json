@@ -115,6 +115,10 @@
         "path": {
           "type": "string"
         },
+        "sha256": {
+          "description": "SHA-256 of the selected file bytes observed during collection.",
+          "type": "string"
+        },
         "sizeBytes": {
           "format": "uint64",
           "minimum": 0,
@@ -124,7 +128,8 @@
       "required": [
         "path",
         "sizeBytes",
-        "mediaType"
+        "mediaType",
+        "sha256"
       ],
       "type": "object"
     },

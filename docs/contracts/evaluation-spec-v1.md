@@ -38,6 +38,19 @@ a subset of `llmReadable`. The current v1 shape binds one Collector, so `system_
 requires an empty `llmReadable` and cannot be paired with file evidence for an LLM Review. A future
 multi-Collector shape requires a separately reviewed contract change.
 
+Before reading advisory inputs, Evaluation checks the published `llmReadable` list
+and the exact frozen file list again. It reads only the rubric object named by that
+step, rather than every object in the evaluation package. Frozen archive and file
+hashes, and the rubric's package file hash, must match the actual bytes. The review
+request retains those pinned hashes and object versions.
+
+These checks establish content identity and the published submission path scope.
+The current advisory request has no current user authorization binding or rubric
+visibility/egress permission. Its rubric locator and project policy do not establish
+permission to disclose hidden rules. Student advisory authorization and hidden
+rubric handling remain incomplete; material-package selection in #216 does not
+complete this separate input boundary.
+
 Collector include/exclude values in this v1 contract are literal normalized paths. An exclude
 also excludes descendants by path-segment prefix. Glob metacharacters such as `*`, `?`, `[]` and
 `{}` are rejected until the Collector contract defines and implements one portable matching

@@ -31,11 +31,325 @@ use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
 #[tokio::test]
+async fn worker_dispatch_is_fenced_on_the_existing_command_ledger()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(0).await?;
+    let store = PgFreezeCommandStore::new(fixture.pool.clone());
+    let command = SubmissionFreezeCommand {
+        input_authorization_context: None,
+        worker_dispatch: evaluation_service::FreezeWorkerDispatch::Pending,
+        frozen_submission_id: fixture.request.frozen_submission_id,
+        operation_id: contracts::OperationId::new(),
+        project_id: fixture.request.project_id,
+        course_id: fixture.request.course_id,
+        environment_id: fixture.request.environment.environment_id,
+        actor_id: fixture.request.actor_id,
+        environment_revision: fixture.request.environment.environment_revision,
+        manifest_revision: fixture.request.manifest_revision,
+        manifest: fixture.request.manifest.clone(),
+        idempotency_key: "dispatch-ledger".to_owned(),
+        trace_id: "dispatch-ledger".to_owned(),
+        requested_at: store.authority_now().await?,
+    };
+    store.accept(&command).await?;
+    store.claim_next().await?.ok_or("queued command missing")?;
+    let dispatch = evaluation_service::FreezeWorkerDispatch::Bound {
+        namespace: "synthetic-workspace".to_owned(),
+        profile: evaluation_service::FreezeWorkerProfile::Managed,
+    };
+    let bound = store.bind_worker_dispatch(&command, &dispatch).await?;
+    assert_eq!(
+        store.bind_worker_dispatch(&command, &dispatch).await?,
+        bound
+    );
+    assert_eq!(store.refresh_worker_dispatch(&command).await?, bound);
+    assert_eq!(store.running(32).await?, vec![bound.clone()]);
+    let moved = evaluation_service::FreezeWorkerDispatch::Bound {
+        namespace: "another-workspace".to_owned(),
+        profile: evaluation_service::FreezeWorkerProfile::Managed,
+    };
+    assert!(matches!(
+        store.bind_worker_dispatch(&command, &moved).await,
+        Err(evaluation_service::FreezeCommandStoreError::FenceConflict)
+    ));
+    let mut wrong_owner = command.clone();
+    wrong_owner.actor_id = ActorId::new();
+    assert!(matches!(
+        store.bind_worker_dispatch(&wrong_owner, &dispatch).await,
+        Err(evaluation_service::FreezeCommandStoreError::DatabaseIdentityInvalid)
+    ));
+    assert!(
+        store.accept(&bound).await.is_err(),
+        "public acceptance cannot supply dispatch provenance"
+    );
+    let mut retry = command.clone();
+    retry.frozen_submission_id = FrozenSubmissionId::new();
+    retry.operation_id = contracts::OperationId::new();
+    retry.trace_id = "dispatch-ledger-retry".to_owned();
+    let replay = store.accept(&retry).await?;
+    assert!(replay.replay);
+    assert_eq!(replay.frozen_submission_id, command.frozen_submission_id);
+    assert_eq!(store.refresh_worker_dispatch(&command).await?, bound);
+    let mut legacy = serde_json::to_value(&command)?;
+    legacy
+        .as_object_mut()
+        .ok_or("command object")?
+        .remove("workerDispatch");
+    let legacy: SubmissionFreezeCommand = serde_json::from_value(legacy)?;
+    assert_eq!(
+        legacy.worker_dispatch,
+        evaluation_service::FreezeWorkerDispatch::Untracked
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "replay and corruption checks share one immutable fact flow"
+)]
+async fn model_input_facts_are_scoped_metadata_and_pin_first_session()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(0).await?;
+    let commands = PgFreezeCommandStore::new(fixture.pool.clone());
+    let first_session =
+        Sha256Digest::of_bytes(uuid::Uuid::new_v4().to_string().as_bytes()).to_string();
+    let command = SubmissionFreezeCommand {
+        input_authorization_context: Some(contracts::http::ModelInputAuthorizationContext {
+            session_sha256: first_session.clone(),
+            actor_id: fixture.request.actor_id,
+            project_id: fixture.request.project_id,
+            course_id: fixture.request.course_id,
+            operation_id: "freezeSubmission".to_owned(),
+            valid_until: commands.authority_now().await?,
+        }),
+        worker_dispatch: evaluation_service::FreezeWorkerDispatch::Pending,
+        frozen_submission_id: fixture.request.frozen_submission_id,
+        operation_id: contracts::OperationId::new(),
+        project_id: fixture.request.project_id,
+        course_id: fixture.request.course_id,
+        environment_id: fixture.request.environment.environment_id,
+        actor_id: fixture.request.actor_id,
+        environment_revision: fixture.request.environment.environment_revision,
+        manifest_revision: fixture.request.manifest_revision,
+        manifest: fixture.request.manifest.clone(),
+        idempotency_key: "metadata-first-session".to_owned(),
+        trace_id: "metadata-first-session".to_owned(),
+        requested_at: commands.authority_now().await?,
+    };
+    let first = commands.accept(&command).await?;
+    let mut replay = command.clone();
+    replay
+        .input_authorization_context
+        .as_mut()
+        .ok_or("context missing")?
+        .session_sha256 = Sha256Digest::of_bytes(b"another-session").to_string();
+    replay.frozen_submission_id = FrozenSubmissionId::new();
+    replay.operation_id = contracts::OperationId::new();
+    assert_eq!(
+        commands.accept(&replay).await?.frozen_submission_id,
+        first.frozen_submission_id
+    );
+    let claimed = commands.claim_next().await?.ok_or("command missing")?;
+    assert_eq!(
+        claimed.input_authorization_context,
+        command.input_authorization_context
+    );
+    let mut changed = claimed.clone();
+    changed.input_authorization_context = replay.input_authorization_context;
+    assert!(matches!(
+        commands.refresh_worker_dispatch(&changed).await,
+        Err(evaluation_service::FreezeCommandStoreError::DatabaseIdentityInvalid)
+    ));
+    let frozen = fixture
+        .service
+        .freeze(&fixture.request, &fixture.source)
+        .await?;
+    let release = metadata_release(&fixture).await?;
+    // A DB system-fact value must not become model content merely because facts were requested.
+    for table in ["frozen_submissions", "submission_freeze_requests"] {
+        sqlx::query(&format!("UPDATE evaluation.{table} SET contract=jsonb_set(contract,'{{systemFacts}}','{{\"synthetic\":\"UNSELECTED_FACT_MARKER\"}}'::jsonb) WHERE frozen_submission_id=$1"))
+            .bind(frozen.id.as_uuid()).execute(&fixture.pool).await?;
+    }
+    let store = PgFreezeStore::new(fixture.pool.clone());
+    let facts = store
+        .model_input_facts(
+            frozen.id,
+            frozen.project_id,
+            frozen.course_id,
+            frozen.actor_id,
+            release.id,
+            release.revision,
+        )
+        .await?;
+    assert_eq!(
+        facts["inputAuthorizationContext"],
+        serde_json::to_value(&command.input_authorization_context)?
+    );
+    assert_eq!(
+        facts["inputAuthorizationContext"]["sessionSha256"],
+        first_session
+    );
+    assert_eq!(
+        facts["manifestSha256"],
+        Sha256Digest::of_canonical(&command.manifest)?.to_string()
+    );
+    assert_eq!(facts["files"], serde_json::to_value(&frozen.files)?);
+    assert_eq!(facts["archive"], serde_json::to_value(&frozen.object)?);
+    assert_eq!(facts["evaluationRelease"]["id"], release.id.to_string());
+    let text = serde_json::to_string(&facts)?;
+    assert!(!text.contains("UNSELECTED_FACT_MARKER"));
+    for field in [
+        "systemFacts",
+        "workerDispatch",
+        "objectLocators",
+        "objectKey",
+        "presignedUrl",
+        "visibility",
+        "allowEgress",
+    ] {
+        assert!(
+            facts.get(field).is_none(),
+            "unexpected metadata field {field}"
+        );
+    }
+    for (project, course, owner, revision) in [
+        (
+            ProjectId::new(),
+            frozen.course_id,
+            frozen.actor_id,
+            release.revision,
+        ),
+        (frozen.project_id, None, frozen.actor_id, release.revision),
+        (
+            frozen.project_id,
+            frozen.course_id,
+            ActorId::new(),
+            release.revision,
+        ),
+        (
+            frozen.project_id,
+            frozen.course_id,
+            frozen.actor_id,
+            Revision::new(2)?,
+        ),
+    ] {
+        assert!(matches!(
+            store
+                .model_input_facts(frozen.id, project, course, owner, release.id, revision)
+                .await,
+            Err(evaluation_service::freeze_store::FreezeStoreError::NotFound)
+        ));
+    }
+    sqlx::query("UPDATE evaluation.submission_freeze_commands SET contract=contract-'inputAuthorizationContext' WHERE frozen_submission_id=$1")
+        .bind(frozen.id.as_uuid()).execute(&fixture.pool).await?;
+    assert!(
+        store
+            .model_input_facts(
+                frozen.id,
+                frozen.project_id,
+                frozen.course_id,
+                frozen.actor_id,
+                release.id,
+                release.revision
+            )
+            .await?["inputAuthorizationContext"]
+            .is_null()
+    );
+    sqlx::query("UPDATE evaluation.submission_freeze_commands SET manifest_sha256=$2 WHERE frozen_submission_id=$1")
+        .bind(frozen.id.as_uuid()).bind(Sha256Digest::of_bytes(b"wrong-manifest").to_string()).execute(&fixture.pool).await?;
+    assert!(matches!(
+        store
+            .model_input_facts(
+                frozen.id,
+                frozen.project_id,
+                frozen.course_id,
+                frozen.actor_id,
+                release.id,
+                release.revision
+            )
+            .await,
+        Err(evaluation_service::freeze_store::FreezeStoreError::ContractInvalid)
+    ));
+    assert_eq!(fixture.object_store.reads.load(Ordering::Acquire), 0);
+    Ok(())
+}
+
+async fn metadata_release(
+    fixture: &TestContext,
+) -> Result<contracts::evaluation::EvaluationRelease, Box<dyn std::error::Error>> {
+    let artifact_id = ArtifactId::new();
+    let request = contracts::http::InternalPublishEvaluationReleaseRequest {
+        project_id: fixture.request.project_id,
+        course_id: fixture.request.course_id,
+        candidate_id: contracts::CandidateId::new(),
+        candidate_revision: Revision::new(1)?,
+        approval_id: contracts::ApprovalId::new(),
+        approval_revision: Revision::new(1)?,
+        evaluation_spec: contracts::evaluation::EvaluationSpec::from_yaml(include_str!(
+            "../../../crates/contracts/tests/fixtures/evaluation/oj/evaluation.yaml"
+        ))?,
+        execution_binding: contracts::evaluation::EvaluationExecutionBinding {
+            package: contracts::authoring::ProblemPackage {
+                id: contracts::ProblemPackageId::new(),
+                project_id: fixture.request.project_id,
+                course_id: fixture.request.course_id,
+                revision: Revision::new(1)?,
+                files: vec![contracts::authoring::PackageFile {
+                    path: "rubric.yml".to_owned(),
+                    sha256: Sha256Digest::of_bytes(b"rubric").to_string(),
+                    object: ArtifactRef {
+                        artifact_id,
+                        store_binding: "synthetic-materials".to_owned(),
+                        object_version: "v1".to_owned(),
+                        size_bytes: 6,
+                        media_type: "text/plain".to_owned(),
+                    },
+                }],
+                retention: RetentionSnapshot {
+                    class: RetentionClass::CourseMaterial,
+                    ..fixture.request.retention.clone()
+                },
+                completed_at: PgFreezeStore::new(fixture.pool.clone())
+                    .authority_now()
+                    .await?,
+            },
+            object_locators: std::collections::BTreeMap::from([(
+                artifact_id,
+                "synthetic/rubric.yml".to_owned(),
+            )]),
+        },
+        runtime_identity: contracts::evaluation::EvaluationRuntimeIdentity {
+            provider_binding: "kubernetes/synthetic-metadata".to_owned(),
+            runner_image: format!("registry.invalid/evaluation@sha256:{}", "a".repeat(64)),
+        },
+        published_by: fixture.request.actor_id,
+    };
+    let store = evaluation_service::PgEvaluationControlStore::new(fixture.pool.clone());
+    Ok(
+        match store
+            .publish_release(
+                &request,
+                &contracts::http::IdempotencyKey::parse("metadata-release")?,
+                store.authority_now().await?,
+                "metadata-release",
+            )
+            .await?
+        {
+            evaluation_service::EvaluationReleaseReservation::Created(value)
+            | evaluation_service::EvaluationReleaseReservation::Replayed(value) => value,
+        },
+    )
+}
+
+#[tokio::test]
 async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = TestContext::start(0).await?;
     let store = PgFreezeCommandStore::new(fixture.pool.clone());
     let command = SubmissionFreezeCommand {
+        input_authorization_context: None,
+        worker_dispatch: evaluation_service::FreezeWorkerDispatch::Pending,
         frozen_submission_id: contracts::FrozenSubmissionId::new(),
         operation_id: contracts::OperationId::new(),
         project_id: fixture.request.project_id,
@@ -146,6 +460,8 @@ async fn durable_outcome_uses_latest_attempt_and_completed_result_wins()
     let command_store = PgFreezeCommandStore::new(fixture.pool.clone());
     let now = freeze_store.authority_now().await?;
     let command = SubmissionFreezeCommand {
+        input_authorization_context: None,
+        worker_dispatch: evaluation_service::FreezeWorkerDispatch::Pending,
         frozen_submission_id,
         operation_id: contracts::OperationId::new(),
         project_id: fixture.request.project_id,
@@ -328,6 +644,7 @@ async fn project_idempotency_identity_supports_independent_work_and_rejects_cont
 
 #[derive(Debug)]
 struct LockedStore {
+    reads: AtomicUsize,
     failures_remaining: AtomicUsize,
     puts: AtomicUsize,
 }
@@ -335,6 +652,7 @@ struct LockedStore {
 impl LockedStore {
     fn new(failures: usize) -> Self {
         Self {
+            reads: AtomicUsize::new(0),
             failures_remaining: AtomicUsize::new(failures),
             puts: AtomicUsize::new(0),
         }
@@ -362,6 +680,7 @@ impl ImmutableObjectStore for LockedStore {
         _key: &str,
         _expected: &ArtifactRef,
     ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.reads.fetch_add(1, Ordering::AcqRel);
         Err(ObjectStoreError::ObjectUnavailable)
     }
 
@@ -418,6 +737,13 @@ async fn repeated_request_replays_one_database_object_and_event_identity()
         .service
         .freeze(&fixture.request, &fixture.source)
         .await?;
+    assert_eq!(
+        first.files[0].sha256,
+        Sha256Digest::of_bytes(b"fn main() {}\n").to_string()
+    );
+    let mut invalid = first.clone();
+    invalid.files[0].sha256 = "invalid".to_owned();
+    assert!(invalid.validate().is_err());
     let replay = fixture
         .service
         .freeze(&fixture.request, &fixture.source)
