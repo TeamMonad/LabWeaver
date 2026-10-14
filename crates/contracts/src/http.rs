@@ -940,6 +940,40 @@ pub struct WithdrawEnvironmentTemplateReleaseRequest {
     pub reason_code: String,
 }
 
+/// First authenticated request context, persisted before immutable input artifacts exist.
+/// This is decision evidence, not a permission grant or a task deadline. Consumers must
+/// recheck the original session and current object permissions before reading or sending input.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationContext {
+    pub session_sha256: String,
+    pub actor_id: ActorId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub operation_id: String,
+    pub valid_until: UtcTimestamp,
+}
+
+impl ModelInputAuthorizationContext {
+    /// Checks transport identity only. No operation is authorized by this method.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if !is_sha256(&self.session_sha256)
+            || self.actor_id.as_uuid().is_nil()
+            || self.project_id.as_uuid().is_nil()
+            || self.course_id.is_some_and(|id| id.as_uuid().is_nil())
+            || self.operation_id.is_empty()
+            || self.operation_id.len() > 128
+            || !self
+                .operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
+}
+
 /// Control-derived asynchronous recheck input, never accepted from a public create request.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -955,6 +989,21 @@ pub struct ModelInputAuthorizationBinding {
     pub policy_id: crate::PolicyId,
     pub policy_revision: Revision,
     pub selection_sha256: String,
+}
+
+impl ModelInputAuthorizationBinding {
+    /// Preserves first-request evidence without deriving it from artifact ownership.
+    #[must_use]
+    pub fn context(&self) -> ModelInputAuthorizationContext {
+        ModelInputAuthorizationContext {
+            session_sha256: self.session_sha256.clone(),
+            actor_id: self.actor_id,
+            project_id: self.project_id,
+            course_id: self.course_id,
+            operation_id: self.operation_id.clone(),
+            valid_until: self.valid_until,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1129,8 +1178,8 @@ impl InternalCreateAgentRunRequest {
         };
         let paths = validate_model_input_selection(&self.package, selection)?;
         let binding = &self.input_authorization;
+        binding.context().validate()?;
         if !operation_matches
-            || !is_sha256(&binding.session_sha256)
             || binding.actor_id != self.actor_id
             || binding.project_id != self.project_id
             || binding.course_id != self.course_id

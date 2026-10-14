@@ -397,13 +397,24 @@ fn model_input_binding(
     let paths = contracts::http::validate_model_input_selection(package, selection)
         .map_err(|_| ApiError::bad_request("LW_MODEL_INPUT_SELECTION_REQUIRED"))?;
     let session = parse_header::<BffSessionId>(headers, SESSION_HEADER)?;
-    Ok(contracts::http::ModelInputAuthorizationBinding {
+    let context = contracts::http::ModelInputAuthorizationContext {
         session_sha256: format!("{:x}", sha2::Sha256::digest(session.to_string().as_bytes())),
         actor_id: decision.actor.actor_id,
         project_id: package.project_id,
         course_id: package.course_id,
         operation_id: operation.to_owned(),
         valid_until: decision.valid_until,
+    };
+    context
+        .validate()
+        .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?;
+    Ok(contracts::http::ModelInputAuthorizationBinding {
+        session_sha256: context.session_sha256,
+        actor_id: context.actor_id,
+        project_id: context.project_id,
+        course_id: context.course_id,
+        operation_id: context.operation_id,
+        valid_until: context.valid_until,
         package_id: package.id,
         package_revision: package.revision,
         policy_id: policy.id,
