@@ -608,6 +608,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::auth::AuthorizationDecisionRequest
     );
     document!(
+        "schemas/contracts/v1/http/model-input-authorization-context.schema.json",
+        crate::http::ModelInputAuthorizationContext
+    );
+    document!(
         "schemas/contracts/v1/http/model-input-authorization-resolve-request.schema.json",
         crate::http::ModelInputAuthorizationResolveRequest
     );

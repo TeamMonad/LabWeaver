@@ -10,6 +10,10 @@ Agent 配置生成和已有 Work 配置操作只使用调用方显式选择的�
 
 ## 内部实时复核
 
+`ModelInputAuthorizationContext` 表达首次已鉴别请求的会话 SHA、发起者、项目、课程、原 operation 和当次 decision 的 `validUntil`。它不包含文件身份或许可布尔值；冻结请求尚无归档时可保存这一完整证据。`validate()` 只检查传输身份格式，不授权操作，也不把旧 decision TTL 当任务期限。现有材料包 binding 可通过 `context()` 提取同一证据；Control 构造和复核入口及 Agent 命令校验使用相同检查。
+
+冻结命令的持久化与 metadata-only 返回仍由 Evaluation owner 接线。该接线完成前，不声称冻结请求已有完整 context；缺失记录不得从冻结 owner、服务身份或新会话补造。rubric 权威许可、冻结事实核对及 advisory 外发复核仍未接通。
+
 `POST /internal/v1/model-input-authorizations/resolve` 仅在内部 API 中提供，服务账户需要现有 `control.agent_run.read` 权限。公开浏览器 API 和 SDK 不提供该操作。
 
 请求是 `ModelInputAuthorizationResolveRequest`：
