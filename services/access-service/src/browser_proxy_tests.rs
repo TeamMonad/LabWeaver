@@ -34,6 +34,9 @@ use super::*;
 #[path = "oidc_login_tests.rs"]
 mod oidc_login_tests;
 
+#[path = "freeze_context_tests.rs"]
+mod freeze_context_tests;
+
 #[path = "platform_configuration_browser_tests.rs"]
 mod platform_configuration_browser_tests;
 
@@ -325,7 +328,11 @@ fn control_request_record(
         "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
         "body": serde_json::from_slice::<Value>(body).ok(),
         "browserCookie": headers.contains_key(header::COOKIE),
-        "browserCsrf": headers.contains_key("x-csrf-token")
+        "browserCsrf": headers.contains_key("x-csrf-token"),
+        "project": headers.get("x-labweaver-project-id").and_then(|v| v.to_str().ok()),
+        "course": headers.get("x-labweaver-course-id").and_then(|v| v.to_str().ok()),
+        "modelContextCount": headers.get_all("x-labweaver-model-input-authorization-context").iter().count(),
+        "modelContext": headers.get("x-labweaver-model-input-authorization-context").and_then(|v| v.to_str().ok()).and_then(|v| serde_json::from_str::<Value>(v).ok())
     })
 }
 
@@ -595,6 +602,10 @@ async fn state_with_environment(
         .route(
             "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}/cancel",
             any(control),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/freeze",
+            post(control),
         )
         .route("/api/v1/projects/{project_id}", any(control))
         .route("/api/v1/projects/{project_id}/members", any(control))

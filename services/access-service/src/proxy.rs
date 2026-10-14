@@ -30,6 +30,7 @@ use super::{
 const RESOURCE_DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
+const MODEL_INPUT_CONTEXT_HEADER: &str = "x-labweaver-model-input-authorization-context";
 
 /// A fixed-origin TLS client; callers cannot select an upstream host.
 #[derive(Clone)]
@@ -70,6 +71,7 @@ struct ForwardRequest {
     body: ForwardBody,
     valid_path: fn(&str) -> bool,
     scope: Option<EvaluationScope>,
+    freeze_authorization: Option<FreezeAuthorization>,
     gateway: GatewayAuthority,
 }
 
@@ -94,6 +96,7 @@ pub(super) async fn forward_control_bundle(
             body: ForwardBody::Bundle(body),
             valid_path: valid_bundle_path,
             scope: None,
+            freeze_authorization: None,
             gateway: GatewayAuthority::Control,
         },
     )
@@ -375,6 +378,7 @@ pub(super) async fn forward_control(
             body: ForwardBody::Buffered(body),
             valid_path: valid_control_path,
             scope: None,
+            freeze_authorization: None,
             gateway: GatewayAuthority::Control,
         },
     )
@@ -466,6 +470,7 @@ pub(super) async fn authorize_project_membership_governance(
             body: ForwardBody::Buffered(Bytes::new()),
             valid_path: valid_control_path,
             scope: None,
+            freeze_authorization: None,
             gateway: GatewayAuthority::Control,
         },
     )
@@ -551,6 +556,7 @@ async fn authorize_evaluation_release_path(
         operation,
     )
     .await
+    .map(|_| ())
 }
 
 pub(super) async fn forward_environment(
@@ -610,6 +616,7 @@ pub(super) async fn forward_environment(
             body: ForwardBody::Buffered(body),
             valid_path: valid_environment_path,
             scope: None,
+            freeze_authorization: None,
             gateway: GatewayAuthority::Environment,
         },
     )
@@ -624,6 +631,7 @@ pub(super) async fn forward_evaluation(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let mut scope = None;
+    let mut freeze_authorization = None;
     if method == Method::POST {
         let environment_id = uri
             .path()
@@ -649,7 +657,8 @@ pub(super) async fn forward_evaluation(
             "freezeSubmission",
         )
         .await?;
-        scope = Some(resolved_scope);
+        scope = Some(resolved_scope.scope);
+        freeze_authorization = Some(resolved_scope);
     } else if method == Method::GET {
         let segments = uri.path().split('/').collect::<Vec<_>>();
         if let [
@@ -713,6 +722,7 @@ pub(super) async fn forward_evaluation(
             body: ForwardBody::Buffered(body),
             valid_path: valid_evaluation_path,
             scope,
+            freeze_authorization,
             gateway: GatewayAuthority::Evaluation,
         },
     )
@@ -1740,6 +1750,7 @@ async fn forward(
         body,
         valid_path,
         scope,
+        freeze_authorization,
         gateway,
     } = request;
     if !matches!(
@@ -1756,6 +1767,9 @@ async fn forward(
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_REQUEST_TOO_LARGE"));
     }
     let session = authenticated_session(state, &headers).await?;
+    if let Some(proof) = &freeze_authorization {
+        proof.check_session(&session, scope, OffsetDateTime::now_utc())?;
+    }
     if method != Method::GET {
         require_browser_origin(state, &headers)?;
         let supplied = headers
@@ -1793,12 +1807,22 @@ async fn forward(
     } else {
         request
     };
+    let request = if let Some(proof) = &freeze_authorization {
+        let value = serde_jcs::to_string(&proof.context)
+            .map_err(|_| ApiError::internal("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        request.header(MODEL_INPUT_CONTEXT_HEADER, value)
+    } else {
+        request
+    };
     let request = attach_service_token(
         request,
         &proxy.service_token_client,
         &proxy.service_token_target,
     )
     .await?;
+    if let Some(proof) = &freeze_authorization {
+        proof.check_session(&session, scope, OffsetDateTime::now_utc())?;
+    }
     let started = Instant::now();
     let response = request.send().await.map_err(|error| {
         tracing::warn!(
@@ -1926,7 +1950,9 @@ async fn authorize_environment_create(
 ) -> Result<(), ApiError> {
     let request = contracts::parse_strict_json::<contracts::http::CreateEnvironmentRequest>(body)
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-    authorize_environment_project(state, headers, request.project_id, "createEnvironment").await
+    authorize_environment_project(state, headers, request.project_id, "createEnvironment")
+        .await
+        .map(|_| ())
 }
 
 async fn authorize_environment_project(
@@ -1934,26 +1960,50 @@ async fn authorize_environment_project(
     headers: &HeaderMap,
     project_id: contracts::ProjectId,
     operation_id: &'static str,
-) -> Result<(), ApiError> {
+) -> Result<contracts::AuthorizationDecision, ApiError> {
     let session = authenticated_session(state, headers).await?;
-    let actor = super::actor_from_session(&session)?;
+    authorize_environment_scope(
+        state,
+        &session,
+        contracts::AuthorizationScope::Project { project_id },
+        operation_id,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+}
+
+async fn authorize_environment_scope(
+    state: &AppState,
+    session: &auth::BffSession,
+    scope: contracts::AuthorizationScope,
+    operation_id: &'static str,
+    now: OffsetDateTime,
+) -> Result<contracts::AuthorizationDecision, ApiError> {
+    let actor = super::actor_from_session(session)?;
     let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
         .await
         .map_err(ApiError::from)?;
     let policy = contracts::operation_contract(operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
-    auth::object_authorization::authorize_operation(
-        &auth::AuthorizationContext {
-            actor,
-            course_memberships: memberships.course_memberships,
-            project_memberships: memberships.project_memberships,
-            now: time::OffsetDateTime::now_utc(),
-        },
-        contracts::AuthorizationScope::Project { project_id },
-        policy,
-    )
+    let authorization = auth::AuthorizationContext {
+        actor,
+        course_memberships: memberships.course_memberships,
+        project_memberships: memberships.project_memberships,
+        now,
+    };
+    // Preserve the existing project object action and course role/scope algorithms.
+    let mut decision = if matches!(scope, contracts::AuthorizationScope::Project { .. }) {
+        auth::object_authorization::authorize_operation(&authorization, scope, policy)
+    } else {
+        auth::authorize(
+            &authorization,
+            scope,
+            &policy.allowed_roles.iter().copied().collect(),
+        )
+    }
     .map_err(ApiError::from)?;
-    Ok(())
+    super::cap_decision_expiry(state, &mut decision, now)?;
+    Ok(decision)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1962,23 +2012,58 @@ struct EvaluationScope {
     course_id: Option<contracts::CourseId>,
 }
 
-/// Authorizes a freeze against the project recorded by the active Access
-/// grant for this exact environment.  A course is an optional association;
-/// when present it must agree with the grant and its membership is checked in
-/// addition to the project membership.
+struct FreezeAuthorization {
+    session: auth::BffSession,
+    scope: EvaluationScope,
+    context: contracts::http::ModelInputAuthorizationContext,
+    // Retain real precision for liveness checks; only the wire timestamp is floored.
+    valid_until: OffsetDateTime,
+}
+
+impl FreezeAuthorization {
+    fn check_session(
+        &self,
+        session: &auth::BffSession,
+        scope: Option<EvaluationScope>,
+        now: OffsetDateTime,
+    ) -> Result<(), ApiError> {
+        if session.session_id != self.session.session_id
+            || session.actor_id != self.session.actor_id
+            || self.valid_until <= now
+            || self.session.expires_at <= now
+            || self.session.idle_expires_at <= now
+        {
+            return Err(ApiError::unauthorized("LW_AUTH_SESSION_REJECTED"));
+        }
+        if scope != Some(self.scope) {
+            return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+        }
+        Ok(())
+    }
+}
+
+/// Uses one verified session and the existing decisions, never caller context headers.
 async fn authorize_environment_freeze(
     state: &AppState,
     headers: &HeaderMap,
     environment_id: contracts::EnvironmentId,
     requested_course_id: Option<contracts::CourseId>,
     operation_id: &'static str,
-) -> Result<EvaluationScope, ApiError> {
+) -> Result<FreezeAuthorization, ApiError> {
     let session = authenticated_session(state, headers).await?;
+    require_browser_origin(state, headers)?;
+    auth::verify_csrf_token(
+        &session.csrf_token,
+        headers
+            .get(state.deployment.browser.csrf_header_name.as_str())
+            .and_then(|v| v.to_str().ok()),
+    )
+    .map_err(ApiError::from)?;
     let now = OffsetDateTime::now_utc();
     let rows = sqlx::query(
-        "SELECT DISTINCT project_id,course_id FROM access.access_grants \
+        "SELECT project_id,course_id,min(expires_at) AS expires_at FROM access.access_grants \
          WHERE actor_id=$1 AND environment_id=$2 AND state='active' \
-           AND not_before <= $3 AND expires_at > $3",
+           AND not_before <= $3 AND expires_at > $3 GROUP BY project_id,course_id",
     )
     .bind(session.actor_id)
     .bind(environment_id.as_uuid())
@@ -1986,11 +2071,8 @@ async fn authorize_environment_freeze(
     .fetch_all(&state.pool)
     .await
     .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    if rows.is_empty() {
-        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
-    }
-
     let mut scope = None;
+    let mut grant_expiry = session.expires_at;
     for row in rows {
         let project_id = row
             .get::<uuid::Uuid, _>("project_id")
@@ -1999,9 +2081,8 @@ async fn authorize_environment_freeze(
             .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
         let course_id = row
             .get::<Option<uuid::Uuid>, _>("course_id")
-            .map(|value| {
-                value
-                    .to_string()
+            .map(|id| {
+                id.to_string()
                     .parse()
                     .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
             })
@@ -2017,14 +2098,93 @@ async fn authorize_environment_freeze(
             return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
         }
         scope = Some(candidate);
+        grant_expiry = grant_expiry.min(row.get::<OffsetDateTime, _>("expires_at"));
     }
     let scope = scope.ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
+    let project = authorize_environment_scope(
+        state,
+        &session,
+        contracts::AuthorizationScope::Project {
+            project_id: scope.project_id,
+        },
+        operation_id,
+        now,
+    )
+    .await?;
+    let course = if let Some(course_id) = scope.course_id {
+        Some(
+            authorize_environment_scope(
+                state,
+                &session,
+                contracts::AuthorizationScope::Course { course_id },
+                operation_id,
+                now,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    freeze_authorization(session, scope, &project, course.as_ref(), grant_expiry, now)
+}
 
-    authorize_environment_project(state, headers, scope.project_id, operation_id).await?;
-    if let Some(course_id) = scope.course_id {
-        authorize_environment_course(state, headers, course_id, operation_id).await?;
+fn freeze_authorization(
+    session: auth::BffSession,
+    scope: EvaluationScope,
+    project: &contracts::AuthorizationDecision,
+    course: Option<&contracts::AuthorizationDecision>,
+    grant_expiry: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<FreezeAuthorization, ApiError> {
+    let actor_id = super::actor_from_session(&session)?.actor_id;
+    if project.actor.actor_id != actor_id
+        || project.scope
+            != (contracts::AuthorizationScope::Project {
+                project_id: scope.project_id,
+            })
+        || match (scope.course_id, course) {
+            (None, None) => false,
+            (Some(course_id), Some(decision)) => {
+                decision.actor.actor_id != actor_id
+                    || decision.scope != (contracts::AuthorizationScope::Course { course_id })
+            }
+            _ => true,
+        }
+    {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
     }
-    Ok(scope)
+    let mut valid_until = project
+        .valid_until
+        .get()
+        .min(session.expires_at)
+        .min(session.idle_expires_at)
+        .min(grant_expiry);
+    if let Some(decision) = course {
+        valid_until = valid_until.min(decision.valid_until.get());
+    }
+    if valid_until <= now {
+        return Err(ApiError::unauthorized("LW_AUTH_SESSION_REJECTED"));
+    }
+    let context = contracts::http::ModelInputAuthorizationContext {
+        session_sha256: persistence_sqlx::Sha256Digest::of_bytes(
+            session.session_id.to_string().as_bytes(),
+        )
+        .to_string(),
+        actor_id,
+        project_id: scope.project_id,
+        course_id: scope.course_id,
+        operation_id: "freezeSubmission".to_owned(),
+        valid_until: super::utc_timestamp(valid_until)?,
+    };
+    context
+        .validate()
+        .map_err(|_| ApiError::internal("LW_CONTRACT_DOCUMENT_INVALID"))?;
+    Ok(FreezeAuthorization {
+        session,
+        scope,
+        context,
+        valid_until,
+    })
 }
 
 async fn authorize_environment_course(
@@ -2032,26 +2192,16 @@ async fn authorize_environment_course(
     headers: &HeaderMap,
     course_id: contracts::CourseId,
     operation_id: &'static str,
-) -> Result<(), ApiError> {
+) -> Result<contracts::AuthorizationDecision, ApiError> {
     let session = authenticated_session(state, headers).await?;
-    let actor = super::actor_from_session(&session)?;
-    let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
-        .await
-        .map_err(ApiError::from)?;
-    let policy = contracts::operation_contract(operation_id)
-        .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
-    auth::authorize(
-        &auth::AuthorizationContext {
-            actor,
-            course_memberships: memberships.course_memberships,
-            project_memberships: memberships.project_memberships,
-            now: time::OffsetDateTime::now_utc(),
-        },
+    authorize_environment_scope(
+        state,
+        &session,
         contracts::AuthorizationScope::Course { course_id },
-        &policy.allowed_roles.iter().copied().collect(),
+        operation_id,
+        OffsetDateTime::now_utc(),
     )
-    .map_err(ApiError::from)?;
-    Ok(())
+    .await
 }
 
 fn copy_request_headers(
@@ -2370,6 +2520,7 @@ async fn read_owned_environment(
             body: ForwardBody::Buffered(Bytes::new()),
             valid_path: valid_environment_path,
             scope: None,
+            freeze_authorization: None,
             gateway: GatewayAuthority::Environment,
         },
     )
@@ -2819,5 +2970,183 @@ mod tests {
         );
 
         assert_eq!(result, Err(auth::AuthorizationError::ProjectScopeDenied));
+    }
+}
+
+#[cfg(test)]
+mod freeze_proof_tests {
+    use super::*;
+    use contracts::{
+        ActorId, AuthenticatedActor, AuthorizationDecision, AuthorizationScope, PlatformRole,
+        Revision,
+    };
+    use time::Duration as TimeDuration;
+    use uuid::Uuid;
+
+    fn proof_inputs() -> Result<
+        (
+            auth::BffSession,
+            EvaluationScope,
+            AuthorizationDecision,
+            OffsetDateTime,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let now = OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(1_000);
+        let session = auth::BffSession {
+            session_id: Uuid::now_v7(),
+            actor_id: Uuid::now_v7(),
+            roles: vec![PlatformRole::Teacher],
+            authorization_revision: 1,
+            expires_at: now + TimeDuration::seconds(100),
+            idle_expires_at: now + TimeDuration::seconds(80),
+            csrf_token: auth::CsrfToken::generate()?,
+        };
+        let scope = EvaluationScope {
+            project_id: contracts::ProjectId::new(),
+            course_id: None,
+        };
+        let decision = AuthorizationDecision {
+            actor: AuthenticatedActor {
+                actor_id: session.actor_id.to_string().parse()?,
+                roles: session.roles.clone(),
+                expires_at: super::super::utc_timestamp(session.expires_at)
+                    .map_err(|e| std::io::Error::other(e.diagnostic))?,
+            },
+            scope: AuthorizationScope::Project {
+                project_id: scope.project_id,
+            },
+            authorization_revision: Revision::new(1)?,
+            scope_revision: Revision::new(1)?,
+            valid_until: super::super::utc_timestamp(now + TimeDuration::seconds(60))
+                .map_err(|e| std::io::Error::other(e.diagnostic))?,
+            diagnostic_code: None,
+        };
+        Ok((session, scope, decision, now))
+    }
+
+    #[test]
+    fn freeze_proof_floors_transport_but_checks_the_original_microsecond_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (session, scope, decision, now) = proof_inputs()?;
+        let deadline = now + TimeDuration::seconds(2) + TimeDuration::microseconds(123_456);
+        for bound in ["grant", "idle", "absolute"] {
+            let mut session = session.clone();
+            let mut grant = now + TimeDuration::seconds(90);
+            match bound {
+                "grant" => grant = deadline,
+                "idle" => session.idle_expires_at = deadline,
+                _ => session.expires_at = deadline,
+            }
+            let proof = freeze_authorization(session.clone(), scope, &decision, None, grant, now)
+                .map_err(|e| std::io::Error::other(e.diagnostic))?;
+            assert_eq!(proof.valid_until, deadline);
+            assert_eq!(
+                proof.context.valid_until.get(),
+                now + TimeDuration::seconds(2) + TimeDuration::milliseconds(123)
+            );
+            assert!(
+                proof
+                    .check_session(
+                        &session,
+                        Some(scope),
+                        deadline - TimeDuration::microseconds(1)
+                    )
+                    .is_ok()
+            );
+            assert!(
+                proof
+                    .check_session(&session, Some(scope), deadline)
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn freeze_proof_keeps_earlier_decisions_and_rejects_identity_scope_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (session, mut scope, mut project, now) = proof_inputs()?;
+        let project_expiry = now + TimeDuration::seconds(20);
+        project.valid_until = super::super::utc_timestamp(project_expiry)
+            .map_err(|e| std::io::Error::other(e.diagnostic))?;
+        let proof = freeze_authorization(
+            session.clone(),
+            scope,
+            &project,
+            None,
+            now + TimeDuration::seconds(90),
+            now,
+        )
+        .map_err(|e| std::io::Error::other(e.diagnostic))?;
+        assert_eq!(proof.valid_until, project_expiry);
+        let mut other_session = session.clone();
+        other_session.session_id = Uuid::now_v7();
+        assert!(
+            proof
+                .check_session(&other_session, Some(scope), now)
+                .is_err()
+        );
+        other_session = session.clone();
+        other_session.actor_id = Uuid::now_v7();
+        assert!(
+            proof
+                .check_session(&other_session, Some(scope), now)
+                .is_err()
+        );
+        let course_id = contracts::CourseId::new();
+        scope.course_id = Some(course_id);
+        let mut course = project.clone();
+        course.scope = AuthorizationScope::Course { course_id };
+        course.valid_until = super::super::utc_timestamp(now + TimeDuration::seconds(10))
+            .map_err(|e| std::io::Error::other(e.diagnostic))?;
+        let proof = freeze_authorization(
+            session.clone(),
+            scope,
+            &project,
+            Some(&course),
+            now + TimeDuration::seconds(90),
+            now,
+        )
+        .map_err(|e| std::io::Error::other(e.diagnostic))?;
+        assert_eq!(proof.valid_until, course.valid_until.get());
+        assert!(
+            freeze_authorization(
+                session.clone(),
+                scope,
+                &project,
+                None,
+                now + TimeDuration::seconds(90),
+                now
+            )
+            .is_err()
+        );
+        course.actor.actor_id = ActorId::new();
+        assert!(
+            freeze_authorization(
+                session.clone(),
+                scope,
+                &project,
+                Some(&course),
+                now + TimeDuration::seconds(90),
+                now
+            )
+            .is_err()
+        );
+        project.scope = AuthorizationScope::Project {
+            project_id: contracts::ProjectId::new(),
+        };
+        assert!(
+            freeze_authorization(
+                session,
+                scope,
+                &project,
+                Some(&course),
+                now + TimeDuration::seconds(90),
+                now
+            )
+            .is_err()
+        );
+        Ok(())
     }
 }
