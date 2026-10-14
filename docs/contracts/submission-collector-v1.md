@@ -112,6 +112,11 @@ previous preflight with `LW_COLLECT_SOURCE_CHANGED`. A completed frozen object r
 unchanged when the user later edits the Work. The file hashes bind the manifest to the
 same submission attempt and exact archive object version.
 
+Evaluation consumers also compare the downloaded archive with `contentSha256` and
+each decoded file with its pinned `FrozenFile.sha256`. A valid whole-object hash
+does not replace the file identity check. Package object reads compare actual bytes
+with the pinned `PackageFile.sha256`; equal paths, sizes or media types are insufficient.
+
 ## Storage, persistence and event
 
 The object store binding must support bucket versioning and Governance Object
