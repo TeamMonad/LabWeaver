@@ -51,6 +51,12 @@ lifetime ([ID Token](https://openid.net/specs/openid-connect-core-1_0.html#IDTok
 logout-token validation and RP session clearing follow
 [OpenID Connect Back-Channel Logout](https://openid.net/specs/openid-connect-backchannel-1_0.html#BackchannelLogoutValidation).
 
+## 冻结请求的模型输入上下文
+
+Access 在真实 freeze POST 完成 BFF、Origin/CSRF、环境 grant、项目 Edit 和可选课程授权后，使用同一会话与实际 decision 生成 `x-labweaver-model-input-authorization-context`。六字段来自可信 session/actor、grant scope、固定 `freezeSubmission` 和最早有效上界；session 摘要使用规范 UUID 文本的 SHA-256。上界取项目/课程 decision、BFF absolute/idle、grant 的最小值，复用既有 decision TTL；有效判定保留原精度，传输时间向下截断至毫秒。客户端该 header 不在转发白名单，服务端只发送一个 canonical JSON。
+
+该上下文是首次证据，不是模型输入许可或 Agent 永久截止。Evaluation 保存首次 context，合法重放不替换它；旧的缺上下文记录保持缺失。Source/Rubric 可见性、外发权限和每次实际发送的当前授权仍由各权威入口复核。
+
 ## 浏览器与 SSH
 
 Access 默认 API 错误使用公共 `ProblemDetails` 契约，返回 `application/problem+json`。响应保留原 HTTP 状态和 `diagnosticCode`，包含安全的 `type/title/detail/instance`、与 `x-request-id` 一致的 `requestId`、关联 `traceId` 和 `retryable`。Gateway 心跳和关闭重试的专用 412 正文仍保持 `diagnosticCode/currentRevision/state` 三字段 JSON，满足既有严格消费契约。缺少或与当前会话不匹配的 CSRF 仍拒绝写入；403 不允许原输入直接重试，客户端须刷新当前会话后由用户重新提交。
