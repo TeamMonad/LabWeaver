@@ -946,6 +946,40 @@ pub struct WithdrawEnvironmentTemplateReleaseRequest {
     pub reason_code: String,
 }
 
+/// First authenticated request context, persisted before immutable input artifacts exist.
+/// This is decision evidence, not a permission grant or a task deadline. Consumers must
+/// recheck the original session and current object permissions before reading or sending input.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationContext {
+    pub session_sha256: String,
+    pub actor_id: ActorId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub operation_id: String,
+    pub valid_until: UtcTimestamp,
+}
+
+impl ModelInputAuthorizationContext {
+    /// Checks transport identity only. No operation is authorized by this method.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if !is_sha256(&self.session_sha256)
+            || self.actor_id.as_uuid().is_nil()
+            || self.project_id.as_uuid().is_nil()
+            || self.course_id.is_some_and(|id| id.as_uuid().is_nil())
+            || self.operation_id.is_empty()
+            || self.operation_id.len() > 128
+            || !self
+                .operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
+}
+
 /// Control-to-Agent command carried only over an allowlisted mTLS service identity.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(

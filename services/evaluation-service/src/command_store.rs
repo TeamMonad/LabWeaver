@@ -26,6 +26,9 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmissionFreezeCommand {
+    /// Full original authorization evidence forwarded by Access; legacy commands have no model authority.
+    #[serde(default)]
+    pub input_authorization_context: Option<contracts::http::ModelInputAuthorizationContext>,
     /// Internal dispatch provenance, persisted before any Kubernetes write.
     #[serde(default)]
     pub worker_dispatch: crate::FreezeWorkerDispatch,
@@ -49,6 +52,18 @@ impl SubmissionFreezeCommand {
     pub fn validate(&self) -> Result<(), FreezeCommandStoreError> {
         if !self.worker_dispatch.valid() {
             return Err(FreezeCommandStoreError::ContractInvalid);
+        }
+        if let Some(context) = &self.input_authorization_context {
+            context
+                .validate()
+                .map_err(|_| FreezeCommandStoreError::ContractInvalid)?;
+            if context.actor_id != self.actor_id
+                || context.project_id != self.project_id
+                || context.course_id != self.course_id
+                || context.operation_id != "freezeSubmission"
+            {
+                return Err(FreezeCommandStoreError::DatabaseIdentityInvalid);
+            }
         }
         self.manifest
             .validate()
