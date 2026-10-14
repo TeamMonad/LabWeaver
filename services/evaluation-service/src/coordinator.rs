@@ -1962,6 +1962,7 @@ spec:
             worker_registry_pull_config: Vec::new(),
         };
         let mut command = SubmissionFreezeCommand {
+            input_authorization_context: None,
             worker_dispatch: crate::FreezeWorkerDispatch::Pending,
             frozen_submission_id: FrozenSubmissionId::new(),
             operation_id: contracts::OperationId::new(),

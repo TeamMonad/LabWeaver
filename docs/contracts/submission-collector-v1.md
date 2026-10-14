@@ -135,6 +135,38 @@ The v2 event data includes the complete `FrozenSubmission` and
 `sourceIdentitySha256`. Its object version, object SHA-256 and file manifest
 must therefore equal the database JSON and Object Lock version.
 
+## Internal model-input facts
+
+Control may read ledger metadata through
+`GET /internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts`.
+The route uses the existing `evaluation.control.invoke` service permission. It requires
+`x-labweaver-project-id`, `x-labweaver-actor-id` (the frozen owner selector), optional
+`x-labweaver-course-id`, and `If-Match` for the exact Evaluation release revision.
+The owner selector does not establish the requesting user's object permissions.
+
+The response contains `frozenSubmissionId`, `projectId`, `courseId`, `ownerActorId`,
+`manifestRevision`, canonical `manifestSha256`, `manifest`, the exact `archive` reference,
+`contentSha256`, `files`, `environment`, `evaluationRelease` (`id`, `revision`, `state`),
+and `inputAuthorizationContext`. It omits object keys, download URLs, worker placement,
+system-fact values, file content and rubric content. The read performs no object-store or
+Control request. A missing, incomplete, differently scoped or inconsistent ledger result
+is rejected. An active Evaluation release in the same scope is metadata; Control must still
+verify the original publication admission linking that release to the Environment release.
+
+`inputAuthorizationContext` consumes the complete, unchanged #216 Context from
+`592ac41681b54df19d1651468c444c5965c2961d`: original session digest, actor, project/course,
+operation and original decision `validUntil` evidence. Access must construct and overwrite
+`x-labweaver-model-input-authorization-context` from its real authorization decision.
+Evaluation checks the bounded JSON against the trusted forwarded session and scope, and
+stores the first context in the existing command JSON. Replay cannot replace it. Legacy
+commands or requests without that upstream evidence return a null context; model consumers
+must reject it rather than derive a session or deadline from the actor or service token.
+
+The current Access proxy has not yet supplied this new header. Its producer and the
+remaining frozen-source/rubric permission checks are separate owner-coordinated work.
+Facts and context are not visibility or egress grants. Hidden or unknown rubric permission
+must be rejected before object reads; fresh user/object authorization remains required.
+
 ## Stable failure diagnostics
 
 The implementation uses payload-free codes including:
