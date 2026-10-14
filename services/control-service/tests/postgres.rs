@@ -53,6 +53,8 @@ use uuid::Uuid;
 mod manual_work_template_cases;
 #[path = "cases/membership_governance.rs"]
 mod membership_governance_cases;
+#[path = "cases/rubric_model_input.rs"]
+mod rubric_model_input_cases;
 #[path = "cases/runtime_authorization.rs"]
 mod runtime_authorization_cases;
 mod support;
@@ -1315,9 +1317,21 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
 -> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(authoring_publication_fixture(false)).await
+}
+
+#[tokio::test]
+async fn rubric_rules_require_current_instructor_and_exact_content_and_revoke()
+-> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(authoring_publication_fixture(true)).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn authoring_publication_fixture(
+    rubric_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let url = format!(
         "postgres://postgres:postgres@127.0.0.1:{}/postgres",
@@ -1473,7 +1487,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         .await?;
     assert_eq!(replay, approval);
     let mut changed_request = request.clone();
-    changed_request.reason = "different immutable decision".to_owned();
+    "different immutable decision".clone_into(&mut changed_request.reason);
     assert!(matches!(
         service
             .complete_authoring_approval(
@@ -1576,6 +1590,16 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         ready.submission_manifest.is_none(),
         "system-facts evaluations must not project a workspace submission manifest"
     );
+    if rubric_only {
+        rubric_model_input_cases::assert_rubric_authority(
+            &pool,
+            &package,
+            &evaluation_release,
+            now,
+        )
+        .await?;
+        return Ok(());
+    }
 
     Box::pin(
         runtime_authorization_cases::assert_bindings_after_publication(

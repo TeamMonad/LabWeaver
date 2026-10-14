@@ -250,6 +250,8 @@ impl ControlService {
             rules.push(rule);
         }
         let next: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(revision),0)+1 FROM control.project_llm_policies WHERE project_id=$1").bind(project_id.as_uuid()).fetch_one(&mut *tx).await.map_err(db)?;
+        // policy_id is the immutable version row's primary key, not a reusable project identity.
+        policy.id = contracts::PolicyId::new();
         policy.revision = super::revision_from_i64(next)?;
         policy.activated_at = now;
         let contract = encode_policy(&policy, &rules)?;
@@ -273,7 +275,8 @@ impl ControlService {
 }
 
 impl ControlService {
-    pub(super) async fn current_rubric_permission(
+    /// Resolves metadata-only model permission from the current rubric policy and instructor.
+    pub async fn current_rubric_permission(
         &self,
         project_id: ProjectId,
         course_id: contracts::CourseId,
@@ -309,8 +312,11 @@ impl ControlService {
         {
             return Err(ControlError::TeacherApprovalDenied);
         }
-        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND revision=$3 AND role='teacher' AND object_role='instructor' AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp()))")
+        // Recheck that this exact policy is still active in the same statement as instructor
+        // membership. A revoke committed during metadata decoding cannot leave the old rule valid.
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND revision=$3 AND role='teacher' AND object_role='instructor' AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp())) AND EXISTS(SELECT 1 FROM control.project_llm_policies WHERE policy_id=$4 AND revision=$5 AND project_id=$6 AND course_id=$1 AND superseded_at IS NULL)")
             .bind(course_id.as_uuid()).bind(approval.approved_by.as_uuid()).bind(i64_revision(approval.approver_course_membership_revision)?)
+            .bind(policy.id.as_uuid()).bind(i64_revision(policy.revision)?).bind(project_id.as_uuid())
             .fetch_one(&self.pool).await.map_err(db)?;
         if !current {
             return Err(ControlError::TeacherApprovalDenied);
