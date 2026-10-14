@@ -3677,10 +3677,13 @@ async fn model_input_rechecks_current_session_roles_membership_and_object_scope(
             course_id: None,
             operation_id: "createProjectAgentRun".to_owned(),
             valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
-            package_id: package.id,
-            package_revision: package.revision,
+            source: contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+                package_id: package.id,
+                package_revision: package.revision,
+            },
             policy_id: policy.id,
             policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)?,
             selection_sha256: model_input_selection_sha256(&paths)?,
         },
         selected_paths: paths,
@@ -4463,10 +4466,13 @@ async fn exercise_initial_decision_lifetime(
             course_id: None,
             operation_id: "createProjectAgentRun".to_owned(),
             valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::seconds(5))?,
-            package_id: package.id,
-            package_revision: package.revision,
+            source: contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+                package_id: package.id,
+                package_revision: package.revision,
+            },
             policy_id: policy.id,
             policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)?,
             selection_sha256: model_input_selection_sha256(&paths)?,
         },
         selected_paths: paths.clone(),
@@ -4771,5 +4777,112 @@ async fn exercise_initial_decision_lifetime(
     );
     assert_eq!(process.recoveries.load(Ordering::SeqCst), 1);
     assert_eq!(failure.audit().usage.requests, 0);
+    Ok(())
+}
+
+struct ForbiddenModelInputObjects(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl ImmutableObjectStore for ForbiddenModelInputObjects {
+    fn binding(&self) -> &'static str {
+        "forbidden-model-input"
+    }
+    async fn presign_upload(
+        &self,
+        _: &str,
+        _: u64,
+        _: &str,
+        _: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+    async fn read_verified(
+        &self,
+        _: &str,
+        _: &ArtifactRef,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+    async fn freeze_current(
+        &self,
+        _: &str,
+        _: u64,
+        _: &str,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+    async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+}
+
+#[tokio::test]
+async fn frozen_inputs_without_connected_authority_deny_before_database_or_objects()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::http::{
+        FrozenModelInputSource, ModelInputAuthorizationBinding,
+        ModelInputAuthorizationResolveRequest, ModelInputAuthorizationSource,
+        ModelInputRubricIdentity,
+    };
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(25))
+        .connect_lazy("postgres://synthetic:synthetic@127.0.0.1:9/unavailable")?;
+    let objects = Arc::new(ForbiddenModelInputObjects(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    let service = ControlService::new(pool, objects.clone(), control_config()?)?;
+    let source = FrozenModelInputSource {
+        task_run_id: contracts::TaskRunId::new(),
+        frozen_submission_id: contracts::FrozenSubmissionId::new(),
+        manifest_revision: Revision::new(3)?,
+        manifest_sha256: "a".repeat(64),
+        archive: verified("archive", "archive-v1", 50, "application/gzip").reference,
+        content_sha256: "b".repeat(64),
+        evaluation_release_id: EvaluationReleaseId::new(),
+        evaluation_release_revision: Revision::new(9)?,
+        environment: contracts::submission::FrozenEnvironmentIdentity {
+            environment_id: EnvironmentId::new(),
+            environment_revision: Revision::new(2)?,
+            release_id: ReleaseId::new(),
+            release_version: 4,
+            runtime_kind: RuntimeKind::Container,
+            build_request_id: None,
+        },
+        rubric: ModelInputRubricIdentity {
+            package_id: ProblemPackageId::new(),
+            package_revision: Revision::new(7)?,
+            path: "rubric.md".to_owned(),
+            artifact: verified("rubric", "rubric-v2", 20, "text/plain").reference,
+            sha256: "d".repeat(64),
+        },
+        rubric_permission: None,
+    };
+    let binding = ModelInputAuthorizationBinding {
+        session_sha256: "a".repeat(64),
+        actor_id: ActorId::new(),
+        project_id: ProjectId::new(),
+        course_id: Some(CourseId::new()),
+        operation_id: "freezeSubmission".to_owned(),
+        valid_until: "2026-10-14T12:00:00.000Z".parse()?,
+        source: ModelInputAuthorizationSource::FrozenSubmission(Box::new(source)),
+        policy_id: PolicyId::new(),
+        policy_revision: Revision::new(1)?,
+        policy_sha256: "a".repeat(64),
+        selection_sha256: "c".repeat(64),
+    };
+    binding.validate()?;
+    let request = ModelInputAuthorizationResolveRequest {
+        binding,
+        selected_paths: vec!["answer.rs".to_owned()],
+    };
+    assert!(matches!(
+        service.resolve_model_input_authorization(&request).await,
+        Err(ControlError::ContractInvalid)
+    ));
+    assert_eq!(objects.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     Ok(())
 }

@@ -1,0 +1,207 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EvaluationReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.",
+      "type": "string"
+    },
+    "ModelInputRubricIdentity": {
+      "additionalProperties": false,
+      "description": "Control-derived asynchronous recheck input, never accepted from a public create request.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "packageId": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "packageRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "packageId",
+        "packageRevision",
+        "path",
+        "artifact",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RubricModelInputApproval": {
+      "additionalProperties": false,
+      "description": "One verified instructor's model-use approval for an exact rubric version.",
+      "properties": {
+        "approvedBy": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "approverCourseMembershipRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "model": {
+          "type": "string"
+        },
+        "runtimeBinding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approvedBy",
+        "approverCourseMembershipRevision",
+        "runtimeBinding",
+        "model"
+      ],
+      "type": "object"
+    },
+    "RubricModelInputRule": {
+      "additionalProperties": false,
+      "description": "Control-owned rule stored with the current material-project policy.",
+      "properties": {
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RubricModelInputApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "evaluationReleaseId": {
+          "$ref": "#/$defs/EvaluationReleaseId"
+        },
+        "evaluationReleaseRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "rubric": {
+          "$ref": "#/$defs/ModelInputRubricIdentity"
+        },
+        "visibility": {
+          "$ref": "#/$defs/RubricModelInputVisibility"
+        }
+      },
+      "required": [
+        "courseId",
+        "evaluationReleaseId",
+        "evaluationReleaseRevision",
+        "rubric",
+        "visibility"
+      ],
+      "type": "object"
+    },
+    "RubricModelInputVisibility": {
+      "description": "Course-controlled rubric visibility, separate from model-use approval.",
+      "enum": [
+        "course_public",
+        "hidden"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Teacher-only projection of current authority; no object contents or storage locators.",
+  "properties": {
+    "courseId": {
+      "$ref": "#/$defs/CourseId"
+    },
+    "policyId": {
+      "$ref": "#/$defs/PolicyId"
+    },
+    "policyRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "rules": {
+      "items": {
+        "$ref": "#/$defs/RubricModelInputRule"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "projectId",
+    "courseId",
+    "policyId",
+    "policyRevision",
+    "rules"
+  ],
+  "title": "ProjectRubricModelInputRules",
+  "type": "object"
+}
