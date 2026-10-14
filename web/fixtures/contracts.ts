@@ -777,6 +777,8 @@ export async function cancelProjectAgentRun(_options?: FixtureOptions) { return 
 
 export async function cancelProjectCandidateBuild(_options?: FixtureOptions) { return unsupportedResponse('取消候选构建') }
 
+export async function cancelProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('取消题包上传') }
+
 export async function completeProjectAuthoringApproval(_options?: FixtureOptions) { return unsupportedResponse('完成命题审批') }
 
 export async function completeProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('完成题包上传') }
@@ -810,6 +812,8 @@ export async function getProjectEvaluationCandidate(_options?: FixtureOptions) {
 export async function getProjectLlmPolicyOptions(_options?: FixtureOptions) { return unsupportedResponse('读取项目 LLM 策略选项') }
 
 export async function getProjectProblemPackage(_options?: FixtureOptions) { return unsupportedResponse('读取题包') }
+
+export async function getProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('读取题包上传会话') }
 
 export async function getProjectWorkConfigurationPlan(_options?: FixtureOptions) { return unsupportedResponse('读取工作配置计划') }
 
