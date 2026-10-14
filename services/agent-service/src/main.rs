@@ -512,7 +512,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         ModelInputAuthorizationClient::from_env(Arc::clone(&service_token_client))
             .map_err(|_| StartupError::Configuration)?;
     let worker = Worker {
-        input_authorization_client,
+        input_authorization_client: input_authorization_client.clone(),
         store,
         objects,
         generated_artifacts,
@@ -525,6 +525,14 @@ async fn run_agent_service() -> Result<(), StartupError> {
         provider_bindings: deployment.authoring_provider_bindings.clone(),
     };
     let review_worker = LlmReviewWorker {
+        authorization: input_authorization_client.map(|client| {
+            Arc::new(
+                agent_service::model_input_authorization::ReviewControlAuthorization {
+                    client,
+                    store: llm_reviews.clone(),
+                },
+            ) as Arc<dyn agent_service::llm_review::ReviewInputAuthorization>
+        }),
         store: llm_reviews,
         classifier: Arc::clone(&classifier),
         process: review_process,

@@ -105,7 +105,7 @@ impl ModelInputAuthorizationClient {
             .map_err(|_| ())?;
         Ok(Some((http, endpoint, audience)))
     }
-    async fn resolve(
+    pub(crate) async fn resolve(
         &self,
         request: &ModelInputAuthorizationResolveRequest,
     ) -> Result<(), ClaudeCodeRuntimeError> {
@@ -180,6 +180,40 @@ impl ModelInputAuthorization for DispatchInputAuthorization {
         {
             return Err(ClaudeCodeRuntimeError::Cancelled);
         }
+        Ok(())
+    }
+}
+
+/// Concrete Control check plus the existing Agent durable review cancellation/lease fence.
+pub struct ReviewControlAuthorization {
+    pub client: ModelInputAuthorizationClient,
+    pub store: crate::llm_review::LlmReviewStore,
+}
+#[async_trait]
+impl crate::llm_review::ReviewInputAuthorization for ReviewControlAuthorization {
+    async fn check(
+        &self,
+        lease: &crate::llm_review::LlmReviewLease,
+    ) -> Result<(), ClaudeCodeRuntimeError> {
+        self.store
+            .check_invocation(lease)
+            .await
+            .map_err(|_| ClaudeCodeRuntimeError::InputAuthorizationDenied)?;
+        self.client
+            .resolve(&ModelInputAuthorizationResolveRequest {
+                binding: lease.request.input_authorization.clone(),
+                selected_paths: lease
+                    .request
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect(),
+            })
+            .await?;
+        self.store
+            .check_invocation(lease)
+            .await
+            .map_err(|_| ClaudeCodeRuntimeError::InputAuthorizationDenied)?;
         Ok(())
     }
 }
