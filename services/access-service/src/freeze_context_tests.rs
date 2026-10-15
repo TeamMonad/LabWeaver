@@ -230,6 +230,92 @@ fn io_error(message: &str) -> std::io::Error {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
+async fn freeze_rejects_idle_expiry_while_absolute_session_expiry_remains_valid()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let actor = Uuid::now_v7();
+    let (state, requests) = Box::pin(state(pool, actor, &mut tasks)).await?;
+    let session = session(
+        &state.pool,
+        &state.key_ring,
+        actor,
+        contracts::PlatformRole::Teacher,
+    )
+    .await?;
+    let project = Uuid::now_v7();
+    let course = Uuid::now_v7();
+    let environment = Uuid::now_v7();
+    let now = OffsetDateTime::now_utc();
+    sqlx::query("INSERT INTO control.project_memberships (course_id,project_id,actor_id,role,object_role,state,revision) VALUES (NULL,$1,$2,'teacher','editor','active',1)")
+        .bind(project).bind(actor).execute(&state.pool).await?;
+    sqlx::query("INSERT INTO control.course_memberships (course_id,actor_id,role,object_role,state,revision) VALUES ($1,$2,'teacher','instructor','active',1)")
+        .bind(course).bind(actor).execute(&state.pool).await?;
+    sqlx::query("INSERT INTO access.access_grants (grant_id,actor_id,project_id,course_id,environment_id,revision,state,not_before,expires_at,contract) VALUES ($1,$2,$3,$4,$5,1,'active',$6,$7,'{}')")
+        .bind(Uuid::now_v7()).bind(actor).bind(project).bind(course).bind(environment)
+        .bind(now - Duration::minutes(1)).bind(now + Duration::minutes(5))
+        .execute(&state.pool).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(Arc::clone(&state));
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let body = json!({"courseId": course, "manifest": {
+        "apiVersion":"evaluation.labweaver.io/v1", "kind":"SubmissionManifest", "name":"workspace", "source":"workspace",
+        "include":[{"kind":"directoryTree","path":"src"}], "exclude":[], "required":[], "llmReadable":[],
+        "maxTotalBytes":1_048_576, "maxFiles":100, "followSymlinks":false
+    }});
+    let post = || {
+        client
+            .post(format!("{base}/api/v1/environments/{environment}/freeze"))
+            .header(
+                header::COOKIE,
+                format!(
+                    "{}={}",
+                    state.deployment.browser.session_cookie_name, session.session_id
+                ),
+            )
+            .header(header::ORIGIN, ORIGIN)
+            .header("x-csrf-token", session.csrf_token.expose())
+            .header("idempotency-key", "idle-expiry-freeze-intent")
+            .json(&body)
+    };
+    assert_eq!(post().send().await?.status(), StatusCode::ACCEPTED);
+    let accepted = requests.lock().await.len();
+    assert_eq!(accepted, 1, "the authorized control request must forward");
+
+    sqlx::query("UPDATE access.bff_sessions SET idle_expires_at=clock_timestamp()-interval '1 microsecond' WHERE session_id=$1")
+        .bind(session.session_id).execute(&state.pool).await?;
+    let (absolute_valid, idle_expired, not_revoked): (bool, bool, bool) = sqlx::query_as(
+        "SELECT expires_at>clock_timestamp(),idle_expires_at<=clock_timestamp(),revoked_at IS NULL FROM access.bff_sessions WHERE session_id=$1",
+    )
+    .bind(session.session_id)
+    .fetch_one(&state.pool)
+    .await?;
+    assert!(absolute_valid, "absolute expiry must remain in the future");
+    assert!(idle_expired);
+    assert!(not_revoked);
+    assert_eq!(post().send().await?.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        requests.lock().await.len(),
+        accepted,
+        "idle expiry must stop forwarding even while absolute expiry remains valid"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn freeze_context_uses_persisted_earliest_expiries_and_microsecond_idle()
 -> Result<(), Box<dyn Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
