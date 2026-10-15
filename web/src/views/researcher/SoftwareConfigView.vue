@@ -77,9 +77,17 @@
       :code="agent.outcome.code"
       :message="agent.outcome.message"
       :retryable="agent.outcome.retryable"
-      :severity="agent.outcome.code.includes('FAILED') ? 'error' : 'info'"
+      :severity="agent.outcome.code.includes('FAILED') || agent.outcome.code.includes('DENIED') || agent.outcome.code.includes('UNAVAILABLE') || agent.outcome.code.includes('SELECTION_REQUIRED') ? 'error' : 'info'"
       @retry="reloadPolicy"
     />
+    <p
+      v-if="mode === 'configuration' && agent.outcome && modelInputSelectionAction(agent.outcome.code)"
+      class="diagnostic-action"
+      role="status"
+      data-testid="software-model-input-action"
+    >
+      建议：{{ modelInputSelectionAction(agent.outcome.code) }}
+    </p>
 
     <div v-if="mode === 'configuration'" class="config-layout">
       <section class="config-card md-card" aria-labelledby="config-heading">
@@ -160,9 +168,15 @@
               <small>材料包版本：{{ uploadedPackage.revision }} · 材料包 ID：{{ uploadedPackage.id }}</small>
             </details>
           </div>
+          <ModelInputPathPicker
+            v-if="uploadedPackage"
+            :model-value="modelInputSelection.selectedPaths"
+            :files="uploadedPackage.files"
+            @update:model-value="modelInputSelection.setSelected"
+          />
         </section>
 
-        <form class="config-form" @submit.prevent="startRun">
+        <form class="config-form" data-testid="software-config-form" @submit.prevent="startRun">
           <label>
             <span>Work 环境</span>
             <select v-model="selectedEnvironmentId" class="text-input" :disabled="workEnvironments.environments.kind !== 'success'" required>
@@ -315,6 +329,9 @@ import WorkTemplateAuthoringView from '@/views/researcher/WorkTemplateAuthoringV
 import { approveProjectWorkConfigurationRun, getActiveProjectLlmPolicy, getProjectWorkConfigurationPlan } from '@/generated/contracts'
 import type { AgentRunHistoryItem, AgentRunSchema, ProblemPackageSchema, ProjectLlmEgressPolicySchema, WorkConfigurationPlanViewSchema } from '@/generated/contracts'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
+import { useModelInputPathSelection } from '@/composables/useModelInputPathSelection'
+import { modelInputSelectionAction } from '@/utils/modelInputSelection'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjects } from '@/composables/useProjects'
@@ -377,6 +394,7 @@ const planApprovalOutcome = ref<DiagnosticViewModel | null>(null)
 const packageInput = ref<HTMLInputElement | null>(null)
 const uploadedPackage = computed<ProblemPackageSchema | null>(() => packageUpload.state.kind === 'done' ? packageUpload.state.package : null)
 const packageDone = computed(() => uploadedPackage.value !== null)
+const modelInputSelection = useModelInputPathSelection(uploadedPackage)
 const packageId = computed(() => uploadedPackage.value?.id ?? '')
 const packageRevision = computed(() => uploadedPackage.value?.revision ?? 0)
 let packageRestoreKey: string | null = null
@@ -409,7 +427,7 @@ const existingRunForCurrentInputs = computed(() => {
     && current.purpose.environmentId === selectedEnvironment.value.id
     && current.purpose.environmentRevision === selectedEnvironment.value.revision
 })
-const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success' && agent.run.kind !== 'loading' && !existingRunForCurrentInputs.value))
+const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && modelInputSelection.hasSelection && policy.value.kind === 'success' && agent.run.kind !== 'loading' && !existingRunForCurrentInputs.value))
 const canApprovePlan = computed(() => {
   if (plan.value.kind !== 'success' || agent.run.kind !== 'success' || agent.run.data.state !== 'awaiting_approval') return false
   if (!approvalReason.value.trim() || !approvalExpiresAt.value) return false
@@ -660,6 +678,7 @@ async function startRun() {
   if (!canStart.value || policy.value.kind !== 'success') return
   const environment = selectedEnvironment.value
   if (!environment) return
+  if (!modelInputSelection.hasSelection) return
   const started = await agent.startWorkConfiguration({
     environmentId: environment.id,
     environmentRevision: environment.revision,
@@ -667,6 +686,7 @@ async function startRun() {
     packageRevision: packageRevision.value,
     policyId: policy.value.data.id,
     policyRevision: policy.value.data.revision,
+    selectedPaths: modelInputSelection.selectedPaths,
     ...(selectedProject.value?.courseId ? { courseId: selectedProject.value.courseId } : {}),
   })
   if (started && agent.run.kind === 'success' && agent.run.data.purpose.kind === 'work_configuration') {
@@ -876,4 +896,5 @@ function trackStateLabel(state: string) {
 .restart-warning { margin: 14px 0; padding: 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); font: var(--md-sys-body-medium); }
 .approval-form { display: grid; gap: 14px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--md-sys-color-outline-variant); }
 @media (max-width: 820px) { .config-layout { grid-template-columns: 1fr; } .project-strip { align-items: stretch; flex-direction: column; } .project-strip label { max-width: none; } .project-summary { padding-bottom: 0; } }
+.diagnostic-action { margin: 0 0 12px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 </style>

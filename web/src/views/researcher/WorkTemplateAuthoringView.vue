@@ -116,7 +116,14 @@
         </button>
       </div>
 
-      <button type="button" class="filled-button" :disabled="!canStartRun" @click="startRun">
+      <ModelInputPathPicker
+        v-if="uploadedPackage"
+        :model-value="modelInputSelection.selectedPaths"
+        :files="uploadedPackage.files"
+        @update:model-value="modelInputSelection.setSelected"
+      />
+
+      <button type="button" class="filled-button" data-testid="work-template-start-run" :disabled="!canStartRun" @click="startRun">
         {{ agent.acting === 'start' ? '提交中…' : '启动 Work 模板生成' }}
       </button>
 
@@ -365,6 +372,9 @@ import type {
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
 import { withdrawEnvironmentTemplateReleaseByUi } from '@/composables/useEnvironmentTemplateReleases'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
+import { useModelInputPathSelection } from '@/composables/useModelInputPathSelection'
+import { modelInputSelectionAction } from '@/utils/modelInputSelection'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { agentAttemptStateLabel } from '@/utils/stateLabels'
@@ -421,6 +431,7 @@ let releaseRequestKey: string | null = null
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed<ProblemPackageSchema | null>(() => upload.state.kind === 'done' ? upload.state.package : null)
+const modelInputSelection = useModelInputPathSelection(uploadedPackage)
 const candidateId = computed(() => {
   if (agent.run.kind !== 'success') return null
   return agent.run.data.tracks.find((track) => track.kind === 'environment')?.candidateId ?? null
@@ -437,6 +448,7 @@ const agentRunForCurrentPackage = computed(() => (
 const canStartRun = computed(() => Boolean(
   packageDone.value
   && uploadedPackage.value
+  && modelInputSelection.hasSelection
   && policy.state.kind === 'success'
   && agent.run.kind !== 'loading'
   && !agentRunForCurrentPackage.value
@@ -711,6 +723,7 @@ async function startRun() {
   const policyData = policy.state.kind === 'success' ? policy.state.data : null
   const projectId = props.projectId
   if (!projectId || !pkg || !policyData || agent.acting) return
+  if (!modelInputSelection.hasSelection) return
   const started = await agent.start({
     ...(props.courseId ? { courseId: props.courseId } : {}),
     packageId: pkg.id,
@@ -718,6 +731,7 @@ async function startRun() {
     policyId: policyData.id,
     policyRevision: policyData.revision,
     environmentClass: 'work',
+    selectedPaths: modelInputSelection.selectedPaths,
   })
   if (started && agent.run.kind === 'success') {
     loadedRouteRunId = agent.run.data.id
@@ -915,8 +929,14 @@ function runDiagnosticMessage(code: string, fallback: string): string {
       return '材料或项目 AI 设置已经变化，请刷新页面后重新启动任务。'
     case 'LW_CANDIDATE_NOT_FOUND':
       return '候选可能仍在服务端同步，请点击重试继续查看。'
-    default:
-      return fallback
+    case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_DENIED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
+      return modelInputSelectionAction(code) ?? fallback
+    default: {
+      const action = modelInputSelectionAction(code)
+      return action ?? fallback
+    }
   }
 }
 
