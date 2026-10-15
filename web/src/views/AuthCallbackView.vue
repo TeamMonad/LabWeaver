@@ -72,8 +72,8 @@ watch(
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  padding: 40px 48px;
+  gap: var(--space-4);
+  padding: var(--space-10) var(--space-12);
   text-align: center;
 }
 
@@ -94,8 +94,8 @@ watch(
 
 .callback-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 8px;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
 }
 
 .primary-button,
@@ -104,7 +104,7 @@ watch(
   align-items: center;
   justify-content: center;
   height: 40px;
-  padding: 0 24px;
+  padding: 0 var(--space-6);
   border-radius: var(--md-sys-shape-full);
   font: var(--md-sys-label-large);
   text-decoration: none;

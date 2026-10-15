@@ -121,7 +121,7 @@ onMounted(() => {
   grid-row: 3;
   grid-column: 1;
   overflow-y: auto;
-  padding: 24px 16px 48px;
+  padding: var(--space-6) var(--space-4) var(--space-12);
   min-width: 0;
 }
 
@@ -129,17 +129,17 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 48px 16px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-4);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
 }
 
 .project-context-error {
   display: grid;
-  gap: 12px;
+  gap: var(--space-3);
   max-width: 720px;
-  margin: 24px auto;
+  margin: var(--space-6) auto;
 }
 
 .project-context-error h1 {
@@ -178,13 +178,13 @@ onMounted(() => {
 
   .app-main {
     grid-column: 2;
-    padding: 24px 32px 48px;
+    padding: var(--space-6) var(--space-8) var(--space-12);
   }
 }
 
 @media (min-width: 1200px) {
   .app-main {
-    padding: 32px 48px 64px;
+    padding: var(--space-8) var(--space-12) var(--space-16);
   }
 }
 

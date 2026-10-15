@@ -148,7 +148,7 @@ async function confirmDelete() {
 .ssh-keys {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: var(--space-8);
 }
 
 .page-header h2 {
@@ -160,25 +160,25 @@ async function confirmDelete() {
 .page-subtitle {
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
 }
 
 .section-title {
   font: var(--md-sys-title-medium);
   color: var(--md-sys-color-on-surface);
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .key-form {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .key-input {
   width: 100%;
   min-height: 96px;
-  padding: 12px;
+  padding: var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -197,47 +197,12 @@ async function confirmDelete() {
   justify-content: flex-end;
 }
 
-.filled-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-on-surface-variant);
-  cursor: pointer;
-}
-
-.text-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .form-error {
-  margin-top: 12px;
+  margin-top: var(--space-3);
 }
 
 .ssh-key-guide {
-  margin-top: 12px;
+  margin-top: var(--space-3);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
@@ -250,8 +215,8 @@ async function confirmDelete() {
 
 .ssh-key-guide__content {
   display: grid;
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
   line-height: 1.5;
 }
 
@@ -261,14 +226,14 @@ async function confirmDelete() {
 
 .ssh-key-guide__content pre {
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   overflow-x: auto;
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container-low);
 }
 
 .tag {
-  padding: 4px 10px;
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);

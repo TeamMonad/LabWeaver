@@ -275,7 +275,7 @@ const routeReason = computed(() => {
 .home-view {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--space-5);
   max-width: var(--content-max-width);
   margin: 0 auto;
 }
@@ -284,13 +284,13 @@ const routeReason = computed(() => {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .home-header__text {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .eyebrow {
@@ -314,19 +314,19 @@ const routeReason = computed(() => {
 
 .home-sections {
   display: grid;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .home-section {
   display: grid;
-  gap: 8px;
-  padding: 16px 20px;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
 }
 
 .section-heading {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .section-heading h2 {
@@ -336,7 +336,7 @@ const routeReason = computed(() => {
 
 .count {
   min-width: 24px;
-  padding: 0 8px;
+  padding: 0 var(--space-2);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
@@ -356,8 +356,8 @@ const routeReason = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 0;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
   border-top: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -367,20 +367,20 @@ const routeReason = computed(() => {
 
 .item-row--attention {
   box-shadow: inset 3px 0 0 var(--md-sys-color-warning);
-  padding-left: 12px;
+  padding-left: var(--space-3);
 }
 
 .item-main {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .item-title {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .item-title strong {
@@ -412,8 +412,8 @@ const routeReason = computed(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 48px 24px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-large);
   background: var(--md-sys-color-surface-container-high);
@@ -427,36 +427,10 @@ const routeReason = computed(() => {
   font: var(--md-sys-title-large);
 }
 
+/* Colors, heights and disabled tone come from styles/components.css. */
 .filled-button,
 .outlined-button {
-  display: inline-flex;
   flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 16px;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.filled-button {
-  border: none;
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.outlined-button {
-  border: 1px solid var(--md-sys-color-outline);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
-.outlined-button:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .hint {

@@ -114,7 +114,7 @@ onBeforeUnmount(() => {
 .xterm-host {
   width: 100%;
   height: 100%;
-  padding: 8px;
+  padding: var(--space-2);
   box-sizing: border-box;
   overflow: hidden;
 }

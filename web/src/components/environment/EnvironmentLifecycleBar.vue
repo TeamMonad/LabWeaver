@@ -49,7 +49,7 @@
         </button>
         <button
           type="button"
-          class="text-button error"
+          class="outlined-button danger-button"
           :disabled="!canDelete(env.instance.data)"
           :title="lifecycleActionReason(env.instance.data, 'delete')"
           :aria-label="failedCleanup(env.instance.data) ? '重试回收' : '删除'"
@@ -150,69 +150,12 @@ const deleteCopy = computed(() => deleteDialogCopy(deleteEnvironment.value))
 }
 
 .lifecycle-result {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .lifecycle-action-hint {
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
-}
-
-.filled-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button.small {
-  height: 32px;
-  padding: 0 16px;
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.outlined-button {
-  height: 40px;
-  padding: 0 24px;
-  border: 1px solid var(--md-sys-color-outline);
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.outlined-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-button {
-  height: 40px;
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.text-button.error {
-  color: var(--md-sys-color-error);
-}
-
-.text-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 </style>

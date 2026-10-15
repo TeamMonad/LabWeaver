@@ -167,17 +167,17 @@ function onEnterKey() {
 .gcp-filter-bar {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
 .filter-box {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-2);
   min-height: 36px;
-  padding: 4px 10px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface);
@@ -197,15 +197,15 @@ function onEnterKey() {
 .filter-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .filter-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   height: 24px;
-  padding: 0 6px 0 8px;
+  padding: 0 var(--space-2) 0 var(--space-2);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
@@ -271,7 +271,7 @@ function onEnterKey() {
 .filter-presets {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -279,7 +279,7 @@ function onEnterKey() {
   display: inline-flex;
   align-items: center;
   height: 24px;
-  padding: 0 8px;
+  padding: 0 var(--space-2);
   border-radius: var(--md-sys-shape-full);
   border: 1px solid var(--md-sys-color-outline-variant);
   background: transparent;
