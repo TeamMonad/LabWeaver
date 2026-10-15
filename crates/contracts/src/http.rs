@@ -1011,6 +1011,21 @@ pub struct ModelInputAuthorizationBinding {
     pub selection_sha256: String,
 }
 
+impl ModelInputAuthorizationBinding {
+    /// Preserves first-request evidence without deriving it from artifact ownership.
+    #[must_use]
+    pub fn context(&self) -> ModelInputAuthorizationContext {
+        ModelInputAuthorizationContext {
+            session_sha256: self.session_sha256.clone(),
+            actor_id: self.actor_id,
+            project_id: self.project_id,
+            course_id: self.course_id,
+            operation_id: self.operation_id.clone(),
+            valid_until: self.valid_until,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelInputAuthorizationResolveRequest {
@@ -1183,8 +1198,8 @@ impl InternalCreateAgentRunRequest {
         };
         let paths = validate_model_input_selection(&self.package, selection)?;
         let binding = &self.input_authorization;
+        binding.context().validate()?;
         if !operation_matches
-            || !is_sha256(&binding.session_sha256)
             || binding.actor_id != self.actor_id
             || binding.project_id != self.project_id
             || binding.course_id != self.course_id
