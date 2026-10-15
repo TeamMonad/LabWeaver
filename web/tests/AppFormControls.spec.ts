@@ -1,3 +1,4 @@
+/* eslint-disable vue/one-component-per-file -- test harness hosts */
 import { mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { describe, expect, it } from 'vitest'
