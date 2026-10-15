@@ -181,7 +181,7 @@ function onEnterKey() {
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface);
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: border-color var(--motion-duration-fast) var(--motion-ease-out), box-shadow var(--motion-duration-fast) var(--motion-ease-out);
 }
 
 .filter-box:focus-within {
@@ -286,7 +286,7 @@ function onEnterKey() {
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color var(--motion-duration-fast) var(--motion-ease-out), border-color var(--motion-duration-fast) var(--motion-ease-out), color var(--motion-duration-fast) var(--motion-ease-out);
 }
 
 .preset-btn:hover {

@@ -1,0 +1,149 @@
+/* Global reset, typography and focus behaviour. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scrollbar-gutter: stable;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  font: var(--md-sys-body-medium);
+  font-optical-sizing: auto;
+  background: var(--md-sys-color-background);
+  color: var(--md-sys-color-on-surface);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: var(--md-sys-tracking-tight);
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+a {
+  color: var(--md-sys-color-primary);
+  text-decoration: none;
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  text-decoration-thickness: 1px;
+}
+
+/* Links inside running text must not rely on color alone (WCAG 1.4.1).
+   Button-styled links keep their own affordance. */
+:where(p, dd) a:not([class*='button']) {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+}
+
+img,
+svg,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+
+/* Numbers in tables, money and timestamps should not jitter. */
+table,
+time,
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--md-sys-font-family-mono);
+  font-size: 0.92em;
+}
+
+::selection {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+
+/* Focus: never on pointer click, always visible on keyboard. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline-offset: 0;
+}
+
+/* Thin, theme-aware scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--md-sys-color-outline-variant) transparent;
+}
+
+/* Cards (legacy utility names kept). Hairline border plus a soft level-1 shadow. */
+.md-card {
+  background: var(--md-sys-color-surface);
+  border-radius: var(--md-sys-shape-large);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: var(--md-sys-elevation-1);
+}
+
+.md-card-filled {
+  background: var(--md-sys-color-surface-container-low);
+  border-radius: var(--md-sys-shape-large);
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
