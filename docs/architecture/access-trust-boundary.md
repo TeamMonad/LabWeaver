@@ -59,6 +59,8 @@ Access 在真实 freeze POST 完成 BFF、Origin/CSRF、环境 grant、项目 Ed
 
 ## 浏览器与 SSH
 
+浏览器通过 `GET/POST /api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules` 访问 Control 的 rubric 规则入口。Access 复用公共 operation 契约要求教师身份及当前项目 Browse（GET）或 Edit（POST）；写请求沿用 Origin/CSRF 校验。身份、项目动作或 CSRF 拒绝时不转发。Control 继续负责当前课程 instructor、rubric 精确版本、可见性与模型许可；Access 不生成这些权威事实。`If-Match`、幂等键与响应 ETag 沿既有代理规则透传。
+
 Access 默认 API 错误使用公共 `ProblemDetails` 契约，返回 `application/problem+json`。响应保留原 HTTP 状态和 `diagnosticCode`，包含安全的 `type/title/detail/instance`、与 `x-request-id` 一致的 `requestId`、关联 `traceId` 和 `retryable`。Gateway 心跳和关闭重试的专用 412 正文仍保持 `diagnosticCode/currentRevision/state` 三字段 JSON，满足既有严格消费契约。缺少或与当前会话不匹配的 CSRF 仍拒绝写入；403 不允许原输入直接重试，客户端须刷新当前会话后由用户重新提交。
 
 浏览器退出先向 BFF 提交带 Origin 和 CSRF 的请求。Access 撤销本地会话及控制台连接、清理会话 Cookie，并返回身份提供方的完整退出地址；浏览器随后进行顶层导航完成 [OIDC RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)。跨源退出不能用后台 fetch 跟随重定向代替。退出响应不允许缓存，页面在会话失效时清除本地登录状态并提示重新登录。

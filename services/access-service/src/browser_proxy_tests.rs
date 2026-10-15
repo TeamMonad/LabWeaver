@@ -37,6 +37,9 @@ mod oidc_login_tests;
 #[path = "freeze_context_tests.rs"]
 mod freeze_context_tests;
 
+#[path = "rubric_rules_proxy_tests.rs"]
+mod rubric_rules_proxy_tests;
+
 #[path = "platform_configuration_browser_tests.rs"]
 mod platform_configuration_browser_tests;
 
@@ -475,6 +478,17 @@ async fn control(
         )
             .into_response();
     }
+    if uri
+        .path()
+        .ends_with("/llm-egress-policies/active/rubric-rules")
+    {
+        return (
+            StatusCode::OK,
+            [(header::ETAG, "\"7\"")],
+            Json(json!({"boundary": "request_record_only"})),
+        )
+            .into_response();
+    }
     if uri.path().contains("/builds/") && method == Method::GET {
         (
             StatusCode::OK,
@@ -609,6 +623,10 @@ async fn state_with_environment(
         )
         .route("/api/v1/projects/{project_id}", any(control))
         .route("/api/v1/projects/{project_id}/members", any(control))
+        .route(
+            "/api/v1/projects/{project_id}/llm-egress-policies/active/rubric-rules",
+            get(control).post(control),
+        )
         .route("/admin/realms/test/users", any(control))
         .with_state(authority.clone());
     let control_server_config = Arc::clone(&server_config);

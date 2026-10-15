@@ -13,7 +13,7 @@ use auth::{
 };
 use axum::{
     body::{Body, Bytes, to_bytes},
-    extract::{Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, Method, Uri, header},
     response::Response,
 };
@@ -347,6 +347,25 @@ impl ControlGatewayProxy {
             max_response_bytes: config.max_response_bytes,
         })
     }
+}
+
+/// Reuses the project operation contract before forwarding rubric maintenance.
+/// Control remains responsible for the current instructor and exact rubric facts.
+pub(super) async fn forward_rubric_rules(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<contracts::ProjectId>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let operation = match method {
+        Method::GET => "getProjectRubricModelInputRules",
+        Method::POST => "maintainProjectRubricModelInputRule",
+        _ => return Err(ApiError::bad_request("LW_AUTH_CONTROL_METHOD_REJECTED")),
+    };
+    authorize_environment_project(&state, &headers, project_id, operation).await?;
+    forward_control(State(state), method, uri, headers, body).await
 }
 
 pub(super) async fn forward_control(
