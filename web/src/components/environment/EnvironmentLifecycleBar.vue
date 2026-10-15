@@ -158,4 +158,21 @@ const deleteCopy = computed(() => deleteDialogCopy(deleteEnvironment.value))
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
+
+/* Destructive action sits apart from lifecycle actions. */
+.danger-button {
+  position: relative;
+  margin-inline-start: var(--space-4);
+}
+
+.danger-button::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: calc(-1 * var(--space-3));
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--md-sys-color-outline-variant);
+  pointer-events: none;
+}
 </style>

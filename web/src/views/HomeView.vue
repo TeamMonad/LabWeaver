@@ -327,6 +327,8 @@ const routeReason = computed(() => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .section-heading h2 {
@@ -341,6 +343,7 @@ const routeReason = computed(() => {
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-medium);
+  font-variant-numeric: tabular-nums;
   line-height: 22px;
   text-align: center;
 }
@@ -442,6 +445,16 @@ const routeReason = computed(() => {
   .item-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .home-header h1 {
+    white-space: normal;
+  }
+
+  /* Narrow screens: sections become flat list cards to shorten the page. */
+  .home-section {
+    padding: var(--space-3) var(--space-4);
+    box-shadow: none;
   }
 }
 </style>
