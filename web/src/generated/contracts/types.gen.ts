@@ -7068,6 +7068,10 @@ export type ModelInputAuthorizationSource = {
     kind: 'frozen_submission';
     manifestRevision: InternalAgentLlmReviewRequestSchemaRevision;
     manifestSha256: string;
+    /**
+     * SHA of the original Evaluation worker lease; never refreshed on recovery.
+     */
+    parentLeaseSha256: string;
     rubric: ModelInputRubricIdentity;
     /**
      * Missing permission is representable for a refusal, never for model egress.

@@ -90,6 +90,10 @@
     "inputAuthorizationContext": {
       "$ref": "#/$defs/ModelInputAuthorizationContext"
     },
+    "parentLeaseSha256": {
+      "description": "Derived by Evaluation from its actual fenced worker lease, not from user input.",
+      "type": "string"
+    },
     "selectedPaths": {
       "items": {
         "type": "string"
@@ -103,6 +107,7 @@
   "required": [
     "inputAuthorizationContext",
     "taskRunId",
+    "parentLeaseSha256",
     "frozenSubmissionId",
     "evaluationReleaseId",
     "evaluationReleaseRevision",
