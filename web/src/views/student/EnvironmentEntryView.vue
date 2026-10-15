@@ -2781,4 +2781,33 @@ async function revokeAccessGrant() {
     font: var(--md-sys-headline-small);
   }
 }
+
+/* Cloudscape detail-page header: breadcrumbs + title/status on the left,
+   page actions on the same row to the right (desktop). */
+@media (min-width: 1200px) {
+  .gcp-resource-view {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-6);
+    row-gap: var(--layout-page-section-gap);
+  }
+
+  .gcp-resource-view > * {
+    grid-column: 1 / -1;
+  }
+
+  .gcp-resource-view > .gcp-resource-header {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .gcp-resource-view > :deep(.gcp-action-bar) {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    margin-bottom: 0;
+    padding: 0;
+    border-bottom: 0;
+  }
+}
 </style>
