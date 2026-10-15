@@ -33,9 +33,9 @@ use axum::{
 use contracts::http::PageQuery;
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    AuthorizationScope, CsrfTokenResponse, LogoutBrowserSessionResponse, OperationScopeKind,
-    OrganizationUserPage, Revision, UtcTimestamp, environment::EnvironmentOwnerResolutionRequest,
-    operation_contract,
+    AuthorizationScope, CsrfTokenResponse, DiagnosticCode, LogoutBrowserSessionResponse,
+    OperationScopeKind, OrganizationUserPage, ProblemDetails, Revision, UtcTimestamp,
+    environment::EnvironmentOwnerResolutionRequest, operation_contract,
 };
 use persistence_sqlx::Sha256Digest;
 
@@ -1796,10 +1796,35 @@ impl IntoResponse for ApiError {
             "status" => self.status.as_u16().to_string()
         )
         .increment(1);
-        let body = self
-            .body
-            .unwrap_or_else(|| serde_json::json!({"diagnosticCode": self.diagnostic}));
-        (self.status, Json(body)).into_response()
+        // Gateway heartbeat/close has an existing strict revision-conflict body.
+        // Keep explicitly supplied domain responses intact.
+        if let Some(body) = self.body {
+            return (self.status, Json(body)).into_response();
+        }
+        let context = telemetry::current_request_context()
+            .unwrap_or_else(telemetry::RequestContext::generate);
+        let request_id = context.request_id().to_owned();
+        let body = ProblemDetails {
+            problem_type: format!(
+                "urn:labweaver:problem:{}",
+                self.diagnostic.to_ascii_lowercase()
+            ),
+            title: "Access request blocked".to_owned(),
+            status: self.status.as_u16(),
+            detail: "The request was rejected by an access boundary.".to_owned(),
+            instance: format!("urn:labweaver:request:{request_id}"),
+            diagnostic_code: DiagnosticCode::registered(self.diagnostic),
+            request_id,
+            trace_id: Some(context.trace_id().to_owned()),
+            retryable,
+            violations: Vec::new(),
+        };
+        (
+            self.status,
+            [(header::CONTENT_TYPE, "application/problem+json")],
+            Json(body),
+        )
+            .into_response()
     }
 }
 
@@ -1983,6 +2008,43 @@ mod tests {
     #[test]
     fn browser_routes_register_without_conflicts() {
         let _router = browser_routes();
+    }
+
+    #[tokio::test]
+    async fn api_errors_preserve_status_diagnostics_and_retry_semantics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{body::to_bytes, http::header, response::IntoResponse};
+
+        for error in [
+            ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"),
+            ApiError::unauthorized("LW_AUTH_SESSION_REJECTED"),
+            ApiError::forbidden("LW_AUTH_CSRF_REJECTED"),
+            ApiError::not_found("LW_ACCESS_KEY_NOT_FOUND"),
+            ApiError::conflict("LW_ACCESS_KEY_CONFLICT"),
+            ApiError::precondition("LW_REVISION_CONFLICT"),
+            ApiError::unprocessable("LW_ACCESS_SSH_KEY_REJECTED"),
+            ApiError::internal("LW_ACCESS_STORE_CORRUPT"),
+            ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"),
+        ] {
+            let status = error.status;
+            let diagnostic = error.diagnostic;
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+            let body = to_bytes(response.into_body(), 16_384).await?;
+            let problem: contracts::ProblemDetails = serde_json::from_slice(&body)?;
+            assert_eq!(problem.status, status.as_u16());
+            assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
+            assert_eq!(
+                problem.retryable,
+                status == axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert!(!problem.request_id.is_empty());
+        }
+        Ok(())
     }
 
     #[test]
