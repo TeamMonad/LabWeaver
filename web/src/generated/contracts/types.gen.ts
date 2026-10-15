@@ -3579,6 +3579,10 @@ export type FrozenEnvironmentIdentity = {
 export type FrozenFile = {
     mediaType: string;
     path: string;
+    /**
+     * SHA-256 of the selected file bytes observed during collection.
+     */
+    sha256: string;
     sizeBytes: number;
 };
 
@@ -8604,6 +8608,10 @@ export type PackageFile = {
      * Normalized package-relative file path.
      */
     path: string;
+    /**
+     * SHA-256 of the actual bytes of this exact immutable object version.
+     */
+    sha256: string;
 };
 
 /**
@@ -9213,13 +9221,56 @@ export type PlatformImageUploadStatusSchemaUtcTimestamp = string;
  * ProblemPackageUploadSession
  */
 export type ProblemPackageUploadSessionSchema = {
+    completedPackage?: ProblemPackageUploadSessionSchemaProblemPackage | null;
+    completionExpectedRevision?: ProblemPackageUploadSessionSchemaRevision | null;
+    /**
+     * Original completion intent. Reuse both values when recovering a completing upload.
+     */
+    completionIdempotencyKey?: string | null;
     courseId?: ProblemPackageUploadSessionSchemaCourseId | null;
     expiresAt: ProblemPackageUploadSessionSchemaUtcTimestamp;
     files: Array<ProblemPackageUploadSessionSchemaProblemPackageUploadFile>;
     id: ProblemPackageUploadSessionSchemaUploadSessionId;
     projectId: ProblemPackageUploadSessionSchemaProjectId;
     revision: ProblemPackageUploadSessionSchemaRevision;
+    state: ProblemPackageUploadState;
+    terminalDiagnostic?: string | null;
     uploadTargets: Array<ProblemPackageUploadTarget>;
+    /**
+     * Paths whose objects exist with the declared size and media type. Completion hashes bytes.
+     */
+    uploadedPaths: Array<string>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type ProblemPackageUploadSessionSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type ProblemPackageUploadSessionSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: ProblemPackageUploadSessionSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
 };
 
 /**
@@ -9227,11 +9278,57 @@ export type ProblemPackageUploadSessionSchema = {
  */
 export type ProblemPackageUploadSessionSchemaCourseId = string;
 
+/**
+ * One immutable file in a teacher ProblemPackage.
+ */
+export type ProblemPackageUploadSessionSchemaPackageFile = {
+    /**
+     * Immutable object reference.
+     */
+    object: ProblemPackageUploadSessionSchemaArtifactRef;
+    /**
+     * Normalized package-relative file path.
+     */
+    path: string;
+    /**
+     * SHA-256 of the actual bytes of this exact immutable object version.
+     */
+    sha256: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type ProblemPackageUploadSessionSchemaPolicyId = string;
+
+/**
+ * Immutable, atomically completed teacher material package.
+ */
+export type ProblemPackageUploadSessionSchemaProblemPackage = {
+    completedAt: ProblemPackageUploadSessionSchemaUtcTimestamp;
+    courseId?: ProblemPackageUploadSessionSchemaCourseId | null;
+    files: Array<ProblemPackageUploadSessionSchemaPackageFile>;
+    id: ProblemPackageUploadSessionSchemaProblemPackageId;
+    projectId: ProblemPackageUploadSessionSchemaProjectId;
+    retention: ProblemPackageUploadSessionSchemaRetentionSnapshot;
+    revision: ProblemPackageUploadSessionSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type ProblemPackageUploadSessionSchemaProblemPackageId = string;
+
 export type ProblemPackageUploadSessionSchemaProblemPackageUploadFile = {
     mediaType: string;
     path: string;
     sizeBytes: number;
 };
+
+/**
+ * Durable material upload lifecycle. Terminal states issue no upload authorities.
+ */
+export type ProblemPackageUploadState = 'pending' | 'completing' | 'completed' | 'failed' | 'cancelled' | 'expired';
 
 /**
  * Short-lived, per-object upload authority returned only by session creation.
@@ -9249,6 +9346,43 @@ export type ProblemPackageUploadTarget = {
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type ProblemPackageUploadSessionSchemaProjectId = string;
+
+/**
+ * Retention classes with distinct privacy and recovery requirements.
+ */
+export type ProblemPackageUploadSessionSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+
+/**
+ * Required action after retention expires.
+ */
+export type ProblemPackageUploadSessionSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
+
+/**
+ * Frozen data-retention decision for an immutable resource.
+ */
+export type ProblemPackageUploadSessionSchemaRetentionSnapshot = {
+    /**
+     * Stable retention class.
+     */
+    class: ProblemPackageUploadSessionSchemaRetentionClass;
+    /**
+     * Required terminal disposition.
+     */
+    disposition: ProblemPackageUploadSessionSchemaRetentionDisposition;
+    /**
+     * Policy identity.
+     */
+    policyId: ProblemPackageUploadSessionSchemaPolicyId;
+    /**
+     * Exact policy revision used at creation.
+     */
+    policyRevision: ProblemPackageUploadSessionSchemaRevision;
+    /**
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
+     */
+    retainUntil: string | null;
+};
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -10790,6 +10924,10 @@ export type ProblemPackageSchemaPackageFile = {
      * Normalized package-relative file path.
      */
     path: string;
+    /**
+     * SHA-256 of the actual bytes of this exact immutable object version.
+     */
+    sha256: string;
 };
 
 /**
@@ -19338,6 +19476,146 @@ export type CreateProjectProblemPackageUploadResponses = {
 };
 
 export type CreateProjectProblemPackageUploadResponse = CreateProjectProblemPackageUploadResponses[keyof CreateProjectProblemPackageUploadResponses];
+
+export type GetProjectProblemPackageUploadData = {
+    body?: never;
+    path: {
+        projectId: string;
+        uploadId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}';
+};
+
+export type GetProjectProblemPackageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectProblemPackageUploadError = GetProjectProblemPackageUploadErrors[keyof GetProjectProblemPackageUploadErrors];
+
+export type GetProjectProblemPackageUploadResponses = {
+    /**
+     * Successful response
+     */
+    200: ProblemPackageUploadSessionSchema;
+};
+
+export type GetProjectProblemPackageUploadResponse = GetProjectProblemPackageUploadResponses[keyof GetProjectProblemPackageUploadResponses];
+
+export type CancelProjectProblemPackageUploadData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        projectId: string;
+        uploadId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}/cancel';
+};
+
+export type CancelProjectProblemPackageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CancelProjectProblemPackageUploadError = CancelProjectProblemPackageUploadErrors[keyof CancelProjectProblemPackageUploadErrors];
+
+export type CancelProjectProblemPackageUploadResponses = {
+    /**
+     * Successful response
+     */
+    200: ProblemPackageUploadSessionSchema;
+};
+
+export type CancelProjectProblemPackageUploadResponse = CancelProjectProblemPackageUploadResponses[keyof CancelProjectProblemPackageUploadResponses];
 
 export type CompleteProjectProblemPackageUploadData = {
     body: CompleteProblemPackageUploadRequestSchema;

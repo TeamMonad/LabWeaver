@@ -23,6 +23,8 @@ pub struct PackageFile {
     pub path: String,
     /// Immutable object reference.
     pub object: ArtifactRef,
+    /// SHA-256 of the actual bytes of this exact immutable object version.
+    pub sha256: String,
 }
 
 /// Immutable, atomically completed teacher material package.
@@ -66,6 +68,16 @@ impl ProblemPackage {
                 ));
             }
             previous = Some(&file.path);
+            if file.sha256.len() != 64
+                || !file
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(AuthoringError::InvalidPackage(
+                    "file SHA-256 is invalid".to_owned(),
+                ));
+            }
             validate_artifact_ref(&file.object)?;
         }
         Ok(())

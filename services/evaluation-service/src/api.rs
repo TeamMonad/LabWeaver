@@ -45,6 +45,7 @@ use crate::{
 
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
+const MODEL_CONTEXT_HEADER: &str = "x-labweaver-model-input-authorization-context";
 const ACCESS_PERMISSION: &str = "evaluation.api.invoke";
 const CONTROL_PERMISSION: &str = "evaluation.control.invoke";
 const WORKER_PERMISSION: &str = "evaluation.step.complete";
@@ -125,6 +126,10 @@ pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
         )
         .route("/internal/v1/evaluation-runs", post(create_evaluation_run))
         .route(
+            "/internal/v1/evaluation-releases/{release_id}/frozen-submissions/{submission_id}/model-input-facts",
+            get(get_frozen_model_input_facts),
+        )
+        .route(
             "/internal/v1/evaluation-runs/{run_id}",
             get(get_evaluation_run),
         )
@@ -200,6 +205,13 @@ async fn freeze_submission(
     let environment_revision = if_match(&headers)?;
     let idempotency_key = idempotency_key(&headers)?;
     let command = SubmissionFreezeCommand {
+        input_authorization_context: model_input_context(
+            &headers,
+            project_id,
+            request.course_id.or(course_id),
+            actor_id,
+        )?,
+        worker_dispatch: crate::FreezeWorkerDispatch::Pending,
         frozen_submission_id: FrozenSubmissionId::new(),
         operation_id: OperationId::new(),
         project_id,
@@ -222,6 +234,27 @@ async fn freeze_submission(
         replay = accepted.replay,
     );
     Ok((StatusCode::ACCEPTED, Json(accepted.accepted)))
+}
+
+async fn get_frozen_model_input_facts(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
+    Path((release_id, submission_id)): Path<(EvaluationReleaseId, FrozenSubmissionId)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, EvaluationApiError> {
+    require_control(principal)?;
+    let facts = state
+        .submissions
+        .model_input_facts(
+            submission_id,
+            project_header(&headers)?,
+            optional_course_header(&headers)?,
+            actor(&headers)?,
+            release_id,
+            if_match(&headers)?,
+        )
+        .await?;
+    Ok(Json(facts))
 }
 
 async fn publish_evaluation_release(
@@ -776,6 +809,147 @@ fn require_session(headers: &HeaderMap) -> Result<(), EvaluationApiError> {
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .map(|_| ())
         .ok_or(EvaluationApiError::IdentityInvalid)
+}
+
+fn session_sha256(headers: &HeaderMap) -> Result<String, EvaluationApiError> {
+    let session = headers
+        .get(SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .ok_or(EvaluationApiError::IdentityInvalid)?;
+    Ok(persistence_sqlx::Sha256Digest::of_bytes(session.to_string().as_bytes()).to_string())
+}
+
+fn model_input_context(
+    headers: &HeaderMap,
+    project_id: contracts::ProjectId,
+    course_id: Option<contracts::CourseId>,
+    actor_id: ActorId,
+) -> Result<Option<contracts::http::ModelInputAuthorizationContext>, EvaluationApiError> {
+    let Some(value) = headers.get(MODEL_CONTEXT_HEADER) else {
+        return Ok(None);
+    };
+    if value.as_bytes().len() > 4096 {
+        return Err(EvaluationApiError::IdentityInvalid);
+    }
+    let context: contracts::http::ModelInputAuthorizationContext =
+        contracts::parse_strict_json(value.as_bytes())
+            .map_err(|_| EvaluationApiError::IdentityInvalid)?;
+    context
+        .validate()
+        .map_err(|_| EvaluationApiError::IdentityInvalid)?;
+    if context.session_sha256 != session_sha256(headers)?
+        || context.actor_id != actor_id
+        || context.project_id != project_id
+        || context.course_id != course_id
+        || context.operation_id != "freezeSubmission"
+    {
+        return Err(EvaluationApiError::IdentityInvalid);
+    }
+    Ok(Some(context))
+}
+
+#[cfg(test)]
+mod model_input_facts_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_requires_control_permission_and_never_uses_user_headers_as_service_identity() {
+        assert!(matches!(
+            require_control(None),
+            Err(EvaluationApiError::CallerDenied)
+        ));
+        let access = auth::ServiceIdentity {
+            issuer: "https://synthetic.invalid/issuer".to_owned(),
+            subject: "synthetic-access".to_owned(),
+            client_id: "synthetic-access".to_owned(),
+            expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(1),
+            permissions: std::collections::BTreeSet::from([ACCESS_PERMISSION.to_owned()]),
+        };
+        assert!(matches!(
+            require_control(Some(Extension(access))),
+            Err(EvaluationApiError::CallerDenied)
+        ));
+    }
+
+    #[test]
+    fn original_session_digest_uses_the_validated_forwarded_id()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let id = uuid::Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        assert!(session_sha256(&headers).is_err());
+        headers.insert(SESSION_HEADER, "not-a-session".parse()?);
+        assert!(session_sha256(&headers).is_err());
+        headers.insert(SESSION_HEADER, id.to_string().to_ascii_uppercase().parse()?);
+        assert_eq!(
+            session_sha256(&headers)?,
+            persistence_sqlx::Sha256Digest::of_bytes(id.to_string().as_bytes()).to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn full_model_context_is_preserved_and_must_match_the_trusted_delegation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let session = uuid::Uuid::new_v4();
+        let actor_id = ActorId::new();
+        let project_id = contracts::ProjectId::new();
+        let course_id = Some(contracts::CourseId::new());
+        let mut headers = HeaderMap::new();
+        headers.insert(SESSION_HEADER, session.to_string().parse()?);
+        assert_eq!(
+            model_input_context(&headers, project_id, course_id, actor_id)?,
+            None
+        );
+        let context = contracts::http::ModelInputAuthorizationContext {
+            session_sha256: session_sha256(&headers)?,
+            actor_id,
+            project_id,
+            course_id,
+            operation_id: "freezeSubmission".to_owned(),
+            valid_until: "2026-10-14T12:00:00.000Z".parse()?,
+        };
+        let value = serde_json::to_value(&context)?;
+        headers.insert(
+            MODEL_CONTEXT_HEADER,
+            serde_json::to_string(&value)?.parse()?,
+        );
+        assert_eq!(
+            model_input_context(&headers, project_id, course_id, actor_id)?,
+            Some(context)
+        );
+        for (field, replacement) in [
+            ("sessionSha256", serde_json::json!("0".repeat(64))),
+            ("actorId", serde_json::json!(ActorId::new())),
+            ("projectId", serde_json::json!(contracts::ProjectId::new())),
+            ("courseId", serde_json::Value::Null),
+            ("operationId", serde_json::json!("createAgentRun")),
+            ("validUntil", serde_json::Value::Null),
+            ("allowEgress", serde_json::json!(true)),
+        ] {
+            let mut invalid = value.clone();
+            invalid[field] = replacement;
+            headers.insert(
+                MODEL_CONTEXT_HEADER,
+                serde_json::to_string(&invalid)?.parse()?,
+            );
+            assert!(
+                model_input_context(&headers, project_id, course_id, actor_id).is_err(),
+                "accepted {field}"
+            );
+        }
+        let mut missing = value;
+        missing
+            .as_object_mut()
+            .ok_or("context object")?
+            .remove("validUntil");
+        headers.insert(
+            MODEL_CONTEXT_HEADER,
+            serde_json::to_string(&missing)?.parse()?,
+        );
+        assert!(model_input_context(&headers, project_id, course_id, actor_id).is_err());
+        Ok(())
+    }
 }
 
 fn if_match(headers: &HeaderMap) -> Result<Revision, EvaluationApiError> {

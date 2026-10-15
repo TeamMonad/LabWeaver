@@ -1219,11 +1219,23 @@ impl KubernetesEvaluationRunner {
                 "advisory_output_mode_invalid".to_owned(),
             ));
         }
+        validate_advisory_selection(
+            context
+                .release
+                .evaluation_spec
+                .body()
+                .submission()
+                .llm_readable(),
+            frozen,
+            include,
+        )?;
         let package = self.load_execution_binding(context.run.release_id).await?;
         package
             .validate_ownership(context.run.project_id, context.run.course_id)
             .map_err(|_| ExecutionError::IdentityMismatch)?;
-        let (archive, package_bytes) = self.load_archive_and_package(frozen, &package).await?;
+        let rubric_path = rubric.strip_prefix("evaluator://").unwrap_or(rubric);
+        let rubric_file = find_package_file(&package.package, rubric_path)
+            .ok_or_else(|| ExecutionError::Backend("advisory_rubric_missing".to_owned()))?;
         let policy = self
             .authoring
             .active_policy(context.run.project_id)
@@ -1232,6 +1244,7 @@ impl KubernetesEvaluationRunner {
         policy
             .validate_ownership(context.run.project_id, context.run.course_id)
             .map_err(|_| ExecutionError::IdentityMismatch)?;
+        let archive = self.load_frozen_archive(frozen).await?;
         let mut paths = BTreeSet::new();
         let files = include
             .iter()
@@ -1248,7 +1261,13 @@ impl KubernetesEvaluationRunner {
                     .map_err(|_| ExecutionError::Backend("advisory_include_not_utf8".to_owned()))?;
                 Ok(AgentLlmReviewFile {
                     path: path.clone(),
-                    sha256: Sha256Digest::of_bytes(file_content.as_bytes()).to_string(),
+                    sha256: frozen
+                        .files
+                        .iter()
+                        .find(|file| file.path == *path)
+                        .ok_or(ExecutionError::IdentityMismatch)?
+                        .sha256
+                        .clone(),
                     content: file_content,
                 })
             })
@@ -1256,13 +1275,8 @@ impl KubernetesEvaluationRunner {
         if files.is_empty() {
             return Err(ExecutionError::Backend("advisory_include_empty".to_owned()));
         }
-        let rubric_path = rubric.strip_prefix("evaluator://").unwrap_or(rubric);
-        let rubric_file = find_package_file(&package.package, rubric_path)
-            .ok_or_else(|| ExecutionError::Backend("advisory_rubric_missing".to_owned()))?;
-        let rubric_bytes = package_bytes
-            .get(&rubric_file.object.artifact_id)
-            .ok_or_else(|| ExecutionError::Backend("advisory_rubric_unavailable".to_owned()))?;
-        let rubric_content = String::from_utf8(rubric_bytes.clone())
+        let rubric_bytes = self.load_package_file(&package, rubric_file).await?;
+        let rubric_content = String::from_utf8(rubric_bytes)
             .map_err(|_| ExecutionError::Backend("advisory_rubric_not_utf8".to_owned()))?;
         let now = self
             .control
@@ -1282,7 +1296,7 @@ impl KubernetesEvaluationRunner {
             rubric: AgentLlmReviewRubric {
                 artifact: rubric_file.object.clone(),
                 path: rubric_file.path.clone(),
-                sha256: Sha256Digest::of_bytes(rubric_bytes).to_string(),
+                sha256: rubric_file.sha256.clone(),
                 content: rubric_content,
             },
             deadline_at,
@@ -2096,6 +2110,21 @@ impl KubernetesEvaluationRunner {
         ),
         ExecutionError,
     > {
+        let archive = self.load_frozen_archive(frozen).await?;
+        let mut bytes = BTreeMap::new();
+        for file in &package.package.files {
+            bytes.insert(
+                file.object.artifact_id,
+                self.load_package_file(package, file).await?,
+            );
+        }
+        Ok((archive, bytes))
+    }
+
+    async fn load_frozen_archive(
+        &self,
+        frozen: &FrozenSubmission,
+    ) -> Result<BTreeMap<String, Vec<u8>>, ExecutionError> {
         let key = self
             .freezes
             .load_completed_object_key(
@@ -2116,28 +2145,34 @@ impl KubernetesEvaluationRunner {
             .read_verified(&key, &frozen.object)
             .await
             .map_err(|_| ExecutionError::Backend("frozen_object_read_failed".to_owned()))?;
-        let archive = decode_archive_metadata(&object.bytes)?;
-        validate_frozen_archive(frozen, &archive)?;
-        let mut bytes = BTreeMap::new();
-        for file in &package.package.files {
-            if file.object.store_binding != self.package_objects.binding() {
-                return Err(ExecutionError::IdentityMismatch);
-            }
-            let key = package
-                .object_locators
-                .get(&file.object.artifact_id)
-                .ok_or(ExecutionError::IdentityMismatch)?;
-            let object = self
-                .package_objects
-                .read_verified(key, &file.object)
-                .await
-                .map_err(|_| ExecutionError::Backend("package_object_read_failed".to_owned()))?;
-            if u64::try_from(object.bytes.len()).ok() != Some(file.object.size_bytes) {
-                return Err(ExecutionError::IdentityMismatch);
-            }
-            bytes.insert(file.object.artifact_id, object.bytes);
+        decode_frozen_archive(frozen, &object.bytes)
+    }
+
+    async fn load_package_file(
+        &self,
+        package: &contracts::evaluation::EvaluationExecutionBinding,
+        file: &PackageFile,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        if !package.package.files.contains(file)
+            || file.object.store_binding != self.package_objects.binding()
+        {
+            return Err(ExecutionError::IdentityMismatch);
         }
-        Ok((archive, bytes))
+        let key = package
+            .object_locators
+            .get(&file.object.artifact_id)
+            .ok_or(ExecutionError::IdentityMismatch)?;
+        let object = self
+            .package_objects
+            .read_verified(key, &file.object)
+            .await
+            .map_err(|_| ExecutionError::Backend("package_object_read_failed".to_owned()))?;
+        if u64::try_from(object.bytes.len()).ok() != Some(file.object.size_bytes)
+            || Sha256Digest::of_bytes(&object.bytes).to_string() != file.sha256
+        {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        Ok(object.bytes)
     }
 
     #[allow(
@@ -3131,12 +3166,50 @@ fn validate_frozen_archive(
 ) -> Result<(), ExecutionError> {
     if archive.len() != frozen.files.len()
         || frozen.files.iter().any(|file| {
-            archive
-                .get(&file.path)
-                .is_none_or(|content| u64::try_from(content.len()).ok() != Some(file.size_bytes))
+            archive.get(&file.path).is_none_or(|content| {
+                u64::try_from(content.len()).ok() != Some(file.size_bytes)
+                    || Sha256Digest::of_bytes(content).to_string() != file.sha256
+            })
         })
     {
         return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn decode_frozen_archive(
+    frozen: &FrozenSubmission,
+    bytes: &[u8],
+) -> Result<BTreeMap<String, Vec<u8>>, ExecutionError> {
+    if Sha256Digest::of_bytes(bytes).to_string() != frozen.content_sha256 {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    let archive = decode_archive_metadata(bytes)?;
+    validate_frozen_archive(frozen, &archive)?;
+    Ok(archive)
+}
+
+fn validate_advisory_selection(
+    llm_readable: &[String],
+    frozen: &FrozenSubmission,
+    include: &[String],
+) -> Result<(), ExecutionError> {
+    let mut selected = BTreeSet::new();
+    if include.is_empty() || include.len() > InternalAgentLlmReviewRequest::MAX_FILES {
+        return Err(ExecutionError::Backend(
+            "advisory_include_empty_or_excessive".to_owned(),
+        ));
+    }
+    for path in include {
+        if contracts::validate_relative_path(path).is_err()
+            || !selected.insert(path)
+            || !llm_readable.contains(path)
+            || !frozen.files.iter().any(|file| &file.path == path)
+        {
+            return Err(ExecutionError::Backend(
+                "advisory_include_not_authorized".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -3397,6 +3470,124 @@ mod probe_recovery_tests {
         actor_id: ActorId,
         release: contracts::evaluation::EvaluationRelease,
         run: EvaluationRun,
+    }
+
+    #[test]
+    fn input_identity_rejects_same_size_archive_and_file_changes() -> Result<(), Box<dyn Error>> {
+        let mut frozen =
+            frozen_submission(contracts::ProjectId::new(), CourseId::new(), ActorId::new())?;
+        let archive = serde_json::to_vec(&json!({
+            "apiVersion": "evaluation.labweaver.io/frozen-submission-archive/v1",
+            "files": [{"path": "answer.txt", "contentBase64": "eA=="}],
+        }))?;
+        frozen.content_sha256 = Sha256Digest::of_bytes(&archive).to_string();
+        assert_eq!(
+            super::decode_frozen_archive(&frozen, &archive)?["answer.txt"],
+            b"x"
+        );
+        let changed = serde_json::to_vec(&json!({
+            "apiVersion": "evaluation.labweaver.io/frozen-submission-archive/v1",
+            "files": [{"path": "answer.txt", "contentBase64": "eQ=="}],
+        }))?;
+        assert_eq!(archive.len(), changed.len());
+        assert!(matches!(
+            super::decode_frozen_archive(&frozen, &changed),
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        // A newly valid whole-object hash must not silently substitute a file whose pinned hash differs.
+        frozen.content_sha256 = Sha256Digest::of_bytes(&changed).to_string();
+        assert!(matches!(
+            super::decode_frozen_archive(&frozen, &changed),
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        frozen.files[0].sha256 = Sha256Digest::of_bytes(b"y").to_string();
+        assert_eq!(
+            super::decode_frozen_archive(&frozen, &changed)?["answer.txt"],
+            b"y"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn input_identity_advisory_uses_published_allowlist_and_actual_frozen_paths()
+    -> Result<(), Box<dyn Error>> {
+        let frozen =
+            frozen_submission(contracts::ProjectId::new(), CourseId::new(), ActorId::new())?;
+        let allowed = vec!["answer.txt".to_owned(), "missing.txt".to_owned()];
+        super::validate_advisory_selection(&allowed, &frozen, &["answer.txt".to_owned()])?;
+        for paths in [
+            vec![],
+            vec!["other.txt".to_owned()],
+            vec!["missing.txt".to_owned()],
+            vec!["../answer.txt".to_owned()],
+            vec!["answer.txt".to_owned(); 2],
+            vec!["answer.txt".to_owned(); 129],
+        ] {
+            assert!(super::validate_advisory_selection(&allowed, &frozen, &paths).is_err());
+        }
+        assert!(
+            super::validate_advisory_selection(&[], &frozen, &["answer.txt".to_owned()]).is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn input_identity_exact_package_read_rejects_same_size_change_without_reading_neighbors()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")?;
+        let runner = build_runner(&cluster, &authority, &temp, &pool).await?;
+        let mut package = evaluation_binding(contracts::ProjectId::new(), CourseId::new())?;
+        let file = package.package.files[0].clone();
+        let mut neighbor = file.clone();
+        neighbor.path = "unselected.txt".to_owned();
+        neighbor.object.artifact_id = ArtifactId::new();
+        package.object_locators.insert(
+            neighbor.object.artifact_id,
+            "evaluation-package-tests/unselected.txt".to_owned(),
+        );
+        package.package.files.push(neighbor);
+        let path = format!(
+            "/test-package-bucket/{}",
+            package.object_locators[&file.object.artifact_id]
+        );
+        cluster.state.lock().await.s3_objects.insert(
+            path.clone(),
+            MockS3Object {
+                body: b"x".to_vec(),
+                content_type: file.object.media_type.clone(),
+                version_id: file.object.object_version.clone(),
+            },
+        );
+        assert_eq!(runner.load_package_file(&package, &file).await?, b"x");
+        assert_eq!(cluster.calls().await, vec![(Method::GET, path.clone())]);
+        cluster
+            .state
+            .lock()
+            .await
+            .s3_objects
+            .get_mut(&path)
+            .ok_or("object missing")?
+            .body = b"y".to_vec();
+        assert!(matches!(
+            runner.load_package_file(&package, &file).await,
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        let mut substituted = file.clone();
+        substituted.object.artifact_id = ArtifactId::new();
+        assert!(matches!(
+            runner.load_package_file(&package, &substituted).await,
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        assert_eq!(
+            cluster.calls().await,
+            vec![(Method::GET, path.clone()), (Method::GET, path)]
+        );
+        cluster.stop().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -4900,6 +5091,7 @@ mod probe_recovery_tests {
             attempt: 1,
             manifest_revision: Revision::new(1)?,
             files: vec![FrozenFile {
+                sha256: Sha256Digest::of_bytes(b"x").to_string(),
                 path: "answer.txt".to_owned(),
                 size_bytes: 1,
                 media_type: "text/plain".to_owned(),
@@ -4998,6 +5190,7 @@ mod probe_recovery_tests {
                 course_id: Some(course_id),
                 revision: Revision::new(1)?,
                 files: vec![PackageFile {
+                    sha256: Sha256Digest::of_bytes(b"x").to_string(),
                     path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
                     object: ArtifactRef {
                         artifact_id,

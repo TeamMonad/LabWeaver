@@ -186,3 +186,68 @@ and renders `seed_images` from the lock, failing with
 upstream digest the operator imported, so a later tag move cannot change what authoring sees; a
 seed that cannot be resolved or registered is logged with `LW_PLATFORM_IMAGE_SEED_FAILED` and
 stays absent from the catalog.
+## Evaluation freeze with existing resources
+
+`evaluation-freeze-existing-profile.yaml.example` is a synthetic configuration fragment.
+Set `coordinator.workerProfile.mode` to `existing` only in the reviewed isolated deployment.
+Use the exact existing namespace, Secret, ServiceAccount, NetworkPolicy and ResourceQuota names.
+No name in this example identifies a real cluster resource.
+The normal managed profile remains the default when `workerProfile` is omitted.
+
+The existing profile supports Container/PVC sources. VM/SFTP sources fail explicitly.
+Environment must return a real eligible binding in the configured namespace.
+Evaluation keeps the existing actor, release, lease, revision and Ready checks.
+It records the binding's namespace and profile on the existing command JSON before any Kubernetes write.
+Public request identity and replay semantics exclude this internal dispatch record.
+No new table, migration, public contract or generated SDK is needed.
+
+The coordinator creates only its immutable command ConfigMap and its Job.
+It references the existing Secret and ServiceAccount and uses `imagePullPolicy: Never`.
+Use optional `nodeName` to select the approved hostname with the exact imported image.
+If it is omitted, every eligible scheduler target must already have that digest.
+This value is retained with the dispatch profile; the coordinator does not import images or configure nodes.
+It does not create or patch a Secret, account, policy, namespace, quota or RBAC object.
+Set `workerSecretFiles` to an empty map. Existing mode does not read or copy those credential files.
+It requests [Secret metadata only](https://kubernetes.io/docs/reference/using-api/api-concepts/#metadata-only-fetches).
+It does not negotiate a full Secret response when partial metadata is unavailable.
+The worker still requires the reviewed credential and CA file keys at its configured paths.
+
+Named policies must exist and select the actual worker labels.
+Their declared types must cover ingress and egress. Named ingress policies must admit no worker ingress.
+The operator must review the effective union of namespace policies and approve required destinations.
+Reference checks do not prove database or object-store connectivity.
+This profile supplies no egress changes.
+
+Use existing rights to get the named Job, ConfigMap, account, policy and quota,
+and to fetch Secret metadata. Job failure observation also needs list access to Pods.
+Only Job/ConfigMap create and UID-conditional delete are used for mutations.
+Metadata negotiation still requires the normal Secret GET permission.
+This change supplies no Role, RoleBinding or service-identity scope grant.
+
+Each named quota must be unscoped and report observed hard and used values for requests and limits
+of CPU and memory. The check adds the worker budget to namespace usage, which includes the running Work.
+Missing usage, unknown quantities, scoped quotas and an unobserved hard-limit change block scheduling.
+Supported quantities are decimal CPU or millicores, byte counts, Ki/Mi/Gi/Ti and K/M/G memory units.
+Hard values round down and usage rounds up. Overflow and unsupported forms do not become zero.
+An optional Pod-count quota also needs room for one worker.
+Kubernetes admission remains the final quota fence if concurrent workloads change usage.
+Budgets cannot exceed the previous worker ceiling of one CPU and 1Gi memory.
+The example budget is not proof of actual memory use or available quota.
+Keep the approved Work, worker and other test Pods within the existing aggregate ceiling.
+
+Insufficient quota, unknown quota status and missing referenced resources retry until the command deadline.
+The stable diagnostics are `LW_COLLECT_QUOTA_EXCEEDED`, `LW_COLLECT_QUOTA_UNAVAILABLE`
+and `LW_COLLECT_PROFILE_RESOURCE_UNAVAILABLE`.
+Invalid binding or admission remains a terminal rejection. No weaker fallback is used.
+
+Retries observe the same Job and preserve the original immutable ConfigMap.
+Cleanup refreshes the persisted dispatch rather than resolving a now-expired environment.
+It verifies ownership and uses UID deletion preconditions for this command's Job and ConfigMap only.
+It retains the referenced Secret, account, policies, quota, namespace, source PVC and frozen object versions.
+Legacy in-flight commands without dispatch provenance require a still-valid real binding for cleanup.
+If that source is unavailable, cleanup stays blocked; do not guess a namespace or hand-edit the database.
+
+The frozen `f6e16444ddfaefc3b63c058a40a42393201d253a` worker logic can be reused.
+Record the coordinator and Environment profile commits separately in combined validation.
+This configuration does not establish a pure unchanged-f6 full-chain result.
+Image build/import, real Secret configuration, policy changes and deployment need separate approval.

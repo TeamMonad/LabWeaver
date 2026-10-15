@@ -125,6 +125,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
             post(complete_project_upload),
         )
         .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads/{upload_id}",
+            get(get_project_upload),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads/{upload_id}/cancel",
+            post(cancel_project_upload),
+        )
+        .route(
             "/api/v1/projects/{project_id}/problem-packages/{package_id}",
             get(get_project_package),
         )
@@ -696,6 +704,54 @@ async fn complete_project_upload(
         )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &package, package.revision))
+}
+
+async fn get_project_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, upload_id)): Path<(ProjectId, UploadSessionId)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectProblemPackageUpload",
+        project_id,
+    )
+    .await?;
+    let session = state
+        .control
+        .project_upload(project_id, upload_id, now()?)
+        .await?;
+    Ok(with_etag(StatusCode::OK, &session, session.revision))
+}
+
+async fn cancel_project_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, upload_id)): Path<(ProjectId, UploadSessionId)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "cancelProjectProblemPackageUpload",
+        project_id,
+    )
+    .await?;
+    let session = state
+        .control
+        .cancel_project_upload(
+            project_id,
+            upload_id,
+            etag(&headers)?,
+            &idempotency(&headers)?,
+            now()?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::OK, &session, session.revision))
 }
 
 async fn get_project_package(

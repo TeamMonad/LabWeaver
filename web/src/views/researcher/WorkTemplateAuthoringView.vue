@@ -88,12 +88,14 @@
         @retry="retryPackageLoad"
       />
 
+      <UploadRecoveryStatus :state="upload.state" :has-session="upload.session !== null" @cancel="upload.cancel" />
       <div class="form-actions">
         <button type="button" class="filled-button" :disabled="!canUpload" @click="upload.createSession">
           <template v-if="upload.state.kind === 'creating'">创建上传会话…</template>
           <template v-else-if="upload.state.kind === 'uploading'">上传中…</template>
           <template v-else-if="upload.state.kind === 'completing'">确认归档…</template>
           <template v-else-if="upload.state.kind === 'loading'">读取已归档材料包…</template>
+          <template v-else-if="upload.state.kind === 'needs-files'">继续上传</template>
           <template v-else>上传材料包</template>
         </button>
         <button v-if="packageDone" type="button" class="text-button" @click="upload.clear">清除材料</button>
@@ -359,6 +361,7 @@ import RuntimePermissions from '@/components/review/RuntimePermissions.vue'
 import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import UploadRecoveryStatus from '@/components/common/UploadRecoveryStatus.vue'
 import { appendProjectEnvironmentCandidateDecision, createEnvironmentTemplateRelease, getEnvironmentTemplateRelease, getProjectEnvironmentCandidate } from '@/generated/contracts'
 import type {
   AgentRunSchema,
@@ -397,7 +400,7 @@ const runIdRef = computed(() => props.runId?.trim() || null)
 const releaseIdRef = computed(() => props.releaseId?.trim() || null)
 const policy = useActiveProjectLlmPolicy(projectIdRef)
 const policyRevision = computed(() => policy.state.kind === 'success' ? policy.state.data.revision : undefined)
-const upload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef)
+const upload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef, undefined, { recoveryScope: 'work-template' })
 const agent = useProjectAgentRun(projectIdRef, { kind: 'authoring', environmentClass: 'work' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -437,7 +440,7 @@ const candidateId = computed(() => {
   return agent.run.data.tracks.find((track) => track.kind === 'environment')?.candidateId ?? null
 })
 const canUpload = computed(() => {
-  const ready = upload.state.kind === 'ready' || upload.state.kind === 'error'
+  const ready = ['ready', 'error', 'needs-files', 'cancelled'].includes(upload.state.kind)
   return Boolean(props.projectId && ready && upload.files.length > 0 && policyRevision.value !== undefined)
 })
 const agentRunForCurrentPackage = computed(() => (

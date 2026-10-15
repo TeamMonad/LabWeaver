@@ -292,6 +292,26 @@ pub struct ProblemPackageUploadSession {
     pub files: Vec<ProblemPackageUploadFile>,
     pub upload_targets: Vec<ProblemPackageUploadTarget>,
     pub expires_at: UtcTimestamp,
+    pub state: ProblemPackageUploadState,
+    /// Paths whose objects exist with the declared size and media type. Completion hashes bytes.
+    pub uploaded_paths: Vec<String>,
+    pub completed_package: Option<crate::authoring::ProblemPackage>,
+    pub terminal_diagnostic: Option<String>,
+    /// Original completion intent. Reuse both values when recovering a completing upload.
+    pub completion_idempotency_key: Option<String>,
+    pub completion_expected_revision: Option<Revision>,
+}
+
+/// Durable material upload lifecycle. Terminal states issue no upload authorities.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemPackageUploadState {
+    Pending,
+    Completing,
+    Completed,
+    Failed,
+    Cancelled,
+    Expired,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -938,6 +958,40 @@ pub struct CreateEnvironmentTemplateReleaseRequest {
 pub struct WithdrawEnvironmentTemplateReleaseRequest {
     /// Stable reviewed reason code; free-form sensitive text is not accepted.
     pub reason_code: String,
+}
+
+/// First authenticated request context, persisted before immutable input artifacts exist.
+/// This is decision evidence, not a permission grant or a task deadline. Consumers must
+/// recheck the original session and current object permissions before reading or sending input.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationContext {
+    pub session_sha256: String,
+    pub actor_id: ActorId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub operation_id: String,
+    pub valid_until: UtcTimestamp,
+}
+
+impl ModelInputAuthorizationContext {
+    /// Checks transport identity only. No operation is authorized by this method.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if !is_sha256(&self.session_sha256)
+            || self.actor_id.as_uuid().is_nil()
+            || self.project_id.as_uuid().is_nil()
+            || self.course_id.is_some_and(|id| id.as_uuid().is_nil())
+            || self.operation_id.is_empty()
+            || self.operation_id.len() > 128
+            || !self
+                .operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
 }
 
 /// Control-derived asynchronous recheck input, never accepted from a public create request.
@@ -2824,6 +2878,34 @@ pub const OPERATIONS: &[OperationContract] = &[
         Oidc,
         IdempotentCreate,
         201,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}",
+        "getProjectProblemPackageUpload",
+        "problem_package:write",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}/cancel",
+        "cancelProjectProblemPackageUpload",
+        "problem_package:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
         false,
         true,
         ALL_ROLES,

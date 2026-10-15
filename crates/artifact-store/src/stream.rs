@@ -167,6 +167,7 @@ mod tests {
     use aws_sdk_s3::operation::get_object::GetObjectOutput;
     use aws_sdk_s3::primitives::ByteStream;
     use contracts::{ArtifactId, ArtifactRef};
+    use sha2::Digest as _;
 
     use super::response_to_tempfile;
 
@@ -191,7 +192,7 @@ mod tests {
         let path = file.path().to_owned();
         assert_eq!(std::fs::read(&path)?, bytes);
         assert_eq!(file.reference(), &expected);
-        assert_eq!(file.sha256().len(), 64);
+        assert_eq!(file.sha256(), format!("{:x}", sha2::Sha256::digest(bytes)));
         drop(file);
         assert!(!path.exists());
         Ok(())

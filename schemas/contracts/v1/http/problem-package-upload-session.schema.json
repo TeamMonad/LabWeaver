@@ -1,7 +1,125 @@
 {
   "$defs": {
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "PackageFile": {
+      "additionalProperties": false,
+      "description": "One immutable file in a teacher ProblemPackage.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ArtifactRef",
+          "description": "Immutable object reference."
+        },
+        "path": {
+          "description": "Normalized package-relative file path.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the actual bytes of this exact immutable object version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "object",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ProblemPackage": {
+      "additionalProperties": false,
+      "description": "Immutable, atomically completed teacher material package.",
+      "properties": {
+        "completedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/PackageFile"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "retention": {
+          "$ref": "#/$defs/RetentionSnapshot"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "revision",
+        "files",
+        "retention",
+        "completedAt"
+      ],
+      "type": "object"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
       "type": "string"
     },
     "ProblemPackageUploadFile": {
@@ -25,6 +143,18 @@
         "mediaType"
       ],
       "type": "object"
+    },
+    "ProblemPackageUploadState": {
+      "description": "Durable material upload lifecycle. Terminal states issue no upload authorities.",
+      "enum": [
+        "pending",
+        "completing",
+        "completed",
+        "failed",
+        "cancelled",
+        "expired"
+      ],
+      "type": "string"
     },
     "ProblemPackageUploadTarget": {
       "description": "Short-lived, per-object upload authority returned only by session creation.",
@@ -57,6 +187,64 @@
       "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
+    "RetentionClass": {
+      "description": "Retention classes with distinct privacy and recovery requirements.",
+      "enum": [
+        "course_material",
+        "build_evidence",
+        "run_evidence",
+        "student_submission",
+        "security_audit"
+      ],
+      "type": "string"
+    },
+    "RetentionDisposition": {
+      "description": "Required action after retention expires.",
+      "enum": [
+        "delete",
+        "purge_after_export",
+        "retain_sanitized_receipt",
+        "retain_until_revoked"
+      ],
+      "type": "string"
+    },
+    "RetentionSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen data-retention decision for an immutable resource.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/RetentionClass",
+          "description": "Stable retention class."
+        },
+        "disposition": {
+          "$ref": "#/$defs/RetentionDisposition",
+          "description": "Required terminal disposition."
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId",
+          "description": "Policy identity."
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Exact policy revision used at creation."
+        },
+        "retainUntil": {
+          "description": "Absolute retention boundary. `None` is valid only for an explicitly permanent course\nmaterial decision whose disposition is `RetainUntilRevoked`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "policyId",
+        "policyRevision",
+        "class",
+        "retainUntil",
+        "disposition"
+      ],
+      "type": "object"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -74,6 +262,33 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "completedPackage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProblemPackage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "completionExpectedRevision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Revision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "completionIdempotencyKey": {
+      "description": "Original completion intent. Reuse both values when recovering a completing upload.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "courseId": {
       "anyOf": [
         {
@@ -102,9 +317,25 @@
     "revision": {
       "$ref": "#/$defs/Revision"
     },
+    "state": {
+      "$ref": "#/$defs/ProblemPackageUploadState"
+    },
+    "terminalDiagnostic": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "uploadTargets": {
       "items": {
         "$ref": "#/$defs/ProblemPackageUploadTarget"
+      },
+      "type": "array"
+    },
+    "uploadedPaths": {
+      "description": "Paths whose objects exist with the declared size and media type. Completion hashes bytes.",
+      "items": {
+        "type": "string"
       },
       "type": "array"
     }
@@ -115,7 +346,9 @@
     "revision",
     "files",
     "uploadTargets",
-    "expiresAt"
+    "expiresAt",
+    "state",
+    "uploadedPaths"
   ],
   "title": "ProblemPackageUploadSession",
   "type": "object"
