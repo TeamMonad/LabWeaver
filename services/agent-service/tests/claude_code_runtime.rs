@@ -2493,6 +2493,32 @@ async fn postgres_llm_review_completion_preserves_claim_start_and_cancellation()
     Ok(())
 }
 
+#[test]
+fn persisted_frozen_review_cannot_refresh_parent_lease_on_recovery() -> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let deadline = UtcTimestamp::from_utc(test_timestamp()?.get() + time::Duration::minutes(1))?;
+    let original = review_request(&policy, deadline);
+    original.validate()?;
+    let saved = serde_json::to_value(&original)?;
+    let replay: InternalAgentLlmReviewRequest = serde_json::from_value(saved.clone())?;
+    assert_eq!(replay, original);
+    let mut renewed = replay;
+    let contracts::http::ModelInputAuthorizationSource::FrozenSubmission(source) =
+        &mut renewed.input_authorization.source
+    else {
+        return Err("missing frozen source".into());
+    };
+    source.parent_lease_sha256 = contracts::http::model_input_parent_lease_sha256(Uuid::now_v7());
+    assert!(renewed.validate().is_err());
+    let mut legacy = saved;
+    legacy["inputAuthorization"]["source"]
+        .as_object_mut()
+        .ok_or("source missing")?
+        .remove("parentLeaseSha256");
+    assert!(serde_json::from_value::<InternalAgentLlmReviewRequest>(legacy).is_err());
+    Ok(())
+}
+
 fn test_timestamp() -> Result<UtcTimestamp, Box<dyn Error>> {
     let now = OffsetDateTime::now_utc();
     let now = now.replace_nanosecond((now.nanosecond() / 1_000_000) * 1_000_000)?;
@@ -2524,6 +2550,7 @@ fn review_request(
         media_type: "text/plain".to_owned(),
     };
     let source = contracts::http::FrozenModelInputSource {
+        parent_lease_sha256: "d".repeat(64),
         task_run_id,
         frozen_submission_id,
         manifest_revision: contracts::Revision::new(1).expect("revision"),
