@@ -1,5 +1,5 @@
 <template>
-  <div class="diagnostic-banner" :class="`diagnostic-banner--${severity}`" role="alert">
+  <div class="diagnostic-banner" :class="`diagnostic-banner--${severity}`" role="alert" aria-live="assertive">
     <SvgIcon class="diagnostic-icon" :name="iconName" size="md" />
     <div class="diagnostic-content">
       <span class="diagnostic-message">{{ message }}</span>
@@ -105,6 +105,11 @@ const iconName = computed(() => {
 .diagnostic-retry {
   flex-shrink: 0;
   align-self: center;
+}
+
+/* Flashbar stacking: consecutive notifications sit tightly together. */
+.diagnostic-banner + .diagnostic-banner {
+  margin-top: var(--layout-flashbar-gap);
 }
 
 @keyframes diagnostic-in {
