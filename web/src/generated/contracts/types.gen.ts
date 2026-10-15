@@ -6884,12 +6884,18 @@ export type InternalAgentLlmReviewRequestSchema = {
     deadlineAt: InternalAgentLlmReviewRequestSchemaUtcTimestamp;
     files: Array<AgentLlmReviewFile>;
     frozenSubmissionId: InternalAgentLlmReviewRequestSchemaFrozenSubmissionId;
+    inputAuthorization: ModelInputAuthorizationBinding;
     policy: ProjectLlmEgressPolicy;
     projectId: InternalAgentLlmReviewRequestSchemaProjectId;
     rubric: AgentLlmReviewRubric;
     submissionArtifact: InternalAgentLlmReviewRequestSchemaArtifactRef;
     taskRunId: InternalAgentLlmReviewRequestSchemaTaskRunId;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaActorId = string;
 
 /**
  * One UTF-8 submission file included in a bounded internal advisory review request.
@@ -6948,6 +6954,11 @@ export type InternalAgentLlmReviewRequestSchemaArtifactRef = {
 };
 
 /**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaBuildRequestId = string;
+
+/**
  * Immutable Claude Code worker binding.
  *
  * Provider-specific transport and authentication remain deployment-owned Claude Code
@@ -6984,6 +6995,28 @@ export type InternalAgentLlmReviewRequestSchemaCourseId = string;
 export type DeniedDataClass = 'secret' | 'token' | 'private_key' | 'personally_identifiable_information' | 'unallowlisted_student_submission';
 
 /**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaEvaluationReleaseId = string;
+
+/**
+ * Frozen build and runtime identity used to reproduce collection.
+ */
+export type InternalAgentLlmReviewRequestSchemaFrozenEnvironmentIdentity = {
+    buildRequestId?: InternalAgentLlmReviewRequestSchemaBuildRequestId | null;
+    environmentId: InternalAgentLlmReviewRequestSchemaEnvironmentId;
+    environmentRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    releaseId: InternalAgentLlmReviewRequestSchemaReleaseId;
+    releaseVersion: number;
+    runtimeKind: InternalAgentLlmReviewRequestSchemaRuntimeKind;
+};
+
+/**
  * Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.
  */
 export type InternalAgentLlmReviewRequestSchemaFrozenSubmissionId = string;
@@ -7002,9 +7035,78 @@ export type LlmBudget = {
 };
 
 /**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type ModelInputAuthorizationBinding = {
+    actorId: InternalAgentLlmReviewRequestSchemaActorId;
+    courseId?: InternalAgentLlmReviewRequestSchemaCourseId | null;
+    operationId: string;
+    policyId: InternalAgentLlmReviewRequestSchemaPolicyId;
+    policyRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    policySha256: string;
+    projectId: InternalAgentLlmReviewRequestSchemaProjectId;
+    selectionSha256: string;
+    sessionSha256: string;
+    source: ModelInputAuthorizationSource;
+    validUntil: InternalAgentLlmReviewRequestSchemaUtcTimestamp;
+};
+
+/**
+ * A freeze identifier cannot be interpreted as a material package identifier.
+ */
+export type ModelInputAuthorizationSource = {
+    kind: 'problem_package';
+    packageId: InternalAgentLlmReviewRequestSchemaProblemPackageId;
+    packageRevision: InternalAgentLlmReviewRequestSchemaRevision;
+} | {
+    archive: InternalAgentLlmReviewRequestSchemaArtifactRef;
+    contentSha256: string;
+    environment: InternalAgentLlmReviewRequestSchemaFrozenEnvironmentIdentity;
+    evaluationReleaseId: InternalAgentLlmReviewRequestSchemaEvaluationReleaseId;
+    evaluationReleaseRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    frozenSubmissionId: InternalAgentLlmReviewRequestSchemaFrozenSubmissionId;
+    kind: 'frozen_submission';
+    manifestRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    manifestSha256: string;
+    rubric: ModelInputRubricIdentity;
+    /**
+     * Missing permission is representable for a refusal, never for model egress.
+     */
+    rubricPermission?: ModelInputRubricPermissionRef | null;
+    taskRunId: InternalAgentLlmReviewRequestSchemaTaskRunId;
+};
+
+/**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type ModelInputRubricIdentity = {
+    artifact: InternalAgentLlmReviewRequestSchemaArtifactRef;
+    packageId: InternalAgentLlmReviewRequestSchemaProblemPackageId;
+    packageRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    path: string;
+    sha256: string;
+};
+
+/**
+ * References Control's current material-project policy and the approving instructor fact.
+ */
+export type ModelInputRubricPermissionRef = {
+    approvedBy: InternalAgentLlmReviewRequestSchemaActorId;
+    approverCourseMembershipRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    authoringProjectId: InternalAgentLlmReviewRequestSchemaProjectId;
+    policyId: InternalAgentLlmReviewRequestSchemaPolicyId;
+    policyRevision: InternalAgentLlmReviewRequestSchemaRevision;
+};
+
+/**
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
 export type InternalAgentLlmReviewRequestSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaProblemPackageId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -7027,9 +7129,19 @@ export type ProjectLlmEgressPolicy = {
 };
 
 /**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaReleaseId = string;
+
+/**
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type InternalAgentLlmReviewRequestSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type InternalAgentLlmReviewRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
 
 /**
  * Only explicit SubmissionManifest paths may disclose student content.
@@ -8819,6 +8931,94 @@ export type IssueConsoleCapabilityRequestSchemaRevision = number;
 export type IssueConsoleCapabilityRequestSchemaUtcTimestamp = string;
 
 /**
+ * MaintainRubricModelInputRuleRequest
+ *
+ * Teacher maintenance input; the caller cannot supply the approving actor or role evidence.
+ */
+export type MaintainRubricModelInputRuleRequestSchema = {
+    action: RubricModelInputRuleAction;
+    evaluationReleaseId: MaintainRubricModelInputRuleRequestSchemaEvaluationReleaseId;
+    evaluationReleaseRevision: MaintainRubricModelInputRuleRequestSchemaRevision;
+    rubric: MaintainRubricModelInputRuleRequestSchemaModelInputRubricIdentity;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: MaintainRubricModelInputRuleRequestSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaEvaluationReleaseId = string;
+
+/**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaModelInputRubricIdentity = {
+    artifact: MaintainRubricModelInputRuleRequestSchemaArtifactRef;
+    packageId: MaintainRubricModelInputRuleRequestSchemaProblemPackageId;
+    packageRevision: MaintainRubricModelInputRuleRequestSchemaRevision;
+    path: string;
+    sha256: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaProblemPackageId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaRevision = number;
+
+/**
+ * Visibility declaration does not implicitly approve model disclosure.
+ */
+export type RubricModelInputRuleAction = {
+    kind: 'set_visibility';
+    visibility: RubricModelInputVisibility;
+} | {
+    kind: 'approve_model_use';
+    model: string;
+    runtimeBinding: string;
+} | {
+    kind: 'revoke_model_use';
+};
+
+/**
+ * Course-controlled rubric visibility, separate from model-use approval.
+ */
+export type RubricModelInputVisibility = 'course_public' | 'hidden';
+
+/**
  * PlatformImageCatalogView
  *
  * Catalog listing with the Control-owned release impact hint on every entry.
@@ -9398,6 +9598,123 @@ export type ProblemPackageUploadSessionSchemaUploadSessionId = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ProblemPackageUploadSessionSchemaUtcTimestamp = string;
+
+/**
+ * ProjectRubricModelInputRules
+ *
+ * Teacher-only projection of current authority; no object contents or storage locators.
+ */
+export type ProjectRubricModelInputRulesSchema = {
+    courseId: ProjectRubricModelInputRulesSchemaCourseId;
+    policyId: ProjectRubricModelInputRulesSchemaPolicyId;
+    policyRevision: ProjectRubricModelInputRulesSchemaRevision;
+    projectId: ProjectRubricModelInputRulesSchemaProjectId;
+    rules: Array<RubricModelInputRule>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type ProjectRubricModelInputRulesSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type ProjectRubricModelInputRulesSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type ProjectRubricModelInputRulesSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: ProjectRubricModelInputRulesSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type ProjectRubricModelInputRulesSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type ProjectRubricModelInputRulesSchemaEvaluationReleaseId = string;
+
+/**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type ProjectRubricModelInputRulesSchemaModelInputRubricIdentity = {
+    artifact: ProjectRubricModelInputRulesSchemaArtifactRef;
+    packageId: ProjectRubricModelInputRulesSchemaProblemPackageId;
+    packageRevision: ProjectRubricModelInputRulesSchemaRevision;
+    path: string;
+    sha256: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type ProjectRubricModelInputRulesSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type ProjectRubricModelInputRulesSchemaProblemPackageId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ProjectRubricModelInputRulesSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ProjectRubricModelInputRulesSchemaRevision = number;
+
+/**
+ * One verified instructor's model-use approval for an exact rubric version.
+ */
+export type RubricModelInputApproval = {
+    approvedBy: ProjectRubricModelInputRulesSchemaActorId;
+    approverCourseMembershipRevision: ProjectRubricModelInputRulesSchemaRevision;
+    model: string;
+    runtimeBinding: string;
+};
+
+/**
+ * Control-owned rule stored with the current material-project policy.
+ */
+export type RubricModelInputRule = {
+    approval?: RubricModelInputApproval | null;
+    courseId: ProjectRubricModelInputRulesSchemaCourseId;
+    evaluationReleaseId: ProjectRubricModelInputRulesSchemaEvaluationReleaseId;
+    evaluationReleaseRevision: ProjectRubricModelInputRulesSchemaRevision;
+    rubric: ProjectRubricModelInputRulesSchemaModelInputRubricIdentity;
+    visibility: ProjectRubricModelInputRulesSchemaRubricModelInputVisibility;
+};
+
+/**
+ * Course-controlled rubric visibility, separate from model-use approval.
+ */
+export type ProjectRubricModelInputRulesSchemaRubricModelInputVisibility = 'course_public' | 'hidden';
 
 /**
  * RegisterPlatformImageRequest
@@ -18707,6 +19024,144 @@ export type GetActiveProjectLlmPolicyResponses = {
 };
 
 export type GetActiveProjectLlmPolicyResponse = GetActiveProjectLlmPolicyResponses[keyof GetActiveProjectLlmPolicyResponses];
+
+export type GetProjectRubricModelInputRulesData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules';
+};
+
+export type GetProjectRubricModelInputRulesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectRubricModelInputRulesError = GetProjectRubricModelInputRulesErrors[keyof GetProjectRubricModelInputRulesErrors];
+
+export type GetProjectRubricModelInputRulesResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectRubricModelInputRulesSchema;
+};
+
+export type GetProjectRubricModelInputRulesResponse = GetProjectRubricModelInputRulesResponses[keyof GetProjectRubricModelInputRulesResponses];
+
+export type MaintainProjectRubricModelInputRuleData = {
+    body: MaintainRubricModelInputRuleRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules';
+};
+
+export type MaintainProjectRubricModelInputRuleErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type MaintainProjectRubricModelInputRuleError = MaintainProjectRubricModelInputRuleErrors[keyof MaintainProjectRubricModelInputRuleErrors];
+
+export type MaintainProjectRubricModelInputRuleResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectRubricModelInputRulesSchema;
+};
+
+export type MaintainProjectRubricModelInputRuleResponse = MaintainProjectRubricModelInputRuleResponses[keyof MaintainProjectRubricModelInputRuleResponses];
 
 export type GetProjectLlmPolicyOptionsData = {
     body?: never;
