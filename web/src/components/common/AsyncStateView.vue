@@ -2,14 +2,20 @@
   <div class="async-state-view">
     <slot v-if="state.kind === 'success'" name="success" :data="state.data" />
 
-    <div v-else-if="state.kind === 'loading'" class="state-message" role="status">
-      <span class="spinner" aria-hidden="true" />
-      <span>{{ state.message ?? loadingText }}</span>
+    <div v-else-if="state.kind === 'loading'" class="state-loading" role="status" aria-busy="true">
+      <div class="state-skeleton" aria-hidden="true">
+        <span class="skeleton state-skeleton__line state-skeleton__line--title" />
+        <span class="skeleton state-skeleton__line" />
+        <span class="skeleton state-skeleton__line state-skeleton__line--short" />
+      </div>
+      <span class="state-loading__text">{{ state.message ?? loadingText }}</span>
     </div>
 
     <slot v-else-if="state.kind === 'empty'" name="empty">
       <div class="state-message" role="status">
-        <SvgIcon name="info" size="lg" aria-hidden="true" />
+        <span class="state-message__icon" aria-hidden="true">
+          <SvgIcon name="inbox" size="lg" aria-hidden="true" />
+        </span>
         <span>{{ emptyText }}</span>
       </div>
     </slot>
@@ -77,30 +83,54 @@ function bannerSeverity(kind: FailureKind): 'error' | 'warning' | 'info' {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-4);
-  min-height: 200px;
+  gap: var(--space-3);
+  min-height: 160px;
+  padding: var(--space-8) var(--space-6);
+  border: 1px dashed var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-large);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
+  text-align: center;
 }
 
-.spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--md-sys-color-outline-variant);
-  border-top-color: var(--md-sys-color-primary);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
+.state-message__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--md-sys-shape-full);
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface-variant);
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+.state-loading {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .spinner {
-    animation: none;
-  }
+.state-skeleton {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.state-skeleton__line {
+  display: block;
+  height: 14px;
+}
+
+.state-skeleton__line--title {
+  width: 40%;
+  height: 18px;
+}
+
+.state-skeleton__line--short {
+  width: 64%;
+}
+
+.state-loading__text {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
 }
 </style>
