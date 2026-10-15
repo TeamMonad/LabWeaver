@@ -1,6 +1,6 @@
 <template>
   <div class="diagnostic-banner" :class="`diagnostic-banner--${severity}`" role="alert">
-    <SvgIcon :name="iconName" size="md" aria-hidden="true" />
+    <SvgIcon class="diagnostic-icon" :name="iconName" size="md" aria-hidden="true" />
     <div class="diagnostic-content">
       <span class="diagnostic-message">{{ resolvedMessage }}</span>
       <span v-if="resolvedNextStep" class="diagnostic-next-step">{{ resolvedNextStep }}</span>
@@ -8,7 +8,7 @@
     <button
       v-if="resolvedRetryable"
       type="button"
-      class="text-button"
+      class="text-button small diagnostic-retry"
       @click="$emit('retry')"
     >
       重试
@@ -94,29 +94,35 @@ const iconName = computed(() => {
 </script>
 
 <style scoped>
+/* Calm, tinted surface with a severity accent; the human reason and next step
+   lead, while code/requestId stay as quiet monospace metadata in the details. */
 .diagnostic-banner {
+  --diagnostic-accent: var(--md-sys-color-error);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
   gap: var(--space-1) var(--space-3);
   padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--diagnostic-accent) 22%, transparent);
+  border-inline-start: 3px solid var(--diagnostic-accent);
   border-radius: var(--md-sys-shape-medium);
+  background: color-mix(in srgb, var(--diagnostic-accent) 6%, var(--md-sys-color-surface));
+  color: var(--md-sys-color-on-surface);
   font: var(--md-sys-body-medium);
-}
-
-.diagnostic-banner--error {
-  background: var(--md-sys-color-error-container);
-  color: var(--md-sys-color-on-error-container);
+  animation: diagnostic-in var(--motion-duration-base) var(--motion-ease-out);
 }
 
 .diagnostic-banner--warning {
-  background: var(--md-sys-color-warning-container);
-  color: var(--md-sys-color-on-surface);
+  --diagnostic-accent: var(--md-sys-color-warning);
 }
 
 .diagnostic-banner--info {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  --diagnostic-accent: var(--md-sys-color-primary);
+}
+
+.diagnostic-icon {
+  margin-top: 1px;
+  color: var(--diagnostic-accent);
 }
 
 .diagnostic-content {
@@ -129,22 +135,28 @@ const iconName = computed(() => {
 
 .diagnostic-message {
   font-weight: 500;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .diagnostic-next-step {
-  word-break: break-word;
+  color: var(--md-sys-color-on-surface-variant);
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-retry {
+  flex-shrink: 0;
+  align-self: center;
 }
 
 .diagnostic-details {
   grid-column: 2 / -1;
+  color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
 
 .diagnostic-details summary {
   width: fit-content;
   cursor: pointer;
-  opacity: 0.85;
 }
 
 .diagnostic-details summary:focus-visible {
@@ -159,18 +171,21 @@ const iconName = computed(() => {
   margin: var(--space-2) 0;
 }
 
-.diagnostic-fields dt {
-  opacity: 0.8;
-}
-
 .diagnostic-fields dd {
   min-width: 0;
   margin: 0;
 }
 
 .diagnostic-fields code {
-  font-family: var(--md-sys-typescale-code-font, ui-monospace, monospace);
+  font-family: var(--md-sys-font-family-mono);
+  letter-spacing: 0.02em;
   overflow-wrap: anywhere;
 }
 
+@keyframes diagnostic-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
 </style>
