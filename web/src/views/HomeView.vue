@@ -177,12 +177,17 @@ const routeReason = computed(() => {
   padding: 20px;
   color: var(--md-sys-color-on-surface);
   text-decoration: none;
-  transition: box-shadow 0.2s ease, transform 0.2s ease;
+  transition: box-shadow var(--motion-duration-base) var(--motion-ease-out), transform var(--motion-duration-base) var(--motion-ease-out), border-color var(--motion-duration-base) var(--motion-ease-out);
 }
 
 .task-card:hover {
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 28%, var(--md-sys-color-outline-variant));
   box-shadow: var(--md-sys-elevation-2);
   transform: translateY(-2px);
+}
+
+.task-card:active {
+  transform: translateY(0) scale(0.99);
 }
 
 .task-card:focus-visible {

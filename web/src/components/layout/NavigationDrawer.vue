@@ -170,7 +170,7 @@ onScopeDispose(() => {
   background: var(--md-sys-color-surface);
   border-right: 1px solid var(--md-sys-color-outline-variant);
   transform: translateX(-100%);
-  transition: transform 0.25s ease, width 0.25s ease;
+  transition: transform var(--motion-duration-slow) var(--motion-ease-drawer), width var(--motion-duration-slow) var(--motion-ease-drawer);
 }
 
 .navigation-drawer--open {

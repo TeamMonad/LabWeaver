@@ -233,6 +233,7 @@ function environmentInstance(id: string): EnvironmentInstanceSchema {
     displayLabel: environmentDisplayLabel(state),
     projectId: fixtureProjectId,
     courseId: 'course-physics-2026',
+    approvedResources: { cpuMillicores: 2000, memoryBytes: 4294967296, storageBytes: 21474836480 },
     class: environmentClass,
     runtimeKind: 'container',
     releaseId: release.id,
@@ -697,3 +698,31 @@ export async function listResourceRates(_options?: FixtureOptions): Promise<Fixt
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
 export async function createResourceRate() { return unsupportedResponse('创建资源费率') }
 export async function endResourceRate() { return unsupportedResponse('结束资源费率') }
+
+// Sprint 5 契约尚未提供 fixture 数据：统一返回不受支持，保证预览可加载。
+export async function appendProjectEnvironmentCandidateDecision() { return unsupportedResponse('appendProjectEnvironmentCandidateDecision') }
+export async function approveProjectWorkConfigurationRun() { return unsupportedResponse('approveProjectWorkConfigurationRun') }
+export async function cancelProjectAgentRun() { return unsupportedResponse('cancelProjectAgentRun') }
+export async function cancelProjectCandidateBuild() { return unsupportedResponse('cancelProjectCandidateBuild') }
+export async function completeProjectAuthoringApproval() { return unsupportedResponse('completeProjectAuthoringApproval') }
+export async function completeProjectProblemPackageUpload() { return unsupportedResponse('completeProjectProblemPackageUpload') }
+export async function createEnvironmentTemplateRelease() { return unsupportedResponse('createEnvironmentTemplateRelease') }
+export async function createProjectAgentRun() { return unsupportedResponse('createProjectAgentRun') }
+export async function createProjectLlmPolicy() { return unsupportedResponse('createProjectLlmPolicy') }
+export async function createProjectProblemPackageUpload() { return unsupportedResponse('createProjectProblemPackageUpload') }
+export async function createProjectWorkConfigurationRun() { return unsupportedResponse('createProjectWorkConfigurationRun') }
+export async function getActiveProjectLlmPolicy() { return unsupportedResponse('getActiveProjectLlmPolicy') }
+export async function getEnvironmentTemplateRelease() { return unsupportedResponse('getEnvironmentTemplateRelease') }
+export async function getOwnProjectEvaluationResult() { return unsupportedResponse('getOwnProjectEvaluationResult') }
+export async function getProjectAgentRun() { return unsupportedResponse('getProjectAgentRun') }
+export async function getProjectAuthoringApproval() { return unsupportedResponse('getProjectAuthoringApproval') }
+export async function getProjectCandidateBuild() { return unsupportedResponse('getProjectCandidateBuild') }
+export async function getProjectEnvironmentCandidate() { return unsupportedResponse('getProjectEnvironmentCandidate') }
+export async function getProjectEvaluationCandidate() { return unsupportedResponse('getProjectEvaluationCandidate') }
+export async function getProjectLlmPolicyOptions() { return unsupportedResponse('getProjectLlmPolicyOptions') }
+export async function getProjectProblemPackage() { return unsupportedResponse('getProjectProblemPackage') }
+export async function getProjectWorkConfigurationPlan() { return unsupportedResponse('getProjectWorkConfigurationPlan') }
+export async function listOwnProjectEvaluationResults() { return unsupportedResponse('listOwnProjectEvaluationResults') }
+export async function listProjectResourceUsage() { return unsupportedResponse('listProjectResourceUsage') }
+export async function retryProjectAgentRunTrack() { return unsupportedResponse('retryProjectAgentRunTrack') }
+export async function withdrawEnvironmentTemplateRelease() { return unsupportedResponse('withdrawEnvironmentTemplateRelease') }

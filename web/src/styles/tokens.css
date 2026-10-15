@@ -1,0 +1,181 @@
+/*
+ * LabWeaver design tokens (Sprint 5 visual foundation).
+ * Supersedes the Sprint 2 frozen baseline (#74). Variable names under
+ * --md-sys-* are kept for compatibility; values are retuned.
+ * Rules: use these tokens instead of raw colors, shadows, radii, spacing,
+ * durations or easings. Spacing is a 4px grid.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- Color: brand (teal, hue kept from #74, chroma lowered) ---- */
+  --md-sys-color-primary: #00696B;
+  --md-sys-color-on-primary: #FFFFFF;
+  --md-sys-color-primary-container: #C4EDEC;
+  --md-sys-color-on-primary-container: #00201F;
+
+  --md-sys-color-secondary: #4A6362;
+  --md-sys-color-on-secondary: #FFFFFF;
+  --md-sys-color-secondary-container: #D6E9E7;
+  --md-sys-color-on-secondary-container: #072020;
+
+  --md-sys-color-tertiary: #4A5F7D;
+  --md-sys-color-on-tertiary: #FFFFFF;
+  --md-sys-color-tertiary-container: #DAE5F7;
+  --md-sys-color-on-tertiary-container: #051C36;
+
+  /* ---- Color: neutral surfaces (near-neutral, faint brand tint) ---- */
+  --md-sys-color-background: #F7F9F9;
+  --md-sys-color-surface: #FFFFFF;
+  --md-sys-color-surface-dim: #EDF1F0;
+  --md-sys-color-surface-container-lowest: #FFFFFF;
+  --md-sys-color-surface-container-low: #F3F6F6;
+  --md-sys-color-surface-container: #EEF2F1;
+  --md-sys-color-surface-container-high: #E8ECEC;
+  --md-sys-color-surface-container-highest: #E2E7E6;
+  --md-sys-color-surface-variant: #E1E6E5;
+  --md-sys-color-on-surface: #171D1C;
+  --md-sys-color-on-surface-variant: #414948;
+  --md-sys-color-outline: #707978;
+  --md-sys-color-outline-variant: #D5DCDB;
+
+  /* ---- Color: status ---- */
+  --md-sys-color-error: #B3261E;
+  --md-sys-color-on-error: #FFFFFF;
+  --md-sys-color-error-container: #FCE3E0;
+  --md-sys-color-on-error-container: #410E0B;
+  --md-sys-color-warning: #8A5100;
+  --md-sys-color-warning-container: #FDE8CC;
+  --md-sys-color-success: #1B6B3E;
+  --md-sys-color-success-container: #D3F0DB;
+
+  --md-sys-color-inverse-surface: #2C3231;
+  --md-sys-color-inverse-on-surface: #EEF2F1;
+  --md-sys-color-scrim: rgba(10, 20, 20, 0.36);
+
+  /* ---- State layers (MD3 opacities) ---- */
+  --md-sys-state-hover: 0.08;
+  --md-sys-state-focus: 0.10;
+  --md-sys-state-pressed: 0.10;
+  --md-sys-state-disabled-content: 0.38;
+  --md-sys-state-disabled-container: 0.12;
+  --app-focus-ring: 0 0 0 2px var(--md-sys-color-surface), 0 0 0 4px var(--md-sys-color-primary);
+
+  /* ---- Elevation: soft, layered, tinted; level 0 = hairline only ---- */
+  --app-shadow-color: 180 30% 12%;
+  --md-sys-elevation-0: 0 0 0 1px var(--md-sys-color-outline-variant);
+  --md-sys-elevation-1: 0 1px 2px hsl(var(--app-shadow-color) / 0.06), 0 1px 3px hsl(var(--app-shadow-color) / 0.05);
+  --md-sys-elevation-2: 0 2px 4px hsl(var(--app-shadow-color) / 0.05), 0 6px 16px -4px hsl(var(--app-shadow-color) / 0.10);
+  --md-sys-elevation-3: 0 4px 8px hsl(var(--app-shadow-color) / 0.06), 0 16px 32px -8px hsl(var(--app-shadow-color) / 0.16);
+
+  /* ---- Shape ---- */
+  --md-sys-shape-extra-small: 4px;
+  --md-sys-shape-small: 6px;
+  --md-sys-shape-medium: 10px;
+  --md-sys-shape-large: 14px;
+  --md-sys-shape-extra-large: 20px;
+  --md-sys-shape-full: 999px;
+
+  /* ---- Spacing (4px grid) ---- */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- Typography ---- */
+  --md-sys-font-family: 'Roboto Flex', 'Noto Sans SC', 'Roboto', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --md-sys-font-family-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, monospace;
+  /* CJK reads heavier than Latin; headings use 600/500 instead of MD3's 400. */
+  --md-sys-display-small: 600 36px/44px var(--md-sys-font-family);
+  --md-sys-headline-large: 600 30px/38px var(--md-sys-font-family);
+  --md-sys-headline-medium: 600 26px/34px var(--md-sys-font-family);
+  --md-sys-headline-small: 600 22px/30px var(--md-sys-font-family);
+  --md-sys-title-large: 600 18px/26px var(--md-sys-font-family);
+  --md-sys-title-medium: 600 16px/24px var(--md-sys-font-family);
+  --md-sys-title-small: 600 14px/20px var(--md-sys-font-family);
+  --md-sys-body-large: 400 16px/26px var(--md-sys-font-family);
+  --md-sys-body-medium: 400 14px/22px var(--md-sys-font-family);
+  --md-sys-body-small: 400 12px/18px var(--md-sys-font-family);
+  --md-sys-label-large: 500 14px/20px var(--md-sys-font-family);
+  --md-sys-label-medium: 500 12px/16px var(--md-sys-font-family);
+  --md-sys-label-small: 500 11px/16px var(--md-sys-font-family);
+  --md-sys-tracking-tight: -0.012em;
+  --md-sys-tracking-label: 0.01em;
+
+  /* ---- Motion (emil-design-eng: ease-out for UI, <300ms) ---- */
+  --motion-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --motion-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --motion-ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --motion-duration-instant: 100ms;
+  --motion-duration-fast: 150ms;
+  --motion-duration-base: 200ms;
+  --motion-duration-slow: 280ms;
+  --motion-press-scale: 0.97;
+
+  /* ---- Layout ---- */
+  --app-top-bar-height: 64px;
+  --nav-drawer-expanded: 256px;
+  --nav-drawer-collapsed: 72px;
+  --evidence-side-sheet-width: 360px;
+  --content-max-width: 1280px;
+  --content-gutter: clamp(16px, 4vw, 40px);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --md-sys-color-primary: #7FD6D4;
+  --md-sys-color-on-primary: #003736;
+  --md-sys-color-primary-container: #0F4F4E;
+  --md-sys-color-on-primary-container: #C4EDEC;
+
+  --md-sys-color-secondary: #B1CCCA;
+  --md-sys-color-on-secondary: #1C3534;
+  --md-sys-color-secondary-container: #2F4847;
+  --md-sys-color-on-secondary-container: #D6E9E7;
+
+  --md-sys-color-tertiary: #B3C8E8;
+  --md-sys-color-on-tertiary: #1B324A;
+  --md-sys-color-tertiary-container: #33475F;
+  --md-sys-color-on-tertiary-container: #DAE5F7;
+
+  --md-sys-color-background: #0D1212;
+  --md-sys-color-surface: #121817;
+  --md-sys-color-surface-dim: #0D1212;
+  --md-sys-color-surface-container-lowest: #0A0F0F;
+  --md-sys-color-surface-container-low: #161C1C;
+  --md-sys-color-surface-container: #1A2120;
+  --md-sys-color-surface-container-high: #232A2A;
+  --md-sys-color-surface-container-highest: #2D3434;
+  --md-sys-color-surface-variant: #3F4948;
+  --md-sys-color-on-surface: #DFE4E3;
+  --md-sys-color-on-surface-variant: #BEC8C7;
+  --md-sys-color-outline: #889392;
+  --md-sys-color-outline-variant: #2F3837;
+
+  --md-sys-color-error: #FFB4AB;
+  --md-sys-color-on-error: #690005;
+  --md-sys-color-error-container: #5C1410;
+  --md-sys-color-on-error-container: #FFDAD6;
+  --md-sys-color-warning: #FFB95F;
+  --md-sys-color-warning-container: #4A2A00;
+  --md-sys-color-success: #8FD8A9;
+  --md-sys-color-success-container: #0F3F24;
+
+  --md-sys-color-inverse-surface: #DFE4E3;
+  --md-sys-color-inverse-on-surface: #2C3231;
+  --md-sys-color-scrim: rgba(0, 0, 0, 0.56);
+
+  --app-shadow-color: 0 0% 0%;
+  --md-sys-elevation-1: 0 1px 2px hsl(var(--app-shadow-color) / 0.40);
+  --md-sys-elevation-2: 0 2px 4px hsl(var(--app-shadow-color) / 0.35), 0 8px 20px -6px hsl(var(--app-shadow-color) / 0.45);
+  --md-sys-elevation-3: 0 4px 8px hsl(var(--app-shadow-color) / 0.40), 0 20px 40px -10px hsl(var(--app-shadow-color) / 0.55);
+}

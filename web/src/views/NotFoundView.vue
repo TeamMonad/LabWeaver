@@ -51,7 +51,7 @@ import { RouterLink } from 'vue-router'
   background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
   font: var(--md-sys-label-large);
-  transition: box-shadow 0.2s;
+  transition: box-shadow var(--motion-duration-base) var(--motion-ease-out);
 }
 
 .home-btn:hover {
