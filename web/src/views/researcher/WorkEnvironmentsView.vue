@@ -388,9 +388,8 @@ function openById() {
 .templates-empty p { margin: 0; }
 .advanced { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .advanced__form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
-.advanced__form .text-input { min-width: 280px; }
+.advanced__form .text-input { width: auto; min-width: 280px; }
 .icon-button { display: inline-grid; place-items: center; width: 40px; height: 40px; border: none; border-radius: 50%; background: transparent; color: var(--md-sys-color-on-surface-variant); cursor: pointer; }
-.text-input { min-height: 40px; padding: 0 var(--space-3); border: 1px solid var(--md-sys-color-outline); border-radius: var(--md-sys-shape-extra-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 @media (max-width: 600px) {
   .work-row { grid-template-columns: minmax(0, 1fr) auto; }
   .work-row > :last-child { grid-column: 1 / -1; justify-self: start; }

@@ -138,7 +138,7 @@ async function fillGpuForm(wrapper: ReturnType<typeof mountView>, selection = 'n
   const form = wrapper.get('[data-testid="resource-rate-form"]')
   await form.get('select[aria-label="GPU 目录分配类型"]').setValue(selection)
   await form.get('input[aria-label="费率单价"]').setValue('0.25')
-  await form.get('input[type="datetime-local"]').setValue('2030-01-01T00:00')
+  await form.get('input[data-app-datetime]').setValue('2030-01-01T00:00')
   return form
 }
 
@@ -334,7 +334,7 @@ describe('ResourceFinanceView', () => {
     const form = wrapper.get('[data-testid="resource-rate-form"]')
     await form.get('select[aria-label="计费单位"]').setValue(unit)
     await form.get('input[aria-label="费率单价"]').setValue('9007199254740993.123457')
-    await form.get('input[type="datetime-local"]').setValue('2030-01-01T00:00')
+    await form.get('input[data-app-datetime]').setValue('2030-01-01T00:00')
     expect(form.get('[role="status"]').text()).toContain(`9007199254740993.123457 USD / ${label}`)
     expect(createResourceRate).not.toHaveBeenCalled()
     vi.mocked(createResourceRate).mockResolvedValue({ data: existingRate as never, error: undefined as never })
@@ -389,7 +389,7 @@ describe('ResourceFinanceView', () => {
     const wrapper = mountView()
     await flushPromises()
     const form = await fillGpuForm(wrapper)
-    const times = form.findAll('input[type="datetime-local"]')
+    const times = form.findAll('input[data-app-datetime]')
     await times[0].setValue('2020-01-01T00:00')
     expect(form.text()).toContain('须在未来生效')
     await times[0].setValue('2030-01-01T00:00')

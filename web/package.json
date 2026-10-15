@@ -31,6 +31,7 @@
     "@fontsource-variable/roboto-flex": "^5.2.8",
     "@fontsource/roboto": "^5.2.10",
     "@hey-api/client-axios": "0.9.1",
+    "@internationalized/date": "^3.12.4",
     "@novnc/novnc": "1.5.0",
     "@xterm/addon-fit": "0.10.0",
     "@xterm/xterm": "5.5.0",

@@ -25,9 +25,8 @@
     <section class="project-strip md-card">
       <label>
         <span>项目</span>
-        <select
+        <AppSelect
           v-model="selectedProjectId"
-          class="text-input"
           :disabled="projects.projects.kind !== 'success'"
         >
           <option value="">只管理全局费率</option>
@@ -36,7 +35,7 @@
             :key="project.id"
             :value="project.id"
           >{{ project.name }}</option>
-        </select>
+        </AppSelect>
       </label>
       <span
         v-if="selectedProject"
@@ -158,12 +157,9 @@
               >
                 <label>
                   <span>截止时间</span>
-                  <input
+                  <AppDateTimePicker
                     v-model="endingEffectiveUntil"
-                    class="text-input"
-                    type="datetime-local"
-                    aria-label="费率截止时间"
-                  >
+                    aria-label="费率截止时间" />
                 </label>
                 <p class="rate-equivalent">
                   只结束这一费率版本。截止后不再用于新的用量核算，历史账单快照保留，现有环境不会被强制停止。
@@ -205,22 +201,20 @@
       >
         <label>
           <span>计费单位</span>
-          <select
+          <AppSelect
             v-model="rateUnit"
-            class="text-input"
             aria-label="计费单位"
           >
             <option value="gpu_unit_second">GPU 分配单位秒</option>
             <option value="cpu_millicore_second">CPU 核心小时</option>
             <option value="memory_byte_second">内存 GiB 小时</option>
             <option value="storage_byte_second">存储 GiB 小时</option>
-          </select>
+          </AppSelect>
         </label>
         <label v-if="rateUnit === 'gpu_unit_second'">
           <span>GPU 目录分配类型</span>
-          <select
+          <AppSelect
             v-model="rateGpuSelection"
-            class="text-input"
             aria-label="GPU 目录分配类型"
             :disabled="catalog.kind !== 'success'"
             required
@@ -231,7 +225,7 @@
               :key="gpuOptionKey(entry)"
               :value="gpuOptionKey(entry)"
             >{{ entry.class }} · {{ rateModeLabel(entry.mode) }}</option>
-          </select>
+          </AppSelect>
         </label>
         <p
           v-if="rateUnit === 'gpu_unit_second'"
@@ -286,20 +280,14 @@
         </label>
         <label>
           <span>生效时间</span>
-          <input
+          <AppDateTimePicker
             v-model="rateEffectiveFrom"
-            class="text-input"
-            type="datetime-local"
-            required
-          >
+            required />
         </label>
         <label>
           <span>结束时间（可选）</span>
-          <input
-            v-model="rateEffectiveUntil"
-            class="text-input"
-            type="datetime-local"
-          >
+          <AppDateTimePicker
+            v-model="rateEffectiveUntil" />
         </label>
         <p
           class="rate-equivalent"
@@ -695,6 +683,8 @@
 </template>
 
 <script setup lang="ts">
+import AppDateTimePicker from '@/components/form/AppDateTimePicker.vue'
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -1139,8 +1129,6 @@ onMounted(() => { void rates.load(); void loadCatalog() })
 .budget-summary span { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .budget-summary strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); white-space: nowrap; }
 .budget-form { display: grid; gap: var(--space-3); }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: var(--space-2) 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
-textarea.text-input { resize: vertical; }
 .charge-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .charge-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
 .charge-main { display: grid; gap: var(--space-1); min-width: 0; }
