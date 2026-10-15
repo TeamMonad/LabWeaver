@@ -2083,6 +2083,24 @@ impl ClaudeCodeRuntime {
                 &prompt,
                 false,
             );
+            if cancellation.is_cancelled() {
+                return Err(review_failure(
+                    ClaudeCodeRuntimeError::Cancelled,
+                    usage_option(total_usage),
+                ));
+            }
+            if let Some(check) = &self.input_authorization {
+                check
+                    .check()
+                    .await
+                    .map_err(|error| review_failure(error, usage_option(total_usage)))?;
+            }
+            if cancellation.is_cancelled() {
+                return Err(review_failure(
+                    ClaudeCodeRuntimeError::Cancelled,
+                    usage_option(total_usage),
+                ));
+            }
             let process_output = self
                 .process
                 .execute(&ExecutionScope::Advisory, command, cancellation.clone())

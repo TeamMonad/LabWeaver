@@ -15,6 +15,7 @@ mod model_input_authorization;
 mod object_authorization;
 pub mod platform_configuration;
 pub mod platform_image_jobs;
+mod rubric_model_input;
 mod runtime_authorization;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -2666,6 +2667,9 @@ impl ControlService {
         if current != expected_revision {
             return Err(ControlError::RevisionConflict);
         }
+        let existing_rules = sqlx::query_scalar::<_, Value>("SELECT contract FROM control.project_llm_policies WHERE project_id=$1 AND superseded_at IS NULL")
+            .bind(project_id.as_uuid()).fetch_optional(&mut *transaction).await.map_err(db)?
+            .map(rubric_model_input::decode_policy).transpose()?.map(|(_, rules)| rules).unwrap_or_default();
         let next = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(revision),0)+1 FROM control.project_llm_policies WHERE project_id=$1",
         )
@@ -2683,7 +2687,7 @@ impl ControlService {
         .execute(&mut *transaction)
         .await
         .map_err(db)?;
-        let contract = serde_json::to_value(&policy).map_err(|_| ControlError::ContractInvalid)?;
+        let contract = rubric_model_input::encode_policy(&policy, &existing_rules)?;
         sqlx::query(
             "INSERT INTO control.project_llm_policies \
              (policy_id,project_id,course_id,revision,contract_sha256,contract,activated_at) \
@@ -2693,7 +2697,7 @@ impl ControlService {
         .bind(policy.project_id.as_uuid())
         .bind(course_id.map(CourseId::as_uuid))
         .bind(i64_revision(policy.revision)?)
-        .bind(canonical_hash(&policy)?.to_string())
+        .bind(canonical_hash(&contract)?.to_string())
         .bind(&contract)
         .bind(policy.activated_at.get())
         .execute(&mut *transaction)
@@ -2725,7 +2729,7 @@ impl ControlService {
             Domain::Control,
             CREATE_POLICY,
             idempotency_key.as_str(),
-            &contract,
+            &serde_json::to_value(&policy).map_err(|_| ControlError::ContractInvalid)?,
         )
         .await
         .map_err(|_| ControlError::PersistenceFailed)?;
@@ -2738,7 +2742,7 @@ impl ControlService {
         &self,
         course_id: CourseId,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
-        load_contract(
+        rubric_model_input::load_policy(
             &self.pool,
             "SELECT contract FROM control.project_llm_policies WHERE course_id=$1 AND superseded_at IS NULL",
             course_id.as_uuid(),
@@ -2755,7 +2759,7 @@ impl ControlService {
         &self,
         project_id: ProjectId,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
-        load_contract(
+        rubric_model_input::load_policy(
             &self.pool,
             "SELECT contract FROM control.project_llm_policies \
              WHERE project_id=$1 AND superseded_at IS NULL",
@@ -4485,9 +4489,8 @@ impl ControlService {
         .await
         .map_err(db)?
         .ok_or(ControlError::PolicyNotFound)?;
-        let policy: ProjectLlmEgressPolicy =
-            serde_json::from_value(policy_row.try_get("contract").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        let policy =
+            rubric_model_input::decode_policy(policy_row.try_get("contract").map_err(db)?)?.0;
         policy
             .validate()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
@@ -8293,20 +8296,6 @@ fn reject_sensitive_payload(value: &Value) -> Result<(), ControlError> {
         _ => {}
     }
     Ok(())
-}
-
-async fn load_contract<T>(pool: &PgPool, query: &str, id: Uuid) -> Result<T, ControlError>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let row = sqlx::query(query)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::NotFound)?;
-    serde_json::from_value(row.try_get("contract").map_err(db)?)
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)
 }
 
 async fn load_contract_two<T>(

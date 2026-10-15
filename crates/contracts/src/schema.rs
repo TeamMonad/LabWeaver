@@ -592,6 +592,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::auth::AuthorizationDecisionRequest
     );
     document!(
+        "schemas/contracts/v1/http/maintain-rubric-model-input-rule-request.schema.json",
+        crate::http::MaintainRubricModelInputRuleRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/project-rubric-model-input-rules.schema.json",
+        crate::http::ProjectRubricModelInputRules
+    );
+    document!(
+        "schemas/contracts/v1/http/create-frozen-model-input-authorization-request.schema.json",
+        crate::http::CreateFrozenModelInputAuthorizationRequest
+    );
+    document!(
         "schemas/contracts/v1/http/model-input-authorization-context.schema.json",
         crate::http::ModelInputAuthorizationContext
     );
@@ -1588,6 +1600,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
                 ,"EnvironmentWorkConfigurationTargetQuery": contract_ref("http/environment-work-configuration-target-query")
+                 ,"CreateFrozenModelInputAuthorizationRequest": contract_ref("http/create-frozen-model-input-authorization-request")
                  ,"ModelInputAuthorizationResolveRequest": contract_ref("http/model-input-authorization-resolve-request")
                  ,"ModelInputAuthorizationResolution": contract_ref("http/model-input-authorization-resolution")
                  ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
@@ -1638,6 +1651,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             .pointer_mut("/components/schemas")
             .and_then(Value::as_object_mut)
     {
+        schemas.remove("CreateFrozenModelInputAuthorizationRequest");
         schemas.remove("ModelInputAuthorizationResolveRequest");
         schemas.remove("ModelInputAuthorizationResolution");
         schemas.remove("InternalCreateAgentRunRequest");
@@ -1675,6 +1689,8 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
         }
         ApiSurface::GatewayInternal => {
+            paths.insert("/internal/v1/authoring/frozen-model-input-authorizations".to_owned(), json!({"post":{"operationId":"createFrozenModelInputAuthorization","security":internal_security("control.authoring.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateFrozenModelInputAuthorizationRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact frozen input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
+            paths.insert("/internal/v1/authoring/model-input-authorizations/resolve".to_owned(), json!({"post":{"operationId":"resolveFrozenModelInputAuthorization","security":internal_security("control.authoring.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolveRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact frozen input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
             paths.insert("/internal/v1/model-input-authorizations/resolve".to_owned(),json!({"post":{"operationId":"resolveModelInputAuthorization","summary":"Recheck current session, object action and explicitly selected material versions","security":internal_security("control.agent_run.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolveRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
             paths.insert(
                 "/internal/v1/auth/decision".to_owned(),
@@ -1922,6 +1938,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "addProjectMembership" => "http/add-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
+        "maintainProjectRubricModelInputRule" => "http/maintain-rubric-model-input-rule-request",
         "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
         "createProjectAgentRun" => "http/create-agent-run-request",
         "cancelProjectCandidateBuild" => "http/cancel-candidate-build-request",
@@ -2054,6 +2071,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
         "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
+        "maintainProjectRubricModelInputRule" | "getProjectRubricModelInputRules" => {
+            contract_ref("http/project-rubric-model-input-rules")
+        }
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"

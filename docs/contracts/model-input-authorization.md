@@ -12,7 +12,13 @@ Agent 配置生成和已有 Work 配置操作只使用调用方显式选择的�
 
 `ModelInputAuthorizationContext` 表达首次已鉴别请求的会话 SHA、发起者、项目、课程、原 operation 和当次 decision 的 `validUntil`。它不包含文件身份或许可布尔值；冻结请求尚无归档时可保存这一完整证据。`validate()` 只检查传输身份格式，不授权操作，也不把旧 decision TTL 当任务期限。现有材料包 binding 可通过 `context()` 提取同一证据；Control 构造和复核入口及 Agent 命令校验使用相同检查。
 
-冻结命令的持久化与 metadata-only 返回仍由 Evaluation owner 接线。该接线完成前，不声称冻结请求已有完整 context；缺失记录不得从冻结 owner、服务身份或新会话补造。rubric 权威许可、冻结事实核对及 advisory 外发复核仍未接通。
+冻结 context 持久化及 metadata-only 事实由 Evaluation 提供。缺失记录不得从冻结 owner、服务身份或新会话补造。冻结完成后，Evaluation 使用现有 `control.authoring.read` 调用 `POST /internal/v1/authoring/frozen-model-input-authorizations`，提交原 `inputAuthorizationContext`、task/freeze/release ID、release revision 和精确 `selectedPaths`。Control 从保护的冻结事实与现行发布材料重建 binding；Evaluation 必须在读取 archive/rubric 对象前完成此检查，将返回 binding 原样填写必需的 `InternalAgentLlmReviewRequest.inputAuthorization`。消费者接线由 Evaluation owner 完成。
+
+binding 的 `source.kind` 区分 `problem_package` 和 `frozen_submission`。冻结来源分别保留 manifest revision/SHA、archive 精确 ArtifactRef/content SHA、Evaluation release revision、Environment release version，以及独立 rubric package/version/path/ArtifactRef/SHA。冻结 ID 不作为材料包 ID。策略全文 SHA 和选择摘要也参与一致性校验。
+
+课程当前教师兼 instructor 且具有材料项目 Edit 权限时，可以通过 `POST /api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules` 单独设置 rubric 可见性、批准目标模型使用或撤回批准。GET 同路径返回教师可见的元数据规则。请求必须提供现行 policy 的 If-Match 和 Idempotency-Key。规则保存在现有 policy 的版本化 JSON 内，批准者和课程成员 revision 从当前真源获取；请求不能自报许可。每次改变可见性都会清除模型批准。只有 `course_public` 且存在当前 instructor 的有效批准时才允许外发；hidden、未知、离任、成员 revision 变化或撤回均拒绝。Browse 和模型许可分别检查。
+
+冻结实时复核使用 `POST /internal/v1/authoring/model-input-authorizations/resolve`（现有 `control.authoring.read`）。Control 重核原会话、冻结 Edit、对象 Browse、ConfigureAgent 和当前 rubric 规则，重建完整 binding 后做全等比较。Agent 首次及 repair 进程调用前均复核，保留原任务截止和累计用量；取消完成与中断恢复保留已经观测到的用量，不重放旧模型调用。
 
 `POST /internal/v1/model-input-authorizations/resolve` 仅在内部 API 中提供，服务账户需要现有 `control.agent_run.read` 权限。公开浏览器 API 和 SDK 不提供该操作。
 
@@ -46,6 +52,6 @@ Agent 复核客户端读取下列四项现有命名的配置：
 
 本切片覆盖教师材料包，以及私人/共享 Work 的材料包选择和实时项目动作权限。前端材料选择交互由 Grok 接续，当前三处旧创建入口没有传 `selectedPaths`，会明确失败。
 
-尚未覆盖学生冻结 advisory 与隐藏 rubric、实时 Work 会话文件许可、逐文件隐藏标签、日志留存切片，以及 Claude Code 单个进程内部的 Read/Bash/tool-result 和后续模型请求逐动作复核。平台进程调用前的检查不能证明这些内部动作已逐项授权。不能据此宣称 #216 全部完成。
+完整冻结链路仍需串行组合 Evaluation 的 metadata-only/context/content-SHA 变更、Access 的真实 context 生产入口及 Evaluation 读取前消费者接线，并验收完整链路和真实网络角色。本切片不能单独证明完整冻结链路通过。rubric 规则的真实 PostgreSQL 测试覆盖公开声明与批准分离、精确内容身份、教师/助教/管理员区别、项目 Edit、撤回、隐藏、离任/重入、成员过期、并发 revision 冲突、幂等重放和通用策略更新保留撤权，且规则操作不读取对象。测试发布内容是合成依赖边界，内容 SHA 生产入口仍由 Evaluation/材料 owner 提供。实时 Work 会话文件许可、逐文件隐藏标签、日志留存切片，以及 Claude Code 单个进程内部的 Read/Bash/tool-result 和后续模型请求逐动作复核仍不在本切片覆盖内。
 
 本地验证使用真实 PostgreSQL 当前会话/成员事实、原 Agent 持久化取消状态和合成 stdin 捕获进程，证明选择内容、准备期间取消、repair 前撤权，以及实际跨越创建当次 5 秒 decision TTL 的排队和 repair 仍按原会话当前权限运行。绝对/idle 期限到期、会话撤销、成员撤销、任务截止和取消均阻止新发送。Access 的 `idle_expires_at <= expires_at` 约束意味着绝对期限到期时 idle 也到期；测试保留该约束，并另外覆盖 absolute 仍未来而 idle 单独到期。该证据没有调用真实模型，也没有验证 Kubernetes sandbox 或生产 Agent→Control TLS/服务角色接线。

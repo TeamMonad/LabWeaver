@@ -1105,3 +1105,23 @@ pub enum DownstreamError {
     #[error("LW_AUTH_SCOPE_DENIED")]
     Denied,
 }
+
+impl EvaluationClient {
+    /// Protected metadata-only endpoint; no artifact bytes or storage locators are requested.
+    pub async fn frozen_model_input_facts(
+        &self,
+        release_id: EvaluationReleaseId,
+        submission_id: contracts::FrozenSubmissionId,
+        revision: contracts::Revision,
+        context: &contracts::http::ModelInputAuthorizationContext,
+    ) -> Result<serde_json::Value, DownstreamError> {
+        let mut request = self.client.get(self.config.endpoint(&format!("internal/v1/evaluation-releases/{release_id}/frozen-submissions/{submission_id}/model-input-facts"))?)
+            .header("x-labweaver-project-id", context.project_id.to_string())
+            .header("x-labweaver-actor-id", context.actor_id.to_string())
+            .header("If-Match", contracts::http::StrongEtag::from_revision(revision).header_value());
+        if let Some(course) = context.course_id {
+            request = request.header("x-labweaver-course-id", course.to_string());
+        }
+        send_json(request, &self.service_token_client, self.token_target).await
+    }
+}

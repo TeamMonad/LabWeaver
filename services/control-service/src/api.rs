@@ -145,6 +145,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(get_project_policy),
         )
         .route(
+            "/api/v1/projects/{project_id}/llm-egress-policies/active/rubric-rules",
+            get(get_rubric_model_input_rules).post(maintain_rubric_model_input_rule),
+        )
+        .route(
             "/api/v1/projects/{project_id}/llm-egress-policy-options",
             get(get_project_policy_options),
         )
@@ -327,6 +331,14 @@ pub fn authenticated_router(state: &Arc<ApiState>, verifier: &Arc<ServiceTokenVe
                 "/internal/v1/environment-releases/{release_id}/admission",
                 get(get_internal_environment_publication_admission),
             )
+            .route(
+                "/internal/v1/authoring/frozen-model-input-authorizations",
+                post(create_frozen_model_input_authorization),
+            )
+            .route(
+                "/internal/v1/authoring/model-input-authorizations/resolve",
+                post(resolve_model_input_authorization),
+            )
             .with_state(Arc::clone(state))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(verifier),
@@ -382,6 +394,33 @@ async fn resolve_model_input_authorization(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<contracts::http::ModelInputAuthorizationResolveRequest>,
 ) -> Result<Json<contracts::http::ModelInputAuthorizationResolution>, ApiError> {
+    if let contracts::http::ModelInputAuthorizationSource::FrozenSubmission(source) =
+        &request.binding.source
+    {
+        let context = request.binding.context();
+        let rebuilt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            create_frozen_binding(
+                &state,
+                &contracts::http::CreateFrozenModelInputAuthorizationRequest {
+                    input_authorization_context: context,
+                    task_run_id: source.task_run_id,
+                    frozen_submission_id: source.frozen_submission_id,
+                    evaluation_release_id: source.evaluation_release_id,
+                    evaluation_release_revision: source.evaluation_release_revision,
+                    selected_paths: request.selected_paths.clone(),
+                },
+            ),
+        )
+        .await
+        .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))??;
+        if rebuilt != request.binding {
+            return Err(ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"));
+        }
+        return Ok(Json(contracts::http::ModelInputAuthorizationResolution {
+            binding: rebuilt,
+        }));
+    }
     tokio::time::timeout(
         std::time::Duration::from_secs(
             contracts::object_authorization::AUTHORIZATION_CHECK_TIMEOUT_SECONDS,
@@ -392,6 +431,69 @@ async fn resolve_model_input_authorization(
     .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?
     .map(Json)
     .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))
+}
+
+async fn create_frozen_binding(
+    state: &ApiState,
+    request: &contracts::http::CreateFrozenModelInputAuthorizationRequest,
+) -> Result<contracts::http::ModelInputAuthorizationBinding, ApiError> {
+    state
+        .control
+        .authorize_frozen_model_context(&request.input_authorization_context)
+        .await
+        .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?;
+    let facts = state
+        .evaluation
+        .frozen_model_input_facts(
+            request.evaluation_release_id,
+            request.frozen_submission_id,
+            request.evaluation_release_revision,
+            &request.input_authorization_context,
+        )
+        .await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-labweaver-project-id",
+        request
+            .input_authorization_context
+            .project_id
+            .to_string()
+            .parse()
+            .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?,
+    );
+    if let Some(course) = request.input_authorization_context.course_id {
+        headers.insert(
+            "x-labweaver-course-id",
+            course
+                .to_string()
+                .parse()
+                .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?,
+        );
+    }
+    let release = state
+        .evaluation
+        .get(request.evaluation_release_id, &headers)
+        .await?;
+    state
+        .control
+        .bind_frozen_model_input(request, facts, &release)
+        .await
+        .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))
+}
+
+async fn create_frozen_model_input_authorization(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<contracts::http::CreateFrozenModelInputAuthorizationRequest>,
+) -> Result<Json<contracts::http::ModelInputAuthorizationResolution>, ApiError> {
+    let binding = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        create_frozen_binding(&state, &request),
+    )
+    .await
+    .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))??;
+    Ok(Json(contracts::http::ModelInputAuthorizationResolution {
+        binding,
+    }))
 }
 
 fn model_input_binding(
@@ -423,10 +525,14 @@ fn model_input_binding(
         course_id: context.course_id,
         operation_id: context.operation_id,
         valid_until: context.valid_until,
-        package_id: package.id,
-        package_revision: package.revision,
+        source: contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+            package_id: package.id,
+            package_revision: package.revision,
+        },
         policy_id: policy.id,
         policy_revision: policy.revision,
+        policy_sha256: contracts::http::model_input_policy_sha256(policy)
+            .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?,
         selection_sha256: contracts::http::model_input_selection_sha256(&paths)
             .map_err(|_| ApiError::bad_request("LW_MODEL_INPUT_SELECTION_REQUIRED"))?,
     })
@@ -784,6 +890,73 @@ async fn get_project_package(
         .project_package(project_id, package_id)
         .await?;
     Ok(with_etag(StatusCode::OK, &package, package.revision))
+}
+
+async fn get_rubric_model_input_rules(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision = authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectRubricModelInputRules",
+        project_id,
+    )
+    .await?;
+    let rules = state
+        .control
+        .project_rubric_model_input_rules(project_id, &decision.actor, now()?)
+        .await?;
+    Ok(with_etag(StatusCode::OK, &rules, rules.policy_revision))
+}
+
+async fn maintain_rubric_model_input_rule(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+    Json(request): Json<contracts::http::MaintainRubricModelInputRuleRequest>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "maintainProjectRubricModelInputRule",
+        project_id,
+    )
+    .await?;
+    request
+        .rubric
+        .validate()
+        .map_err(|_| ApiError::bad_request("LW_MODEL_INPUT_AUTHORIZATION_INVALID"))?;
+    state
+        .control
+        .project_rubric_model_input_rules(project_id, &decision.actor, now()?)
+        .await?;
+    let release = state
+        .evaluation
+        .get(request.evaluation_release_id, &headers)
+        .await?;
+    if release.project_id != project_id || release.revision != request.evaluation_release_revision
+        || release.state != contracts::evaluation::EvaluationReleaseState::Active
+        || !release.evaluation_spec.body().steps().iter().any(|step| matches!(step.advisory_runner(), Some(contracts::evaluation::AdvisoryRunnerSpec::LlmReview {rubric, ..}) if rubric.strip_prefix("evaluator://").unwrap_or(rubric) == request.rubric.path)) {
+        return Err(ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"));
+    }
+    let rules = state
+        .control
+        .maintain_rubric_model_input_rule(
+            project_id,
+            &decision.actor,
+            &request,
+            etag(&headers)?,
+            &idempotency(&headers)?,
+            now()?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::OK, &rules, rules.policy_revision))
 }
 
 async fn create_project_policy(
