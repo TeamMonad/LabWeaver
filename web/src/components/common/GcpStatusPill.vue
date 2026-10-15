@@ -89,8 +89,8 @@ const titleText = computed(() => {
 .gcp-status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
   border-radius: var(--md-sys-shape-full);
   font: var(--md-sys-label-small);
   font-weight: 500;
@@ -101,7 +101,7 @@ const titleText = computed(() => {
 }
 
 .gcp-status-pill--sm {
-  padding: 1px 6px;
+  padding: 1px var(--space-2);
   font-size: 11px;
 }
 

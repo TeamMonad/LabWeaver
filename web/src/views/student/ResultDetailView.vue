@@ -152,29 +152,29 @@ function fallbackDiagnostic(state: StudentEvaluationResultSchema['state']) {
 </script>
 
 <style scoped>
-.result-page { display: flex; flex-direction: column; gap: 20px; }
+.result-page { display: flex; flex-direction: column; gap: var(--space-5); }
 .back-link { color: var(--md-sys-color-primary); }
 h2, h3 { margin: 0; color: var(--md-sys-color-on-surface); }
-.summary { padding: 16px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
-.summary dl { display: grid; grid-template-columns: 140px 1fr; gap: 10px 16px; margin: 0 0 12px; }
+.summary { padding: var(--space-4); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
+.summary dl { display: grid; grid-template-columns: 140px 1fr; gap: var(--space-3) var(--space-4); margin: 0 0 var(--space-3); }
 .summary dt { color: var(--md-sys-color-on-surface-variant); }
 .summary dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .score { color: var(--md-sys-color-primary); font: var(--md-sys-title-large); }
-.step-list { display: grid; gap: 10px; padding-left: 0; list-style: none; }
-.step-card { display: grid; grid-template-columns: 100px minmax(120px, 1fr) auto; gap: 12px; padding: 14px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
+.step-list { display: grid; gap: var(--space-3); padding-left: 0; list-style: none; }
+.step-card { display: grid; grid-template-columns: 100px minmax(120px, 1fr) auto; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
 .step-card code { grid-column: 2 / -1; overflow-wrap: anywhere; }
-.goal-review { grid-column: 1 / -1; display: grid; gap: 12px; margin-top: 4px; padding-top: 14px; border-top: 1px solid var(--md-sys-color-outline-variant); }
-.goal-review__heading, .finding-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.goal-review { grid-column: 1 / -1; display: grid; gap: var(--space-3); margin-top: var(--space-1); padding-top: var(--space-4); border-top: 1px solid var(--md-sys-color-outline-variant); }
+.goal-review__heading, .finding-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .goal-review h4 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
-.review-assessment { padding: 4px 10px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-label-medium); }
-.review-meta { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.review-assessment { padding: var(--space-1) var(--space-3); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-label-medium); }
+.review-meta { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .review-meta strong, .review-meta code { color: var(--md-sys-color-on-surface); }
 .review-disclaimer { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
-.finding-list { display: grid; gap: 10px; margin: 0; padding-left: 20px; }
-.finding-item { display: grid; gap: 6px; padding: 10px 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.finding-list { display: grid; gap: var(--space-3); margin: 0; padding-left: var(--space-5); }
+.finding-item { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
 .finding-item p { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .finding-heading span { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
-.evidence-list { display: grid; gap: 4px; margin: 0; padding-left: 18px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.evidence-list { display: grid; gap: var(--space-1); margin: 0; padding-left: var(--space-5); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .evidence-list code { color: var(--md-sys-color-on-surface); }
 @media (max-width: 600px) { .summary dl, .step-card { grid-template-columns: 1fr; } .step-card code { grid-column: auto; } }
 </style>

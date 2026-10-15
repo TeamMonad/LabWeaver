@@ -186,7 +186,7 @@ onScopeDispose(() => {
   align-items: center;
   justify-content: space-between;
   height: var(--app-top-bar-height);
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -198,43 +198,29 @@ onScopeDispose(() => {
   white-space: nowrap;
 }
 
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 48px;
-  height: 48px;
-  padding: 0;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-on-surface-variant);
-  cursor: pointer;
-}
-
 .drawer-nav {
   display: flex;
   flex: 1;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
   overflow-y: auto;
-  padding: 12px;
+  padding: var(--space-3);
 }
 
 .nav-group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .nav-group + .nav-group {
-  padding-top: 8px;
+  padding-top: var(--space-2);
   border-top: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .nav-section-title {
-  padding: 4px 12px;
+  padding: var(--space-1) var(--space-3);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
   font-size: 11px;
@@ -251,9 +237,9 @@ onScopeDispose(() => {
 .drawer-item {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--space-4);
   min-height: 44px;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border-radius: var(--md-sys-shape-full);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-large);
@@ -285,8 +271,8 @@ onScopeDispose(() => {
 }
 
 .drawer-empty {
-  margin: 8px;
-  padding: 12px;
+  margin: var(--space-2);
+  padding: var(--space-3);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface-variant);
@@ -315,17 +301,17 @@ onScopeDispose(() => {
 }
 
 .drawer-footer {
-  padding: 12px;
+  padding: var(--space-3);
   border-top: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .rail-toggle {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
   height: 40px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border: none;
   border-radius: var(--md-sys-shape-full);
   background: transparent;

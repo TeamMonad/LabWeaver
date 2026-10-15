@@ -229,15 +229,15 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .console-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface);
   margin: 0;
@@ -246,45 +246,7 @@ onMounted(() => {
 .console-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.filled-button,
-.text-button {
-  height: 36px;
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button {
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-button {
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
-.icon-button {
-  width: 36px;
-  height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-on-surface-variant);
-  cursor: pointer;
+  gap: var(--space-2);
 }
 
 .console-body {
@@ -293,7 +255,7 @@ onMounted(() => {
 }
 
 .console-status {
-  padding: 24px;
+  padding: var(--space-6);
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
   text-align: center;

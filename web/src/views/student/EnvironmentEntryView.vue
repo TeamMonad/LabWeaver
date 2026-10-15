@@ -248,7 +248,7 @@
               </button>
               <button
                 type="button"
-                class="text-button error"
+                class="outlined-button danger-button"
                 :disabled="!canDelete(env.instance.data)"
                 :title="lifecycleActionReason(env.instance.data, 'delete')"
                 :aria-label="failedCleanup(env.instance.data) ? '重试回收' : '删除'"
@@ -2021,23 +2021,23 @@ async function revokeAccessGrant() {
 .environment-entry {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: var(--space-6);
 }
 
 /* GCP Resource Header & Breadcrumbs */
 .gcp-resource-view {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .gcp-breadcrumbs {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
-  margin-bottom: 6px;
+  margin-bottom: var(--space-2);
 }
 
 .breadcrumb-link {
@@ -2062,14 +2062,14 @@ async function revokeAccessGrant() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
   flex-wrap: wrap;
 }
 
 .title-with-pill {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .title-with-pill h2 {
@@ -2083,7 +2083,7 @@ async function revokeAccessGrant() {
 .gcp-detail-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   overflow-x: auto;
   scrollbar-width: none;
@@ -2096,9 +2096,9 @@ async function revokeAccessGrant() {
 .detail-tab {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   height: 42px;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border: none;
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
@@ -2132,21 +2132,21 @@ async function revokeAccessGrant() {
 .tab-pane {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 8px 0;
+  gap: var(--space-5);
+  padding: var(--space-2) 0;
 }
 
 .env-meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
-  padding: 16px;
+  gap: var(--space-4);
+  padding: var(--space-4);
 }
 
 .meta-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .meta-item__label {
@@ -2162,7 +2162,7 @@ async function revokeAccessGrant() {
 
 .environment-id-details,
 .environment-id-input-details {
-  margin: 0 16px 16px;
+  margin: 0 var(--space-4) var(--space-4);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
 }
@@ -2174,14 +2174,14 @@ async function revokeAccessGrant() {
 
 .environment-id-details code {
   display: block;
-  margin-top: 6px;
+  margin-top: var(--space-2);
   overflow-wrap: anywhere;
   color: var(--md-sys-color-on-surface);
 }
 
 .environment-id-details span {
   display: block;
-  margin-top: 6px;
+  margin-top: var(--space-2);
 }
 
 .console-unauthorized-pane {
@@ -2189,8 +2189,8 @@ async function revokeAccessGrant() {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 48px 24px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
   text-align: center;
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -2209,27 +2209,27 @@ async function revokeAccessGrant() {
 .page-subtitle {
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
 }
 
 .section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-title-medium);
   color: var(--md-sys-color-on-surface);
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .section-subtitle {
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface);
-  margin: 16px 0 8px;
+  margin: var(--space-4) 0 var(--space-2);
 }
 
 .create-result {
-  margin-top: 12px;
-  padding: 10px 12px;
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-3);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-tertiary-container);
   color: var(--md-sys-color-on-tertiary-container);
@@ -2239,15 +2239,15 @@ async function revokeAccessGrant() {
 .create-result--ok {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .lifecycle-result {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .lifecycle-action-hint {
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
@@ -2259,8 +2259,8 @@ async function revokeAccessGrant() {
 .environment-selector {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 .environment-selector label {
@@ -2272,7 +2272,7 @@ async function revokeAccessGrant() {
   flex: 1;
   min-width: 0;
   height: 40px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -2289,15 +2289,15 @@ async function revokeAccessGrant() {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 48px 24px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
   text-align: center;
   color: var(--md-sys-color-on-surface-variant);
 }
 
 .env-card,
 .grant-card {
-  padding: 16px;
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -2307,8 +2307,8 @@ async function revokeAccessGrant() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 12px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
 }
 
 .env-id {
@@ -2318,8 +2318,8 @@ async function revokeAccessGrant() {
 }
 
 .env-runtime {
-  margin-left: 12px;
-  padding: 2px 8px;
+  margin-left: var(--space-3);
+  padding: 2px var(--space-2);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
@@ -2327,7 +2327,7 @@ async function revokeAccessGrant() {
 }
 
 .env-state {
-  padding: 4px 12px;
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   font: var(--md-sys-label-large);
   text-transform: capitalize;
@@ -2366,27 +2366,27 @@ async function revokeAccessGrant() {
 .env-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
 }
 
 .operation-current-panel {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .operation-current-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .operation-current-header > div {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .operation-current-label {
@@ -2400,7 +2400,7 @@ async function revokeAccessGrant() {
 }
 
 .operation-current-description {
-  margin: 16px 0;
+  margin: var(--space-4) 0;
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -2408,14 +2408,14 @@ async function revokeAccessGrant() {
 .operation-current-meta {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px 16px;
+  gap: var(--space-3) var(--space-4);
   margin: 0;
 }
 
 .operation-current-meta div {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .operation-current-meta dt {
@@ -2430,17 +2430,17 @@ async function revokeAccessGrant() {
 }
 
 .env-failed-panel {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .env-failed-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .evidence-hint {
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -2450,22 +2450,22 @@ async function revokeAccessGrant() {
 .console-freeze-notice {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 16px;
+  gap: var(--space-2);
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
 }
 
 .freeze-status-card {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .freeze-status-header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .freeze-status-label {
@@ -2493,8 +2493,8 @@ async function revokeAccessGrant() {
 .freeze-status-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 4px;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
 }
 
 .console-freeze-pane {
@@ -2510,7 +2510,7 @@ async function revokeAccessGrant() {
 }
 
 .console-freeze-notice {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
   align-items: flex-start;
 }
 
@@ -2520,15 +2520,15 @@ async function revokeAccessGrant() {
 }
 
 .freeze-confirm {
-  margin-top: 12px;
+  margin-top: var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
 }
 
 .freeze-manifest {
-  margin: 8px 0;
-  padding: 12px;
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface);
@@ -2537,21 +2537,21 @@ async function revokeAccessGrant() {
 }
 
 .freeze-manifest-group + .freeze-manifest-group {
-  margin-top: 12px;
+  margin-top: var(--space-3);
 }
 
 .freeze-manifest-group ul {
-  margin: 4px 0 0;
-  padding-left: 20px;
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-5);
 }
 
 .freeze-manifest-limits {
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
   color: var(--md-sys-color-on-surface-variant);
 }
 
 .freeze-manifest-details {
-  margin: 8px 0;
+  margin: var(--space-2) 0;
   font: var(--md-sys-body-small);
 }
 
@@ -2561,8 +2561,8 @@ async function revokeAccessGrant() {
 }
 
 .freeze-manifest-json {
-  margin: 8px 0 0;
-  padding: 12px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container);
   font: 12px/1.5 monospace;
@@ -2571,13 +2571,13 @@ async function revokeAccessGrant() {
 }
 
 .freeze-unavailable {
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
   color: var(--md-sys-color-error);
   font: var(--md-sys-body-small);
 }
 
 .freeze-confirm-hint {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -2585,97 +2585,40 @@ async function revokeAccessGrant() {
 .env-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-}
-
-.filled-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button.small {
-  height: 32px;
-  padding: 0 16px;
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.outlined-button {
-  height: 40px;
-  padding: 0 24px;
-  border: 1px solid var(--md-sys-color-outline);
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.outlined-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-button {
-  height: 40px;
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.text-button.error {
-  color: var(--md-sys-color-error);
-}
-
-.text-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  gap: var(--space-3);
 }
 
 .access-section {
-  margin-top: 24px;
+  margin-top: var(--space-6);
 }
 
 .console-section {
-  margin-top: 20px;
+  margin-top: var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .grant-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 16px;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
 }
 
 .access-grant-hint {
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
 
 .grant-result {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .grant-row {
   display: flex;
-  gap: 16px;
-  padding: 8px 0;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -2692,11 +2635,11 @@ async function revokeAccessGrant() {
 .endpoint-grants {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .tag {
-  padding: 4px 10px;
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
@@ -2707,7 +2650,7 @@ async function revokeAccessGrant() {
   display: inline-block;
   width: 8px;
   height: 8px;
-  margin-right: 6px;
+  margin-right: var(--space-2);
   border-radius: 50%;
   background: var(--md-sys-color-outline);
 }
@@ -2718,18 +2661,18 @@ async function revokeAccessGrant() {
 .health-dot--removed { background: var(--md-sys-color-outline); }
 
 .timeline-section {
-  margin-top: 24px;
+  margin-top: var(--space-6);
 }
 
 .runtime-access {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  margin-top: 20px;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
 }
 
 .access-card {
-  padding: 16px;
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -2738,33 +2681,33 @@ async function revokeAccessGrant() {
 .access-card__title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface);
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
 }
 
 .access-card__desc {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .access-card__hint {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-error);
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
 }
 
 .ssh-command {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 
 .ssh-command__text {
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container-highest);
   color: var(--md-sys-color-on-surface);
@@ -2775,29 +2718,29 @@ async function revokeAccessGrant() {
 .ssh-meta {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 12px;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
 }
 
 .freeze-section {
-  margin-top: 24px;
+  margin-top: var(--space-6);
 }
 
 .freeze-desc {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .freeze-result {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .evidence-card {
-  margin-top: 16px;
-  padding: 16px;
+  margin-top: var(--space-4);
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);

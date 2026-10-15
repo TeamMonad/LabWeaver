@@ -264,7 +264,7 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
 <style scoped>
 .labs-page {
   display: grid;
-  gap: 20px;
+  gap: var(--space-5);
 }
 
 .page-header,
@@ -272,7 +272,7 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .page-header h1,
@@ -294,7 +294,7 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
 }
 
 .eyebrow {
-  margin: 0 0 5px;
+  margin: 0 0 var(--space-1);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-medium);
   letter-spacing: 0.04em;
@@ -305,7 +305,7 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
 .release-card p,
 .empty-release p,
 .empty-context p {
-  margin: 6px 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
   line-height: 1.5;
@@ -313,21 +313,21 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
 
 .release-section {
   display: grid;
-  gap: 20px;
-  padding: 24px;
+  gap: var(--space-5);
+  padding: var(--space-6);
 }
 
 .release-list {
   display: grid;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .release-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 16px;
+  gap: var(--space-4);
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -335,7 +335,7 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
 
 .release-card__main {
   display: grid;
-  gap: 5px;
+  gap: var(--space-1);
   min-width: 0;
 }
 
@@ -343,14 +343,14 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .release-card__title {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .release-card h3 {
@@ -382,38 +382,13 @@ function runtimeLabel(runtimeKind: 'container' | 'virtual_machine') {
 .empty-context {
   display: grid;
   justify-items: start;
-  gap: 10px;
-  padding: 16px 0;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
 }
 
 .empty-release h3,
 .empty-context h2 {
   font: var(--md-sys-title-large);
-}
-
-.filled-button,
-.outlined-button,
-.text-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 40px;
-  padding: 0 17px;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  text-decoration: none;
-}
-
-.filled-button {
-  border: 1px solid var(--md-sys-color-primary);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.outlined-button {
-  flex: 0 0 auto;
-  border: 1px solid var(--md-sys-color-outline);
-  color: var(--md-sys-color-primary);
 }
 
 .release-state {

@@ -86,9 +86,9 @@ async function copy() {
 .copy-button {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   height: 40px;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border: 1px solid var(--md-sys-color-outline);
   border-radius: var(--md-sys-shape-full);
   background: transparent;
@@ -101,13 +101,13 @@ async function copy() {
   display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .copy-fallback {
   display: inline-flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   max-width: min(100%, 560px);
   color: var(--md-sys-color-error);
   font: var(--md-sys-body-small);
@@ -116,7 +116,7 @@ async function copy() {
 .copy-fallback__input {
   width: min(560px, 100%);
   min-height: 44px;
-  padding: 8px;
+  padding: var(--space-2);
   border: 1px solid var(--md-sys-color-error);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface);

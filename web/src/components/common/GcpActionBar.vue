@@ -70,10 +70,10 @@ defineEmits<{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 0 12px;
+  gap: var(--space-3);
+  padding: var(--space-2) 0 var(--space-3);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
   flex-wrap: wrap;
 }
 
@@ -82,16 +82,16 @@ defineEmits<{
 .gcp-action-bar__trailing {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
 .action-button {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   height: 32px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border-radius: var(--md-sys-shape-small);
   font: var(--md-sys-label-medium);
   font-weight: 500;
@@ -120,12 +120,12 @@ defineEmits<{
 .auto-refresh-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
   user-select: none;
-  margin-left: 4px;
+  margin-left: var(--space-1);
 }
 
 .auto-refresh-toggle input {

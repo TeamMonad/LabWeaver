@@ -32,8 +32,8 @@ withDefaults(defineProps<Props>(), {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 48px 24px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
   text-align: center;
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -55,8 +55,8 @@ withDefaults(defineProps<Props>(), {
 .placeholder-hint {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-tertiary-container);
   color: var(--md-sys-color-on-tertiary-container);

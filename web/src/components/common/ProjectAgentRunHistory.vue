@@ -163,23 +163,18 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.run-history { display: grid; gap: 14px; padding: 18px 20px; }
-.section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.run-history { display: grid; gap: var(--space-4); padding: var(--space-5) var(--space-5); }
+.section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-4); }
 .section-heading h3 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
-.section-heading p { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
-.run-history-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.run-history-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
-.run-history-item__main { min-width: 0; display: grid; gap: 5px; }
-.run-history-item__heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--md-sys-color-on-surface); }
+.section-heading p { margin: var(--space-2) 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
+.run-history-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.run-history-item { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.run-history-item__main { min-width: 0; display: grid; gap: var(--space-1); }
+.run-history-item__heading { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); color: var(--md-sys-color-on-surface); }
 .run-history-item__main p { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
-.history-empty { padding: 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
-.run-history-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
-.icon-button { display: inline-grid; place-items: center; width: 40px; height: 40px; border: 0; border-radius: 50%; background: transparent; color: var(--md-sys-color-on-surface-variant); cursor: pointer; }
-.outlined-button, .text-button { display: inline-flex; justify-content: center; align-items: center; gap: 8px; min-height: 40px; padding: 0 17px; border-radius: var(--md-sys-shape-full); font: var(--md-sys-label-large); cursor: pointer; }
-.outlined-button { border: 1px solid var(--md-sys-color-outline); background: transparent; color: var(--md-sys-color-primary); }
-.text-button { min-height: 32px; border: 0; background: transparent; color: var(--md-sys-color-primary); }
-.outlined-button:disabled, .text-button:disabled { opacity: .5; cursor: not-allowed; }
-.state-chip { display: inline-flex; width: fit-content; padding: 3px 8px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.history-empty { padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
+.run-history-pagination { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.state-chip { display: inline-flex; width: fit-content; padding: var(--space-1) var(--space-2); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .state-chip--succeeded { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .state-chip--failed, .state-chip--cancelled { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
 @media (max-width: 640px) {
