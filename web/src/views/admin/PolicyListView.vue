@@ -14,9 +14,8 @@
     <section class="project-strip md-card" aria-label="项目上下文">
       <label>
         <span>项目</span>
-        <select
+        <AppSelect
           v-model="selectedProjectId"
-          class="text-input"
           data-testid="policy-project-select"
           :disabled="projects.projects.kind !== 'success' || loading"
         >
@@ -24,7 +23,7 @@
           <option v-for="project in projectOptions" :key="project.id" :value="project.id">
             {{ project.name }}
           </option>
-        </select>
+        </AppSelect>
       </label>
       <span v-if="selectedProject" class="project-scope">
         {{ selectedProject.courseId ? `课程 ${selectedProject.courseId}` : '独立科研项目' }}
@@ -84,12 +83,12 @@
 
               <label>
                 <span>可用模型</span>
-                <select v-model="model" class="text-input" data-testid="policy-model-select" :disabled="saving" required>
+                <AppSelect v-model="model" data-testid="policy-model-select" :disabled="saving" required>
                   <option value="" disabled>选择模型</option>
                   <option v-for="option in options.models" :key="option.model" :value="option.model">
                     {{ option.label }}
                   </option>
-                </select>
+                </AppSelect>
               </label>
 
               <fieldset class="scope-fieldset">
@@ -179,6 +178,7 @@
 </template>
 
 <script setup lang="ts">
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -455,7 +455,6 @@ watch(selectedProjectId, () => {
 .empty-policy, .empty-page { display: grid; justify-items: center; gap: var(--space-3); text-align: center; color: var(--md-sys-color-on-surface-variant); }
 .empty-policy { padding: var(--space-6) var(--space-3); }
 .empty-policy p, .empty-page p { max-width: 520px; margin: 0; line-height: 1.5; }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: var(--space-2) 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .scope-fieldset, .budget-fieldset { display: grid; gap: var(--space-3); margin: 0; padding: var(--space-4); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); }
 .scope-fieldset legend, .budget-fieldset legend { padding: 0 var(--space-1); color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
 .authorization-field { display: flex !important; align-items: flex-start; gap: 9px !important; }

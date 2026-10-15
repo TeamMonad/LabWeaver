@@ -11,9 +11,9 @@
     <section class="project-strip md-card">
       <label>
         <span>项目</span>
-        <select v-model="selectedProjectId" class="text-input" :disabled="projects.projects.kind !== 'success'">
+        <AppSelect v-model="selectedProjectId" :disabled="projects.projects.kind !== 'success'">
           <option v-for="project in projectOptions" :key="project.id" :value="project.id">{{ project.name }} · {{ project.id }}</option>
-        </select>
+        </AppSelect>
       </label>
       <span v-if="selectedProject" class="project-scope">{{ selectedProject.courseId ? `课程 ${selectedProject.courseId}` : '独立科研项目' }}</span>
     </section>
@@ -71,13 +71,13 @@
           </div>
           <label>
             <span>已发布版本</span>
-            <select v-model="selectedReleaseKey" class="text-input" required :disabled="options.releases.kind !== 'success'">
+            <AppSelect v-model="selectedReleaseKey" required :disabled="options.releases.kind !== 'success'">
               <option value="">选择用于绑定的版本</option>
               <option v-if="selectedReleaseKey && !selectedRelease" :value="selectedReleaseKey">先前选择的版本（当前不可用）</option>
               <option v-for="release in releaseOptions" :key="releaseKey(release.id, release.version)" :value="releaseKey(release.id, release.version)">
                 {{ release.label }} · {{ release.runtimeKind }}
               </option>
-            </select>
+            </AppSelect>
             <small v-if="releaseSelectionMessage" class="field-note">{{ releaseSelectionMessage }}</small>
             <small v-else-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布版本。请联系课程教师发布模板，或先生成 Work 模板。</small>
             <div v-if="options.releases.kind === 'empty'" class="release-empty-next-step">
@@ -96,13 +96,13 @@
           <div class="two-columns">
             <label>
               <span>GPU 目录项（可选）</span>
-              <select v-model="selectedGpuCatalogId" class="text-input" :disabled="!selectedRelease">
+              <AppSelect v-model="selectedGpuCatalogId" :disabled="!selectedRelease">
                 <option value="">不申请 GPU</option>
                 <option v-if="selectedGpuCatalogId && !selectedGpu" :value="selectedGpuCatalogId">先前选择的 GPU（当前不可用）</option>
                 <option v-for="entry in gpuCatalogOptions" :key="entry.id" :value="entry.id">
                   {{ entry.class }} · {{ gpuModeLabel(entry.mode) }} · {{ entry.capacityUnits }} units
                 </option>
-              </select>
+              </AppSelect>
               <small v-if="gpuSelectionMessage" class="field-note">{{ gpuSelectionMessage }}</small>
               <small v-else-if="!selectedRelease" class="field-note">先选择已发布版本，再显示与运行时兼容的 GPU 目录项。</small>
               <small v-else-if="options.catalog.kind === 'success' && gpuCatalogOptions.length === 0" class="field-note">当前版本的运行时没有兼容的 GPU 目录项。</small>
@@ -192,6 +192,7 @@
 </template>
 
 <script setup lang="ts">
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -461,7 +462,6 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .request-form-card, .status-card { padding: var(--space-5); }
 .request-form { display: grid; gap: var(--space-4); margin-top: var(--space-5); }
 .two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: var(--space-2) 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .estimate-box { display: grid; gap: var(--space-1); padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .estimate-box strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .gpu-detail { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-body-small); }

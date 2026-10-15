@@ -11,9 +11,9 @@
     <section class="project-strip md-card">
       <label>
         <span>项目</span>
-        <select v-model="selectedProjectId" class="text-input" :disabled="projects.projects.kind !== 'success'">
+        <AppSelect v-model="selectedProjectId" :disabled="projects.projects.kind !== 'success'">
           <option v-for="project in projectOptions" :key="project.id" :value="project.id">{{ project.name }}</option>
-        </select>
+        </AppSelect>
       </label>
       <div v-if="selectedProject" class="project-summary">
         <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '可用' : '已归档' }}</span>
@@ -165,10 +165,10 @@
         <form class="config-form" @submit.prevent="startRun">
           <label>
             <span>Work 环境</span>
-            <select v-model="selectedEnvironmentId" class="text-input" :disabled="workEnvironments.environments.kind !== 'success'" required>
+            <AppSelect v-model="selectedEnvironmentId" :disabled="workEnvironments.environments.kind !== 'success'" required>
               <option value="" disabled>选择现有 Work 环境</option>
               <option v-for="environment in workEnvironments.environments.kind === 'success' ? workEnvironments.environments.data : []" :key="environment.id" :value="environment.id">{{ environment.displayLabel }} · {{ environmentStateLabel(environment.observedState) }}</option>
-            </select>
+            </AppSelect>
           </label>
           <div v-if="selectedEnvironment" class="readonly-meta">
             <span>Work 环境</span><span>{{ selectedEnvironment.displayLabel }}</span>
@@ -290,7 +290,7 @@
                 </label>
                 <label>
                   <span>批准有效期</span>
-                  <input v-model="approvalExpiresAt" class="text-input" type="datetime-local" required />
+                  <AppDateTimePicker v-model="approvalExpiresAt" required />
                 </label>
                 <button type="submit" class="filled-button" :disabled="!canApprovePlan || approving">
                   {{ approving ? '提交批准中…' : '批准并执行 Work 配置' }}
@@ -305,6 +305,8 @@
 </template>
 
 <script setup lang="ts">
+import AppDateTimePicker from '@/components/form/AppDateTimePicker.vue'
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, inject, ref, watch } from 'vue'
 import { RouterLink, routeLocationKey, routerKey } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -838,7 +840,6 @@ function trackStateLabel(state: string) {
 .package-upload-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
 .package-upload-success { margin: 0; color: var(--md-sys-color-tertiary); font: var(--md-sys-body-small); }
 .package-upload-success .advanced-details { margin-top: var(--space-2); }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: var(--space-2) 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .policy-summary, .run-overview, .plan-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2) var(--space-4); margin: var(--space-5) 0; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); font: var(--md-sys-body-small); }
 .policy-summary span, .run-overview span, .plan-meta > div > span:first-child { color: var(--md-sys-color-on-surface-variant); }
 .policy-summary .advanced-details, .run-overview .advanced-details, .plan-meta > .advanced-details { grid-column: 1 / -1; }

@@ -10,9 +10,8 @@
       <div class="review-context md-card">
         <label class="context-field">
           <span>Project</span>
-          <select
+          <AppSelect
             v-model="selectedProjectId"
-            class="text-input"
             aria-label="选择项目"
             :disabled="projects.projects.kind !== 'success'"
           >
@@ -21,7 +20,7 @@
               :key="project.id"
               :value="project.id"
             >{{ project.name }}</option>
-          </select>
+          </AppSelect>
         </label>
         <label class="context-field">
           <span>AgentRun ID</span>
@@ -547,6 +546,7 @@
 </template>
 
 <script setup lang="ts">
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -706,7 +706,6 @@ function publicationStateLabel(state: AuthoringPublicationState): string {
 .page-subtitle { margin: var(--space-1) 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
 .review-context { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; gap: var(--space-3); align-items: end; padding: var(--space-4); min-width: min(100%, 720px); }
 .context-field, .reason-field { display: flex; flex-direction: column; gap: var(--space-2); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
-.text-input { box-sizing: border-box; min-height: 40px; padding: 0 var(--space-3); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .run-id-input { min-width: 0; }
 .md-card { border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); background: var(--md-sys-color-surface-container-low); }
 .run-summary, .candidate-card, .approval-card { padding: var(--space-4); }
