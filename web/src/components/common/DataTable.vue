@@ -7,6 +7,8 @@
             v-for="column in columns"
             :key="column.key"
             :style="{ width: column.width, minWidth: column.minWidth }"
+            :class="alignClass(column)"
+            scope="col"
           >
             {{ column.title }}
           </th>
@@ -22,7 +24,7 @@
           <td :colspan="columns.length" class="data-table__state">
             <slot name="empty">
               <div class="empty-cell">
-                <SvgIcon name="info" size="lg" aria-hidden="true" />
+                <SvgIcon name="inbox" size="lg" aria-hidden="true" />
                 <span>{{ emptyText }}</span>
               </div>
             </slot>
@@ -35,7 +37,12 @@
           :class="{ 'data-table__row--interactive': interactive }"
           @click="interactive && $emit('row-click', row)"
         >
-          <td v-for="column in columns" :key="column.key">
+          <td
+            v-for="column in columns"
+            :key="column.key"
+            :class="[alignClass(column, row[column.key]), { 'data-table__cell--truncate': column.truncate }]"
+            :title="column.truncate && isPrimitive(row[column.key]) ? String(row[column.key]) : undefined"
+          >
             <slot :name="column.key" :row="row" :value="row[column.key]">
               {{ formatCell(row[column.key]) }}
             </slot>
@@ -55,6 +62,10 @@ export interface DataTableColumn<T extends object = Record<string, unknown>> {
   title: string
   width?: string
   minWidth?: string
+  /** Horizontal alignment; numeric cells default to `end`. */
+  align?: 'start' | 'center' | 'end'
+  /** Single-line with ellipsis; full value in the native tooltip. */
+  truncate?: boolean
 }
 
 interface Props {
@@ -89,6 +100,15 @@ function rowKey(row: any, index: number): string {
   return `row-${index}`
 }
 
+function alignClass(column: DataTableColumn<any>, value?: unknown): string | undefined {
+  const align = column.align ?? (typeof value === 'number' || typeof value === 'bigint' ? 'end' : undefined)
+  return align && align !== 'start' ? `data-table__cell--${align}` : undefined
+}
+
+function isPrimitive(value: unknown): boolean {
+  return ['string', 'number', 'bigint'].includes(typeof value)
+}
+
 function formatCell(value: unknown): string {
   if (value === null || value === undefined) return '—'
   return String(value)
@@ -99,7 +119,18 @@ function formatCell(value: unknown): string {
 .data-table {
   overflow-x: auto;
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: var(--md-sys-shape-medium);
+  border-radius: var(--md-sys-shape-large);
+  background: var(--md-sys-color-surface);
+  /* Scroll shadows hint at hidden columns on narrow screens. */
+  background-image:
+    linear-gradient(to right, var(--md-sys-color-surface), var(--md-sys-color-surface)),
+    linear-gradient(to right, var(--md-sys-color-surface), var(--md-sys-color-surface)),
+    linear-gradient(to right, hsl(var(--app-shadow-color) / 0.10), transparent),
+    linear-gradient(to left, hsl(var(--app-shadow-color) / 0.10), transparent);
+  background-position: left center, right center, left center, right center;
+  background-repeat: no-repeat;
+  background-size: 24px 100%, 24px 100%, 12px 100%, 12px 100%;
+  background-attachment: local, local, scroll, scroll;
 }
 
 .data-table:focus-visible {
@@ -110,28 +141,48 @@ function formatCell(value: unknown): string {
 table {
   width: 100%;
   min-width: 600px;
-  border-collapse: collapse;
-  font: var(--md-sys-body-medium);
+  border-collapse: separate;
+  border-spacing: 0;
   color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-body-medium);
+  font-variant-numeric: tabular-nums;
 }
 
 th,
 td {
   padding: var(--space-3) var(--space-4);
-  text-align: left;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  text-align: start;
+  vertical-align: middle;
 }
 
 th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   height: 40px;
-  background: var(--md-sys-color-surface-container);
+  padding-block: var(--space-2);
+  background: var(--md-sys-color-surface-container-low);
   color: var(--md-sys-color-on-surface-variant);
-  font: var(--md-sys-label-large);
+  font: var(--md-sys-label-medium);
+  letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
-tr:last-child td {
+td {
+  height: 52px;
+}
+
+tbody tr:last-child td {
   border-bottom: none;
+}
+
+.data-table__row {
+  transition: background-color var(--motion-duration-fast) var(--motion-ease-out);
+}
+
+.data-table__row:hover {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 3%, transparent);
 }
 
 .data-table__row--interactive {
@@ -139,7 +190,22 @@ tr:last-child td {
 }
 
 .data-table__row--interactive:hover {
-  background: var(--md-sys-color-surface-container);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 6%, transparent);
+}
+
+.data-table__cell--end {
+  text-align: end;
+}
+
+.data-table__cell--center {
+  text-align: center;
+}
+
+.data-table__cell--truncate {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .data-table__state {
@@ -151,7 +217,7 @@ tr:last-child td {
   flex-direction: column;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-12) var(--space-6);
+  padding: var(--space-10) var(--space-6);
   color: var(--md-sys-color-on-surface-variant);
 }
 

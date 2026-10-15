@@ -12,6 +12,11 @@
       </button>
     </div>
 
+    <!-- Narrow screens hide the top-bar project selector; surface it here. -->
+    <div v-if="isModal" class="drawer-project">
+      <GcpProjectSelector class="drawer-project__selector" />
+    </div>
+
     <nav class="drawer-nav" aria-label="任务导航">
       <section
         v-for="group in visibleGroups"
@@ -72,6 +77,7 @@
 import { computed } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useProjects } from '@/composables/useProjects'
 import { navigationGroupsForRoles, navigationTarget, rolesFromProfile } from '@/utils/navigation'
@@ -259,6 +265,42 @@ function isActive(path: string) {
 @media (min-width: 840px) {
   .drawer-header {
     display: none;
+  }
+}
+
+.drawer-project {
+  display: none;
+  padding: 0 var(--space-3) var(--space-3);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.drawer-project__selector {
+  width: 100%;
+}
+
+.drawer-project__selector :deep(.selector-trigger) {
+  width: 100%;
+  max-width: none;
+  height: 44px;
+}
+
+.drawer-project__selector :deep(.trigger-label) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.drawer-project__selector :deep(.trigger-primary) {
+  max-width: 100%;
+}
+
+.drawer-project__selector :deep(.trigger-arrow) {
+  margin-inline-start: auto;
+}
+
+@media (max-width: 599px) {
+  .drawer-project {
+    display: block;
   }
 }
 </style>

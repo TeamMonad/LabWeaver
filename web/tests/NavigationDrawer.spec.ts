@@ -8,7 +8,15 @@ const authState = vi.hoisted(() => ({
   isAuthenticated: { value: true },
 }))
 
-const projectsState = vi.hoisted(() => ({ selectedProjectId: 'project-1' }))
+// The compact drawer embeds GcpProjectSelector, which reads the project list state.
+const projectsState = vi.hoisted(() => ({
+  selectedProjectId: 'project-1',
+  selectedProject: null,
+  projects: { kind: 'idle' },
+  settledProjects: { kind: 'idle' },
+  load: () => Promise.resolve(),
+  select: () => undefined,
+}))
 
 vi.mock('@/composables/useAuth', () => ({
   useAuth: () => authState,
@@ -112,5 +120,17 @@ describe('NavigationDrawer', () => {
       expect(document.body.querySelector('.navigation-drawer')).toBeNull()
       wrapper.unmount()
     })
+
+    it('offers the project selector inside the compact drawer', async () => {
+      const wrapper = await mountModal(true)
+      const dialog = document.body.querySelector('[role="dialog"]')
+      expect(dialog?.querySelector('.drawer-project .gcp-project-selector')).not.toBeNull()
+      wrapper.unmount()
+    })
+  })
+
+  it('keeps the project selector in the top bar when the drawer is docked', async () => {
+    const { wrapper } = await createWrapper()
+    expect(wrapper.find('.drawer-project').exists()).toBe(false)
   })
 })
