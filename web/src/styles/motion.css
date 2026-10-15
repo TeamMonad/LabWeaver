@@ -1,0 +1,98 @@
+/*
+ * Motion primitives. Ease-out for anything the user triggers, never ease-in,
+ * specify properties instead of `all`, stay under 300ms.
+ */
+
+/* Press feedback on native buttons (emil-design-eng: scale 0.97, ~100ms). */
+button:not(:disabled) {
+  transition:
+    transform var(--motion-duration-instant) var(--motion-ease-out),
+    background-color var(--motion-duration-fast) var(--motion-ease-out),
+    border-color var(--motion-duration-fast) var(--motion-ease-out),
+    color var(--motion-duration-fast) var(--motion-ease-out),
+    box-shadow var(--motion-duration-fast) var(--motion-ease-out);
+}
+
+button:not(:disabled):active {
+  transform: scale(var(--motion-press-scale));
+}
+
+/* Vue <Transition name="fade|rise|scale"> presets. */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity var(--motion-duration-base) var(--motion-ease-out);
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.rise-enter-active,
+.rise-leave-active {
+  transition:
+    opacity var(--motion-duration-base) var(--motion-ease-out),
+    transform var(--motion-duration-base) var(--motion-ease-out);
+}
+
+.rise-enter-from,
+.rise-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.scale-enter-active,
+.scale-leave-active {
+  transition:
+    opacity var(--motion-duration-fast) var(--motion-ease-out),
+    transform var(--motion-duration-fast) var(--motion-ease-out);
+}
+
+.scale-enter-from,
+.scale-leave-to {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+/* Reka UI popper content grows from its trigger. */
+[data-reka-popper-content-wrapper] > * {
+  transform-origin: var(--reka-popper-transform-origin);
+}
+
+/* Skeleton shimmer for loading states. */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-surface-container-high);
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--md-sys-color-surface) 60%, transparent), transparent);
+  animation: skeleton-sweep 1.4s var(--motion-ease-in-out) infinite;
+}
+
+@keyframes skeleton-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  button:not(:disabled):active {
+    transform: none;
+  }
+}

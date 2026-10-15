@@ -98,7 +98,7 @@ defineEmits<{
   text-decoration: none;
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.15s ease, opacity 0.15s ease;
+  transition: background-color var(--motion-duration-fast) var(--motion-ease-out), opacity var(--motion-duration-fast) var(--motion-ease-out);
   border: 1px solid transparent;
 }
 

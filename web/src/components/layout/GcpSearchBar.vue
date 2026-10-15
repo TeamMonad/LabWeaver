@@ -235,7 +235,7 @@ onScopeDispose(() => {
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container-high);
   border: 1px solid transparent;
-  transition: all 0.2s ease;
+  transition: background-color var(--motion-duration-fast) var(--motion-ease-out), border-color var(--motion-duration-fast) var(--motion-ease-out), box-shadow var(--motion-duration-fast) var(--motion-ease-out);
 }
 
 .search-input-box:hover {
@@ -341,7 +341,7 @@ onScopeDispose(() => {
   background: transparent;
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background-color var(--motion-duration-fast) var(--motion-ease-out);
 }
 
 .dropdown-item:hover,

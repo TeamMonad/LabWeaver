@@ -2106,7 +2106,7 @@ async function revokeAccessGrant() {
   cursor: pointer;
   white-space: nowrap;
   position: relative;
-  transition: color 0.15s;
+  transition: color var(--motion-duration-fast) var(--motion-ease-out);
 }
 
 .detail-tab:hover {
