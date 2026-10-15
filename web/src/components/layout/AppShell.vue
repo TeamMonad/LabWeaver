@@ -17,7 +17,14 @@
     />
 
     <main ref="appMain" class="app-main">
-      <RouterView />
+      <!--
+        App.vue supplies a sessionEpoch-keyed RouterView here; rendering it (instead of a
+        private unkeyed RouterView) is what drops the old actor's page after a session switch.
+        Callers without a slot (fixture preview) keep the plain router outlet.
+      -->
+      <slot>
+        <RouterView />
+      </slot>
     </main>
   </div>
 </template>
