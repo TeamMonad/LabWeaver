@@ -169,8 +169,43 @@ first context in the existing command JSON. Replay cannot replace it. Legacy com
 without that upstream evidence return a null context; model consumers must reject it rather than
 derive a session or deadline from the actor or service token.
 
-Facts and context are not visibility or egress grants. Hidden or unknown rubric permission must be
-rejected before object reads; fresh user/object authorization remains required.
+Access supplies this header from the verified original request and authorization decision.
+Evaluation persists the first value; it cannot replace it when another session replays the request.
+Facts and context are not visibility or egress grants. Hidden or unknown rubric permission
+must be rejected before object reads; fresh user/object authorization remains required.
+
+### Frozen advisory and parent task admission
+
+Before archive or rubric reads, Evaluation obtains the original context from its frozen ledger
+and calls Control's `POST /internal/v1/authoring/frozen-model-input-authorizations` with the
+existing `control.authoring.read` permission. It compares the returned binding with the exact
+freeze, manifest, archive/file hashes, Environment and Evaluation releases, separate rubric
+package/object/hash and permission reference, policy and selection. It forwards that unchanged
+binding in required `InternalAgentLlmReviewRequest.inputAuthorization`.
+
+Control uses the task-limited metadata route
+`GET /internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`.
+This route requires the existing `evaluation.control.invoke`, the original scope/owner headers
+and If-Match, plus one `x-labweaver-evaluation-lease-sha256` header. The response has exactly the
+original fact fields. No raw lease token, worker credentials or content is returned. Evaluation
+checks the actual run/step/current attempt, owner/scope/freeze/release, durable cancellation,
+current database lease digest and expiry, and original deadline. Unknown or inactive parents
+are refused. The ordinary metadata route cannot substitute for task admission.
+
+`parentLeaseSha256` uses the shared hash function on the actual fenced Evaluation lease token.
+The first request and selection digest retain it. Worker lease rotation invalidates the old
+binding even when taskRunId is unchanged. Recovery can reconcile an existing Agent receipt
+and its observed usage; it cannot refresh the old binding to permit another send.
+
+Before a full review request exists, immutable attempt creation time plus the existing five-minute
+window fixes the deadline. After the intent is stored, its original deadline is reused. Rechecks
+do not extend it. The current parent is checked before each content read, after preparation and
+before a missing Agent receipt permits sending. Initial refusal causes zero reads and sends;
+revocation during preparation prevents subsequent actions but cannot undo completed reads.
+Agent's Control rechecks before its first model call and every repair use the same parent path,
+so they do not depend on the cancellation RPC arriving first. Original content, context and
+deadline remain in the existing execution-intent JSON; response loss does not cause a new read
+or a duplicate create when the original receipt already exists.
 
 ## Stable failure diagnostics
 

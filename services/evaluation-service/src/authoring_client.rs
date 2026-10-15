@@ -18,7 +18,9 @@ use auth::{ServiceTokenClient, ServiceTokenClientError};
 use contracts::authoring::ProjectLlmEgressPolicy;
 use contracts::http::{
     AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery,
-    EnvironmentPublicationAdmissionQuery,
+    CreateFrozenModelInputAuthorizationRequest, EnvironmentPublicationAdmissionQuery,
+    ModelInputAuthorizationBinding, ModelInputAuthorizationResolution,
+    ModelInputAuthorizationResolveRequest, ModelInputAuthorizationSource,
 };
 use contracts::{ApprovalId, ProjectId, ReleaseId};
 use futures_util::StreamExt;
@@ -91,6 +93,7 @@ pub struct AuthoringAdmissionClient {
     token_client: Arc<ServiceTokenClient>,
     audience: String,
     scopes: BTreeSet<String>,
+    max_request_bytes: usize,
     max_response_bytes: usize,
 }
 
@@ -122,12 +125,15 @@ impl AuthoringAdmissionClient {
         validate_scopes(&scopes)?;
         let max_response_bytes = usize::try_from(configuration.max_response_bytes)
             .map_err(|_| AuthoringAdmissionClientError::Configuration)?;
+        let max_request_bytes = usize::try_from(configuration.max_request_bytes)
+            .map_err(|_| AuthoringAdmissionClientError::Configuration)?;
         Ok(Self {
             base_uri: configuration.base_uri,
             client,
             token_client,
             audience: configuration.audience,
             scopes,
+            max_request_bytes,
             max_response_bytes,
         })
     }
@@ -351,10 +357,134 @@ impl AuthoringAdmissionClient {
         Ok(policy)
     }
 
+    /// Gets current Control authority for the first persisted frozen context, before contents.
+    pub async fn authorize_frozen_inputs(
+        &self,
+        request: &CreateFrozenModelInputAuthorizationRequest,
+    ) -> Result<ModelInputAuthorizationBinding, AuthoringAdmissionClientError> {
+        request
+            .validate()
+            .map_err(|_| AuthoringAdmissionClientError::RequestInvalid)?;
+        validate_model_paths(&request.selected_paths)?;
+        let binding = self
+            .model_input_post(
+                "internal/v1/authoring/frozen-model-input-authorizations",
+                request,
+            )
+            .await?
+            .binding;
+        binding
+            .validate()
+            .map_err(|_| AuthoringAdmissionClientError::ResponseInvalid)?;
+        let ModelInputAuthorizationSource::FrozenSubmission(source) = &binding.source else {
+            return Err(AuthoringAdmissionClientError::ResponseInvalid);
+        };
+        if binding.context() != request.input_authorization_context
+            || source.task_run_id != request.task_run_id
+            || source.parent_lease_sha256 != request.parent_lease_sha256
+            || source.frozen_submission_id != request.frozen_submission_id
+            || source.evaluation_release_id != request.evaluation_release_id
+            || source.evaluation_release_revision != request.evaluation_release_revision
+            || source.rubric_permission.is_none()
+        {
+            return Err(AuthoringAdmissionClientError::ResponseInvalid);
+        }
+        Ok(binding)
+    }
+
+    /// Rechecks the original binding; a different current binding cannot refresh the old request.
+    pub async fn recheck_frozen_inputs(
+        &self,
+        binding: &ModelInputAuthorizationBinding,
+        selected_paths: &[String],
+    ) -> Result<(), AuthoringAdmissionClientError> {
+        binding
+            .validate()
+            .map_err(|_| AuthoringAdmissionClientError::RequestInvalid)?;
+        validate_model_paths(selected_paths)?;
+        if !matches!(
+            binding.source,
+            ModelInputAuthorizationSource::FrozenSubmission(_)
+        ) {
+            return Err(AuthoringAdmissionClientError::RequestInvalid);
+        }
+        let request = ModelInputAuthorizationResolveRequest {
+            binding: binding.clone(),
+            selected_paths: selected_paths.to_vec(),
+        };
+        let resolved = self
+            .model_input_post(
+                "internal/v1/authoring/model-input-authorizations/resolve",
+                &request,
+            )
+            .await?;
+        if resolved.binding != *binding {
+            return Err(AuthoringAdmissionClientError::ResponseInvalid);
+        }
+        Ok(())
+    }
+
+    async fn model_input_post<T: Serialize>(
+        &self,
+        path: &str,
+        request: &T,
+    ) -> Result<ModelInputAuthorizationResolution, AuthoringAdmissionClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|_| AuthoringAdmissionClientError::RequestInvalid)?;
+        if body.len() > self.max_request_bytes {
+            return Err(AuthoringAdmissionClientError::RequestInvalid);
+        }
+        let url = self
+            .base_uri
+            .join(path)
+            .map_err(|_| AuthoringAdmissionClientError::Configuration)?;
+        let mut headers = HeaderMap::new();
+        self.token_client
+            .bearer_auth_for(&mut headers, &self.audience, &self.scopes)
+            .await
+            .map_err(AuthoringAdmissionClientError::Token)?;
+        let response = self
+            .client
+            .post(url)
+            .headers(headers)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| AuthoringAdmissionClientError::Transport)?;
+        match response.status() {
+            StatusCode::OK => {}
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                return Err(AuthoringAdmissionClientError::Denied);
+            }
+            StatusCode::TOO_MANY_REQUESTS => {
+                return Err(AuthoringAdmissionClientError::Unavailable);
+            }
+            status if status.is_server_error() => {
+                return Err(AuthoringAdmissionClientError::Unavailable);
+            }
+            _ => return Err(AuthoringAdmissionClientError::Rejected),
+        }
+        decode_response(&read_bounded_body(response, self.max_response_bytes).await?)
+    }
+
     #[must_use]
     pub fn audience(&self) -> &str {
         &self.audience
     }
+}
+
+fn validate_model_paths(paths: &[String]) -> Result<(), AuthoringAdmissionClientError> {
+    let mut seen = BTreeSet::new();
+    if paths.is_empty()
+        || paths.len() > contracts::http::InternalAgentLlmReviewRequest::MAX_FILES
+        || paths
+            .iter()
+            .any(|path| !seen.insert(path) || contracts::validate_relative_path(path).is_err())
+    {
+        return Err(AuthoringAdmissionClientError::RequestInvalid);
+    }
+    Ok(())
 }
 
 fn validate_scopes(scopes: &BTreeSet<String>) -> Result<(), AuthoringAdmissionClientError> {

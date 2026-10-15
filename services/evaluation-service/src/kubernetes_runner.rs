@@ -25,7 +25,8 @@ use contracts::{
     http::RecordResourceUsageRequest,
     http::{
         AgentLlmReviewFile, AgentLlmReviewRubric, AgentLlmReviewState,
-        InternalAgentLlmReviewRequest,
+        CreateFrozenModelInputAuthorizationRequest, InternalAgentLlmReviewRequest,
+        ModelInputAuthorizationBinding, ModelInputAuthorizationSource,
     },
     resource::WorkloadResources,
     submission::FrozenSubmission,
@@ -1138,7 +1139,9 @@ impl KubernetesEvaluationRunner {
         }
         let key = format!("evaluation-llm-{}", context.lease.task_run_id);
         let cancel_key = format!("{key}-cancel");
-        let mut receipt = self.load_or_enqueue_advisory(&request, &key).await?;
+        let mut receipt = self
+            .load_or_enqueue_advisory(context, &request, &key)
+            .await?;
         let (receipt, started_at, finished_at) = self
             .observe_advisory(context, &request, &cancel_key, &mut receipt)
             .await?;
@@ -1184,6 +1187,7 @@ impl KubernetesEvaluationRunner {
     /// an explicit missing receipt permits the original immutable request to be posted.
     async fn load_or_enqueue_advisory(
         &self,
+        context: &EvaluationAttemptContext,
         request: &InternalAgentLlmReviewRequest,
         idempotency_key: &str,
     ) -> Result<contracts::http::InternalAgentLlmReviewReceipt, ExecutionError> {
@@ -1195,11 +1199,24 @@ impl KubernetesEvaluationRunner {
             .await
         {
             Ok(receipt) => receipt,
-            Err(AgentClientError::ReviewMissing) => self
-                .agent
-                .enqueue(request, idempotency_key)
-                .await
-                .map_err(|error| ExecutionError::Backend(error.to_string()))?,
+            Err(AgentClientError::ReviewMissing) => {
+                let paths = request
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect::<Vec<_>>();
+                self.recheck_advisory_inputs(
+                    context,
+                    request.deadline_at,
+                    &request.input_authorization,
+                    &paths,
+                )
+                .await?;
+                self.agent
+                    .enqueue(request, idempotency_key)
+                    .await
+                    .map_err(|error| ExecutionError::Backend(error.to_string()))?
+            }
             Err(error) => return Err(ExecutionError::Backend(error.to_string())),
         };
         validate_advisory_receipt_hash(request, expected_request_sha256, &receipt)?;
@@ -1219,6 +1236,7 @@ impl KubernetesEvaluationRunner {
                 "advisory_output_mode_invalid".to_owned(),
             ));
         }
+        validate_advisory_context(context, frozen, include, rubric, output_mode)?;
         validate_advisory_selection(
             context
                 .release
@@ -1244,6 +1262,51 @@ impl KubernetesEvaluationRunner {
         policy
             .validate_ownership(context.run.project_id, context.run.course_id)
             .map_err(|_| ExecutionError::IdentityMismatch)?;
+        let deadline_at = self
+            .freezes
+            .model_input_task_deadline(
+                frozen.id,
+                frozen.project_id,
+                frozen.course_id,
+                frozen.actor_id,
+                context.release.id,
+                context.release.revision,
+                context.lease.task_run_id,
+                &contracts::http::model_input_parent_lease_sha256(context.lease.lease_token()),
+            )
+            .await
+            .map_err(|_| ExecutionError::Backend("advisory_parent_admission_denied".to_owned()))?;
+        self.check_advisory_preparation(context, deadline_at)
+            .await?;
+        let facts = self
+            .freezes
+            .model_input_facts(
+                frozen.id,
+                frozen.project_id,
+                frozen.course_id,
+                frozen.actor_id,
+                context.release.id,
+                context.release.revision,
+            )
+            .await
+            .map_err(|_| ExecutionError::Backend("advisory_input_facts_unavailable".to_owned()))?;
+        let authorization_request = frozen_input_request(context, frozen, include, &facts)?;
+        let input_authorization = self
+            .authoring
+            .authorize_frozen_inputs(&authorization_request)
+            .await
+            .map_err(|error| ExecutionError::Backend(error.to_string()))?;
+        validate_frozen_input_binding(
+            &input_authorization,
+            &authorization_request,
+            frozen,
+            &facts,
+            &package.package,
+            rubric_file,
+            &policy,
+        )?;
+        self.recheck_advisory_inputs(context, deadline_at, &input_authorization, include)
+            .await?;
         let archive = self.load_frozen_archive(frozen).await?;
         let mut paths = BTreeSet::new();
         let files = include
@@ -1275,17 +1338,15 @@ impl KubernetesEvaluationRunner {
         if files.is_empty() {
             return Err(ExecutionError::Backend("advisory_include_empty".to_owned()));
         }
+        self.recheck_advisory_inputs(context, deadline_at, &input_authorization, include)
+            .await?;
         let rubric_bytes = self.load_package_file(&package, rubric_file).await?;
         let rubric_content = String::from_utf8(rubric_bytes)
             .map_err(|_| ExecutionError::Backend("advisory_rubric_not_utf8".to_owned()))?;
-        let now = self
-            .control
-            .authority_now()
-            .await
-            .map_err(ExecutionError::Control)?;
-        let deadline_at = contracts::UtcTimestamp::from_utc(now.get() + time::Duration::minutes(5))
-            .map_err(|_| ExecutionError::Backend("advisory_deadline_invalid".to_owned()))?;
+        self.recheck_advisory_inputs(context, deadline_at, &input_authorization, include)
+            .await?;
         let request = InternalAgentLlmReviewRequest {
+            input_authorization,
             task_run_id: context.lease.task_run_id,
             project_id: context.run.project_id,
             course_id: context.run.course_id,
@@ -1305,6 +1366,88 @@ impl KubernetesEvaluationRunner {
             .validate()
             .map_err(|_| ExecutionError::Backend("advisory_request_invalid".to_owned()))?;
         Ok(request)
+    }
+
+    async fn recheck_advisory_inputs(
+        &self,
+        context: &EvaluationAttemptContext,
+        deadline_at: contracts::UtcTimestamp,
+        binding: &ModelInputAuthorizationBinding,
+        paths: &[String],
+    ) -> Result<(), ExecutionError> {
+        if !matches!(&binding.source,ModelInputAuthorizationSource::FrozenSubmission(source)
+            if source.parent_lease_sha256==contracts::http::model_input_parent_lease_sha256(context.lease.lease_token()))
+        {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        self.check_advisory_preparation(context, deadline_at)
+            .await?;
+        self.authoring
+            .recheck_frozen_inputs(binding, paths)
+            .await
+            .map_err(|error| ExecutionError::Backend(error.to_string()))?;
+        self.check_advisory_preparation(context, deadline_at).await
+    }
+
+    async fn check_advisory_preparation(
+        &self,
+        context: &EvaluationAttemptContext,
+        deadline_at: contracts::UtcTimestamp,
+    ) -> Result<(), ExecutionError> {
+        if context.lease_lost.is_cancelled() {
+            return Err(ExecutionError::LeaseLost);
+        }
+        if context.cancellation.is_cancelled() {
+            return Err(TaskResourceError::Cancelled.into());
+        }
+        let run = self
+            .control
+            .load_run(context.lease.run_id)
+            .await
+            .map_err(ExecutionError::Control)?;
+        if run.cancellation_requested
+            || run.state == contracts::evaluation::EvaluationRunState::Cancelling
+        {
+            return Err(TaskResourceError::Cancelled.into());
+        }
+        if run.state != contracts::evaluation::EvaluationRunState::Running
+            || run.id != context.run.id
+            || run.project_id != context.run.project_id
+            || run.course_id != context.run.course_id
+            || run.actor_id != context.run.actor_id
+            || run.frozen_submission_id != context.run.frozen_submission_id
+            || run.release_id != context.release.id
+            || run.release_revision != context.release.revision
+            || run.identity != context.run.identity
+            || !run.steps.iter().any(|step| {
+                step.id == context.lease.step_run_id
+                    && step.step_id == context.step.id()
+                    && step.revision == context.lease.revision
+                    && step.current_attempt == context.lease.attempt
+                    && step.state == contracts::evaluation::EvaluationStepRunState::Running
+            })
+        {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        if !self
+            .freezes
+            .model_input_task_is_active(&context.lease)
+            .await
+            .map_err(|_| ExecutionError::Backend("advisory_task_facts_unavailable".to_owned()))?
+        {
+            return Err(ExecutionError::LeaseLost);
+        }
+        let now = self
+            .control
+            .authority_now()
+            .await
+            .map_err(ExecutionError::Control)?;
+        if now >= deadline_at {
+            return Err(ExecutionError::Backend(
+                "advisory_deadline_elapsed".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn observe_advisory(
@@ -2746,6 +2889,162 @@ fn parse_advisory_recovery_request(
     Ok(request)
 }
 
+fn validate_advisory_context(
+    context: &EvaluationAttemptContext,
+    frozen: &FrozenSubmission,
+    include: &[String],
+    rubric: &str,
+    output_mode: AdvisoryOutputMode,
+) -> Result<(), ExecutionError> {
+    let expected = StepExecutionPlan::Advisory {
+        include: include.to_vec(),
+        rubric: rubric.to_owned(),
+        output_mode,
+    };
+    if context.run.id != context.lease.run_id
+        || context.run.project_id != context.lease.project_id
+        || context.run.course_id != context.lease.course_id
+        || context.run.release_id != context.release.id
+        || context.run.release_revision != context.release.revision
+        || context.run.frozen_submission_id != frozen.id
+        || context.run.actor_id != frozen.actor_id
+        || context.run.project_id != frozen.project_id
+        || context.run.course_id != frozen.course_id
+        || context.step.id() != context.lease.step_id
+        || context.execution_plan != expected
+        || !context
+            .release
+            .evaluation_spec
+            .body()
+            .steps()
+            .contains(&context.step)
+        || crate::execution::plan_deterministic_step(&context.step)? != expected
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn frozen_input_request(
+    context: &EvaluationAttemptContext,
+    frozen: &FrozenSubmission,
+    include: &[String],
+    facts: &serde_json::Value,
+) -> Result<CreateFrozenModelInputAuthorizationRequest, ExecutionError> {
+    let manifest: contracts::submission::SubmissionManifest =
+        serde_json::from_value(facts["manifest"].clone())
+            .map_err(|_| ExecutionError::IdentityMismatch)?;
+    let hash = Sha256Digest::of_canonical(&manifest)
+        .map_err(|_| ExecutionError::IdentityMismatch)?
+        .to_string();
+    if facts["frozenSubmissionId"] != serde_json::json!(frozen.id)
+        || facts["projectId"] != serde_json::json!(frozen.project_id)
+        || facts["courseId"] != serde_json::json!(frozen.course_id)
+        || facts["ownerActorId"] != serde_json::json!(frozen.actor_id)
+        || facts["manifestRevision"] != serde_json::json!(frozen.manifest_revision)
+        || facts["manifestSha256"] != hash
+        || facts["archive"] != serde_json::json!(frozen.object)
+        || facts["contentSha256"] != frozen.content_sha256
+        || facts["files"] != serde_json::json!(frozen.files)
+        || facts["environment"] != serde_json::json!(frozen.environment)
+        || facts["evaluationRelease"]
+            != serde_json::json!({"id":context.release.id,"revision":context.release.revision,"state":contracts::evaluation::EvaluationReleaseState::Active})
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    let original: Option<contracts::http::ModelInputAuthorizationContext> =
+        serde_json::from_value(facts["inputAuthorizationContext"].clone())
+            .map_err(|_| ExecutionError::IdentityMismatch)?;
+    let original = original
+        .ok_or_else(|| ExecutionError::Backend("advisory_original_context_missing".to_owned()))?;
+    original
+        .validate()
+        .map_err(|_| ExecutionError::IdentityMismatch)?;
+    if original.actor_id != frozen.actor_id
+        || original.project_id != frozen.project_id
+        || original.course_id != frozen.course_id
+        || original.operation_id != "freezeSubmission"
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(CreateFrozenModelInputAuthorizationRequest {
+        input_authorization_context: original,
+        task_run_id: context.lease.task_run_id,
+        parent_lease_sha256: contracts::http::model_input_parent_lease_sha256(
+            context.lease.lease_token(),
+        ),
+        frozen_submission_id: frozen.id,
+        evaluation_release_id: context.release.id,
+        evaluation_release_revision: context.release.revision,
+        selected_paths: include.to_vec(),
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bind independent archive, rubric and policy facts before reads"
+)]
+fn validate_frozen_input_binding(
+    binding: &ModelInputAuthorizationBinding,
+    request: &CreateFrozenModelInputAuthorizationRequest,
+    frozen: &FrozenSubmission,
+    facts: &serde_json::Value,
+    package: &ProblemPackage,
+    rubric: &PackageFile,
+    policy: &contracts::authoring::ProjectLlmEgressPolicy,
+) -> Result<(), ExecutionError> {
+    binding
+        .validate()
+        .map_err(|_| ExecutionError::IdentityMismatch)?;
+    let ModelInputAuthorizationSource::FrozenSubmission(source) = &binding.source else {
+        return Err(ExecutionError::IdentityMismatch);
+    };
+    let hashes = request
+        .selected_paths
+        .iter()
+        .map(|path| {
+            frozen
+                .files
+                .iter()
+                .find(|file| file.path == *path)
+                .map(|file| (file.path.clone(), file.sha256.clone()))
+                .ok_or(ExecutionError::IdentityMismatch)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if binding.context() != request.input_authorization_context
+        || source.task_run_id != request.task_run_id
+        || source.parent_lease_sha256 != request.parent_lease_sha256
+        || source.frozen_submission_id != frozen.id
+        || source.manifest_revision != frozen.manifest_revision
+        || serde_json::json!(source.manifest_sha256) != facts["manifestSha256"]
+        || source.archive != frozen.object
+        || source.content_sha256 != frozen.content_sha256
+        || source.environment != frozen.environment
+        || source.evaluation_release_id != request.evaluation_release_id
+        || source.evaluation_release_revision != request.evaluation_release_revision
+        || source.rubric.package_id != package.id
+        || source.rubric.package_revision != package.revision
+        || source.rubric.path != rubric.path
+        || source.rubric.artifact != rubric.object
+        || source.rubric.sha256 != rubric.sha256
+        || source
+            .rubric_permission
+            .as_ref()
+            .is_none_or(|p| p.authoring_project_id != package.project_id)
+        || binding.policy_id != policy.id
+        || binding.policy_revision != policy.revision
+        || binding.policy_sha256
+            != contracts::http::model_input_policy_sha256(policy)
+                .map_err(|_| ExecutionError::IdentityMismatch)?
+        || binding.selection_sha256
+            != contracts::http::frozen_model_input_selection_sha256(source, &hashes)
+                .map_err(|_| ExecutionError::IdentityMismatch)?
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -2891,7 +3190,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn advisory_request(deadline_at: UtcTimestamp) -> InternalAgentLlmReviewRequest {
+    pub(super) fn advisory_request(deadline_at: UtcTimestamp) -> InternalAgentLlmReviewRequest {
         let project_id = ProjectId::new();
         let course_id = Some(CourseId::new());
         let submission = "submission";
@@ -2927,18 +3226,88 @@ mod tests {
             "activatedAt": "2026-09-08T00:00:00.000Z"
         }))
         .expect("test policy is valid");
-        InternalAgentLlmReviewRequest {
-            task_run_id: TaskRunId::new(),
+        let task_run_id = TaskRunId::new();
+        let frozen_submission_id = FrozenSubmissionId::new();
+        let archive = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "minio-primary".to_owned(),
+            object_version: "version-1".to_owned(),
+            size_bytes: submission.len() as u64,
+            media_type: "text/plain".to_owned(),
+        };
+        let rubric_artifact = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "minio-primary".to_owned(),
+            object_version: "version-1".to_owned(),
+            size_bytes: rubric.len() as u64,
+            media_type: "text/plain".to_owned(),
+        };
+        let source = contracts::http::FrozenModelInputSource {
+            task_run_id,
+            parent_lease_sha256: contracts::http::model_input_parent_lease_sha256(
+                uuid::Uuid::new_v4(),
+            ),
+            frozen_submission_id,
+            manifest_revision: contracts::Revision::new(1).expect("fixture revision"),
+            manifest_sha256: "a".repeat(64),
+            archive: archive.clone(),
+            content_sha256: "b".repeat(64),
+            evaluation_release_id: contracts::EvaluationReleaseId::new(),
+            evaluation_release_revision: contracts::Revision::new(1).expect("fixture revision"),
+            environment: contracts::submission::FrozenEnvironmentIdentity {
+                environment_id: contracts::EnvironmentId::new(),
+                environment_revision: contracts::Revision::new(1).expect("fixture revision"),
+                release_id: contracts::ReleaseId::new(),
+                release_version: 1,
+                runtime_kind: contracts::authoring::RuntimeKind::Container,
+                build_request_id: None,
+            },
+            rubric: contracts::http::ModelInputRubricIdentity {
+                package_id: contracts::ProblemPackageId::new(),
+                package_revision: contracts::Revision::new(1).expect("fixture revision"),
+                path: "rubric.md".to_owned(),
+                artifact: rubric_artifact.clone(),
+                sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
+            },
+            rubric_permission: Some(contracts::http::ModelInputRubricPermissionRef {
+                authoring_project_id: project_id,
+                policy_id: contracts::PolicyId::new(),
+                policy_revision: contracts::Revision::new(1).expect("fixture revision"),
+                approved_by: contracts::ActorId::new(),
+                approver_course_membership_revision: contracts::Revision::new(1)
+                    .expect("fixture revision"),
+            }),
+        };
+        let input_authorization = contracts::http::ModelInputAuthorizationBinding {
+            session_sha256: "c".repeat(64),
+            actor_id: contracts::ActorId::new(),
             project_id,
             course_id,
-            frozen_submission_id: FrozenSubmissionId::new(),
-            submission_artifact: ArtifactRef {
-                artifact_id: ArtifactId::new(),
-                store_binding: "minio-primary".to_owned(),
-                object_version: "version-1".to_owned(),
-                size_bytes: submission.len() as u64,
-                media_type: "text/plain".to_owned(),
-            },
+            operation_id: "freezeSubmission".to_owned(),
+            valid_until: deadline_at,
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)
+                .expect("fixture policy"),
+            selection_sha256: contracts::http::frozen_model_input_selection_sha256(
+                &source,
+                &[(
+                    "submission.md".to_owned(),
+                    Sha256Digest::of_bytes(submission.as_bytes()).to_string(),
+                )],
+            )
+            .expect("fixture selection"),
+            source: contracts::http::ModelInputAuthorizationSource::FrozenSubmission(Box::new(
+                source,
+            )),
+        };
+        InternalAgentLlmReviewRequest {
+            input_authorization,
+            task_run_id,
+            project_id,
+            course_id,
+            frozen_submission_id,
+            submission_artifact: archive,
             policy,
             files: vec![AgentLlmReviewFile {
                 path: "submission.md".to_owned(),
@@ -2946,13 +3315,7 @@ mod tests {
                 content: submission.to_owned(),
             }],
             rubric: AgentLlmReviewRubric {
-                artifact: ArtifactRef {
-                    artifact_id: ArtifactId::new(),
-                    store_binding: "minio-primary".to_owned(),
-                    object_version: "version-1".to_owned(),
-                    size_bytes: rubric.len() as u64,
-                    media_type: "text/plain".to_owned(),
-                },
+                artifact: rubric_artifact,
                 path: "rubric.md".to_owned(),
                 sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
                 content: rubric.to_owned(),
@@ -3314,7 +3677,7 @@ mod probe_recovery_tests {
     use crate::resource_client::{ResourceClient, ResourceClientConfiguration};
 
     const NAMESPACE: &str = "evaluation-tests";
-    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsicmVzb3VyY2UiLCJlbnZpcm9ubWVudCIsImNvbnRyb2wiLCJhZ2VudCJdfQ.sig";
+    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsicmVzb3VyY2UiLCJlbnZpcm9ubWVudCIsImNvbnRyb2wiLCJhZ2VudCIsImxhYndlYXZlci1ldmFsdWF0aW9uIl19.sig";
 
     #[derive(Default)]
     struct MockHttpState {
@@ -3327,6 +3690,13 @@ mod probe_recovery_tests {
         environment_binding_status: Option<StatusCode>,
         deleted: BTreeSet<String>,
         calls: Vec<(Method, String)>,
+        model_binding: Option<Value>,
+        model_denied: bool,
+        model_rechecks: usize,
+        model_deny_recheck_at: Option<usize>,
+        model_requests: Vec<Value>,
+        agent_receipt: Option<Value>,
+        agent_lose_create_response: bool,
     }
 
     struct MockS3Object {
@@ -4452,8 +4822,67 @@ mod probe_recovery_tests {
     ) -> Response {
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
+        let body = if method == Method::POST
+            && (path.contains("model-input-authorizations") || path == "/internal/v1/llm-reviews")
+        {
+            let Ok(bytes) = axum::body::to_bytes(request.into_body(), 1024 * 1024).await else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            Some(body)
+        } else {
+            None
+        };
         let mut state = state.lock().await;
         state.calls.push((method.clone(), path.clone()));
+        if method == Method::GET && path.ends_with("/llm-egress-policy") {
+            return state.objects.get(&path).cloned().map_or_else(
+                || StatusCode::NOT_FOUND.into_response(),
+                |body| Json(body).into_response(),
+            );
+        }
+        if method == Method::POST && path.contains("model-input-authorizations") {
+            if let Some(body) = body {
+                state.model_requests.push(body);
+            }
+            if path.ends_with("/resolve") {
+                state.model_rechecks += 1;
+            }
+            if state.model_denied
+                || (path.ends_with("/resolve")
+                    && state
+                        .model_deny_recheck_at
+                        .is_some_and(|at| state.model_rechecks >= at))
+            {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            return state.model_binding.clone().map_or_else(
+                || StatusCode::FORBIDDEN.into_response(),
+                |binding| Json(json!({"binding":binding})).into_response(),
+            );
+        }
+        if method == Method::POST && path == "/internal/v1/llm-reviews" {
+            let Some(body) = body else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let Ok(hash) = Sha256Digest::of_canonical(&body) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let receipt = json!({"taskRunId":body["taskRunId"],"requestSha256":hash.to_string(),"state":"queued","review":null,"usage":null,"diagnosticCode":null,"startedAt":null,"finishedAt":null});
+            state.agent_receipt = Some(receipt.clone());
+            if state.agent_lose_create_response {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            return Json(receipt).into_response();
+        }
+        if method == Method::GET && path.starts_with("/internal/v1/llm-reviews/") {
+            return state.agent_receipt.clone().map_or_else(
+                || StatusCode::NOT_FOUND.into_response(),
+                |body| Json(body).into_response(),
+            );
+        }
         if method == Method::GET && path.ends_with("/pods") {
             return state.pods.clone().map_or_else(
                 || StatusCode::NOT_FOUND.into_response(),
@@ -5231,5 +5660,9 @@ mod probe_recovery_tests {
             evaluation_release_id: release.id,
             evaluation_release_revision: release.revision,
         }
+    }
+
+    mod frozen_advisory_tests {
+        include!("../tests/cases/frozen_advisory.rs");
     }
 }
