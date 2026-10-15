@@ -75,6 +75,8 @@
             <strong>新建 Work</strong>
             <span>系统会为本次申请生成唯一工作环境，并在审批通过后创建环境。</span>
           </div>
+          <fieldset class="form-section">
+          <legend class="form-section__title">绑定版本</legend>
           <label>
             <span>已发布版本</span>
             <AppSelect v-model="selectedReleaseKey" required :disabled="options.releases.kind !== 'success'">
@@ -91,6 +93,9 @@
               <RouterLink class="text-button" :to="{ path: '/researcher/software', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">生成 Work 模板</RouterLink>
             </div>
           </label>
+          </fieldset>
+          <fieldset class="form-section">
+          <legend class="form-section__title">资源规格</legend>
           <div class="two-columns">
             <label><span>CPU（m）</span><input v-model.number="cpuMillicores" class="text-input" type="number" min="1" required /><small class="field-note">按 millicores 填写；1000m = 1 核心。</small></label>
             <label><span>时长（小时）</span><input v-model.number="durationHours" class="text-input" type="number" min="1" max="720" required /></label>
@@ -99,6 +104,9 @@
             <label><span>内存（GiB）</span><input v-model.number="memoryGiB" class="text-input" type="number" min="1" required /></label>
             <label><span>存储（GiB）</span><input v-model.number="storageGiB" class="text-input" type="number" min="1" required /></label>
           </div>
+          </fieldset>
+          <fieldset class="form-section">
+          <legend class="form-section__title">GPU<small>（可选）</small></legend>
           <div class="two-columns">
             <label>
               <span>GPU 目录项（可选）</span>
@@ -128,13 +136,18 @@
             <span v-else-if="options.rates.kind === 'loading'">费用：正在读取费率；申请仍可提交，尚未形成费用估算。</span>
             <span v-else>费用：当前未配置计价；申请仍可提交，费用不会按免费处理。</span>
           </div>
+          </fieldset>
+          <div class="form-footer">
           <div class="estimate-box" role="note">
             <span>提交规格</span>
             <strong>{{ requestSummary }}</strong>
             <small v-if="gpuSelectionMessage" class="field-note">{{ gpuSelectionMessage }}</small>
             <small>费率缺失、冲突或读取失败时不显示为免费，费用状态以实际计量和平台后续核算为准。</small>
           </div>
-          <button type="submit" class="filled-button" :disabled="!canSubmit || resources.acting !== null">提交资源申请</button>
+          <div class="form-footer__actions">
+            <button type="submit" class="filled-button" :disabled="!canSubmit || resources.acting !== null">提交资源申请</button>
+          </div>
+          </div>
         </form>
       </section>
 
@@ -497,4 +510,46 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .state-chip--rejected, .state-chip--cancelled, .state-chip--expired, .state-chip--revoked { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
 @media (max-width: 850px) { .resource-layout { grid-template-columns: 1fr; } .project-strip { align-items: stretch; flex-direction: column; } .project-strip label { max-width: none; } .project-scope { padding-bottom: 0; } }
 @media (max-width: 620px) { .two-columns { grid-template-columns: 1fr; } .resource-row { align-items: flex-start; flex-direction: column; } .resource-row__actions { justify-content: flex-start; } }
+
+/* Cloudscape form pattern: titled field groups, label → control → constraint
+   text, summary + primary action in a right-aligned footer. */
+.form-section {
+  display: grid;
+  gap: var(--layout-field-gap);
+  min-width: 0;
+  margin: 0;
+  padding: 0 0 var(--layout-field-gap);
+  border: 0;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.form-section__title {
+  margin-bottom: var(--space-3);
+  padding: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-small);
+}
+
+.form-section__title small {
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 400;
+}
+
+.request-form .two-columns {
+  align-items: start;
+}
+
+.request-form label {
+  gap: var(--layout-field-label-gap);
+}
+
+.form-footer {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.form-footer__actions {
+  display: flex;
+  justify-content: flex-end;
+}
 </style>
