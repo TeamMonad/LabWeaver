@@ -792,3 +792,73 @@ export async function getProjectAvailableActions(options?: FixtureOptions): Prom
 export async function cancelProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('取消题包上传') }
 
 export async function getProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('读取题包上传会话') }
+
+/** #209/#210 Credits + estimate: restricted preview reads; writes/估价 stay unsupported. */
+const zeroCredits = '0.000000'
+
+export async function getProjectCredits(options?: FixtureOptions): Promise<FixtureResult<{
+  available: string
+  balance: string
+  currency: string
+  pending: string
+  platformAbsorbed: string
+  projectId: string
+  reserved: string
+  revision: number
+  spent: string
+  unknown: string
+  unknownCount: number
+}>> {
+  const projectId = options?.path?.projectId
+  if (!projectId) return notFoundResponse('读取项目 Credits', projectId)
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取项目 Credits', projectId)
+  return fixtureResponse({
+    projectId,
+    currency: 'CREDITS',
+    balance: zeroCredits,
+    available: zeroCredits,
+    reserved: zeroCredits,
+    spent: zeroCredits,
+    pending: zeroCredits,
+    unknown: zeroCredits,
+    platformAbsorbed: zeroCredits,
+    unknownCount: 0,
+    revision: 1,
+  })
+}
+
+export async function listProjectCreditHolds(options?: FixtureOptions): Promise<FixtureResult<{
+  items: unknown[]
+  page: number
+  pageSize: number
+  hasMore: boolean
+}>> {
+  const projectId = options?.path?.projectId
+  if (!projectId) return notFoundResponse('读取 Credits 预占', projectId)
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取 Credits 预占', projectId)
+  const page = typeof options?.query?.page === 'number' ? options.query.page : 1
+  const pageSize = typeof options?.query?.pageSize === 'number' ? options.query.pageSize : 20
+  return fixtureResponse({ items: [], page, pageSize, hasMore: false })
+}
+
+export async function listProjectCreditLedger(options?: FixtureOptions): Promise<FixtureResult<{
+  items: unknown[]
+  page: number
+  pageSize: number
+  hasMore: boolean
+}>> {
+  const projectId = options?.path?.projectId
+  if (!projectId) return notFoundResponse('读取 Credits 账目', projectId)
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取 Credits 账目', projectId)
+  const page = typeof options?.query?.page === 'number' ? options.query.page : 1
+  const pageSize = typeof options?.query?.pageSize === 'number' ? options.query.pageSize : 20
+  return fixtureResponse({ items: [], page, pageSize, hasMore: false })
+}
+
+export async function createCreditAdminOperation(_options?: FixtureOptions) {
+  return unsupportedResponse('Credits 管理员操作')
+}
+
+export async function estimateProjectResourceCost(_options?: FixtureOptions) {
+  return unsupportedResponse('项目资源估价')
+}
