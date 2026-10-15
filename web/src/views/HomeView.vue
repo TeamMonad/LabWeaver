@@ -109,17 +109,17 @@ const routeReason = computed(() => {
 .home-view {
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: var(--space-8);
   max-width: var(--content-max-width);
   margin: 0 auto;
 }
 
 .hero {
-  padding: 24px 0 8px;
+  padding: var(--space-6) 0 var(--space-2);
 }
 
 .hero h1 {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
   color: var(--md-sys-color-on-surface);
   font: var(--md-sys-headline-large);
 }
@@ -130,26 +130,26 @@ const routeReason = computed(() => {
 }
 
 .section-title {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-5);
   color: var(--md-sys-color-on-surface);
   font: var(--md-sys-title-medium);
 }
 
 .task-groups {
   display: grid;
-  gap: 28px;
+  gap: var(--space-8);
 }
 
 .task-group {
   display: grid;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .group-heading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .group-heading h3 {
@@ -167,14 +167,14 @@ const routeReason = computed(() => {
 .task-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .task-card {
   display: flex;
   min-height: 154px;
   flex-direction: column;
-  padding: 20px;
+  padding: var(--space-5);
   color: var(--md-sys-color-on-surface);
   text-decoration: none;
   transition: box-shadow var(--motion-duration-base) var(--motion-ease-out), transform var(--motion-duration-base) var(--motion-ease-out), border-color var(--motion-duration-base) var(--motion-ease-out);
@@ -199,7 +199,7 @@ const routeReason = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 18px;
+  margin-bottom: var(--space-5);
   color: var(--md-sys-color-on-surface-variant);
 }
 
@@ -215,7 +215,7 @@ const routeReason = computed(() => {
 }
 
 .card-title {
-  margin-bottom: 6px;
+  margin-bottom: var(--space-2);
   color: var(--md-sys-color-on-surface);
   font: var(--md-sys-title-medium);
 }
@@ -230,27 +230,13 @@ const routeReason = computed(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  padding: 48px 24px;
+  gap: var(--space-4);
+  padding: var(--space-12) var(--space-6);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-large);
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
   text-align: center;
-}
-
-.filled-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
 }
 
 .hint {
@@ -264,9 +250,9 @@ const routeReason = computed(() => {
 .route-reason {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-error-container);
   color: var(--md-sys-color-on-error-container);
@@ -281,7 +267,7 @@ const routeReason = computed(() => {
   .group-heading {
     align-items: flex-start;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-1);
   }
 }
 

@@ -1356,7 +1356,7 @@ async function onLeaseConfirmed() {
 .resource-approval {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: var(--space-8);
 }
 
 .page-header h2 {
@@ -1368,23 +1368,23 @@ async function onLeaseConfirmed() {
 .page-subtitle {
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
 }
 
 .section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-title-medium);
   color: var(--md-sys-color-on-surface);
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .filter-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
   flex-wrap: wrap;
 }
 
@@ -1395,7 +1395,7 @@ async function onLeaseConfirmed() {
 
 .filter-select {
   height: 36px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface);
@@ -1409,7 +1409,7 @@ async function onLeaseConfirmed() {
 }
 
 .filter-hint {
-  margin: -4px 0 12px;
+  margin: -4px 0 var(--space-3);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
@@ -1418,8 +1418,8 @@ async function onLeaseConfirmed() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-top: 10px;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
@@ -1427,9 +1427,9 @@ async function onLeaseConfirmed() {
 .request-empty-next-step {
   display: grid;
   justify-items: start;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 16px;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -1449,9 +1449,9 @@ async function onLeaseConfirmed() {
 .batch-approval-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 16px;
-  padding: 16px;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -1461,7 +1461,7 @@ async function onLeaseConfirmed() {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .batch-approval-heading h4 {
@@ -1472,7 +1472,7 @@ async function onLeaseConfirmed() {
 
 .batch-approval-heading p,
 .batch-approval-hint {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
@@ -1487,7 +1487,7 @@ async function onLeaseConfirmed() {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
   align-items: center;
-  gap: 8px 12px;
+  gap: var(--space-2) var(--space-3);
 }
 
 .batch-approval-fields label {
@@ -1496,21 +1496,21 @@ async function onLeaseConfirmed() {
 }
 
 .batch-outcome {
-  padding-top: 12px;
+  padding-top: var(--space-3);
   border-top: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .batch-outcome ul {
   display: grid;
-  gap: 8px;
-  margin: 8px 0 0;
-  padding-left: 20px;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
 }
 
 .batch-outcome-item {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: baseline;
 }
 
@@ -1520,8 +1520,8 @@ async function onLeaseConfirmed() {
 
 .request-detail,
 .lease-detail {
-  margin-top: 16px;
-  padding: 16px;
+  margin-top: var(--space-4);
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -1530,8 +1530,8 @@ async function onLeaseConfirmed() {
 .meta-row {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 8px 0;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -1553,7 +1553,7 @@ async function onLeaseConfirmed() {
 }
 
 .advanced-details {
-  margin-top: 12px;
+  margin-top: var(--space-3);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
@@ -1565,25 +1565,25 @@ async function onLeaseConfirmed() {
 .advanced-detail-grid {
   display: grid;
   grid-template-columns: 140px minmax(0, 1fr);
-  gap: 8px 16px;
-  margin-top: 10px;
-  padding: 12px;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container);
 }
 
 .approval-controls {
-  margin-top: 20px;
+  margin-top: var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .approve-inputs {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
   align-items: center;
-  gap: 8px 12px;
+  gap: var(--space-2) var(--space-3);
 }
 
 .input-label {
@@ -1594,7 +1594,7 @@ async function onLeaseConfirmed() {
 .provider-binding-hint {
   grid-column: 2;
   margin: 0;
-  padding: 6px 10px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-tertiary-container);
   color: var(--md-sys-color-on-tertiary-container);
@@ -1603,7 +1603,7 @@ async function onLeaseConfirmed() {
 
 .text-input {
   height: 36px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface);
@@ -1614,18 +1614,18 @@ async function onLeaseConfirmed() {
 .resize-fieldset {
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
-  padding: 12px;
+  padding: var(--space-3);
 }
 
 .resize-fieldset legend {
-  padding: 0 8px;
+  padding: 0 var(--space-2);
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface-variant);
 }
 
 .reason-input {
   width: 100%;
-  padding: 12px;
+  padding: var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface);
@@ -1636,47 +1636,16 @@ async function onLeaseConfirmed() {
 
 .approval-buttons {
   display: flex;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
   align-items: center;
-}
-
-.filled-button,
-.outlined-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button {
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.outlined-button {
-  border: 1px solid var(--md-sys-color-outline);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
-.outlined-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .state-note,
 .select-hint {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
 }
 
 @media (max-width: 720px) {

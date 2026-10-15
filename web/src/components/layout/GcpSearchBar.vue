@@ -229,9 +229,9 @@ onScopeDispose(() => {
 .search-input-box {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   height: 36px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container-high);
   border: 1px solid transparent;
@@ -303,11 +303,11 @@ onScopeDispose(() => {
   box-shadow: var(--md-sys-elevation-3);
   max-height: 380px;
   overflow-y: auto;
-  padding: 6px 0;
+  padding: var(--space-2) 0;
 }
 
 .dropdown-section {
-  padding: 4px 0;
+  padding: var(--space-1) 0;
 }
 
 .dropdown-section + .dropdown-section {
@@ -315,7 +315,7 @@ onScopeDispose(() => {
 }
 
 .section-title {
-  padding: 4px 14px;
+  padding: var(--space-1) var(--space-4);
   font: var(--md-sys-label-small);
   font-size: 11px;
   font-weight: 600;
@@ -325,7 +325,7 @@ onScopeDispose(() => {
 }
 
 .search-empty {
-  padding: 14px;
+  padding: var(--space-4);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
   text-align: center;
@@ -334,9 +334,9 @@ onScopeDispose(() => {
 .dropdown-item {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
-  padding: 8px 14px;
+  padding: var(--space-2) var(--space-4);
   border: none;
   background: transparent;
   text-align: left;

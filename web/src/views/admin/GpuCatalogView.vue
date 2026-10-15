@@ -163,24 +163,20 @@ onMounted(() => catalog.load())
 </script>
 
 <style scoped>
-.gpu-catalog-page { display: grid; gap: 20px; }
-.page-header, .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.gpu-catalog-page { display: grid; gap: var(--space-5); }
+.page-header, .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .page-header h2, .section-heading h3 { margin: 0; color: var(--md-sys-color-on-surface); }
 .page-header h2 { font: var(--md-sys-headline-small); }
 .section-heading h3 { font: var(--md-sys-title-large); }
-.page-subtitle, .section-heading p { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
-.catalog-card, .create-card { display: grid; gap: 16px; padding: 20px; }
-.admin-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
-.admin-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.page-subtitle, .section-heading p { margin: var(--space-2) 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
+.catalog-card, .create-card { display: grid; gap: var(--space-4); padding: var(--space-5); }
+.admin-form { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
+.admin-form label { display: grid; gap: var(--space-2); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .field-note { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.4; }
 .admin-form button { justify-self: start; }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
-.state-chip { display: inline-flex; white-space: nowrap; padding: 3px 8px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: var(--space-2) 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
+.state-chip { display: inline-flex; white-space: nowrap; padding: var(--space-1) var(--space-2); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .state-chip--active { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .state-chip--disabled { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
-.filled-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 17px; border: 1px solid var(--md-sys-color-primary); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); font: var(--md-sys-label-large); cursor: pointer; }
-.filled-button:disabled { opacity: .5; cursor: not-allowed; }
-.icon-button { display: inline-grid; place-items: center; width: 40px; height: 40px; border: 0; border-radius: 50%; background: transparent; color: var(--md-sys-color-on-surface-variant); cursor: pointer; }
-.icon-button:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 620px) { .admin-form { grid-template-columns: 1fr; } }
 </style>

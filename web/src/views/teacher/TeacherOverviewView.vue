@@ -133,7 +133,7 @@ function projectLink(path: string) {
 <style scoped>
 .overview {
   display: grid;
-  gap: 20px;
+  gap: var(--space-5);
 }
 
 .page-header,
@@ -141,7 +141,7 @@ function projectLink(path: string) {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .page-header h1,
@@ -156,7 +156,7 @@ function projectLink(path: string) {
 }
 
 .eyebrow {
-  margin: 0 0 5px;
+  margin: 0 0 var(--space-1);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-medium);
   letter-spacing: 0.04em;
@@ -166,7 +166,7 @@ function projectLink(path: string) {
 .page-subtitle,
 .project-description,
 .empty-context p {
-  margin: 6px 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
   line-height: 1.5;
@@ -174,8 +174,8 @@ function projectLink(path: string) {
 
 .project-card {
   display: grid;
-  gap: 24px;
-  padding: 24px;
+  gap: var(--space-6);
+  padding: var(--space-6);
 }
 
 .project-card h2 {
@@ -195,14 +195,14 @@ function projectLink(path: string) {
 .task-links {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .task-link {
   display: grid;
-  gap: 8px;
+  gap: var(--space-2);
   min-height: 112px;
-  padding: 16px;
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -233,35 +233,12 @@ function projectLink(path: string) {
 .empty-context {
   display: grid;
   justify-items: start;
-  gap: 10px;
-  padding: 28px;
+  gap: var(--space-3);
+  padding: var(--space-8);
 }
 
 .empty-context h2 {
   font: var(--md-sys-title-large);
-}
-
-.filled-button,
-.outlined-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 40px;
-  padding: 0 17px;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  text-decoration: none;
-}
-
-.filled-button {
-  border: 1px solid var(--md-sys-color-primary);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.outlined-button {
-  border: 1px solid var(--md-sys-color-outline);
-  color: var(--md-sys-color-primary);
 }
 
 @media (max-width: 760px) {

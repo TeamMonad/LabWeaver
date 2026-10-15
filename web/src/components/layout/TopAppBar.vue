@@ -151,27 +151,27 @@ function cycleTheme() {
   align-items: center;
   justify-content: space-between;
   height: var(--app-top-bar-height);
-  padding: 0 16px 0 4px;
+  padding: 0 var(--space-4) 0 var(--space-1);
   background: var(--md-sys-color-surface);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   box-shadow: var(--md-sys-elevation-1);
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .top-app-bar__leading,
 .top-app-bar__trailing {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
   flex-shrink: 0;
 }
 
 .top-app-bar__leading {
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .top-project-selector {
-  margin-left: 8px;
+  margin-left: var(--space-2);
 }
 
 .top-app-bar__center {
@@ -196,9 +196,9 @@ function cycleTheme() {
 .context-button {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   height: 36px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-surface-container);
@@ -233,24 +233,6 @@ function cycleTheme() {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 48px;
-  height: 48px;
-  padding: 0;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-on-surface-variant);
-  cursor: pointer;
-}
-
-.icon-button:hover {
-  background: var(--md-sys-color-surface-container-highest);
-}
-
 .login-status,
 .user-name {
   font: var(--md-sys-label-large);
@@ -265,10 +247,10 @@ function cycleTheme() {
 .user-chip {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   max-width: 120px;
   height: 32px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
@@ -277,42 +259,9 @@ function cycleTheme() {
   white-space: nowrap;
 }
 
-.text-button,
-.filled-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 12px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.text-button {
-  background: transparent;
-  color: var(--md-sys-color-on-surface-variant);
-}
-
-.text-button:hover {
-  background: var(--md-sys-color-surface-container-highest);
-}
-
-.filled-button {
-  padding: 0 16px;
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.filled-button:hover {
-  background: var(--md-sys-color-on-primary-container);
-}
-
 @media (min-width: 840px) {
   .top-app-bar {
-    padding: 0 24px 0 16px;
+    padding: 0 var(--space-6) 0 var(--space-4);
   }
 
   .top-app-bar__context {
@@ -332,14 +281,14 @@ function cycleTheme() {
 
 @media (max-width: 599px) {
   .top-app-bar {
-    gap: 4px;
-    padding-right: 8px;
+    gap: var(--space-1);
+    padding-right: var(--space-2);
   }
 
   .top-app-bar__leading,
   .top-app-bar__trailing {
     min-width: 0;
-    gap: 4px;
+    gap: var(--space-1);
   }
 
   .top-app-bar__leading {

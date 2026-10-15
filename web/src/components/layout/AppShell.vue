@@ -83,7 +83,7 @@ onMounted(() => {
   grid-row: 3;
   grid-column: 1;
   overflow-y: auto;
-  padding: 24px 16px 48px;
+  padding: var(--space-6) var(--space-4) var(--space-12);
   min-width: 0;
 }
 
@@ -98,13 +98,13 @@ onMounted(() => {
 
   .app-main {
     grid-column: 2;
-    padding: 24px 32px 48px;
+    padding: var(--space-6) var(--space-8) var(--space-12);
   }
 }
 
 @media (min-width: 1200px) {
   .app-main {
-    padding: 32px 48px 64px;
+    padding: var(--space-8) var(--space-12) var(--space-16);
   }
 }
 

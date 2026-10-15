@@ -142,11 +142,11 @@ const confirmSeverity = computed(() => props.severity)
   z-index: 2001;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
   width: min(400px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
   margin: 0;
-  padding: 24px;
+  padding: var(--space-6);
   border: none;
   border-radius: var(--md-sys-shape-extra-large);
   background: var(--md-sys-color-surface-container-high);
@@ -164,7 +164,7 @@ const confirmSeverity = computed(() => props.severity)
 }
 
 .confirm-dialog__description {
-  margin-top: 8px;
+  margin-top: var(--space-2);
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -172,28 +172,8 @@ const confirmSeverity = computed(() => props.severity)
 .confirm-dialog__actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.text-button,
-.filled-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.text-button {
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
-.filled-button {
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .filled-button--warning {

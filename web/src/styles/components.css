@@ -1,0 +1,147 @@
+/*
+ * Shared button system (MD3 common buttons). Components should only add
+ * layout (margins, width) on top; never redefine colors or heights.
+ * Variants: filled | tonal | outlined | text | icon, plus .danger-button / .error tone and .small size.
+ */
+
+.filled-button,
+.tonal-button,
+.outlined-button,
+.text-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: var(--density-control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid transparent;
+  border-radius: var(--md-sys-shape-full);
+  background: transparent;
+  color: var(--md-sys-color-primary);
+  font: var(--md-sys-label-large);
+  letter-spacing: var(--md-sys-tracking-label);
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.filled-button {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  box-shadow: var(--md-sys-elevation-1);
+}
+
+.filled-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--md-sys-color-on-primary) 8%, var(--md-sys-color-primary));
+  box-shadow: var(--md-sys-elevation-2);
+}
+
+.tonal-button {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.outlined-button {
+  border-color: var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-primary);
+}
+
+.outlined-button:hover:not(:disabled) {
+  border-color: var(--md-sys-color-outline);
+}
+
+.text-button {
+  padding: 0 var(--space-3);
+}
+
+.tonal-button:hover:not(:disabled),
+.outlined-button:hover:not(:disabled),
+.text-button:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.tonal-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--md-sys-color-on-secondary-container) 8%, var(--md-sys-color-secondary-container));
+}
+
+/* Destructive tone */
+.danger-button,
+.text-button.error,
+.outlined-button.error {
+  color: var(--md-sys-color-error);
+}
+
+.outlined-button.danger-button,
+.outlined-button.error {
+  border-color: color-mix(in srgb, var(--md-sys-color-error) 40%, transparent);
+}
+
+.filled-button.danger-button {
+  background: var(--md-sys-color-error);
+  color: var(--md-sys-color-on-error);
+}
+
+/* Sizes */
+.filled-button.small,
+.tonal-button.small,
+.outlined-button.small,
+.text-button.small {
+  height: var(--density-control-height-small);
+  padding: 0 var(--space-3);
+  font: var(--md-sys-label-medium);
+}
+
+.full-width {
+  width: 100%;
+}
+
+/* Icon button */
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: var(--density-control-height);
+  padding: 0;
+  border: none;
+  border-radius: var(--md-sys-shape-full);
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+.icon-button.text-button {
+  width: auto;
+  padding: 0 var(--space-3);
+  color: var(--md-sys-color-primary);
+}
+
+/* Disabled (MD3): 12% container, 38% content — clearly distinct from enabled. */
+.filled-button:disabled,
+.tonal-button:disabled,
+.filled-button[aria-disabled='true'],
+.tonal-button[aria-disabled='true'] {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent);
+  color: color-mix(in srgb, var(--md-sys-color-on-surface) 38%, transparent);
+  box-shadow: none;
+}
+
+.outlined-button:disabled,
+.outlined-button[aria-disabled='true'] {
+  border-color: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent);
+  color: color-mix(in srgb, var(--md-sys-color-on-surface) 38%, transparent);
+}
+
+.text-button:disabled,
+.icon-button:disabled,
+.text-button[aria-disabled='true'] {
+  color: color-mix(in srgb, var(--md-sys-color-on-surface) 38%, transparent);
+  background: transparent;
+}

@@ -65,7 +65,7 @@ withDefaults(defineProps<Props>(), {
 
 .structured-diff__header span,
 .structured-diff__row span {
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   background: var(--md-sys-color-surface);
 }
 
@@ -103,14 +103,14 @@ withDefaults(defineProps<Props>(), {
   .structured-diff__row {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 8px;
-    padding: 12px;
+    gap: var(--space-2);
+    padding: var(--space-3);
     background: var(--md-sys-color-surface);
     border-bottom: 1px solid var(--md-sys-color-outline-variant);
   }
 
   .structured-diff__row span {
-    padding: 4px 0;
+    padding: var(--space-1) 0;
   }
 
   .structured-diff__field {

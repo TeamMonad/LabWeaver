@@ -680,19 +680,19 @@ function openEnvironment(environmentId: string) {
 .my-labs {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .header-title-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .header-badge {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  padding: 2px var(--space-2);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
@@ -700,7 +700,7 @@ function openEnvironment(environmentId: string) {
 }
 
 .project-context-loading {
-  padding: 20px;
+  padding: var(--space-5);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -734,20 +734,20 @@ function openEnvironment(environmentId: string) {
 
 .inspect-next-action {
   margin: 0;
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container-low);
 }
 
 .state-cell {
   display: grid;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .runtime-tag {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface);
 }
@@ -755,59 +755,11 @@ function openEnvironment(environmentId: string) {
 .row-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.filled-button,
-.outlined-button,
-.text-button {
-  min-height: 40px;
-  padding: 0 17px;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-  text-decoration: none;
-}
-
-.filled-button.small,
-.outlined-button.small {
-  min-height: 32px;
-  padding: 0 12px;
-  font: var(--md-sys-label-medium);
-}
-
-.filled-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border: 1px solid var(--md-sys-color-primary);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.outlined-button {
-  border: 1px solid var(--md-sys-color-outline);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
-.text-button {
-  min-height: 32px;
-  border: 0;
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
-.filled-button:disabled,
-.outlined-button:disabled,
-.text-button:disabled {
-  opacity: .5;
-  cursor: not-allowed;
+  gap: var(--space-2);
 }
 
 .labs-hint {
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -817,8 +769,8 @@ function openEnvironment(environmentId: string) {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 64px 24px;
+  gap: var(--space-3);
+  padding: var(--space-16) var(--space-6);
   text-align: center;
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -837,28 +789,28 @@ function openEnvironment(environmentId: string) {
 .inspect-content {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--space-5);
 }
 
 .inspect-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 12px;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .inspect-properties {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .prop-row {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .prop-label {
@@ -874,19 +826,19 @@ function openEnvironment(environmentId: string) {
 .prop-value-with-copy {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .prop-value-with-copy code {
   font-family: monospace;
   font-size: 12px;
   background: var(--md-sys-color-surface-container);
-  padding: 2px 6px;
+  padding: 2px var(--space-2);
   border-radius: 4px;
 }
 
 .inspect-actions {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .full-width {
@@ -902,7 +854,7 @@ function openEnvironment(environmentId: string) {
   align-items: center;
   justify-content: center;
   background: var(--md-sys-color-scrim);
-  padding: 16px;
+  padding: var(--space-4);
 }
 
 .create-modal {
@@ -921,14 +873,14 @@ function openEnvironment(environmentId: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .modal-title-group {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .modal-icon {
@@ -936,46 +888,46 @@ function openEnvironment(environmentId: string) {
 }
 
 .modal-body {
-  padding: 20px;
+  padding: var(--space-5);
   overflow-y: auto;
 }
 
 .modal-subtitle {
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .release-cards-grid {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .release-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: var(--space-4) var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container);
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 
 .release-card__top {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .release-runtime-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   font: var(--md-sys-label-small);
-  padding: 2px 8px;
+  padding: 2px var(--space-2);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-surface-container-high);
 }
@@ -997,8 +949,8 @@ function openEnvironment(environmentId: string) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 32px 16px;
+  gap: var(--space-3);
+  padding: var(--space-8) var(--space-4);
   color: var(--md-sys-color-on-surface-variant);
   text-align: center;
 }

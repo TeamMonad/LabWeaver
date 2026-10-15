@@ -53,8 +53,8 @@ const iconName = computed(() => {
 .diagnostic-banner {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--md-sys-shape-medium);
   font: var(--md-sys-body-medium);
 }
@@ -78,7 +78,7 @@ const iconName = computed(() => {
   display: flex;
   flex-direction: column;
   flex: 1;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .diagnostic-code {
@@ -91,15 +91,4 @@ const iconName = computed(() => {
   word-break: break-word;
 }
 
-.text-button {
-  flex-shrink: 0;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid currentColor;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: inherit;
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
 </style>
