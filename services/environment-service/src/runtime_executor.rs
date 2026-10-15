@@ -701,68 +701,161 @@ impl KubernetesContainerExecutor {
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
     ) -> Result<(), ProviderFailure> {
-        // Foreground GC retires this deployment's ReplicaSets and Pods before deleting its PVC.
+        self.retire_work_compute(fence, plan).await?;
+        self.delete_owned_work_object(fence, plan, "PersistentVolumeClaim", "workspace")
+            .await
+    }
+
+    async fn retire_work_compute(
+        &self,
+        fence: &ContainerBackendFence,
+        plan: &ContainerResourcePlan,
+    ) -> Result<(), ProviderFailure> {
         for (kind, suffix) in [
             ("Deployment", "runtime"),
             ("Service", "runtime"),
-            ("PersistentVolumeClaim", "workspace"),
             ("ServiceAccount", "runtime"),
             ("Secret", "registry-pull"),
         ] {
-            let name = plan.placement().resource_name(suffix);
-            let mut first_uid = None;
-            loop {
-                if timestamp()?.get() >= fence.deadline_at.get() {
+            self.delete_owned_work_object(fence, plan, kind, suffix)
+                .await?;
+        }
+        // A missing Deployment does not prove its Pods or another Pod using the disk are gone.
+        self.wait_for_work_pods_absent(fence, plan).await
+    }
+
+    async fn wait_for_work_pods_absent(
+        &self,
+        fence: &ContainerBackendFence,
+        plan: &ContainerResourcePlan,
+    ) -> Result<(), ProviderFailure> {
+        let url = self.namespaced_url(&format!("/api/v1/namespaces/{}/pods", plan.namespace))?;
+        let environment_id = plan.environment_id.to_string();
+        let claim_name = plan.placement().resource_name("workspace");
+        loop {
+            if timestamp()?.get() >= fence.deadline_at.get() {
+                return Err(unavailable());
+            }
+            self.verify_container_namespace(plan).await?;
+            // A label selector would omit a Pod with missing/foreign labels mounting this PVC.
+            let response = self
+                .authorized(self.client.get(url.clone()))
+                .send()
+                .await
+                .map_err(|_| unavailable())?;
+            if !response.status().is_success() {
+                return Err(status_failure(response.status()));
+            }
+            let list: Value = response.json().await.map_err(|_| invalid_observation())?;
+            if let Some(continuation) = list.pointer("/metadata/continue") {
+                let continuation = continuation.as_str().ok_or_else(invalid_observation)?;
+                if !continuation.is_empty() {
                     return Err(unavailable());
                 }
-                self.verify_container_namespace(plan).await?;
-                let Some(value) = self.get_json(kind, &plan.namespace, &name).await? else {
-                    break;
-                };
-                verify_owned_identity(
-                    &value,
-                    &name,
-                    Some(&plan.namespace),
-                    plan.environment_id,
-                    plan.project_id,
-                )?;
-                let uid = pointer_uuid(&value, "/metadata/uid")?;
-                if first_uid.is_some_and(|original| original != uid) {
-                    return Err(rejected());
-                }
-                first_uid = Some(uid);
-                let resource_version = value
-                    .pointer("/metadata/resourceVersion")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(invalid_observation)?;
-                let (prefix, plural, _) = resource_path(kind)?;
-                let url = self.namespaced_url(&format!(
-                    "{prefix}/namespaces/{}/{plural}/{name}",
-                    plan.namespace
-                ))?;
-                let response = self
-                    .authorized(self.client.delete(url).json(&json!({
-                        "apiVersion":"v1", "kind":"DeleteOptions", "propagationPolicy":"Foreground",
-                        "preconditions":{"uid":uid,"resourceVersion":resource_version}
-                    })))
-                    .send()
-                    .await
-                    .map_err(|_| unavailable())?;
-                if response.status() != StatusCode::NOT_FOUND
-                    && response.status() != StatusCode::CONFLICT
-                    && !response.status().is_success()
-                {
-                    return Err(status_failure(response.status()));
-                }
-                // Never clear another controller's finalizers, even when cleanup times out.
-                tokio::time::sleep(Duration::from_millis(
-                    self.configuration.cleanup_poll_milliseconds,
-                ))
-                .await;
             }
+            let pods = list
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or_else(invalid_observation)?;
+            let mut attached = false;
+            for pod in pods {
+                if pod
+                    .pointer("/metadata/labels/labweaver.io~1environment-id")
+                    .and_then(Value::as_str)
+                    == Some(environment_id.as_str())
+                {
+                    attached = true;
+                    break;
+                }
+                let spec = pod
+                    .get("spec")
+                    .and_then(Value::as_object)
+                    .ok_or_else(invalid_observation)?;
+                if let Some(volumes) = spec.get("volumes") {
+                    for volume in volumes.as_array().ok_or_else(invalid_observation)? {
+                        let volume = volume.as_object().ok_or_else(invalid_observation)?;
+                        if let Some(reference) = volume.get("persistentVolumeClaim") {
+                            let name = reference
+                                .get("claimName")
+                                .and_then(Value::as_str)
+                                .ok_or_else(invalid_observation)?;
+                            if name == claim_name {
+                                attached = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if !attached {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(
+                self.configuration.cleanup_poll_milliseconds,
+            ))
+            .await;
         }
-        Ok(())
+    }
+
+    async fn delete_owned_work_object(
+        &self,
+        fence: &ContainerBackendFence,
+        plan: &ContainerResourcePlan,
+        kind: &str,
+        suffix: &str,
+    ) -> Result<(), ProviderFailure> {
+        let name = plan.placement().resource_name(suffix);
+        let mut first_uid = None;
+        loop {
+            if timestamp()?.get() >= fence.deadline_at.get() {
+                return Err(unavailable());
+            }
+            self.verify_container_namespace(plan).await?;
+            let Some(value) = self.get_json(kind, &plan.namespace, &name).await? else {
+                return Ok(());
+            };
+            verify_owned_identity(
+                &value,
+                &name,
+                Some(&plan.namespace),
+                plan.environment_id,
+                plan.project_id,
+            )?;
+            let uid = pointer_uuid(&value, "/metadata/uid")?;
+            if first_uid.is_some_and(|original| original != uid) {
+                return Err(rejected());
+            }
+            first_uid = Some(uid);
+            let resource_version = value
+                .pointer("/metadata/resourceVersion")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(invalid_observation)?;
+            let (prefix, plural, _) = resource_path(kind)?;
+            let url = self.namespaced_url(&format!(
+                "{prefix}/namespaces/{}/{plural}/{name}",
+                plan.namespace
+            ))?;
+            let response = self
+                .authorized(self.client.delete(url).json(&json!({
+                    "apiVersion":"v1", "kind":"DeleteOptions", "propagationPolicy":"Foreground",
+                    "preconditions":{"uid":uid,"resourceVersion":resource_version}
+                })))
+                .send()
+                .await
+                .map_err(|_| unavailable())?;
+            if response.status() != StatusCode::NOT_FOUND
+                && response.status() != StatusCode::CONFLICT
+                && !response.status().is_success()
+            {
+                return Err(status_failure(response.status()));
+            }
+            // Never clear another controller's finalizers, even when cleanup times out.
+            tokio::time::sleep(Duration::from_millis(
+                self.configuration.cleanup_poll_milliseconds,
+            ))
+            .await;
+        }
     }
 
     async fn remove_owned_namespace(
@@ -4033,6 +4126,7 @@ mod tests {
         endpoint: Url,
         ca_pem: String,
         events: Arc<Mutex<Vec<String>>>,
+        lifecycle: Option<Arc<Mutex<LifecycleKubernetes>>>,
         applied_private_secret: Arc<Mutex<Option<Value>>>,
         applied_quota: Arc<Mutex<Option<Value>>>,
         get_responses: Arc<Mutex<std::collections::BTreeMap<String, Option<Value>>>>,
@@ -4072,13 +4166,14 @@ mod tests {
             body: b"fresh-client-token".to_vec(),
             location: None,
         }));
+        let lifecycle = lifecycle.map(|fixture| Arc::new(Mutex::new(fixture)));
         let state = MockKubernetesState {
             deployment_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events: Arc::clone(&events),
             applied_private_secret: Arc::clone(&applied_private_secret),
             applied_quota: Arc::clone(&applied_quota),
             get_responses: Arc::clone(&get_responses),
-            lifecycle: lifecycle.map(|fixture| Arc::new(Mutex::new(fixture))),
+            lifecycle: lifecycle.clone(),
             kubevirt_read: Arc::clone(&kubevirt_read),
             ca_pem: ca_pem.clone(),
             license_response: Arc::clone(&license_response),
@@ -4093,6 +4188,7 @@ mod tests {
             endpoint,
             ca_pem,
             events,
+            lifecycle,
             applied_private_secret,
             applied_quota,
             get_responses,
@@ -4381,7 +4477,20 @@ mod tests {
             return StatusCode::OK.into_response();
         }
         if method == Method::GET && path.ends_with("/pods") {
-            return axum::Json(json!({"items":if fixture.pods_remaining {vec![json!({"metadata":{"name":"runtime-pod"}})]} else {Vec::<Value>::new()}})).into_response();
+            if let Some(response) = fixture.objects.get(&path) {
+                return axum::Json(response.clone()).into_response();
+            }
+            let prefix = format!("{path}/");
+            let mut pods = fixture
+                .objects
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>();
+            if fixture.pods_remaining {
+                pods.push(json!({"metadata":{"name":"runtime-pod"}}));
+            }
+            return axum::Json(json!({"items":pods})).into_response();
         }
         if method == Method::GET {
             return fixture.objects.get(&path).cloned().map_or_else(
@@ -4559,6 +4668,191 @@ mod tests {
                     .any(|event| event == &format!("DELETE {path}"))
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_namespace_cleanup_keeps_disk_while_pod_references_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (owned, terminating, mounted) in [
+            (true, false, true),
+            (true, true, true),
+            (false, false, true),
+            (true, false, false),
+        ] {
+            let (mut fixture, plan, profile) =
+                existing_work_fixture(contracts::EnvironmentId::new(), contracts::ProjectId::new());
+            let claim_name = plan.placement().resource_name("workspace");
+            let disk_path = format!(
+                "/api/v1/namespaces/{}/persistentvolumeclaims/{claim_name}",
+                plan.namespace
+            );
+            let mut pod = json!({
+                "metadata":{"name":"still-attached","namespace":plan.namespace},
+                "spec":{"volumes":[{"name":"workspace","persistentVolumeClaim":{"claimName":claim_name}}]},
+                "status":{"phase":"Pending"}
+            });
+            if owned {
+                pod["metadata"]["labels"] = json!({
+                    "labweaver.io/environment-id":plan.environment_id,
+                    "labweaver.io/project-id":plan.project_id
+                });
+            }
+            if terminating {
+                pod["metadata"]["deletionTimestamp"] = json!("2026-10-15T00:00:00Z");
+            }
+            if !mounted {
+                pod["spec"]["volumes"] = json!([]);
+            }
+            fixture.objects.insert(
+                format!("/api/v1/namespaces/{}/pods/still-attached", plan.namespace),
+                pod,
+            );
+            let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
+            let (_files, executor) = test_kubevirt_executor(&mock).await?;
+            let executor = executor.with_namespace_profile(profile);
+            let mut fence = container_test_fence(plan.environment_id);
+            fence.deadline_at = UtcTimestamp::from_utc(
+                OffsetDateTime::now_utc().replace_nanosecond(0)? + time::Duration::seconds(2),
+            )?;
+            let failure = executor
+                .delete_work_objects(&fence, &plan)
+                .await
+                .err()
+                .ok_or("cleanup deleted a workspace while a Pod still referenced it")?;
+            assert!(failure.retryable);
+            let events = mock.events.lock().await;
+            assert!(events.iter().any(|event| {
+                event == &format!("GET /api/v1/namespaces/{}/pods", plan.namespace)
+            }));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| event == &format!("DELETE {disk_path}"))
+            );
+            assert!(
+                mock.lifecycle
+                    .as_ref()
+                    .ok_or("fixture")?
+                    .lock()
+                    .await
+                    .objects
+                    .contains_key(&disk_path)
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_namespace_cleanup_rejects_incomplete_pod_observation_before_disk_removal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for response in [
+            json!({"metadata":{"continue":"next-page"},"items":[]}),
+            json!({"items":[{"metadata":{"name":"unknown"},"spec":{"volumes":"unknown"}}]}),
+            json!({"items":[{"metadata":{"name":"unknown"},"spec":{"volumes":[null]}}]}),
+            json!({"items":null}),
+        ] {
+            let (mut fixture, plan, profile) =
+                existing_work_fixture(contracts::EnvironmentId::new(), contracts::ProjectId::new());
+            fixture.objects.insert(
+                format!("/api/v1/namespaces/{}/pods", plan.namespace),
+                response,
+            );
+            let disk_path = format!(
+                "/api/v1/namespaces/{}/persistentvolumeclaims/{}",
+                plan.namespace,
+                plan.placement().resource_name("workspace")
+            );
+            let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
+            let (_files, executor) = test_kubevirt_executor(&mock).await?;
+            let executor = executor.with_namespace_profile(profile);
+            assert!(
+                executor
+                    .delete_work_objects(&container_test_fence(plan.environment_id), &plan)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                !mock
+                    .events
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|event| event == &format!("DELETE {disk_path}"))
+            );
+            assert!(
+                mock.lifecycle
+                    .as_ref()
+                    .ok_or("fixture")?
+                    .lock()
+                    .await
+                    .objects
+                    .contains_key(&disk_path)
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_namespace_cleanup_resumes_disk_removal_after_compute_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut fixture, plan, profile) =
+            existing_work_fixture(contracts::EnvironmentId::new(), contracts::ProjectId::new());
+        let pod_path = format!("/api/v1/namespaces/{}/pods/runtime", plan.namespace);
+        let claim_name = plan.placement().resource_name("workspace");
+        let disk_path = format!(
+            "/api/v1/namespaces/{}/persistentvolumeclaims/{claim_name}",
+            plan.namespace
+        );
+        fixture.objects.insert(pod_path.clone(), json!({
+            "metadata":{"name":"runtime","labels":{"labweaver.io/environment-id":plan.environment_id}},
+            "spec":{"volumes":[{"name":"workspace","persistentVolumeClaim":{"claimName":claim_name}}]}
+        }));
+        let unrelated_pod_path = format!("/api/v1/namespaces/{}/pods/other-work", plan.namespace);
+        fixture.objects.insert(unrelated_pod_path.clone(), json!({
+            "metadata":{"name":"other-work","labels":{"labweaver.io/environment-id":contracts::EnvironmentId::new()}},
+            "spec":{"volumes":[{"name":"workspace","persistentVolumeClaim":{"claimName":"other-workspace"}}]}
+        }));
+        let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let executor = executor.with_namespace_profile(profile);
+        let fence = container_test_fence(plan.environment_id);
+        let cleanup =
+            tokio::spawn(async move { executor.delete_work_objects(&fence, &plan).await });
+        let pod_read = format!("GET {}", pod_path.trim_end_matches("/runtime"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if mock
+                    .events
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|event| *event == &pod_read)
+                    .count()
+                    >= 2
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+        assert!(
+            !cleanup.is_finished(),
+            "disk cleanup must wait for compute retirement"
+        );
+        let lifecycle = mock.lifecycle.as_ref().ok_or("fixture")?;
+        {
+            let mut state = lifecycle.lock().await;
+            assert!(state.objects.contains_key(&disk_path));
+            state.objects.remove(&pod_path);
+        }
+        tokio::time::timeout(Duration::from_secs(2), cleanup)
+            .await??
+            .map_err(|failure| format!("cleanup failed: {failure:?}"))?;
+        let state = lifecycle.lock().await;
+        assert!(!state.objects.contains_key(&disk_path));
+        assert!(state.objects.contains_key(&unrelated_pod_path));
         Ok(())
     }
 
