@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive, ref } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
+import { getProjectAvailableActions } from '@/generated/contracts'
 
 const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
@@ -75,6 +76,29 @@ const authState = {
   } as { expired: boolean; profile: TestProfile } | null),
 }
 
+
+vi.mock('@/generated/contracts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/generated/contracts')>()
+  return {
+    ...actual,
+    getProjectAvailableActions: vi.fn(),
+  }
+})
+
+function mockAvailableActions(actions: string[] = ['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs']) {
+  vi.mocked(getProjectAvailableActions).mockResolvedValue({
+    data: {
+      projectId: 'project-1',
+      actorId: 'actor-owner',
+      membershipRevision: 1,
+      validUntil: '2099-01-01T00:00:00.000Z',
+      actions,
+    },
+    error: undefined,
+  } as never)
+}
+
+
 vi.mock('@/composables/useProjects', () => ({
   useProjects: () => projectsState,
   useProjectMemberships: () => membersState,
@@ -111,6 +135,7 @@ async function mountView(projectId = 'project-1') {
 
 describe('WorkspaceListView', () => {
   beforeEach(() => {
+    mockAvailableActions()
     mocks.requests = []
     mocks.requestState = null
     mocks.loadResources.mockReset()
@@ -242,6 +267,7 @@ describe('WorkspaceListView', () => {
 
   it('keeps a student member read-only while preserving project and member visibility', async () => {
     authState.user.value = { expired: false, profile: { roles: ['student'], actor_id: 'student-1' } }
+    mockAvailableActions(['browse'])
     const { wrapper } = await mountView()
 
     expect(wrapper.get('input.text-input').attributes('readonly')).toBeDefined()
@@ -250,7 +276,7 @@ describe('WorkspaceListView', () => {
     expect(wrapper.find('button.danger-button').exists()).toBe(false)
     expect(wrapper.find('.member-form').exists()).toBe(false)
     expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
-    expect(wrapper.text()).toContain('只有项目所有者或平台管理员可以编辑项目、归档项目和管理成员')
+    expect(wrapper.text()).toContain('缺少 edit / manage_members 对象动作')
     expect(wrapper.text()).toContain('项目成员')
     wrapper.unmount()
   })
@@ -271,6 +297,7 @@ describe('WorkspaceListView', () => {
 
   it('keeps a teacher who is not the owner under the same project restrictions', async () => {
     authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'teacher-2' } }
+    mockAvailableActions(['browse'])
     const { wrapper } = await mountView()
 
     expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
