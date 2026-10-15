@@ -2,21 +2,18 @@
   <div class="async-state-view">
     <slot v-if="state.kind === 'success'" name="success" :data="state.data" />
 
-    <div v-else-if="state.kind === 'loading'" class="state-loading" role="status" aria-busy="true">
-      <div class="state-skeleton" aria-hidden="true">
-        <span class="skeleton state-skeleton__line state-skeleton__line--title" />
-        <span class="skeleton state-skeleton__line" />
-        <span class="skeleton state-skeleton__line state-skeleton__line--short" />
-      </div>
+    <!-- Cloudscape status indicator: inline spinner + text inside the content area. -->
+    <div v-else-if="state.kind === 'loading'" class="state-loading" role="status" aria-live="polite" aria-busy="true">
+      <span class="state-spinner" aria-hidden="true" />
       <span class="state-loading__text">{{ state.message ?? loadingText }}</span>
     </div>
 
     <slot v-else-if="state.kind === 'empty'" name="empty">
+      <!-- Cloudscape empty state: bold title, optional description and action. -->
       <div class="state-message" role="status">
-        <span class="state-message__icon" aria-hidden="true">
-          <SvgIcon name="inbox" size="lg" aria-hidden="true" />
-        </span>
-        <span>{{ emptyText }}</span>
+        <strong class="state-message__title">{{ emptyText }}</strong>
+        <span v-if="$slots['empty-description']" class="state-message__description"><slot name="empty-description" /></span>
+        <div v-if="$slots['empty-action']" class="state-message__action"><slot name="empty-action" /></div>
       </div>
     </slot>
 
@@ -35,7 +32,6 @@
 
 <script setup lang="ts" generic="T">
 import DiagnosticBanner from './DiagnosticBanner.vue'
-import SvgIcon from './SvgIcon.vue'
 import type { AsyncState } from '@/types/async'
 
 interface Props {
@@ -85,54 +81,44 @@ function bannerSeverity(kind: FailureKind): 'error' | 'warning' | 'info' {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-3);
-  min-height: 160px;
+  gap: var(--space-1);
   padding: var(--space-8) var(--space-6);
-  border: 1px dashed var(--md-sys-color-outline-variant);
-  border-radius: var(--md-sys-shape-large);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
   text-align: center;
 }
 
-.state-message__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 48px;
-  height: 48px;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-surface-container);
-  color: var(--md-sys-color-on-surface-variant);
+.state-message__title {
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-small);
+}
+
+.state-message__action {
+  margin-top: var(--space-3);
 }
 
 .state-loading {
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-4) 0;
-}
-
-.state-skeleton {
-  display: grid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   gap: var(--space-2);
-}
-
-.state-skeleton__line {
-  display: block;
-  height: 14px;
-}
-
-.state-skeleton__line--title {
-  width: 40%;
-  height: 18px;
-}
-
-.state-skeleton__line--short {
-  width: 64%;
-}
-
-.state-loading__text {
+  padding: var(--space-8) var(--space-4);
   color: var(--md-sys-color-on-surface-variant);
-  font: var(--md-sys-body-small);
+  font: var(--md-sys-body-medium);
+}
+
+.state-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--md-sys-color-outline-variant);
+  border-top-color: var(--md-sys-color-primary);
+  border-radius: 50%;
+  animation: state-spin 0.7s linear infinite;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>
