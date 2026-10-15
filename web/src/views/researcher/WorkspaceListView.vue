@@ -188,10 +188,10 @@
               </label>
               <label>
                 <span>角色</span>
-                <select v-model="memberRole" class="text-input">
+                <AppSelect v-model="memberRole">
                   <option value="student">学生</option>
                   <option value="teacher">教师</option>
-                </select>
+                </AppSelect>
               </label>
               <button type="submit" class="outlined-button" :disabled="!canAddMember">添加成员</button>
             </form>
@@ -331,6 +331,7 @@
 </template>
 
 <script setup lang="ts">
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -607,8 +608,6 @@ async function confirmDestructiveAction() {
 .project-form { display: grid; gap: var(--space-4); margin-top: var(--space-5); }
 .project-form label, .member-form label { display: grid; gap: var(--space-2); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .field-hint { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
-.text-input { box-sizing: border-box; width: 100%; min-height: 40px; padding: 9px var(--space-3); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
-textarea.text-input { resize: vertical; }
 .readonly-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2) var(--space-4); padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .readonly-meta code { color: var(--md-sys-color-on-surface); overflow-wrap: anywhere; }
 .form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-3); }

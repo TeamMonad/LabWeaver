@@ -45,10 +45,9 @@
           class="filter-label"
           for="course-filter"
         >课程过滤</label>
-        <select
+        <AppSelect
           id="course-filter"
           v-model="courseFilter"
-          class="filter-select"
           aria-label="按课程过滤资源申请"
         >
           <option value="">
@@ -61,7 +60,7 @@
           >
             {{ courseId }}
           </option>
-        </select>
+        </AppSelect>
         <label
           class="filter-label"
           for="request-search"
@@ -78,10 +77,9 @@
           class="filter-label"
           for="request-state-filter"
         >状态</label>
-        <select
+        <AppSelect
           id="request-state-filter"
           v-model="requestStateFilter"
-          class="filter-select"
           aria-label="按资源申请状态过滤"
         >
           <option value="">
@@ -94,7 +92,7 @@
           >
             {{ resourceRequestStateLabel(state) }}
           </option>
-        </select>
+        </AppSelect>
       </div>
 
       <p class="filter-hint">
@@ -376,10 +374,9 @@
                   class="input-label"
                   for="provider-binding"
                 >GPU Provider Binding</label>
-                <select
+                <AppSelect
                   id="provider-binding"
                   v-model="providerBinding"
-                  class="text-input"
                   aria-label="GPU Provider Binding"
                   :disabled="approval.providerOptions.kind !== 'success' || eligibleProviderOptions.length === 0"
                   aria-describedby="provider-binding-hint"
@@ -394,7 +391,7 @@
                   >
                     {{ option.providerBinding }} · {{ option.gpuClasses.length ? `GPU: ${option.gpuClasses.join('、')}` : '无 GPU 项目' }}
                   </option>
-                </select>
+                </AppSelect>
               </template>
               <template v-else>
                 <label
@@ -762,6 +759,7 @@
 </template>
 
 <script setup lang="ts">
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -1601,15 +1599,6 @@ async function onLeaseConfirmed() {
   font: var(--md-sys-body-small);
 }
 
-.text-input {
-  height: 36px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: var(--md-sys-shape-small);
-  background: var(--md-sys-color-surface);
-  color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-body-medium);
-}
 
 .resize-fieldset {
   border: 1px solid var(--md-sys-color-outline-variant);

@@ -62,11 +62,11 @@
         </label>
         <label>
           <span>mode</span>
-          <select v-model="createForm.mode" class="text-input">
+          <AppSelect v-model="createForm.mode">
             <option value="exclusive">exclusive</option>
             <option value="container_time_slice">container_time_slice</option>
             <option value="vm_vgpu">vm_vgpu</option>
-          </select>
+          </AppSelect>
           <small v-if="createForm.mode === 'container_time_slice'" data-testid="gpu-sharing-limit" class="field-note">容器时间片不提供独占显存或固定比例算力，其他任务可能影响性能。</small>
         </label>
         <label>
@@ -92,6 +92,7 @@
 </template>
 
 <script setup lang="ts">
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, onMounted, reactive } from 'vue'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DataTable, { type DataTableColumn } from '@/components/common/DataTable.vue'
@@ -174,7 +175,6 @@ onMounted(() => catalog.load())
 .admin-form label { display: grid; gap: var(--space-2); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .field-note { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.4; }
 .admin-form button { justify-self: start; }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: var(--space-2) 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .state-chip { display: inline-flex; white-space: nowrap; padding: var(--space-1) var(--space-2); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .state-chip--active { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .state-chip--disabled { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }

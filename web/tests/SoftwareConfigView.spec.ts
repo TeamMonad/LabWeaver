@@ -248,7 +248,7 @@ describe('SoftwareConfigView', () => {
       }),
     }))
 
-    const expiry = wrapper.find('input[type="datetime-local"]')
+    const expiry = wrapper.find('input[data-app-datetime]')
     expect(expiry.exists()).toBe(true)
     const expected = new Date(Date.now() + 15 * 60 * 1000)
     const pad = (value: number) => String(value).padStart(2, '0')
@@ -316,7 +316,7 @@ describe('SoftwareConfigView', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('Work 配置计划审核'))
 
     await wrapper.find('textarea[required]').setValue('reviewed the requested Work changes')
-    const expiry = wrapper.get('input[type="datetime-local"]')
+    const expiry = wrapper.get('input[data-app-datetime]')
     const approveButton = wrapper.get('form.approval-form button[type="submit"]')
     const pastExpiry = localDateTimeInput(Date.now() - 60 * 1000)
     const futureExpiry = localDateTimeInput(Date.now() + 30 * 60 * 1000)

@@ -81,10 +81,10 @@
       <form class="admin-form" @submit.prevent="submitRegister">
         <label>
           <span>类型</span>
-          <select v-model="registerForm.kind" class="text-input" aria-label="类型">
+          <AppSelect v-model="registerForm.kind" aria-label="类型">
             <option value="container">container</option>
             <option value="virtual_machine">virtual_machine</option>
-          </select>
+          </AppSelect>
         </label>
         <label>
           <span>binding</span>
@@ -125,10 +125,10 @@
       <form class="admin-form" @submit.prevent="submitUpload">
         <label>
           <span>类型</span>
-          <select v-model="uploadForm.kind" class="text-input" aria-label="类型">
+          <AppSelect v-model="uploadForm.kind" aria-label="类型">
             <option value="container">container</option>
             <option value="virtual_machine">virtual_machine</option>
-          </select>
+          </AppSelect>
         </label>
         <label>
           <span>binding</span>
@@ -154,15 +154,14 @@
         <template v-if="uploadForm.kind === 'virtual_machine'">
           <div class="form-field">
             <label for="upload-disk-format">磁盘格式</label>
-            <select
+            <AppSelect
               id="upload-disk-format"
               v-model="uploadForm.diskFormat"
-              class="text-input"
               aria-describedby="upload-disk-format-hint"
             >
               <option value="qcow2">qcow2</option>
               <option value="raw">raw</option>
-            </select>
+            </AppSelect>
             <small id="upload-disk-format-hint" class="field-hint">必须与归档内磁盘的实际格式一致，否则虚拟机导入或启动可能失败。</small>
           </div>
           <label>
@@ -252,6 +251,7 @@
 </template>
 
 <script setup lang="ts">
+import AppSelect from '@/components/form/AppSelect.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -572,8 +572,6 @@ onMounted(async () => {
 .admin-form label, .operation-credentials label, .form-field { display: grid; gap: var(--space-2); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .admin-form .wide-field { grid-column: 1 / -1; }
 .admin-form button { justify-self: start; }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: var(--space-2) 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
-textarea.text-input { resize: vertical; }
 .operation-credentials { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); padding-top: var(--space-4); border-top: 1px solid var(--md-sys-color-outline-variant); }
 .operation-hint { grid-column: 1 / -1; margin: 0; }
 .row-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
