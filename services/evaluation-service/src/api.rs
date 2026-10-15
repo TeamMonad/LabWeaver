@@ -130,6 +130,10 @@ pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
             get(get_frozen_model_input_facts),
         )
         .route(
+            "/internal/v1/evaluation-releases/{release_id}/frozen-submissions/{submission_id}/model-input-facts/tasks/{task_id}",
+            get(get_frozen_model_input_task_facts),
+        )
+        .route(
             "/internal/v1/evaluation-runs/{run_id}",
             get(get_evaluation_run),
         )
@@ -255,6 +259,49 @@ async fn get_frozen_model_input_facts(
         )
         .await?;
     Ok(Json(facts))
+}
+
+async fn get_frozen_model_input_task_facts(
+    State(state): State<EvaluationApiState>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
+    Path((release_id, submission_id, task_id)): Path<(
+        EvaluationReleaseId,
+        FrozenSubmissionId,
+        contracts::TaskRunId,
+    )>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, EvaluationApiError> {
+    require_control(principal)?;
+    const HEADER: &str = "x-labweaver-evaluation-lease-sha256";
+    if headers.get_all(HEADER).iter().count() != 1 {
+        return Err(EvaluationApiError::RequestInvalid);
+    }
+    let lease = headers
+        .get(HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(EvaluationApiError::RequestInvalid)?;
+    if lease.len() != 64
+        || !lease
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(EvaluationApiError::RequestInvalid);
+    }
+    Ok(Json(
+        state
+            .submissions
+            .model_input_facts_for_task(
+                submission_id,
+                project_header(&headers)?,
+                optional_course_header(&headers)?,
+                actor(&headers)?,
+                release_id,
+                if_match(&headers)?,
+                task_id,
+                lease,
+            )
+            .await?,
+    ))
 }
 
 async fn publish_evaluation_release(
