@@ -38,13 +38,11 @@
               :to="navigationTarget(item, projects.selectedProjectId)"
               class="task-card md-card"
             >
-              <div class="card-header">
-                <span class="card-icon">
-                  <SvgIcon :name="item.icon" size="lg" aria-hidden="true" />
-                </span>
-                <SvgIcon name="arrow_forward" size="md" aria-hidden="true" />
-              </div>
+              <span class="card-icon">
+                <SvgIcon :name="item.icon" size="md" aria-hidden="true" />
+              </span>
               <h4 class="card-title">{{ item.label }}</h4>
+              <SvgIcon class="card-arrow" name="arrow_forward" size="md" aria-hidden="true" />
               <p class="card-desc">{{ item.description }}</p>
             </RouterLink>
           </div>
@@ -115,79 +113,89 @@ const routeReason = computed(() => {
 }
 
 .hero {
-  padding: var(--space-6) 0 var(--space-2);
+  padding: var(--space-4) 0 0;
 }
 
 .hero h1 {
   margin-bottom: var(--space-2);
   color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-headline-large);
+  font: var(--md-sys-display-small);
+  letter-spacing: -0.02em;
 }
 
 .hero-subtitle {
+  max-width: 60ch;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-large);
 }
 
 .section-title {
-  margin-bottom: var(--space-5);
-  color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-title-medium);
+  margin-bottom: var(--space-4);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-medium);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .task-groups {
   display: grid;
-  gap: var(--space-8);
+  gap: var(--space-10);
 }
 
 .task-group {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 .group-heading {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
   gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .group-heading h3 {
   margin: 0;
   color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-title-medium);
+  font: var(--md-sys-title-large);
 }
 
 .group-count {
   flex-shrink: 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-medium);
+  font-variant-numeric: tabular-nums;
 }
 
 .task-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  gap: var(--space-3);
 }
 
 .task-card {
-  display: flex;
-  min-height: 154px;
-  flex-direction: column;
-  padding: var(--space-5);
+  display: grid;
+  grid-template-columns: 40px 1fr 20px;
+  grid-template-rows: auto 1fr;
+  column-gap: var(--space-4);
+  row-gap: var(--space-1);
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
   color: var(--md-sys-color-on-surface);
   text-decoration: none;
+  box-shadow: none;
   transition: box-shadow var(--motion-duration-base) var(--motion-ease-out), transform var(--motion-duration-base) var(--motion-ease-out), border-color var(--motion-duration-base) var(--motion-ease-out);
 }
 
 .task-card:hover {
-  border-color: color-mix(in srgb, var(--md-sys-color-primary) 28%, var(--md-sys-color-outline-variant));
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 32%, var(--md-sys-color-outline-variant));
   box-shadow: var(--md-sys-elevation-2);
-  transform: translateY(-2px);
+  transform: translateY(-1px);
 }
 
 .task-card:active {
-  transform: translateY(0) scale(0.99);
+  transform: scale(0.99);
 }
 
 .task-card:focus-visible {
@@ -195,35 +203,47 @@ const routeReason = computed(() => {
   outline-offset: 2px;
 }
 
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-5);
-  color: var(--md-sys-color-on-surface-variant);
-}
-
 .card-icon {
+  grid-row: 1 / span 2;
+  align-self: start;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-primary);
+  transition: background-color var(--motion-duration-base) var(--motion-ease-out);
+}
+
+.task-card:hover .card-icon {
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
 }
 
 .card-title {
-  margin-bottom: var(--space-2);
   color: var(--md-sys-color-on-surface);
   font: var(--md-sys-title-medium);
 }
 
+.card-arrow {
+  color: var(--md-sys-color-on-surface-variant);
+  opacity: 0.5;
+  transition: transform var(--motion-duration-base) var(--motion-ease-out), opacity var(--motion-duration-base) var(--motion-ease-out);
+}
+
+.task-card:hover .card-arrow {
+  opacity: 1;
+  color: var(--md-sys-color-primary);
+  transform: translateX(2px);
+}
+
 .card-desc {
+  grid-column: 2 / span 2;
+  align-self: start;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
-  line-height: 1.45;
 }
 
 .empty-state {
@@ -264,10 +284,36 @@ const routeReason = computed(() => {
     grid-template-columns: 1fr;
   }
 
-  .group-heading {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: var(--space-1);
+  .hero h1 {
+    font: var(--md-sys-headline-medium);
+  }
+
+  .task-groups {
+    gap: var(--space-8);
+  }
+
+  .task-grid {
+    gap: 0;
+    overflow: hidden;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--md-sys-shape-large);
+    background: var(--md-sys-color-surface);
+  }
+
+  .task-card {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .task-card + .task-card {
+    border-top: 1px solid var(--md-sys-color-outline-variant);
+  }
+
+  .task-card:hover {
+    box-shadow: none;
+    transform: none;
   }
 }
 
@@ -276,7 +322,8 @@ const routeReason = computed(() => {
     transition: none;
   }
 
-  .task-card:hover {
+  .task-card:hover,
+  .task-card:hover .card-arrow {
     transform: none;
   }
 }
