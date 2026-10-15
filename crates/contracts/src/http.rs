@@ -1099,6 +1099,8 @@ pub struct ProjectRubricModelInputRules {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrozenModelInputSource {
     pub task_run_id: TaskRunId,
+    /// SHA of the original Evaluation worker lease; never refreshed on recovery.
+    pub parent_lease_sha256: String,
     pub frozen_submission_id: FrozenSubmissionId,
     pub manifest_revision: Revision,
     pub manifest_sha256: String,
@@ -1153,7 +1155,8 @@ impl ModelInputAuthorizationBinding {
             return Err(HttpContractError::InvalidInternalIdentity);
         }
         if let ModelInputAuthorizationSource::FrozenSubmission(source) = &self.source {
-            if !is_sha256(&source.manifest_sha256)
+            if !is_sha256(&source.parent_lease_sha256)
+                || !is_sha256(&source.manifest_sha256)
                 || !is_sha256(&source.content_sha256)
                 || source.environment.release_version == 0
             {
@@ -1193,10 +1196,32 @@ pub struct ModelInputAuthorizationResolveRequest {
 pub struct CreateFrozenModelInputAuthorizationRequest {
     pub input_authorization_context: ModelInputAuthorizationContext,
     pub task_run_id: TaskRunId,
+    /// Derived by Evaluation from its actual fenced worker lease, not from user input.
+    pub parent_lease_sha256: String,
     pub frozen_submission_id: FrozenSubmissionId,
     pub evaluation_release_id: EvaluationReleaseId,
     pub evaluation_release_revision: Revision,
     pub selected_paths: Vec<String>,
+}
+
+impl CreateFrozenModelInputAuthorizationRequest {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.input_authorization_context.validate()?;
+        if !is_sha256(&self.parent_lease_sha256) {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// Binds an Evaluation worker generation without transmitting the raw lease token.
+#[must_use]
+pub fn model_input_parent_lease_sha256(lease_token: uuid::Uuid) -> String {
+    use sha2::Digest;
+    format!(
+        "{:x}",
+        sha2::Sha256::digest(lease_token.to_string().as_bytes())
+    )
 }
 
 /// Digest of the exact frozen inputs and separate rubric/permission identities.

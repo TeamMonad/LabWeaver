@@ -69,7 +69,7 @@ fn frozen_binding_json() -> Value {
     binding["selectionSha256"] = json!("c".repeat(64));
     let archive = json!({"artifactId": contracts::ArtifactId::new(), "storeBinding":"synthetic", "objectVersion":"archive-v1", "sizeBytes": 50, "mediaType":"application/gzip"});
     binding["source"] = json!({
-        "kind":"frozen_submission", "taskRunId":contracts::TaskRunId::new(),
+        "kind":"frozen_submission", "taskRunId":contracts::TaskRunId::new(), "parentLeaseSha256":"d".repeat(64),
         "frozenSubmissionId":contracts::FrozenSubmissionId::new(), "manifestRevision":3,
         "manifestSha256":"a".repeat(64), "archive":archive,
         "contentSha256":"b".repeat(64), "evaluationReleaseId":contracts::EvaluationReleaseId::new(),
@@ -123,12 +123,44 @@ fn frozen_binding_rejects_untyped_identity_and_caller_permission_claims()
     assert!(
         serde_json::from_value::<contracts::http::ModelInputAuthorizationBinding>(value).is_err()
     );
-    for field in ["manifestSha256", "contentSha256"] {
+    for field in ["manifestSha256", "contentSha256", "parentLeaseSha256"] {
         let mut value = frozen_binding_json();
         value["source"][field] = json!("unknown");
         let binding: contracts::http::ModelInputAuthorizationBinding =
             serde_json::from_value(value)?;
         assert!(binding.validate().is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn frozen_recovery_requires_original_parent_lease_and_binds_it_to_selection()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::http::{
+        ModelInputAuthorizationBinding, ModelInputAuthorizationSource,
+        frozen_model_input_selection_sha256, model_input_parent_lease_sha256,
+    };
+    let token = uuid::Uuid::parse_str("018F0123-4567-789A-BCDE-0123456789AB")?;
+    assert_eq!(
+        model_input_parent_lease_sha256(token),
+        "f18a7dcb0027ac647ae0d6e7ec2d4d5cabc39613caea6b047325c7d8473a51ef"
+    );
+    let mut value = frozen_binding_json();
+    value["source"]
+        .as_object_mut()
+        .ok_or("source missing")?
+        .remove("parentLeaseSha256");
+    assert!(serde_json::from_value::<ModelInputAuthorizationBinding>(value).is_err());
+    let binding: ModelInputAuthorizationBinding = serde_json::from_value(frozen_binding_json())?;
+    let ModelInputAuthorizationSource::FrozenSubmission(mut source) = binding.source else {
+        return Err("wrong source".into());
+    };
+    let files = vec![("submission.md".to_owned(), "a".repeat(64))];
+    let original = frozen_model_input_selection_sha256(&source, &files)?;
+    source.parent_lease_sha256 = model_input_parent_lease_sha256(token);
+    assert_ne!(
+        frozen_model_input_selection_sha256(&source, &files)?,
+        original
+    );
     Ok(())
 }

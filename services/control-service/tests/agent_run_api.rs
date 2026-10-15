@@ -59,6 +59,9 @@ use tower::ServiceExt;
 
 const SERVICE_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsibGFid2VhdmVyLWFjY2VzcyIsImxhYndlYXZlci1hZ2VudCIsImxhYndlYXZlci1lbnZpcm9ubWVudCIsImxhYndlYXZlci1ldmFsdWF0aW9uIl19.signature";
 
+#[path = "cases/parent_task_client.rs"]
+mod parent_task_client;
+
 #[derive(Clone)]
 struct AccessState {
     denied_actor_id: ActorId,
