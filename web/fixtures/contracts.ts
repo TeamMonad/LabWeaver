@@ -33,6 +33,9 @@ type FixtureSuccess<T> = { data: T; error: undefined }
 type FixtureError = { data: undefined; error: unknown }
 type FixtureResult<T> = FixtureSuccess<T> | FixtureError
 
+// Platform configuration (#203) preview facts live in their own module.
+export * from './platformConfiguration'
+
 const now = '2026-09-14T08:00:00.000Z'
 const later = '2026-09-14T16:00:00.000Z'
 const GIB = 1024 ** 3
@@ -742,3 +745,27 @@ export async function getProjectWorkConfigurationPlan(_options?: unknown): Promi
 export async function appendProjectEnvironmentCandidateDecision(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('记录环境候选决定') }
 export async function createEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('发布环境模板') }
 export async function getEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取环境模板版本') }
+
+export async function renewAccessGrant(_options?: unknown) { return unsupportedResponse('renew Access Grant') }
+export async function issueCsrfToken(_options?: unknown) { return unsupportedResponse('issue Csrf Token') }
+export async function getAuthSession(_options?: unknown) { return unsupportedResponse('get Auth Session') }
+export async function listEvaluationReleases(_options?: unknown) { return unsupportedResponse('list Evaluation Releases') }
+export async function createEvaluationRelease(_options?: unknown) { return unsupportedResponse('create Evaluation Release') }
+export async function getEvaluationRelease(_options?: unknown) { return unsupportedResponse('get Evaluation Release') }
+export async function withdrawEvaluationRelease(_options?: unknown) { return unsupportedResponse('withdraw Evaluation Release') }
+export async function createCourseLlmPolicy(_options?: unknown) { return unsupportedResponse('create Course Llm Policy') }
+export async function getActiveCourseLlmPolicy(_options?: unknown) { return unsupportedResponse('get Active Course Llm Policy') }
+export async function getEnvironmentOperation(_options?: unknown) { return unsupportedResponse('get Environment Operation') }
+export async function recoverEnvironment(_options?: unknown) { return unsupportedResponse('recover Environment') }
+export async function resetEnvironment(_options?: unknown) { return unsupportedResponse('reset Environment') }
+export async function listProjectResourceCharges(_options?: unknown) { return unsupportedResponse('list Project Resource Charges') }
+export async function createProjectResourceChargeAdjustment(_options?: unknown) { return unsupportedResponse('create Project Resource Charge Adjustment') }
+export async function appendProjectEvaluationCandidateDecision(_options?: unknown) { return unsupportedResponse('append Project Evaluation Candidate Decision') }
+export async function streamProjectEvents(_options?: unknown) { return unsupportedResponse('stream Project Events') }
+export async function getProjectResourceBudget(_options?: unknown) { return unsupportedResponse('get Project Resource Budget') }
+export async function upsertProjectResourceBudget(_options?: unknown) { return unsupportedResponse('upsert Project Resource Budget') }
+export async function createProjectResourceRequest(_options?: unknown) { return unsupportedResponse('create Project Resource Request') }
+export async function consumeOidcBackchannelLogout(_options?: unknown) { return unsupportedResponse('consume Oidc Backchannel Logout') }
+export async function completeOidcLogin(_options?: unknown) { return unsupportedResponse('complete Oidc Login') }
+export async function beginOidcLogin(_options?: unknown) { return unsupportedResponse('begin Oidc Login') }
+export async function logoutBrowserSession(_options?: unknown) { return unsupportedResponse('logout Browser Session') }
