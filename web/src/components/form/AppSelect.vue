@@ -161,7 +161,7 @@ function onNativeChange(event: Event) {
   gap: var(--space-2);
   min-width: 0;
   width: 100%;
-  height: 40px;
+  height: var(--density-control-height);
   padding: 0 var(--space-2) 0 var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-small);
