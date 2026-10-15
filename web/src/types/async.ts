@@ -28,6 +28,12 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return 'GPU 容量当前不可用，可能已被其他任务占用。请稍后重试或调整资源申请。'
     case 'LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED':
       return '实验环境创建尚未接通原 ResourceRequest→批准→lease→handoff 路径。已拨款的 Experiment lease 走旧 reservation 会返回 422；请等待统一资金/handoff 流程就绪后再创建。'
+    case 'LW_RESOURCE_RATE_UNCONFIGURED':
+      return '缺少适用费率：估价或结算无法完成，不会按免费处理。'
+    case 'LW_RESOURCE_GPU_CATALOG_MISSING':
+      return '缺少 GPU 目录项：无法完成资源计价。'
+    case 'LW_RESOURCE_ESTIMATE_CHANGED':
+      return '报价已过期或规格/费率已变化：请重新估价后再继续。'
     default:
       return message
   }

@@ -1,8 +1,7 @@
 import type { ResourceBillingUnit, ResourceRateSchema } from '@/generated/contracts'
 
 /**
- * Display metadata for billing units. Keys are derived from this object (includes
- * `build_second`) so TypeScript stays green before the generated SDK lands the new unit.
+ * Display metadata for billing units (includes `build_second` from #252 SDK).
  * Existing four units keep the same base/label/quantity for Finance regressions.
  */
 export const rateDisplayUnits = {

@@ -122,11 +122,39 @@
             <span v-else-if="options.rates.kind === 'loading'">费用：正在读取费率；申请仍可提交，尚未形成费用估算。</span>
             <span v-else>费用：当前未配置计价；申请仍可提交，费用不会按免费处理。</span>
           </div>
-          <div class="estimate-box" role="note">
+          <div class="estimate-box" role="note" data-testid="request-cost-estimate">
             <span>提交规格</span>
             <strong>{{ requestSummary }}</strong>
             <small v-if="gpuSelectionMessage" class="field-note">{{ gpuSelectionMessage }}</small>
-            <small>费率缺失、冲突或读取失败时不显示为免费，费用状态以实际计量和平台后续核算为准。</small>
+            <div class="estimate-actions">
+              <button
+                type="button"
+                class="outlined-button small"
+                :disabled="!canEstimate || costEstimate.acting || !selectedProjectId"
+                @click="requestServerEstimate"
+              >
+                请求 CREDITS 估价
+              </button>
+              <small>使用服务端 estimateProjectResourceCost；金额不在浏览器重算。</small>
+            </div>
+            <AsyncStateView
+              :state="costEstimate.estimate"
+              empty-text=""
+              @retry="requestServerEstimate"
+            >
+              <template #success="{ data }">
+                <strong data-testid="request-estimate-total">估价合计 {{ data.total.amount }} {{ data.total.currency }}</strong>
+                <small
+                  v-for="(line, index) in data.lines"
+                  :key="`${line.rateId}-${index}`"
+                >
+                  {{ billingUnitLabel(line.unit) }}：{{ line.amount.amount }} {{ line.amount.currency }}
+                  · {{ formatEstimateQuantity(line) }}
+                  · 费率 rev {{ line.rateRevision }}
+                </small>
+              </template>
+            </AsyncStateView>
+            <small>缺费率、缺目录或过时报价会显示诊断，不会显示为零或免费。预占由后端内部入口完成。</small>
           </div>
           <button type="submit" class="filled-button" :disabled="!canSubmit || resources.acting !== null">提交资源申请</button>
         </form>
@@ -192,13 +220,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResources, resourceSummary } from '@/composables/useProjectResources'
+import {
+  billingUnitLabel,
+  formatEstimateQuantity,
+  hoursFromNowInterval,
+  useProjectResourceCostEstimate,
+} from '@/composables/useProjectResourceCostEstimate'
 import { useProjectResourceOptions, type ResourceGpuCatalogOption } from '@/composables/useProjectResourceOptions'
 import { useProjects } from '@/composables/useProjects'
 import { useAuth } from '@/composables/useAuth'
@@ -237,6 +271,7 @@ const canPublishEnvironmentTemplates = computed(() => hasAnyRole(currentRoles.va
 const resources = useProjectResources(projectIdRef)
 const courseIdRef = computed(() => selectedProject.value?.courseId ?? null)
 const options = useProjectResourceOptions(projectIdRef, courseIdRef)
+const costEstimate = reactive(useProjectResourceCostEstimate(projectIdRef))
 
 const selectedReleaseKey = ref('')
 const cpuMillicores = ref(2000)
@@ -374,6 +409,7 @@ watch(
     // failed retry with the same body keeps both values so the server can
     // replay the idempotent command without creating another Work.
     pendingSubmission.value = null
+    costEstimate.reset()
   },
 )
 const requestSummary = computed(() => resourceSummary({
@@ -382,6 +418,35 @@ const requestSummary = computed(() => resourceSummary({
   storageBytes: storageGiB.value * 1024 ** 3,
   ...(selectedGpu.value ? { gpu: { class: selectedGpu.value.class, count: gpuCount.value } } : {}),
 }))
+
+const canEstimate = computed(() => Boolean(
+  selectedProjectId.value &&
+  Number.isInteger(cpuMillicores.value) && cpuMillicores.value > 0 &&
+  Number.isInteger(memoryGiB.value) && memoryGiB.value > 0 &&
+  Number.isInteger(storageGiB.value) && storageGiB.value > 0 &&
+  Number.isInteger(durationHours.value) && durationHours.value > 0 &&
+  (!selectedGpuCatalogId.value || (selectedGpu.value &&
+    Number.isInteger(gpuCount.value) &&
+    gpuCount.value > 0
+  ))
+))
+
+async function requestServerEstimate() {
+  if (!canEstimate.value || !selectedProjectId.value) return
+  const compute = hoursFromNowInterval(durationHours.value)
+  await costEstimate.run({
+    computeFrom: compute.from,
+    computeUntil: compute.until,
+    storageFrom: compute.from,
+    storageUntil: compute.until,
+    resources: {
+      cpuMillicores: cpuMillicores.value,
+      memoryBytes: memoryGiB.value * 1024 ** 3,
+      storageBytes: storageGiB.value * 1024 ** 3,
+      ...(selectedGpu.value ? { gpu: { class: selectedGpu.value.class, count: gpuCount.value } } : {}),
+    },
+  })
+}
 
 async function submitRequest() {
   if (!canSubmit.value) return
@@ -463,6 +528,9 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .estimate-box { display: grid; gap: 5px; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.estimate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+.outlined-button.small { min-height: 32px; padding: 0 11px; border: 1px solid var(--md-sys-color-outline); border-radius: var(--md-sys-shape-full); background: transparent; color: var(--md-sys-color-primary); font: var(--md-sys-label-medium); cursor: pointer; }
+.outlined-button.small:disabled { opacity: .5; cursor: not-allowed; }
 .estimate-box strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .gpu-detail { display: grid; gap: 4px; padding: 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-body-small); }
 .filled-button, .outlined-button, .text-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 17px; border-radius: var(--md-sys-shape-full); font: var(--md-sys-label-large); cursor: pointer; text-decoration: none; }
