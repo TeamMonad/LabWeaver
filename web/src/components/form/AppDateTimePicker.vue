@@ -129,7 +129,7 @@ function onNative(event: Event) {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  height: 40px;
+  height: var(--density-control-height);
   padding: 0 var(--space-1) 0 var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-small);
