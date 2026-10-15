@@ -5633,6 +5633,7 @@ async fn frozen_inputs_without_connected_authority_deny_before_database_or_objec
     ));
     let service = ControlService::new(pool, objects.clone(), control_config()?)?;
     let source = FrozenModelInputSource {
+        parent_lease_sha256: "d".repeat(64),
         task_run_id: contracts::TaskRunId::new(),
         frozen_submission_id: contracts::FrozenSubmissionId::new(),
         manifest_revision: Revision::new(3)?,

@@ -413,6 +413,7 @@ async fn resolve_model_input_authorization(
                 &contracts::http::CreateFrozenModelInputAuthorizationRequest {
                     input_authorization_context: context,
                     task_run_id: source.task_run_id,
+                    parent_lease_sha256: source.parent_lease_sha256.clone(),
                     frozen_submission_id: source.frozen_submission_id,
                     evaluation_release_id: source.evaluation_release_id,
                     evaluation_release_revision: source.evaluation_release_revision,
@@ -445,20 +446,15 @@ async fn create_frozen_binding(
     state: &ApiState,
     request: &contracts::http::CreateFrozenModelInputAuthorizationRequest,
 ) -> Result<contracts::http::ModelInputAuthorizationBinding, ApiError> {
+    request
+        .validate()
+        .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?;
     state
         .control
         .authorize_frozen_model_context(&request.input_authorization_context)
         .await
         .map_err(|_| ApiError::forbidden("LW_MODEL_INPUT_AUTHORIZATION_DENIED"))?;
-    let facts = state
-        .evaluation
-        .frozen_model_input_facts(
-            request.evaluation_release_id,
-            request.frozen_submission_id,
-            request.evaluation_release_revision,
-            &request.input_authorization_context,
-        )
-        .await?;
+    let facts = state.evaluation.frozen_model_input_facts(request).await?;
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-labweaver-project-id",
