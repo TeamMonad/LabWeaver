@@ -13,7 +13,7 @@
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  height: 40px;
+  height: var(--density-control-height);
   padding: 0 var(--space-5);
   border: 1px solid transparent;
   border-radius: var(--md-sys-shape-full);
@@ -88,7 +88,7 @@
 .tonal-button.small,
 .outlined-button.small,
 .text-button.small {
-  height: 32px;
+  height: var(--density-control-height-small);
   padding: 0 var(--space-3);
   font: var(--md-sys-label-medium);
 }
@@ -103,7 +103,7 @@
   align-items: center;
   justify-content: center;
   width: 40px;
-  height: 40px;
+  height: var(--density-control-height);
   padding: 0;
   border: none;
   border-radius: var(--md-sys-shape-full);
@@ -150,7 +150,7 @@
 .text-input {
   box-sizing: border-box;
   width: 100%;
-  min-height: 40px;
+  min-height: var(--density-control-height);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-small);
