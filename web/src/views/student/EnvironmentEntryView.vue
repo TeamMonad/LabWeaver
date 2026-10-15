@@ -2031,6 +2031,46 @@ async function revokeAccessGrant() {
   gap: var(--space-4);
 }
 
+/* Once an environment is open, the page heading becomes a quiet eyebrow so the
+   environment title owns the hierarchy. */
+.environment-entry:has(.gcp-resource-view) > .page-header h2 {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-large);
+  letter-spacing: 0.04em;
+}
+
+.environment-entry:has(.gcp-resource-view) > .page-header .page-subtitle {
+  font: var(--md-sys-body-small);
+}
+
+/* The section heading duplicates the breadcrumb once an environment is open;
+   keep it for assistive tech only. */
+.console-section:has(.gcp-resource-view) > #console-heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Destructive action sits apart from lifecycle actions. */
+.gcp-resource-view .danger-button {
+  position: relative;
+  margin-inline-start: var(--space-4);
+}
+
+.gcp-resource-view .danger-button::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: calc(-1 * var(--space-3));
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--md-sys-color-outline-variant);
+  pointer-events: none;
+}
+
 .gcp-breadcrumbs {
   display: flex;
   align-items: center;
@@ -2073,7 +2113,7 @@ async function revokeAccessGrant() {
 }
 
 .title-with-pill h2 {
-  font: var(--md-sys-headline-small);
+  font: var(--md-sys-headline-medium);
   color: var(--md-sys-color-on-surface);
   margin: 0;
   overflow-wrap: anywhere;
@@ -2744,5 +2784,45 @@ async function revokeAccessGrant() {
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
+}
+
+@media (max-width: 599px) {
+  .title-with-pill {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .title-with-pill h2 {
+    font: var(--md-sys-headline-small);
+  }
+}
+
+/* Cloudscape detail-page header: breadcrumbs + title/status on the left,
+   page actions on the same row to the right (desktop). */
+@media (min-width: 1200px) {
+  .gcp-resource-view {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-6);
+    row-gap: var(--layout-page-section-gap);
+  }
+
+  .gcp-resource-view > * {
+    grid-column: 1 / -1;
+  }
+
+  .gcp-resource-view > .gcp-resource-header {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .gcp-resource-view > :deep(.gcp-action-bar) {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    margin-bottom: 0;
+    padding: 0;
+    border-bottom: 0;
+  }
 }
 </style>
