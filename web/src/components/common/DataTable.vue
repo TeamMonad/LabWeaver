@@ -1,5 +1,12 @@
 <template>
   <div class="data-table" role="region" :aria-label="ariaLabel ?? (attrs['aria-label'] as string | undefined)" tabindex="0">
+    <!-- Cloudscape container table header (inside the container): title with "(n)" counter, actions on the right. -->
+    <div v-if="title || $slots['header-actions']" class="data-table__header">
+      <h3 v-if="title" class="data-table__title">
+        {{ title }}<span v-if="counter !== undefined" class="data-table__counter">({{ counter }})</span>
+      </h3>
+      <div v-if="$slots['header-actions']" class="data-table__actions"><slot name="header-actions" /></div>
+    </div>
     <table>
       <thead>
         <tr>
@@ -78,6 +85,9 @@ interface Props {
   interactive?: boolean
   ariaLabel?: string
   skeletonRows?: number
+  /** Optional Cloudscape-style table header. */
+  title?: string
+  counter?: number | string
 }
 
 withDefaults(defineProps<Props>(), {
@@ -170,7 +180,36 @@ th {
 }
 
 td {
-  height: 52px;
+  height: var(--density-table-row-height);
+  padding-block: var(--density-table-cell-padding-block);
+}
+
+.data-table__header {
+  position: sticky;
+  left: 0;
+  display: flex;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.data-table__title {
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-medium);
+}
+
+.data-table__counter {
+  margin-inline-start: var(--space-1);
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 400;
+}
+
+.data-table__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 tbody tr:last-child td {
