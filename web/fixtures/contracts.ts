@@ -769,3 +769,26 @@ export async function consumeOidcBackchannelLogout(_options?: unknown) { return 
 export async function completeOidcLogin(_options?: unknown) { return unsupportedResponse('complete Oidc Login') }
 export async function beginOidcLogin(_options?: unknown) { return unsupportedResponse('begin Oidc Login') }
 export async function logoutBrowserSession(_options?: unknown) { return unsupportedResponse('logout Browser Session') }
+
+export async function getProjectAvailableActions(options?: FixtureOptions): Promise<FixtureResult<{
+  actions: Array<'browse' | 'edit' | 'start' | 'stop' | 'configure_agent' | 'grant_access' | 'manage_members' | 'view_costs' | 'request_runtime_permissions' | 'approve_runtime_permissions' | 'manage_runtime_policy'>
+  actorId: string
+  membershipRevision: number
+  projectId: string
+  validUntil: string
+}>> {
+  const projectId = options?.path?.projectId
+  if (!projectId) return notFoundResponse('读取项目可用动作', projectId)
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取项目可用动作', projectId)
+  return fixtureResponse({
+    projectId,
+    actorId: 'fixture-actor',
+    membershipRevision: 1,
+    validUntil: later,
+    actions: ['browse'],
+  })
+}
+
+export async function cancelProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('取消题包上传') }
+
+export async function getProjectProblemPackageUpload(_options?: FixtureOptions) { return unsupportedResponse('读取题包上传会话') }
