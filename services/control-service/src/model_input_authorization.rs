@@ -201,6 +201,9 @@ impl ControlService {
             ModelInputRubricIdentity,
         };
         let context = &request.input_authorization_context;
+        request
+            .validate()
+            .map_err(|_| ControlError::ContractInvalid)?;
         self.authorize_frozen_model_context(context).await?;
         let facts: FrozenFacts =
             serde_json::from_value(facts).map_err(|_| ControlError::ContractInvalid)?;
@@ -350,6 +353,7 @@ impl ControlService {
         }
         let source = FrozenModelInputSource {
             task_run_id: request.task_run_id,
+            parent_lease_sha256: request.parent_lease_sha256.clone(),
             frozen_submission_id: facts.frozen_submission_id,
             manifest_revision: facts.manifest_revision,
             manifest_sha256: facts.manifest_sha256,

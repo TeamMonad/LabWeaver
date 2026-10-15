@@ -1389,6 +1389,7 @@ mod tests {
             media_type: "text/plain".to_owned(),
         };
         let source = contracts::http::FrozenModelInputSource {
+            parent_lease_sha256: "d".repeat(64),
             task_run_id,
             frozen_submission_id,
             manifest_revision: contracts::Revision::new(1).expect("revision"),

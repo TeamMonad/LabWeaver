@@ -16,6 +16,10 @@ Agent 配置生成和已有 Work 配置操作只使用调用方显式选择的�
 
 binding 的 `source.kind` 区分 `problem_package` 和 `frozen_submission`。冻结来源分别保留 manifest revision/SHA、archive 精确 ArtifactRef/content SHA、Evaluation release revision、Environment release version，以及独立 rubric package/version/path/ArtifactRef/SHA。冻结 ID 不作为材料包 ID。策略全文 SHA 和选择摘要也参与一致性校验。
 
+冻结来源和创建 binding 请求必需 `parentLeaseSha256`，由 Evaluation 对真实父 `EvaluationStepLease.lease_token()` 的规范 UUID 字符串 UTF-8 计算 SHA-256。它固定进入原 binding/选择摘要；恢复不能刷新，旧缺失字段不补造。task ID 可在父 worker 恢复时保留而 lease token 轮换，因此 task ID 单独不能证明原执行代次仍有效。
+
+Control 每次创建/复核通过现有 `evaluation.control.invoke` 请求任务限定 metadata 路径 `/internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`，携带原 scope、release If-Match 及 `x-labweaver-evaluation-lease-sha256`。旧无任务路径不作 fallback，拒绝/404/错误均阻止绑定。Evaluation 端必须在返回原形状事实前核权威父 run/step/attempt 的关联、当前 lease 摘要/到期、持久取消和原执行期限；该服务端实现及完整父取消/repair 验收仍需原 Evaluation owner 接线。摘要不是许可，不返回原 lease token。Agent 既有首次/repair Control 复核使用原摘要，自己的取消与 lease 检查仍独立执行。
+
 课程当前教师兼 instructor 且具有材料项目 Edit 权限时，可以通过 `POST /api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules` 单独设置 rubric 可见性、批准目标模型使用或撤回批准。GET 同路径返回教师可见的元数据规则。请求必须提供现行 policy 的 If-Match 和 Idempotency-Key。规则保存在现有 policy 的版本化 JSON 内，批准者和课程成员 revision 从当前真源获取；请求不能自报许可。每次改变可见性都会清除模型批准。只有 `course_public` 且存在当前 instructor 的有效批准时才允许外发；hidden、未知、离任、成员 revision 变化或撤回均拒绝。Browse 和模型许可分别检查。
 
 冻结实时复核使用 `POST /internal/v1/authoring/model-input-authorizations/resolve`（现有 `control.authoring.read`）。Control 重核原会话、冻结 Edit、对象 Browse、ConfigureAgent 和当前 rubric 规则，重建完整 binding 后做全等比较。Agent 首次及 repair 进程调用前均复核，保留原任务截止和累计用量；取消完成与中断恢复保留已经观测到的用量，不重放旧模型调用。
