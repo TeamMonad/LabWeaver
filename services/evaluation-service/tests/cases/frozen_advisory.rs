@@ -539,3 +539,7 @@ async fn frozen_advisory_cancel_deadline_and_expired_database_lease_block_sends(
 mod parent_admission_tests {
     include!("parent_admission.rs");
 }
+
+mod consumer_recovery_tests {
+    include!("consumer_recovery.rs");
+}
