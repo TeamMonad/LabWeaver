@@ -10,6 +10,12 @@ on:
       - services/**
       - Cargo.toml
       - Cargo.lock
+      - .cargo/**
+      - .dockerignore
+      - migrations/**
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - vendor/**
       - deploy/helm/**
       - deploy/versions.lock.yml
       - schemas/results/platform-image-*.json
@@ -25,6 +31,12 @@ on:
       - services/**
       - Cargo.toml
       - Cargo.lock
+      - .cargo/**
+      - .dockerignore
+      - migrations/**
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - vendor/**
       - deploy/helm/**
       - deploy/versions.lock.yml
       - schemas/results/platform-image-*.json
