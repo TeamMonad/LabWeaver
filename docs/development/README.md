@@ -57,6 +57,25 @@ pnpm --dir web test
 
 按改动替换 Rust 包名。修改公共契约后重新生成 Schema、OpenAPI 和 Web SDK，不手改生成文件。契约、权限、持久化与计量变更扩大本地集成检查；遇到构建锁等待，不启动另一套竞争构建。
 
+### CI 影响范围与分支
+
+Rust 工作流先运行 `ci-scope` 及其真实 Git 差异测试。仅根 README、`docs/` 下 Markdown，以及 `web/` 下已知的手写源文件、配置和静态资产，可以不运行 Rust 全仓检查。此时 `rust-gate` 和 `postgres-persistence-gate` 标记为 skipped，不代表执行通过。Web 和 Playwright 继续按各自工作流检查。
+
+生成 SDK、Rust、共享契约、权限、计费、持久化、迁移、部署输入、工作流、scope 工具或测试发生变化时，仍运行原完整 Rust 检查。未知路径、未知文件类型、缺少比较提交、空差异、首次 push 或 Git 读取失败也选择完整检查。
+
+PR 比较 merge-base 到 head。push 比较 before 到 after，包含中间所有提交。删除和跨目录重命名保留旧路径，不能通过把 Rust 文件移入 Web 目录跳过检查。
+
+本地验证选择器：
+
+```sh
+python3 -m unittest discover -s tests/ci
+EVENT_NAME=pull_request BASE_SHA=$(git rev-parse origin/develop) HEAD_SHA=$(git rev-parse HEAD) python3 tools/ci_scope.py
+```
+
+Rust、Web、Playwright 检查覆盖面向 main/develop 的 PR 和两分支 push。Platform Images 在其已有影响路径命中时，也为 main/develop 生成并验证 OCI 构建产物。镜像 CI 不推送运行镜像、不创建 Release，也不部署。Local Integration 保留人工触发。
+
+功能经维护者评审进入 develop。阶段稳定后，维护者决定向 main 发布。CI 成功不表示 Sprint5 最终发布前置已完成，也不授权停止服务、清空数据或切换真实环境。
+
 ### Agent 镜像导入测试超时
 
 本地需要 Docker。测试为每个 fixture 启动独立 PostgreSQL，只替换外部对象存储和镜像仓库。

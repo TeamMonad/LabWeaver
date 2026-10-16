@@ -14,8 +14,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: ci-scope
+    runs-on: ubuntu-latest
+    outputs:
+      rust_required: ${{ steps.scope.outputs.rust_required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test CI scope selection
+        run: python3 -m unittest discover -s tests/ci
+      - name: Select affected checks
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: python3 tools/ci_scope.py >> "$GITHUB_OUTPUT"
+      - name: Describe selection
+        env:
+          RUST_REQUIRED: ${{ steps.scope.outputs.rust_required }}
+          SCOPE_REASON: ${{ steps.scope.outputs.scope_reason }}
+        run: echo "Rust required=$RUST_REQUIRED reason=$SCOPE_REASON"
   postgres-persistence:
     name: postgres-persistence-gate
+    needs: scope
+    if: needs.scope.outputs.rust_required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +54,8 @@ jobs:
       - run: cargo test -p persistence-sqlx --locked
   rust:
     name: rust-gate
+    needs: scope
+    if: needs.scope.outputs.rust_required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
