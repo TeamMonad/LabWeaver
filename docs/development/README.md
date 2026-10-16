@@ -65,6 +65,16 @@ EVENT_NAME=pull_request BASE_SHA=$(git rev-parse origin/develop) HEAD_SHA=$(git 
 
 Rust、Web、Playwright 检查覆盖面向 main/develop 的 PR 和两分支 push。Platform Images 在其已有影响路径命中时，也为 main/develop 生成并验证 OCI 构建产物。镜像 CI 不推送运行镜像、不创建 Release，也不部署。Local Integration 保留人工触发。
 
+Platform Images 的路径范围还包括 Rust builder 复制的 `.cargo/`、`migrations/`、`vendor/`、`rust-toolchain.toml`、`rustfmt.toml` 和影响构建上下文的 `.dockerignore`。仅修改这些输入时仍需检查镜像构建。
+
+使用已有 Ansible 测试依赖，在本地检查 main/develop 的分支和构建输入路径覆盖：
+
+```sh
+python3 -m unittest discover -s tests/ansible -p test_ci_image_events.py
+```
+
+该测试读取实际 Containerfile 的 Rust builder 输入和工作流过滤条件。它不执行 GitHub 事件、不构建或推送镜像，也不能替代真实 main 事件验收。
+
 功能经维护者评审进入 develop。阶段稳定后，维护者决定向 main 发布。CI 成功不表示 Sprint5 最终发布前置已完成，也不授权停止服务、清空数据或切换真实环境。
 
 ### Agent 镜像导入测试超时
