@@ -1,4 +1,4 @@
-//! Transactional Resource Outbox dispatcher backed by JetStream acknowledgements.
+//! Resource Outbox publication with durable claims and JetStream acknowledgements.
 
 #![allow(
     clippy::doc_markdown,
@@ -17,8 +17,8 @@ use sqlx::{PgPool, Row};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-/// Bounded dispatcher. Transport acknowledgement precedes the `published_at` commit, so a
-/// process crash deliberately yields an idempotent replay.
+/// Bounded dispatcher. A short database statement claims an event before transport starts.
+/// Transport acknowledgement precedes `published_at`, so a crash permits an idempotent replay.
 #[derive(Clone)]
 pub struct ResourceOutboxDispatcher {
     pool: PgPool,
@@ -44,11 +44,29 @@ impl ResourceOutboxDispatcher {
 
     pub async fn dispatch_once(&self) -> Result<ResourceOutboxOutcome, ResourceOutboxError> {
         let started = Instant::now();
-        let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query("SELECT event_id,subject,event_type,payload,payload_sha256 FROM resource.outbox_events WHERE published_at IS NULL ORDER BY created_at,event_id FOR UPDATE SKIP LOCKED LIMIT 1")
-            .fetch_optional(&mut *transaction).await?;
+        let claim_token = Uuid::new_v4();
+        // Allow both bounded transport waits and a recovery margin. Correctness depends on
+        // the token: a paused worker or delayed database mark may outlive this lease.
+        let lease_millis = i64::try_from((self.timeout * 2 + Duration::from_secs(1)).as_millis())
+            .map_err(|_| ResourceOutboxError::Configuration)?;
+        let row = sqlx::query(
+            "WITH candidate AS (
+                 SELECT event_id FROM resource.outbox_events
+                 WHERE published_at IS NULL
+                   AND (publish_claim_until IS NULL OR publish_claim_until<=clock_timestamp())
+                 ORDER BY created_at,event_id FOR UPDATE SKIP LOCKED LIMIT 1
+             )
+             UPDATE resource.outbox_events AS event
+             SET publish_claim_token=$1,
+                 publish_claim_until=clock_timestamp()+$2::bigint*interval '1 millisecond'
+             FROM candidate WHERE event.event_id=candidate.event_id
+             RETURNING event.event_id,event.subject,event.event_type,event.payload,event.payload_sha256",
+        )
+        .bind(claim_token)
+        .bind(lease_millis)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(row) = row else {
-            transaction.rollback().await?;
             tracing::debug!(
                 event = "resource.outbox.idle",
                 component = "outbox",
@@ -63,7 +81,60 @@ impl ResourceOutboxDispatcher {
         let event_type: String = row.try_get("event_type")?;
         let payload: Value = row.try_get("payload")?;
         let hash: String = row.try_get("payload_sha256")?;
-        if Sha256Digest::of_canonical(&payload)
+        let result = self
+            .publish_claim(
+                event_id,
+                &subject,
+                &event_type,
+                &payload,
+                &hash,
+                claim_token,
+            )
+            .await;
+        if result.is_err() {
+            // Best-effort early retry. Cancellation or a database outage leaves a durable
+            // lease for takeover; an old worker can never clear a replacement's token.
+            let release = sqlx::query(
+                "UPDATE resource.outbox_events
+                 SET publish_claim_token=NULL,publish_claim_until=NULL
+                 WHERE event_id=$1 AND publish_claim_token=$2 AND published_at IS NULL",
+            )
+            .bind(event_id)
+            .bind(claim_token)
+            .execute(&self.pool);
+            if !matches!(timeout(self.timeout, release).await, Ok(Ok(_))) {
+                tracing::warn!(
+                    event = "resource.outbox.claim_release_failed",
+                    component = "outbox",
+                    event_id = %event_id,
+                );
+            }
+        }
+        let event = result?;
+        tracing::info!(
+            event = "resource.outbox.published",
+            component = "outbox",
+            operation = "nats.publish",
+            outcome = "succeeded",
+            duration_ms = elapsed_millis(started),
+            trace_id = event.trace_id,
+            event_id = %event.id,
+            message_id = %event.id,
+            subject = event.subject,
+        );
+        Ok(ResourceOutboxOutcome::Published { event_id: event.id })
+    }
+
+    async fn publish_claim(
+        &self,
+        event_id: Uuid,
+        subject: &str,
+        event_type: &str,
+        payload: &Value,
+        hash: &str,
+        claim_token: Uuid,
+    ) -> Result<CloudEvent<Value>, ResourceOutboxError> {
+        if Sha256Digest::of_canonical(payload)
             .map_err(|_| ResourceOutboxError::Identity)?
             .to_string()
             != hash
@@ -71,7 +142,7 @@ impl ResourceOutboxDispatcher {
             return Err(ResourceOutboxError::Identity);
         }
         let event: CloudEvent<Value> =
-            serde_json::from_value(payload).map_err(|_| ResourceOutboxError::Contract)?;
+            serde_json::from_value(payload.clone()).map_err(|_| ResourceOutboxError::Contract)?;
         let expected_id =
             EventId::from_str(&event_id.to_string()).map_err(|_| ResourceOutboxError::Identity)?;
         let contract = EVENT_CONTRACTS
@@ -89,7 +160,7 @@ impl ResourceOutboxDispatcher {
         let acknowledgement = timeout(
             self.timeout,
             self.jetstream.send_publish(
-                subject.clone(),
+                subject.to_owned(),
                 PublishMessage::build()
                     .payload(wire.into())
                     .message_id(event_id.to_string()),
@@ -102,26 +173,41 @@ impl ResourceOutboxDispatcher {
             .await
             .map_err(|_| ResourceOutboxError::Timeout)?
             .map_err(|_| ResourceOutboxError::Publish)?;
-        let updated = sqlx::query("UPDATE resource.outbox_events SET published_at=date_trunc('milliseconds',clock_timestamp()) WHERE event_id=$1 AND published_at IS NULL")
-            .bind(event_id).execute(&mut *transaction).await?;
+        let updated = sqlx::query(
+            "UPDATE resource.outbox_events
+             SET published_at=date_trunc('milliseconds',clock_timestamp()),
+                 publish_claim_token=NULL,publish_claim_until=NULL
+             WHERE event_id=$1 AND publish_claim_token=$2 AND published_at IS NULL
+               AND subject=$3 AND event_type=$4 AND payload_sha256=$5 AND payload=$6",
+        )
+        .bind(event_id)
+        .bind(claim_token)
+        .bind(subject)
+        .bind(event_type)
+        .bind(hash)
+        .bind(payload)
+        .execute(&self.pool)
+        .await?;
         if updated.rows_affected() != 1 {
-            return Err(ResourceOutboxError::FenceLost);
+            // A replacement may already have published the same immutable event. Read in a
+            // new statement so its commit is visible even if it raced the conditional UPDATE.
+            let published: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM resource.outbox_events
+                 WHERE event_id=$1 AND published_at IS NOT NULL
+                   AND subject=$2 AND event_type=$3 AND payload_sha256=$4 AND payload=$5)",
+            )
+            .bind(event_id)
+            .bind(subject)
+            .bind(event_type)
+            .bind(hash)
+            .bind(payload)
+            .fetch_one(&self.pool)
+            .await?;
+            if !published {
+                return Err(ResourceOutboxError::FenceLost);
+            }
         }
-        transaction.commit().await?;
-        tracing::info!(
-            event = "resource.outbox.published",
-            component = "outbox",
-            operation = "nats.publish",
-            outcome = "succeeded",
-            duration_ms = elapsed_millis(started),
-            trace_id = event.trace_id,
-            event_id = %event.id,
-            message_id = %event.id,
-            subject = event.subject,
-        );
-        Ok(ResourceOutboxOutcome::Published {
-            event_id: expected_id,
-        })
+        Ok(event)
     }
 }
 
