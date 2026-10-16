@@ -2,7 +2,7 @@ name: Platform Images
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [main, develop]
     paths:
       - access-gateway/**
       - containers/**
@@ -17,7 +17,7 @@ on:
       - xtask/**
       - .github/workflows/platform-images.yml
   push:
-    branches: [develop]
+    branches: [main, develop]
     paths:
       - access-gateway/**
       - containers/**
