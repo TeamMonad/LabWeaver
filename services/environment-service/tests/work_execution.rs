@@ -503,6 +503,7 @@ async fn malformed_observation_retains_cleanup_fence_for_started_execution()
     };
     let target = ContainerWorkExecutionTarget {
         namespace: "test".to_owned(),
+        namespace_uid: None,
         pod_name: "runtime".to_owned(),
         pod_uid: "pod-uid".to_owned(),
         container: "runtime".to_owned(),
@@ -733,6 +734,7 @@ fn admission_for(request: &ContainerWorkExecutionRequest) -> WorkConfigurationAd
 fn target() -> ContainerWorkExecutionTarget {
     ContainerWorkExecutionTarget {
         namespace: "test".to_owned(),
+        namespace_uid: None,
         pod_name: "runtime".to_owned(),
         pod_uid: TEST_TARGET_POD_UID.to_owned(),
         container: "runtime".to_owned(),

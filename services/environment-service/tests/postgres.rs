@@ -752,7 +752,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         .connect(&url)
         .await?;
     support::apply_environment_migrations(&pool).await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
 
     let mut handoff = requested_instance();
     handoff.class = contracts::authoring::EnvironmentClass::Work;
@@ -849,6 +849,171 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         .await?;
     assert_eq!(replay, accepted);
     assert_eq!(store.load(handoff.id).await?.revision, revision(1));
+    let profile = environment_service::ContainerNamespaceProfile::Existing {
+        namespace: "synthetic-work-tests".to_owned(),
+        namespace_uid: uuid::Uuid::from_u128(207),
+        project_id: handoff.project_id,
+    };
+    let placement = profile.for_instance(&loaded)?;
+    let plan = ContainerResourcePlan {
+        environment_id: handoff.id,
+        project_id: handoff.project_id,
+        namespace: placement.namespace.clone(),
+        namespace_uid: placement.namespace_uid,
+        image: String::new(),
+        resources: vec![],
+        plan_sha256: Sha256Digest::of_bytes(b"synthetic-existing-plan"),
+    };
+    let now = container_database_now(&pool).await?;
+    let deadline = container_add_time(now, time::Duration::minutes(1))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let envelope = container_executor_envelope(
+        plan.clone(),
+        loaded.operation.id,
+        1,
+        1,
+        1,
+        ReconcileAction::Provision,
+        deadline,
+    )?;
+    for _ in 0..2 {
+        let executor = FencedContainerExecutor::new(
+            PgContainerExecutorFenceStore::new(pool.clone())
+                .with_namespace_profile(profile.clone()),
+            CountingContainerExecutor {
+                calls: calls.clone(),
+                observed_at: now,
+            },
+        );
+        executor.execute(envelope.clone()).await?;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a new executor must replay the durable result"
+    );
+    assert_eq!(
+        environment_service::ContainerPlacement::load(&pool, handoff.id, handoff.project_id)
+            .await?,
+        placement
+    );
+    assert!(
+        environment_service::ContainerPlacement::load(&pool, handoff.id, ProjectId::new())
+            .await
+            .is_err()
+    );
+    // Changing deployment namespace UID, even after a completed request, cannot move this Work.
+    let changed_profile = environment_service::ContainerNamespaceProfile::Existing {
+        namespace: plan.namespace.clone(),
+        namespace_uid: uuid::Uuid::from_u128(208),
+        project_id: handoff.project_id,
+    };
+    let mut changed = plan.clone();
+    changed.namespace_uid = Some(uuid::Uuid::from_u128(208));
+    let executor = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()).with_namespace_profile(changed_profile),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: now,
+        },
+    );
+    assert!(matches!(
+        executor
+            .execute(container_executor_envelope(
+                changed,
+                OperationId::new(),
+                2,
+                1,
+                1,
+                ReconcileAction::Provision,
+                deadline
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::IdentityMismatch)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let executor = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()).with_namespace_profile(profile.clone()),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: now,
+        },
+    );
+    executor
+        .execute(container_executor_envelope(
+            plan.clone(),
+            OperationId::new(),
+            2,
+            1,
+            1,
+            ReconcileAction::Provision,
+            deadline,
+        )?)
+        .await?;
+    assert!(matches!(
+        executor
+            .execute(container_executor_envelope(
+                plan.clone(),
+                OperationId::new(),
+                1,
+                1,
+                1,
+                ReconcileAction::Provision,
+                deadline
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::StaleGeneration)
+    ));
+    let mut foreign = plan.clone();
+    foreign.project_id = ProjectId::new();
+    assert!(
+        executor
+            .execute(container_executor_envelope(
+                foreign,
+                OperationId::new(),
+                3,
+                1,
+                1,
+                ReconcileAction::Cleanup,
+                deadline
+            )?)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    executor
+        .execute(container_executor_envelope(
+            plan.clone(),
+            OperationId::new(),
+            3,
+            1,
+            1,
+            ReconcileAction::Cleanup,
+            deadline,
+        )?)
+        .await?;
+    let recovered = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()).with_namespace_profile(profile),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: now,
+        },
+    );
+    assert!(matches!(
+        recovered
+            .execute(container_executor_envelope(
+                plan,
+                OperationId::new(),
+                4,
+                1,
+                1,
+                ReconcileAction::Provision,
+                deadline
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::Tombstoned)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     Ok(())
 }
 
@@ -1998,6 +2163,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         environment_id,
         project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{environment_id}"),
+        namespace_uid: None,
         image: format!("harbor.internal/course/image@sha256:{}", "a".repeat(64)),
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"container-plan"),
@@ -2106,6 +2272,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         environment_id: expired_environment_id,
         project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{expired_environment_id}"),
+        namespace_uid: None,
         image: String::new(),
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"expired-plan"),
