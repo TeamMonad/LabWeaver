@@ -19,6 +19,7 @@ use contracts::resource::{
 use contracts::{Revision, UtcTimestamp};
 pub mod api;
 pub mod capacity;
+pub mod credits;
 pub mod messaging;
 pub mod outbox;
 pub mod process;

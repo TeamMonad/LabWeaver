@@ -68,7 +68,7 @@ impl ResourceProcessRuntime {
             .connect(&required(DATABASE_URL)?)
             .await?;
         let schema_ready: Option<String> =
-            sqlx::query_scalar("SELECT to_regclass('resource.resource_leases')::text")
+            sqlx::query_scalar("SELECT CASE WHEN to_regclass('resource.credit_accounts') IS NOT NULL AND to_regclass('resource.credit_holds') IS NOT NULL AND to_regclass('resource.credit_ledger_entries') IS NOT NULL THEN to_regclass('resource.resource_leases')::text END")
                 .fetch_one(&pool)
                 .await?;
         if schema_ready.is_none() {
@@ -219,6 +219,7 @@ async fn run_outbox(
     store: PgResourceStore,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ResourceOutboxError> {
+    let credits = crate::credits::PgCreditStore::new(store.pool());
     let mut interval = tokio::time::interval(OUTBOX_INTERVAL);
     loop {
         tokio::select! {
@@ -235,6 +236,9 @@ async fn run_outbox(
                         failure_stage = e.failure_stage(),
                         safe_detail = safe_detail.as_str(),
                     );
+                }
+                if let Err(error)=credits.reconcile_terminal_once().await {
+                    tracing::warn!(event="resource.credits.recovery_failed",diagnostic_code=%error,outcome="will_retry");
                 }
                 if let Err(error) = store.settle_pending_usage_once().await {
                     let safe_detail = resource_error_safe_detail(&error);
