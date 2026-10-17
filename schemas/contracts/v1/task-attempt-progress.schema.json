@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "ResourceRequestState": {
+      "description": "Request lifecycle owned by Resource Service.",
+      "enum": [
+        "reviewing",
+        "allocating",
+        "active",
+        "expiring",
+        "expired",
+        "rejected",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "TaskAttemptPhase": {
+      "description": "Display phase derived from an owner's attempt and Resource facts.\nThis projection has no independent transitions or persistent authority.",
+      "enum": [
+        "queued",
+        "preparing",
+        "waiting_resource_approval",
+        "allocating",
+        "executing",
+        "awaiting_review",
+        "cleanup_pending",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "blocked"
+      ],
+      "type": "string"
+    },
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Payload-free read projection of one real attempt.",
+  "properties": {
+    "attempt": {
+      "description": "Native attempt number. Evaluation uses zero until the step is first claimed.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "diagnosticCode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "executionGeneration": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "nextSteps": {
+      "description": "Existing operation IDs appropriate to the phase, without granting authorization.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "phase": {
+      "$ref": "#/$defs/TaskAttemptPhase"
+    },
+    "resourceRequestId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResourceRequestId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resourceState": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResourceRequestState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "taskRunId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TaskRunId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "attempt",
+    "phase",
+    "nextSteps"
+  ],
+  "title": "TaskAttemptProgress",
+  "type": "object"
+}

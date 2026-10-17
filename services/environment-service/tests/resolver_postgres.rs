@@ -11,12 +11,17 @@ use std::net::SocketAddr;
 use auth::ServiceIdentity;
 use axum::Extension;
 use contracts::environment::{
-    EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolutionRequest,
+    EnvironmentAccessSubjectKind, EnvironmentConsoleEligibilityRequest,
+    EnvironmentEndpointEligibilityRequest, EnvironmentInstance, EnvironmentOperationKind,
+    EnvironmentOwnerResolutionRequest,
 };
-use contracts::{ActorId, CourseId};
+use contracts::{
+    ActorId, CourseId, ProjectId,
+    authoring::{EnvironmentClass, EnvironmentRuntimeSpec, TerminalSpec},
+};
 use environment_service::{
-    LifecycleCommand, OwnerResolver, PgEnvironmentStore, PgReleaseProjectionStore,
-    authorize_owner_resolution, owner_resolver_router, plan_command,
+    LifecycleCommand, OwnerResolver, OwnerResolverError, PgEnvironmentStore,
+    PgReleaseProjectionStore, authorize_owner_resolution, owner_resolver_router, plan_command,
 };
 use reqwest::{Client, StatusCode};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -27,6 +32,169 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 const OWNER_RESOLUTION_PERMISSION: &str = "environment.owner.resolve";
+
+#[tokio::test]
+async fn funded_console_and_access_resolvers_use_one_original_lease_from_postgres()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let resolver = OwnerResolver::new(store.clone(), PgReleaseProjectionStore::new(pool.clone()));
+    let caller = ServiceIdentity {
+        issuer: "https://keycloak.example.test/realms/workloads".to_owned(),
+        subject: "service-account-access".to_owned(),
+        client_id: "labweaver-access".to_owned(),
+        expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+        permissions: [
+            OWNER_RESOLUTION_PERMISSION.to_owned(),
+            "environment.endpoint.resolve".to_owned(),
+            "environment.console.resolve".to_owned(),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    for (class, funded, separate_authoring_project) in [
+        (EnvironmentClass::Experiment, true, false),
+        (EnvironmentClass::Experiment, true, true),
+        (EnvironmentClass::Work, true, false),
+        (EnvironmentClass::Experiment, false, false),
+    ] {
+        let mut instance = if funded {
+            support::funded_ready_instance(class)
+        } else {
+            support::ready_instance()
+        };
+        let now = store.current_time().await?;
+        instance.eligibility_expires_at = Some(shift_minutes(now, 180)?);
+        if let Some(auth) = &mut instance.operation.lease_authorization {
+            auth.active_from = shift_minutes(now, -60)?;
+            auth.expires_at = shift_minutes(now, 120)?;
+        }
+        let mut projection = support::runtime_projection(&instance);
+        projection.environment_spec.class = class;
+        if let EnvironmentRuntimeSpec::Container { terminal, .. } =
+            &mut projection.environment_spec.runtime
+        {
+            *terminal = Some(Box::new(TerminalSpec {
+                executable: "/bin/sh".to_owned(),
+                args: Vec::new(),
+                working_directory: "/workspace".to_owned(),
+            }));
+        }
+        if separate_authoring_project {
+            projection.release.project_id = ProjectId::new();
+        }
+        projection.validate()?;
+        instance.runtime_authorization = Some(support::runtime_receipt(&instance, &projection));
+        insert_instance(&pool, &instance).await?;
+        sqlx::query("INSERT INTO environment.release_projections (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1)")
+            .bind(instance.release_id.as_uuid()).bind(projection.release.project_id.as_uuid()).bind(instance.course_id.map(CourseId::as_uuid))
+            .bind(i64::try_from(instance.release_version)?).bind(&instance.provider_binding)
+            .bind(persistence_sqlx::Sha256Digest::of_canonical(&projection)?.to_string()).bind(serde_json::to_value(&projection)?)
+            .bind(uuid::Uuid::now_v7()).execute(&pool).await?;
+        let console = EnvironmentConsoleEligibilityRequest {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            actor_id: instance.owner_id,
+            subject_kind: EnvironmentAccessSubjectKind::Owner,
+            expected_revision: instance.revision,
+        };
+        let endpoint = EnvironmentEndpointEligibilityRequest {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            actor_id: instance.owner_id,
+            subject_kind: EnvironmentAccessSubjectKind::Owner,
+            expected_revision: instance.revision,
+            endpoint_ids: vec![instance.endpoints[0].id],
+        };
+        let result = resolver
+            .resolve_console_eligibility(&caller, &console)
+            .await?;
+        assert_eq!(
+            result.lease_fence.as_ref().map(|f| f.lease_id),
+            instance.lease_id
+        );
+        assert_eq!(
+            resolver
+                .resolve(&caller, &request_for(&instance))
+                .await?
+                .lease_fence,
+            result.lease_fence
+        );
+        assert_eq!(
+            resolver
+                .resolve_endpoint_eligibility(&caller, &endpoint)
+                .await?
+                .lease_fence,
+            result.lease_fence
+        );
+        let mut wrong_scope = console.clone();
+        wrong_scope.project_id = ProjectId::new();
+        assert!(matches!(
+            resolver
+                .resolve_console_eligibility(&caller, &wrong_scope)
+                .await,
+            Err(OwnerResolverError::ScopeMismatch)
+        ));
+        if funded {
+            let mut expired = instance.clone();
+            if let Some(auth) = &mut expired.operation.lease_authorization {
+                auth.expires_at = now;
+            }
+            update_instance(&pool, &expired).await?;
+            assert!(matches!(
+                resolver
+                    .resolve_console_eligibility(&caller, &console)
+                    .await,
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+            assert!(matches!(
+                resolver.resolve(&caller, &request_for(&instance)).await,
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+            assert!(matches!(
+                resolver
+                    .resolve_endpoint_eligibility(&caller, &endpoint)
+                    .await,
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+            let mut future = instance.clone();
+            if let Some(auth) = &mut future.operation.lease_authorization {
+                auth.active_from = shift_minutes(now, 60)?;
+            }
+            update_instance(&pool, &future).await?;
+            assert!(matches!(
+                resolver
+                    .resolve_console_eligibility(&caller, &console)
+                    .await,
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+        }
+        if separate_authoring_project {
+            let mut mismatched = instance.clone();
+            if let Some(receipt) = &mut mismatched.runtime_authorization {
+                receipt.authorization.configuration.authoring_project_id = ProjectId::new();
+            }
+            update_instance(&pool, &mismatched).await?;
+            assert!(matches!(
+                resolver
+                    .resolve_console_eligibility(&caller, &console)
+                    .await,
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn resolver_uses_real_postgres_and_owner_resolution_logic()

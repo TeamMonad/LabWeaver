@@ -1,0 +1,26 @@
+{
+  "apiVersion": "evaluation.labweaver.io/v1",
+  "kind": "SubmissionManifest",
+  "name": "lw197-n100-20261012-1",
+  "source": "workspace",
+  "include": [
+    {
+      "kind": "exactFile",
+      "path": "lw197-n100-20261012/README.md"
+    },
+    {
+      "kind": "exactFile",
+      "path": "lw197-n100-20261012/empty.txt"
+    },
+    {
+      "kind": "exactFile",
+      "path": "lw197-n100-20261012/src/main.c"
+    }
+  ],
+  "exclude": [],
+  "required": [],
+  "llmReadable": [],
+  "maxTotalBytes": 4096,
+  "maxFiles": 10000,
+  "followSymlinks": false
+}

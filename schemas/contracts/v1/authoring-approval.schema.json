@@ -20,6 +20,27 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "CourseTeacherApprovalScope": {
+      "additionalProperties": false,
+      "description": "Captured by Control while the verified teacher and current course instructor are checked.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "membershipRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "actorId",
+        "courseId",
+        "membershipRevision"
+      ],
+      "type": "object"
+    },
     "EvaluationRuntimeIdentity": {
       "additionalProperties": false,
       "description": "Immutable build and deployment identity that must match every run using the release.",
@@ -219,6 +240,17 @@
     },
     "revision": {
       "$ref": "#/$defs/Revision"
+    },
+    "teacherScope": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseTeacherApprovalScope"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Course teacher authority captured in the same Control approval transaction."
     }
   },
   "required": [

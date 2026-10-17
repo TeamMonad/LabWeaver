@@ -251,6 +251,12 @@
         </p>
       </div>
 
+      <UploadRecoveryStatus
+        :state="upload.state"
+        :has-session="upload.session !== null"
+        @cancel="upload.cancel"
+      />
+
       <div class="upload-actions">
         <button
           type="button"
@@ -269,6 +275,9 @@
           </template>
           <template v-else-if="upload.state.kind === 'completing'">
             确认归档…
+          </template>
+          <template v-else-if="upload.state.kind === 'needs-files'">
+            继续上传
           </template>
           <template v-else>
             上传材料包
@@ -329,13 +338,21 @@
       </h3>
 
       <p class="section-subtitle">
-        材料包就绪后启动生成，页面刷新后会从项目服务恢复最近一次任务。
+        材料包就绪后，先显式勾选要送入模型的材料文件，再启动生成；页面刷新后会从项目服务恢复最近一次任务。
       </p>
+
+      <ModelInputPathPicker
+        v-if="uploadedPackage"
+        :model-value="modelInputSelection.selectedPaths"
+        :files="uploadedPackage.files"
+        @update:model-value="modelInputSelection.setSelected"
+      />
 
       <button
         type="button"
         class="filled-button"
         :disabled="!canStartRun"
+        data-testid="material-start-run"
         @click="startRun"
       >
         {{ agent.acting === 'start' ? '提交中…' : '启动实验生成' }}
@@ -525,11 +542,15 @@ import { useProjects } from '@/composables/useProjects'
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
+import { useModelInputPathSelection } from '@/composables/useModelInputPathSelection'
+import { modelInputSelectionAction } from '@/utils/modelInputSelection'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import UploadRecoveryStatus from '@/components/common/UploadRecoveryStatus.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
@@ -550,7 +571,7 @@ const courseId = computed(() => projects.selectedProject?.courseId ?? null)
 const policy = useActiveProjectLlmPolicy(projectId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))
 const retentionChoice = ref<ProblemPackageRetentionChoice>('finite')
-const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice)
+const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice, { recoveryScope: 'teacher-materials' })
 const agent = useProjectAgentRun(projectId, { kind: 'authoring', environmentClass: 'experiment' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -563,7 +584,7 @@ const fileColumns: DataTableColumn<UploadFile>[] = [
 ]
 
 const canUpload = computed(() => {
-  const ready = upload.state.kind === 'ready' || upload.state.kind === 'error'
+  const ready = ['ready', 'error', 'needs-files', 'cancelled'].includes(upload.state.kind)
   return ready && upload.files.length > 0 && policyRevision.value !== undefined
 })
 
@@ -576,10 +597,11 @@ const restoreDiagnostic = ref<DiagnosticViewModel | null>(null)
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed(() => (upload.state.kind === 'done' ? upload.state.package : null))
+const modelInputSelection = useModelInputPathSelection(uploadedPackage)
 const retentionChoiceEditable = computed(() => (
   upload.session === null
   && !packageDone.value
-  && ['idle', 'ready', 'error'].includes(upload.state.kind)
+  && ['idle', 'ready', 'error', 'cancelled'].includes(upload.state.kind)
 ))
 const IN_FLIGHT_RUN_STATES = ['requested', 'running', 'cancelling', 'awaiting_approval'] as const
 
@@ -591,6 +613,7 @@ const displayRun = computed(() => {
 
 const canStartRun = computed(() => {
   if (!packageDone.value || !uploadedPackage.value || policy.state.kind !== 'success' || agent.acting) return false
+  if (!modelInputSelection.hasSelection) return false
   if (agent.run.kind !== 'success' || agent.run.data.packageId !== uploadedPackage.value.id) return true
   return !runIsInFlight(agent.run.data.state)
 })
@@ -629,8 +652,12 @@ function diagnosticAction(code: string): string | null {
     case 'PROJECT_APPROVAL_STALE_CONTEXT':
     case 'UPLOAD_PACKAGE_STALE_CONTEXT':
       return '请从当前项目重新选择材料并启动任务，旧链接不会被当作当前项目状态。'
+    case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_DENIED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
+      return modelInputSelectionAction(code)
     default:
-      return null
+      return modelInputSelectionAction(code)
   }
 }
 
@@ -822,12 +849,14 @@ async function startRun() {
   const pkg = uploadedPackage.value
   const policyData = policy.state.kind === 'success' ? policy.state.data : undefined
   if (!pkg || !policyData || !canStartRun.value) return
+  if (!modelInputSelection.hasSelection) return
   const started = await agent.start({
     packageId: pkg.id,
     packageRevision: pkg.revision,
     policyId: policyData.id,
     policyRevision: policyData.revision,
     environmentClass: 'experiment',
+    selectedPaths: modelInputSelection.selectedPaths,
   })
   if (started && agent.run.kind === 'success') {
     restoredContextKey = `${projectId.value}:${pkg.id}:${agent.run.data.id}`

@@ -58,13 +58,24 @@ struct FakeRegistryState {
 #[derive(Clone, Debug)]
 pub struct FakeObjects {
     bytes: Vec<u8>,
+    file_write_delay: std::time::Duration,
 }
 
 impl FakeObjects {
     /// Stages `bytes` as the exact object every verified read returns.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
+        Self {
+            bytes,
+            file_write_delay: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Injects slow synchronous file I/O at the external object-store fixture boundary.
+    #[must_use]
+    pub fn with_file_write_delay(mut self, delay: std::time::Duration) -> Self {
+        self.file_write_delay = delay;
+        self
     }
 }
 
@@ -100,7 +111,17 @@ impl ImmutableObjectStore for FakeObjects {
         _: &str,
         expected: &ArtifactRef,
     ) -> Result<VerifiedObjectFile, ObjectStoreError> {
-        VerifiedObjectFile::from_bytes(expected.clone(), &self.bytes)
+        let expected = expected.clone();
+        let bytes = self.bytes.clone();
+        let delay = self.file_write_delay;
+        // The byte adapter creates, writes, fsyncs and hashes a temporary file. Keep that work
+        // off the single-thread test runtime so HTTP status reads and lease renewal can run.
+        tokio::task::spawn_blocking(move || {
+            std::thread::sleep(delay);
+            VerifiedObjectFile::from_bytes(expected, &bytes)
+        })
+        .await
+        .map_err(|_| ObjectStoreError::ObjectUnavailable)?
     }
 
     async fn freeze_current(
@@ -270,3 +291,5 @@ async fn handle(
     }
     StatusCode::NOT_FOUND.into_response()
 }
+
+pub mod build_billing;

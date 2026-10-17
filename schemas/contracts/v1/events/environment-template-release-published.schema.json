@@ -250,26 +250,48 @@
       "additionalProperties": false,
       "description": "Runtime-independent minimum security posture.",
       "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
         "privilegeEscalationPolicy": {
-          "$ref": "#/$defs/PrivilegeEscalationPolicy"
+          "$ref": "#/$defs/PrivilegeEscalationPolicy",
+          "default": "deny"
+        },
+        "privileged": {
+          "default": false,
+          "type": "boolean"
         },
         "publicExposurePolicy": {
           "$ref": "#/$defs/PublicExposurePolicy"
         },
         "rootFilesystemPolicy": {
-          "$ref": "#/$defs/RootFilesystemPolicy"
+          "$ref": "#/$defs/RootFilesystemPolicy",
+          "default": "mutable_required"
+        },
+        "runAsUser": {
+          "default": null,
+          "description": "Null uses the verified platform default (root/UID 0 by default); an explicit UID is retained.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seccomp": {
+          "$ref": "#/$defs/RuntimeSeccompProfile",
+          "default": "runtime_default"
         },
         "securityProfileBinding": {
           "type": "string"
-        },
-        "userPolicy": {
-          "$ref": "#/$defs/RuntimeUserPolicy"
         }
       },
       "required": [
-        "userPolicy",
-        "rootFilesystemPolicy",
-        "privilegeEscalationPolicy",
         "publicExposurePolicy",
         "securityProfileBinding"
       ],
@@ -478,6 +500,53 @@
       "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
       "type": "string"
     },
+    "LinuxCapability": {
+      "description": "Linux capability names from the kernel UAPI. `ALL` is never an addition.",
+      "enum": [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "DAC_READ_SEARCH",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "SETGID",
+        "SETUID",
+        "SETPCAP",
+        "LINUX_IMMUTABLE",
+        "NET_BIND_SERVICE",
+        "NET_BROADCAST",
+        "NET_ADMIN",
+        "NET_RAW",
+        "IPC_LOCK",
+        "IPC_OWNER",
+        "SYS_MODULE",
+        "SYS_RAWIO",
+        "SYS_CHROOT",
+        "SYS_PTRACE",
+        "SYS_PACCT",
+        "SYS_ADMIN",
+        "SYS_BOOT",
+        "SYS_NICE",
+        "SYS_RESOURCE",
+        "SYS_TIME",
+        "SYS_TTY_CONFIG",
+        "MKNOD",
+        "LEASE",
+        "AUDIT_WRITE",
+        "AUDIT_CONTROL",
+        "SETFCAP",
+        "MAC_OVERRIDE",
+        "MAC_ADMIN",
+        "SYSLOG",
+        "WAKE_ALARM",
+        "BLOCK_SUSPEND",
+        "AUDIT_READ",
+        "PERFMON",
+        "BPF",
+        "CHECKPOINT_RESTORE"
+      ],
+      "type": "string"
+    },
     "NetworkPolicySpec": {
       "description": "Network egress posture for a published environment.",
       "oneOf": [
@@ -532,7 +601,8 @@
     },
     "PrivilegeEscalationPolicy": {
       "enum": [
-        "deny"
+        "deny",
+        "allow"
       ],
       "type": "string"
     },
@@ -684,9 +754,10 @@
       ],
       "type": "string"
     },
-    "RuntimeUserPolicy": {
+    "RuntimeSeccompProfile": {
       "enum": [
-        "non_root_required"
+        "runtime_default",
+        "unconfined"
       ],
       "type": "string"
     },

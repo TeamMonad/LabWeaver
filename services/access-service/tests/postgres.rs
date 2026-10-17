@@ -11,6 +11,103 @@ mod support;
 use support::apply_access_migrations;
 
 #[tokio::test]
+async fn oidc_binding_is_checked_before_atomic_consumption_and_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_access_migrations(&pool).await?;
+    let key_ring = auth::KeyRing::parse(
+        "test-key".to_owned(),
+        &format!(
+            "test-key:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+        ),
+    )?;
+    let first = auth::OidcTransaction::generate()?;
+    let second = auth::OidcTransaction::generate()?;
+    let now = OffsetDateTime::now_utc();
+    for transaction in [&first, &second] {
+        let id = Uuid::now_v7();
+        let encrypted = key_ring.encrypt(&serde_json::to_vec(transaction)?, id.as_bytes())?;
+        sqlx::query("INSERT INTO access.oidc_transactions (transaction_id,state_sha256,encrypted_payload,encryption_key_id,expires_at) VALUES ($1,$2,$3,$4,$5)")
+            .bind(id).bind(persistence_sqlx::Sha256Digest::of_bytes(transaction.state.as_bytes()).to_string())
+            .bind(encrypted.payload).bind(encrypted.key_id).bind(now + Duration::minutes(5))
+            .execute(&pool).await?;
+    }
+    assert!(matches!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &first.state,
+            &second.browser_binding,
+            now
+        )
+        .await,
+        Err(auth::RepositoryError::Transaction(
+            auth::OidcTransactionError::BrowserBindingMismatch
+        ))
+    ));
+    // Concurrent callbacks for one transaction can have only one winner.
+    let (a, b) = tokio::join!(
+        auth::consume_oidc_transaction(&pool, &key_ring, &first.state, &first.browser_binding, now),
+        auth::consume_oidc_transaction(&pool, &key_ring, &first.state, &first.browser_binding, now)
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert!(matches!(
+        if a.is_ok() { b } else { a },
+        Err(auth::RepositoryError::StateRejected)
+    ));
+    // Completing one tab leaves the other transaction usable.
+    assert_eq!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &second.state,
+            &second.browser_binding,
+            now
+        )
+        .await?,
+        second
+    );
+    assert!(matches!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &second.state,
+            &second.browser_binding,
+            now
+        )
+        .await,
+        Err(auth::RepositoryError::StateRejected)
+    ));
+    let expired = auth::OidcTransaction::generate()?;
+    let id = Uuid::now_v7();
+    let encrypted = key_ring.encrypt(&serde_json::to_vec(&expired)?, id.as_bytes())?;
+    sqlx::query("INSERT INTO access.oidc_transactions (transaction_id,state_sha256,encrypted_payload,encryption_key_id,expires_at) VALUES ($1,$2,$3,$4,$5)")
+        .bind(id).bind(persistence_sqlx::Sha256Digest::of_bytes(expired.state.as_bytes()).to_string())
+        .bind(encrypted.payload).bind(encrypted.key_id).bind(now + Duration::seconds(1))
+        .execute(&pool).await?;
+    assert!(matches!(
+        auth::consume_oidc_transaction(
+            &pool,
+            &key_ring,
+            &expired.state,
+            &expired.browser_binding,
+            now + Duration::seconds(1)
+        )
+        .await,
+        Err(auth::RepositoryError::StateRejected)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "one migrated PostgreSQL instance proves interacting schema, fencing, and authorization invariants"
@@ -26,7 +123,7 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .max_connections(4)
         .connect(&url)
         .await?;
-    apply_access_migrations(&pool).await?;
+    support::apply_access_migrations_through(&pool, 7).await?;
 
     let actor = Uuid::now_v7();
     sqlx::query("INSERT INTO access.actors (actor_id,issuer,subject_sha256) VALUES ($1,'https://issuer.example.test','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')")
@@ -222,11 +319,11 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .bind(grant_id).bind(current_token).execute(&pool).await?.rows_affected();
     assert_eq!(current_rows, 1);
 
-    sqlx::query("INSERT INTO access.course_memberships (course_id,actor_id,role,state,revision,expires_at) VALUES ($1,$2,'student','active',1,now()+interval '30 minutes')")
+    sqlx::query("INSERT INTO control.course_memberships (course_id,actor_id,role,state,revision,expires_at) VALUES ($1,$2,'student','active',1,now()+interval '30 minutes')")
         .bind(course).bind(actor).execute(&pool).await?;
     sqlx::query("UPDATE access.access_grants SET state='active',contract=jsonb_set(contract,'{subjectKind}','\"owner\"'::jsonb) WHERE grant_id=$1")
         .bind(grant_id).execute(&pool).await?;
-    let authorized: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
+    let authorized: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN control.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
         .bind(grant_id).fetch_one(&pool).await?;
     assert!(authorized);
 
@@ -253,6 +350,46 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,$7,'work',1,$8,3,now()+interval '20 minutes',now(),now()+interval '30 seconds',now()+interval '15 minutes',$9,$10,$11,'test-key','actor:work',$12)")
         .bind(work_capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(project).bind(course).bind(environment).bind(work_lease_id)
         .bind("1".repeat(64)).bind("2".repeat(64)).bind(vec![9_u8; 32]).bind("3".repeat(64)).execute(&pool).await?;
+    let funded_experiment_capability = Uuid::now_v7();
+    support::apply_access_migration(&pool, 8).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM access.console_capabilities WHERE capability_id IN ($1,$2)"
+        )
+        .bind(capability_id)
+        .bind(work_capability_id)
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) SELECT $1,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,'experiment',environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,$2,$3,encrypted_handoff_secret,encryption_key_id,'actor:funded-experiment',$4 FROM access.console_capabilities WHERE capability_id=$5")
+        .bind(funded_experiment_capability).bind("4".repeat(64)).bind("5".repeat(64)).bind("6".repeat(64)).bind(work_capability_id).execute(&pool).await?;
+    let funded_fence: (Uuid, i64) = sqlx::query_as("SELECT lease_id,lease_revision FROM access.console_capabilities WHERE capability_id=$1 AND environment_class='experiment'")
+        .bind(funded_experiment_capability).fetch_one(&pool).await?;
+    assert_eq!(funded_fence, (work_lease_id, 3));
+    for mutation in [
+        "lease_id=NULL",
+        "lease_revision=NULL",
+        "lease_expires_at=NULL",
+        "lease_expires_at=issued_at+interval '29 seconds'",
+        "environment_class='work',lease_id=NULL,lease_revision=NULL,lease_expires_at=NULL",
+    ] {
+        let error = sqlx::query(&format!(
+            "UPDATE access.console_capabilities SET {mutation} WHERE capability_id=$1"
+        ))
+        .bind(funded_experiment_capability)
+        .execute(&pool)
+        .await
+        .err()
+        .ok_or("partial, expired, or unfunded Work fence was accepted")?;
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("23514")
+        );
+    }
     sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,project_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,$8,1,$9,3,now()+interval '20 minutes','test-proxy','opening',now(),now()+interval '15 minutes')")
         .bind(Uuid::now_v7()).bind(work_capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(project).bind(course).bind(environment).bind(work_lease_id).execute(&pool).await?;
     let console_columns: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema='access' AND table_name IN ('console_capabilities','console_sessions')")
@@ -272,9 +409,9 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         );
     }
 
-    sqlx::query("UPDATE access.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
+    sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
         .bind(course).bind(actor).execute(&pool).await?;
-    let authorized_after_revocation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
+    let authorized_after_revocation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN control.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
         .bind(grant_id).fetch_one(&pool).await?;
     assert!(!authorized_after_revocation);
 

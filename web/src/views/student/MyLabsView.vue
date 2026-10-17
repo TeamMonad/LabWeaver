@@ -310,6 +310,7 @@ import { computed, onScopeDispose, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
+import { EXPERIMENT_CREATE_UNSUPPORTED } from '@/utils/runtimePermissions'
 import { fetchProjectEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjects } from '@/composables/useProjects'
 import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
@@ -322,7 +323,7 @@ import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import GcpActionBar from '@/components/common/GcpActionBar.vue'
 import GcpFilterBar, { type FilterChip, type FilterPreset } from '@/components/common/GcpFilterBar.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
-import { formatTimestamp, idempotencyKey } from '@/utils/format'
+import { formatTimestamp } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import { environmentStateLabel } from '@/utils/stateLabels'
@@ -378,13 +379,6 @@ const inspectedEnv = ref<EnvironmentSummary | null>(null)
 const showCreateModal = ref(false)
 const createDiagnostic = ref<DiagnosticViewModel | null>(null)
 const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
-const createIntentKey = ref<string | null>(null)
-const createIntentReleaseId = ref<string | null>(null)
-const createIntentReleaseVersion = ref<number | null>(null)
-const createIntentProjectId = ref<string | null>(null)
-const createIntentCourseId = ref<string | null>(null)
-let createIntentSequence = 0
-
 const filterSearch = ref('')
 const activeFilterChips = ref<FilterChip[]>([])
 
@@ -495,57 +489,18 @@ function openCreateDrawer() {
 }
 
 async function handleCreate(rel: EnvironmentTemplateReleaseViewSchema) {
-  const targetProjectId = projectId.value
-  if (!targetProjectId) {
+  if (!projectId.value) {
     createDiagnostic.value = makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法创建环境。', false)
     return
   }
-  const operationId = `create:${rel.id}`
-  if (lifecycle.operating.has(operationId)) return
-
-  const targetCourseId = courseId.value ?? null
-  const targetChanged = createIntentReleaseId.value !== rel.id
-    || createIntentReleaseVersion.value !== rel.version
-    || createIntentProjectId.value !== targetProjectId
-    || createIntentCourseId.value !== targetCourseId
-  if (targetChanged || !createIntentKey.value) {
-    createIntentKey.value = idempotencyKey()
-    createIntentReleaseId.value = rel.id
-    createIntentReleaseVersion.value = rel.version
-    createIntentProjectId.value = targetProjectId
-    createIntentCourseId.value = targetCourseId
-    createIntentSequence += 1
-  }
-  const requestSequence = createIntentSequence
-  const intentKey = createIntentKey.value
-  if (!intentKey) return
-  createDiagnostic.value = null
+  // Experiment create still lacks the original ResourceRequest→approval→lease
+  // handoff. Do not invent resourceRequestId; surface the 422 boundary honestly.
   pendingRelease.value = rel
-  lifecycle.operating.add(operationId)
-  try {
-    const result = await lifecycle.create(
-      {
-        releaseId: rel.id,
-        releaseVersion: rel.version,
-      },
-      intentKey,
-    )
-    if (requestSequence !== createIntentSequence || projectId.value !== targetProjectId) return
-    if (result.ok) {
-      createIntentKey.value = null
-      createIntentReleaseId.value = null
-      createIntentReleaseVersion.value = null
-      createIntentProjectId.value = null
-      createIntentCourseId.value = null
-      pendingRelease.value = null
-      showCreateModal.value = false
-      await load()
-    } else {
-      createDiagnostic.value = result.diagnostic
-    }
-  } finally {
-    lifecycle.operating.delete(operationId)
-  }
+  createDiagnostic.value = makeDiagnostic(
+    EXPERIMENT_CREATE_UNSUPPORTED.code,
+    EXPERIMENT_CREATE_UNSUPPORTED.message,
+    EXPERIMENT_CREATE_UNSUPPORTED.retryable,
+  )
 }
 
 function retryCreate() {
@@ -631,12 +586,6 @@ watch(
 )
 
 watch(projectId, () => {
-  createIntentSequence += 1
-  createIntentKey.value = null
-  createIntentReleaseId.value = null
-  createIntentReleaseVersion.value = null
-  createIntentProjectId.value = null
-  createIntentCourseId.value = null
   pendingRelease.value = null
   createDiagnostic.value = null
 })

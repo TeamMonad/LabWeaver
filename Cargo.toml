@@ -96,6 +96,8 @@ expect_used = "deny"
 panic = "deny"
 
 [patch.crates-io]
+# Official SQLx #4394 backport. Keep the 0.8.6 core and other drivers unchanged.
+sqlx-postgres = { path = "vendor/sqlx-postgres" }
 # Upstream 0.15.0 discards the configured HTTP client during JWKS refresh.
 # This audited patch preserves the mature crate and makes unknown-kid refresh
 # reuse the same deployment-controlled trust store used for Discovery.

@@ -113,7 +113,7 @@ impl EnvironmentProcessRuntime {
             );
             EnvironmentProcessRuntimeError::WorkAdmission
         })?;
-        let work_backend = KubernetesWorkExecutionBackend::from_default()
+        let work_backend = KubernetesWorkExecutionBackend::from_default(pool.clone())
             .await
             .map_err(|error| {
                 tracing::error!(
@@ -218,6 +218,10 @@ impl EnvironmentProcessRuntime {
                                 .as_deref()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                         )?,
+                    )?
+                    .with_namespace_profile(
+                        crate::ContainerNamespaceProfile::from_env()
+                            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?,
                     )?;
                     registry.register(Arc::new(provider))?;
                 }
@@ -266,6 +270,12 @@ impl EnvironmentProcessRuntime {
                                     .as_deref()
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             )?
+                            .with_workspace_root(
+                                configuration
+                                    .collector_workspace_root
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            )?
                             .with_evaluation_ingress(
                                 configuration
                                     .evaluation_namespace
@@ -307,7 +317,11 @@ impl EnvironmentProcessRuntime {
         let worker = ReconcileWorker::new(
             store.clone(),
             Reconciler::new(registry, PROVIDER_TIMEOUT)?
-                .with_resource_allocator(resource_usage_client.clone()),
+                .with_resource_allocator(resource_usage_client.clone())
+                .with_runtime_admission(crate::EnvironmentRuntimeAdmission::new(
+                    release_store.clone(),
+                    Arc::new(resource_usage_client.clone()),
+                )),
             RECONCILE_LEASE,
             RETRY_DELAY,
         )?;
@@ -366,7 +380,10 @@ impl EnvironmentProcessRuntime {
             self.freeze_bindings.clone(),
         )
         .with_work_executions(self.work_executions.clone())
-        .with_resource_reservations(self.resource_usage_client.clone())
+        .with_runtime_admission(crate::EnvironmentRuntimeAdmission::new(
+            self.release_store.clone(),
+            Arc::new(self.resource_usage_client.clone()),
+        ))
     }
 
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.

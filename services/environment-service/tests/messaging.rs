@@ -126,6 +126,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
                 reset_target: None,
             },
             create: Some(EnvironmentCreateSpec {
+                runtime_authorization: None,
                 project_id: instance.project_id,
                 course_id: instance.course_id,
                 owner_actor_id: instance.owner_id,
@@ -283,6 +284,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
     work_create.data.command.actor_id = work_owner_id;
     work_create.data.command.trace_id = work_create.trace_id.clone();
     work_create.data.create = Some(EnvironmentCreateSpec {
+        runtime_authorization: None,
         project_id: work_project_id,
         course_id: work_course_id,
         owner_actor_id: work_owner_id,

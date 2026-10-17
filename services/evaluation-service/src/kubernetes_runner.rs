@@ -25,7 +25,8 @@ use contracts::{
     http::RecordResourceUsageRequest,
     http::{
         AgentLlmReviewFile, AgentLlmReviewRubric, AgentLlmReviewState,
-        InternalAgentLlmReviewRequest,
+        CreateFrozenModelInputAuthorizationRequest, InternalAgentLlmReviewRequest,
+        ModelInputAuthorizationBinding, ModelInputAuthorizationSource,
     },
     resource::WorkloadResources,
     submission::FrozenSubmission,
@@ -361,7 +362,9 @@ impl KubernetesEvaluationRunner {
         // reports Missing.  A timeout/transport error remains non-terminal; the durable
         // TaskRunId and idempotency key are reconciled by the next worker attempt.
         lifecycle
-            .create()
+            .create(Duration::from_secs(
+                self.configuration.resource_approval_timeout_seconds,
+            ))
             .await
             .map_err(|error| map_task_resource(error, "create"))?;
         // A reassigned attempt may already own a Resource request from the previous worker. If
@@ -383,7 +386,6 @@ impl KubernetesEvaluationRunner {
         let claimed = match lifecycle
             .claim_after_approval(
                 Duration::from_millis(self.configuration.resource_poll_interval_milliseconds),
-                Duration::from_secs(self.configuration.resource_approval_timeout_seconds),
                 &context.cancellation,
             )
             .await
@@ -404,33 +406,47 @@ impl KubernetesEvaluationRunner {
                 )
                 .into_completion();
             }
+            Err(TaskResourceError::ResourceLeaseExpired) => {
+                return self.expire_before_execution(&context, &lifecycle).await;
+            }
+            Err(TaskResourceError::ResourceApprovalExpired) => {
+                return TerminalResult::Failed("LW_RESOURCE_APPROVAL_EXPIRED".to_owned())
+                    .into_completion();
+            }
             Err(TaskResourceError::ResourceTerminal) => {
                 return TerminalResult::Failed("LW_EVALUATION_RESOURCE_TERMINAL".to_owned())
                     .into_completion();
             }
             Err(error) => return Err(map_task_resource(error, "claim")),
         };
-        let mut resource_status = tokio::select! {
-            result = lifecycle.acknowledge(&claimed, &self.configuration.runner_namespace) => {
-                result.map_err(|error| map_task_resource(error, "ack"))?
+        self.control
+            .load_execution_checkpoint(&context.lease)
+            .await
+            .map_err(ExecutionError::Control)?;
+        // Settle the bounded handoff before user cancellation releases it.
+        // Racing cancellation against this POST can commit Active after cleanup
+        // already read Provisioning. Same-attempt recovery replays a lost reply.
+        let mut resource_status = match lifecycle
+            .acknowledge(&claimed, &self.configuration.runner_namespace)
+            .await
+        {
+            Ok(status) => status,
+            Err(TaskResourceError::ResourceLeaseExpired) => {
+                return self.expire_before_execution(&context, &lifecycle).await;
             }
-            () = context.cancellation.cancelled() => {
-                if context.lease_lost.is_cancelled() {
-                    return Err(ExecutionError::LeaseLost);
-                }
-                lifecycle
-                    .cancel("evaluation step lease cancelled before resource handoff")
-                    .await
-                    .map_err(|error| map_task_resource(error, "cancel"))?;
-                if self.run_is_cancelling(context.lease.run_id).await? {
-                    return TerminalResult::Cancelled.into_completion();
-                }
-                return Err(ExecutionError::LeaseLost);
+            Err(TaskResourceError::ResourceApprovalExpired) => {
+                return TerminalResult::Failed("LW_RESOURCE_APPROVAL_EXPIRED".to_owned())
+                    .into_completion();
             }
+            Err(error) => return Err(map_task_resource(error, "ack")),
         };
         if context.lease_lost.is_cancelled() {
             return Err(ExecutionError::LeaseLost);
         }
+        self.control
+            .load_execution_checkpoint(&context.lease)
+            .await
+            .map_err(ExecutionError::Control)?;
         if context.cancellation.is_cancelled()
             || self.run_is_cancelling(context.lease.run_id).await?
         {
@@ -568,6 +584,44 @@ impl KubernetesEvaluationRunner {
             ));
         }
         Ok(completion)
+    }
+
+    async fn expire_before_execution(
+        &self,
+        context: &EvaluationAttemptContext,
+        lifecycle: &TaskResourceLifecycle,
+    ) -> Result<EvaluationStepCompletion, ExecutionError> {
+        // No executor intent may exist before this handoff. A stale owner or
+        // a recorded external submission must resume cleanup instead.
+        if self
+            .control
+            .load_execution_checkpoint(&context.lease)
+            .await?
+            .is_some()
+        {
+            return Err(ExecutionError::Backend(
+                "execution_intent_changed".to_owned(),
+            ));
+        }
+        lifecycle
+            .cancel("evaluation lease expired before workload submission")
+            .await?;
+        TerminalResult::Failed("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned()).into_completion()
+    }
+
+    async fn task_lease_expired(
+        &self,
+        context: &EvaluationAttemptContext,
+    ) -> Result<bool, ExecutionError> {
+        let status = self
+            .resource
+            .get_task_resource(context.lease.task_run_id)
+            .await
+            .map_err(|error| ExecutionError::TaskResource(TaskResourceFailure(error.into())))?;
+        if status.project_id != context.run.project_id || status.owner_id != context.run.actor_id {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        Ok(status.request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED"))
     }
 
     fn admit_execution(
@@ -1085,7 +1139,9 @@ impl KubernetesEvaluationRunner {
         }
         let key = format!("evaluation-llm-{}", context.lease.task_run_id);
         let cancel_key = format!("{key}-cancel");
-        let mut receipt = self.load_or_enqueue_advisory(&request, &key).await?;
+        let mut receipt = self
+            .load_or_enqueue_advisory(context, &request, &key)
+            .await?;
         let (receipt, started_at, finished_at) = self
             .observe_advisory(context, &request, &cancel_key, &mut receipt)
             .await?;
@@ -1131,6 +1187,7 @@ impl KubernetesEvaluationRunner {
     /// an explicit missing receipt permits the original immutable request to be posted.
     async fn load_or_enqueue_advisory(
         &self,
+        context: &EvaluationAttemptContext,
         request: &InternalAgentLlmReviewRequest,
         idempotency_key: &str,
     ) -> Result<contracts::http::InternalAgentLlmReviewReceipt, ExecutionError> {
@@ -1142,11 +1199,24 @@ impl KubernetesEvaluationRunner {
             .await
         {
             Ok(receipt) => receipt,
-            Err(AgentClientError::ReviewMissing) => self
-                .agent
-                .enqueue(request, idempotency_key)
-                .await
-                .map_err(|error| ExecutionError::Backend(error.to_string()))?,
+            Err(AgentClientError::ReviewMissing) => {
+                let paths = request
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect::<Vec<_>>();
+                self.recheck_advisory_inputs(
+                    context,
+                    request.deadline_at,
+                    &request.input_authorization,
+                    &paths,
+                )
+                .await?;
+                self.agent
+                    .enqueue(request, idempotency_key)
+                    .await
+                    .map_err(|error| ExecutionError::Backend(error.to_string()))?
+            }
             Err(error) => return Err(ExecutionError::Backend(error.to_string())),
         };
         validate_advisory_receipt_hash(request, expected_request_sha256, &receipt)?;
@@ -1166,11 +1236,24 @@ impl KubernetesEvaluationRunner {
                 "advisory_output_mode_invalid".to_owned(),
             ));
         }
+        validate_advisory_context(context, frozen, include, rubric, output_mode)?;
+        validate_advisory_selection(
+            context
+                .release
+                .evaluation_spec
+                .body()
+                .submission()
+                .llm_readable(),
+            frozen,
+            include,
+        )?;
         let package = self.load_execution_binding(context.run.release_id).await?;
         package
             .validate_ownership(context.run.project_id, context.run.course_id)
             .map_err(|_| ExecutionError::IdentityMismatch)?;
-        let (archive, package_bytes) = self.load_archive_and_package(frozen, &package).await?;
+        let rubric_path = rubric.strip_prefix("evaluator://").unwrap_or(rubric);
+        let rubric_file = find_package_file(&package.package, rubric_path)
+            .ok_or_else(|| ExecutionError::Backend("advisory_rubric_missing".to_owned()))?;
         let policy = self
             .authoring
             .active_policy(context.run.project_id)
@@ -1179,6 +1262,52 @@ impl KubernetesEvaluationRunner {
         policy
             .validate_ownership(context.run.project_id, context.run.course_id)
             .map_err(|_| ExecutionError::IdentityMismatch)?;
+        let deadline_at = self
+            .freezes
+            .model_input_task_deadline(
+                frozen.id,
+                frozen.project_id,
+                frozen.course_id,
+                frozen.actor_id,
+                context.release.id,
+                context.release.revision,
+                context.lease.task_run_id,
+                &contracts::http::model_input_parent_lease_sha256(context.lease.lease_token()),
+            )
+            .await
+            .map_err(|_| ExecutionError::Backend("advisory_parent_admission_denied".to_owned()))?;
+        self.check_advisory_preparation(context, deadline_at)
+            .await?;
+        let facts = self
+            .freezes
+            .model_input_facts(
+                frozen.id,
+                frozen.project_id,
+                frozen.course_id,
+                frozen.actor_id,
+                context.release.id,
+                context.release.revision,
+            )
+            .await
+            .map_err(|_| ExecutionError::Backend("advisory_input_facts_unavailable".to_owned()))?;
+        let authorization_request = frozen_input_request(context, frozen, include, &facts)?;
+        let input_authorization = self
+            .authoring
+            .authorize_frozen_inputs(&authorization_request)
+            .await
+            .map_err(|error| ExecutionError::Backend(error.to_string()))?;
+        validate_frozen_input_binding(
+            &input_authorization,
+            &authorization_request,
+            frozen,
+            &facts,
+            &package.package,
+            rubric_file,
+            &policy,
+        )?;
+        self.recheck_advisory_inputs(context, deadline_at, &input_authorization, include)
+            .await?;
+        let archive = self.load_frozen_archive(frozen).await?;
         let mut paths = BTreeSet::new();
         let files = include
             .iter()
@@ -1195,7 +1324,13 @@ impl KubernetesEvaluationRunner {
                     .map_err(|_| ExecutionError::Backend("advisory_include_not_utf8".to_owned()))?;
                 Ok(AgentLlmReviewFile {
                     path: path.clone(),
-                    sha256: Sha256Digest::of_bytes(file_content.as_bytes()).to_string(),
+                    sha256: frozen
+                        .files
+                        .iter()
+                        .find(|file| file.path == *path)
+                        .ok_or(ExecutionError::IdentityMismatch)?
+                        .sha256
+                        .clone(),
                     content: file_content,
                 })
             })
@@ -1203,22 +1338,15 @@ impl KubernetesEvaluationRunner {
         if files.is_empty() {
             return Err(ExecutionError::Backend("advisory_include_empty".to_owned()));
         }
-        let rubric_path = rubric.strip_prefix("evaluator://").unwrap_or(rubric);
-        let rubric_file = find_package_file(&package.package, rubric_path)
-            .ok_or_else(|| ExecutionError::Backend("advisory_rubric_missing".to_owned()))?;
-        let rubric_bytes = package_bytes
-            .get(&rubric_file.object.artifact_id)
-            .ok_or_else(|| ExecutionError::Backend("advisory_rubric_unavailable".to_owned()))?;
-        let rubric_content = String::from_utf8(rubric_bytes.clone())
+        self.recheck_advisory_inputs(context, deadline_at, &input_authorization, include)
+            .await?;
+        let rubric_bytes = self.load_package_file(&package, rubric_file).await?;
+        let rubric_content = String::from_utf8(rubric_bytes)
             .map_err(|_| ExecutionError::Backend("advisory_rubric_not_utf8".to_owned()))?;
-        let now = self
-            .control
-            .authority_now()
-            .await
-            .map_err(ExecutionError::Control)?;
-        let deadline_at = contracts::UtcTimestamp::from_utc(now.get() + time::Duration::minutes(5))
-            .map_err(|_| ExecutionError::Backend("advisory_deadline_invalid".to_owned()))?;
+        self.recheck_advisory_inputs(context, deadline_at, &input_authorization, include)
+            .await?;
         let request = InternalAgentLlmReviewRequest {
+            input_authorization,
             task_run_id: context.lease.task_run_id,
             project_id: context.run.project_id,
             course_id: context.run.course_id,
@@ -1229,7 +1357,7 @@ impl KubernetesEvaluationRunner {
             rubric: AgentLlmReviewRubric {
                 artifact: rubric_file.object.clone(),
                 path: rubric_file.path.clone(),
-                sha256: Sha256Digest::of_bytes(rubric_bytes).to_string(),
+                sha256: rubric_file.sha256.clone(),
                 content: rubric_content,
             },
             deadline_at,
@@ -1238,6 +1366,88 @@ impl KubernetesEvaluationRunner {
             .validate()
             .map_err(|_| ExecutionError::Backend("advisory_request_invalid".to_owned()))?;
         Ok(request)
+    }
+
+    async fn recheck_advisory_inputs(
+        &self,
+        context: &EvaluationAttemptContext,
+        deadline_at: contracts::UtcTimestamp,
+        binding: &ModelInputAuthorizationBinding,
+        paths: &[String],
+    ) -> Result<(), ExecutionError> {
+        if !matches!(&binding.source,ModelInputAuthorizationSource::FrozenSubmission(source)
+            if source.parent_lease_sha256==contracts::http::model_input_parent_lease_sha256(context.lease.lease_token()))
+        {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        self.check_advisory_preparation(context, deadline_at)
+            .await?;
+        self.authoring
+            .recheck_frozen_inputs(binding, paths)
+            .await
+            .map_err(|error| ExecutionError::Backend(error.to_string()))?;
+        self.check_advisory_preparation(context, deadline_at).await
+    }
+
+    async fn check_advisory_preparation(
+        &self,
+        context: &EvaluationAttemptContext,
+        deadline_at: contracts::UtcTimestamp,
+    ) -> Result<(), ExecutionError> {
+        if context.lease_lost.is_cancelled() {
+            return Err(ExecutionError::LeaseLost);
+        }
+        if context.cancellation.is_cancelled() {
+            return Err(TaskResourceError::Cancelled.into());
+        }
+        let run = self
+            .control
+            .load_run(context.lease.run_id)
+            .await
+            .map_err(ExecutionError::Control)?;
+        if run.cancellation_requested
+            || run.state == contracts::evaluation::EvaluationRunState::Cancelling
+        {
+            return Err(TaskResourceError::Cancelled.into());
+        }
+        if run.state != contracts::evaluation::EvaluationRunState::Running
+            || run.id != context.run.id
+            || run.project_id != context.run.project_id
+            || run.course_id != context.run.course_id
+            || run.actor_id != context.run.actor_id
+            || run.frozen_submission_id != context.run.frozen_submission_id
+            || run.release_id != context.release.id
+            || run.release_revision != context.release.revision
+            || run.identity != context.run.identity
+            || !run.steps.iter().any(|step| {
+                step.id == context.lease.step_run_id
+                    && step.step_id == context.step.id()
+                    && step.revision == context.lease.revision
+                    && step.current_attempt == context.lease.attempt
+                    && step.state == contracts::evaluation::EvaluationStepRunState::Running
+            })
+        {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        if !self
+            .freezes
+            .model_input_task_is_active(&context.lease)
+            .await
+            .map_err(|_| ExecutionError::Backend("advisory_task_facts_unavailable".to_owned()))?
+        {
+            return Err(ExecutionError::LeaseLost);
+        }
+        let now = self
+            .control
+            .authority_now()
+            .await
+            .map_err(ExecutionError::Control)?;
+        if now >= deadline_at {
+            return Err(ExecutionError::Backend(
+                "advisory_deadline_elapsed".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn observe_advisory(
@@ -1758,6 +1968,12 @@ impl KubernetesEvaluationRunner {
     ) -> Result<(TerminalResult, ExecutionTiming), ExecutionError> {
         let mut missing_since: Option<Instant> = None;
         loop {
+            if self.task_lease_expired(context).await? {
+                return Ok((
+                    TerminalResult::Failed("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned()),
+                    ExecutionTiming::unknown(),
+                ));
+            }
             if context.cancellation.is_cancelled()
                 || self.run_is_cancelling(context.lease.run_id).await?
             {
@@ -1873,6 +2089,12 @@ impl KubernetesEvaluationRunner {
         recovery: Option<&EvaluationExecutionResources>,
     ) -> Result<(TerminalResult, ExecutionTiming), ExecutionError> {
         loop {
+            if self.task_lease_expired(context).await? {
+                return Ok((
+                    TerminalResult::Failed("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned()),
+                    ExecutionTiming::unknown(),
+                ));
+            }
             if context.cancellation.is_cancelled()
                 || self.run_is_cancelling(context.lease.run_id).await?
             {
@@ -2031,6 +2253,21 @@ impl KubernetesEvaluationRunner {
         ),
         ExecutionError,
     > {
+        let archive = self.load_frozen_archive(frozen).await?;
+        let mut bytes = BTreeMap::new();
+        for file in &package.package.files {
+            bytes.insert(
+                file.object.artifact_id,
+                self.load_package_file(package, file).await?,
+            );
+        }
+        Ok((archive, bytes))
+    }
+
+    async fn load_frozen_archive(
+        &self,
+        frozen: &FrozenSubmission,
+    ) -> Result<BTreeMap<String, Vec<u8>>, ExecutionError> {
         let key = self
             .freezes
             .load_completed_object_key(
@@ -2051,28 +2288,34 @@ impl KubernetesEvaluationRunner {
             .read_verified(&key, &frozen.object)
             .await
             .map_err(|_| ExecutionError::Backend("frozen_object_read_failed".to_owned()))?;
-        let archive = decode_archive_metadata(&object.bytes)?;
-        validate_frozen_archive(frozen, &archive)?;
-        let mut bytes = BTreeMap::new();
-        for file in &package.package.files {
-            if file.object.store_binding != self.package_objects.binding() {
-                return Err(ExecutionError::IdentityMismatch);
-            }
-            let key = package
-                .object_locators
-                .get(&file.object.artifact_id)
-                .ok_or(ExecutionError::IdentityMismatch)?;
-            let object = self
-                .package_objects
-                .read_verified(key, &file.object)
-                .await
-                .map_err(|_| ExecutionError::Backend("package_object_read_failed".to_owned()))?;
-            if u64::try_from(object.bytes.len()).ok() != Some(file.object.size_bytes) {
-                return Err(ExecutionError::IdentityMismatch);
-            }
-            bytes.insert(file.object.artifact_id, object.bytes);
+        decode_frozen_archive(frozen, &object.bytes)
+    }
+
+    async fn load_package_file(
+        &self,
+        package: &contracts::evaluation::EvaluationExecutionBinding,
+        file: &PackageFile,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        if !package.package.files.contains(file)
+            || file.object.store_binding != self.package_objects.binding()
+        {
+            return Err(ExecutionError::IdentityMismatch);
         }
-        Ok((archive, bytes))
+        let key = package
+            .object_locators
+            .get(&file.object.artifact_id)
+            .ok_or(ExecutionError::IdentityMismatch)?;
+        let object = self
+            .package_objects
+            .read_verified(key, &file.object)
+            .await
+            .map_err(|_| ExecutionError::Backend("package_object_read_failed".to_owned()))?;
+        if u64::try_from(object.bytes.len()).ok() != Some(file.object.size_bytes)
+            || Sha256Digest::of_bytes(&object.bytes).to_string() != file.sha256
+        {
+            return Err(ExecutionError::IdentityMismatch);
+        }
+        Ok(object.bytes)
     }
 
     #[allow(
@@ -2261,7 +2504,12 @@ impl EvaluationAttemptRunner for KubernetesEvaluationRunner {
         &self,
         context: EvaluationAttemptContext,
     ) -> Result<EvaluationStepCompletion, ExecutionError> {
-        Box::pin(self.execute_attempt(context)).await
+        let lease_lost = context.lease_lost.clone();
+        tokio::select! {
+            biased;
+            () = lease_lost.cancelled() => Err(ExecutionError::LeaseLost),
+            result = Box::pin(self.execute_attempt(context)) => result,
+        }
     }
 }
 
@@ -2641,6 +2889,162 @@ fn parse_advisory_recovery_request(
     Ok(request)
 }
 
+fn validate_advisory_context(
+    context: &EvaluationAttemptContext,
+    frozen: &FrozenSubmission,
+    include: &[String],
+    rubric: &str,
+    output_mode: AdvisoryOutputMode,
+) -> Result<(), ExecutionError> {
+    let expected = StepExecutionPlan::Advisory {
+        include: include.to_vec(),
+        rubric: rubric.to_owned(),
+        output_mode,
+    };
+    if context.run.id != context.lease.run_id
+        || context.run.project_id != context.lease.project_id
+        || context.run.course_id != context.lease.course_id
+        || context.run.release_id != context.release.id
+        || context.run.release_revision != context.release.revision
+        || context.run.frozen_submission_id != frozen.id
+        || context.run.actor_id != frozen.actor_id
+        || context.run.project_id != frozen.project_id
+        || context.run.course_id != frozen.course_id
+        || context.step.id() != context.lease.step_id
+        || context.execution_plan != expected
+        || !context
+            .release
+            .evaluation_spec
+            .body()
+            .steps()
+            .contains(&context.step)
+        || crate::execution::plan_deterministic_step(&context.step)? != expected
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn frozen_input_request(
+    context: &EvaluationAttemptContext,
+    frozen: &FrozenSubmission,
+    include: &[String],
+    facts: &serde_json::Value,
+) -> Result<CreateFrozenModelInputAuthorizationRequest, ExecutionError> {
+    let manifest: contracts::submission::SubmissionManifest =
+        serde_json::from_value(facts["manifest"].clone())
+            .map_err(|_| ExecutionError::IdentityMismatch)?;
+    let hash = Sha256Digest::of_canonical(&manifest)
+        .map_err(|_| ExecutionError::IdentityMismatch)?
+        .to_string();
+    if facts["frozenSubmissionId"] != serde_json::json!(frozen.id)
+        || facts["projectId"] != serde_json::json!(frozen.project_id)
+        || facts["courseId"] != serde_json::json!(frozen.course_id)
+        || facts["ownerActorId"] != serde_json::json!(frozen.actor_id)
+        || facts["manifestRevision"] != serde_json::json!(frozen.manifest_revision)
+        || facts["manifestSha256"] != hash
+        || facts["archive"] != serde_json::json!(frozen.object)
+        || facts["contentSha256"] != frozen.content_sha256
+        || facts["files"] != serde_json::json!(frozen.files)
+        || facts["environment"] != serde_json::json!(frozen.environment)
+        || facts["evaluationRelease"]
+            != serde_json::json!({"id":context.release.id,"revision":context.release.revision,"state":contracts::evaluation::EvaluationReleaseState::Active})
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    let original: Option<contracts::http::ModelInputAuthorizationContext> =
+        serde_json::from_value(facts["inputAuthorizationContext"].clone())
+            .map_err(|_| ExecutionError::IdentityMismatch)?;
+    let original = original
+        .ok_or_else(|| ExecutionError::Backend("advisory_original_context_missing".to_owned()))?;
+    original
+        .validate()
+        .map_err(|_| ExecutionError::IdentityMismatch)?;
+    if original.actor_id != frozen.actor_id
+        || original.project_id != frozen.project_id
+        || original.course_id != frozen.course_id
+        || original.operation_id != "freezeSubmission"
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(CreateFrozenModelInputAuthorizationRequest {
+        input_authorization_context: original,
+        task_run_id: context.lease.task_run_id,
+        parent_lease_sha256: contracts::http::model_input_parent_lease_sha256(
+            context.lease.lease_token(),
+        ),
+        frozen_submission_id: frozen.id,
+        evaluation_release_id: context.release.id,
+        evaluation_release_revision: context.release.revision,
+        selected_paths: include.to_vec(),
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bind independent archive, rubric and policy facts before reads"
+)]
+fn validate_frozen_input_binding(
+    binding: &ModelInputAuthorizationBinding,
+    request: &CreateFrozenModelInputAuthorizationRequest,
+    frozen: &FrozenSubmission,
+    facts: &serde_json::Value,
+    package: &ProblemPackage,
+    rubric: &PackageFile,
+    policy: &contracts::authoring::ProjectLlmEgressPolicy,
+) -> Result<(), ExecutionError> {
+    binding
+        .validate()
+        .map_err(|_| ExecutionError::IdentityMismatch)?;
+    let ModelInputAuthorizationSource::FrozenSubmission(source) = &binding.source else {
+        return Err(ExecutionError::IdentityMismatch);
+    };
+    let hashes = request
+        .selected_paths
+        .iter()
+        .map(|path| {
+            frozen
+                .files
+                .iter()
+                .find(|file| file.path == *path)
+                .map(|file| (file.path.clone(), file.sha256.clone()))
+                .ok_or(ExecutionError::IdentityMismatch)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if binding.context() != request.input_authorization_context
+        || source.task_run_id != request.task_run_id
+        || source.parent_lease_sha256 != request.parent_lease_sha256
+        || source.frozen_submission_id != frozen.id
+        || source.manifest_revision != frozen.manifest_revision
+        || serde_json::json!(source.manifest_sha256) != facts["manifestSha256"]
+        || source.archive != frozen.object
+        || source.content_sha256 != frozen.content_sha256
+        || source.environment != frozen.environment
+        || source.evaluation_release_id != request.evaluation_release_id
+        || source.evaluation_release_revision != request.evaluation_release_revision
+        || source.rubric.package_id != package.id
+        || source.rubric.package_revision != package.revision
+        || source.rubric.path != rubric.path
+        || source.rubric.artifact != rubric.object
+        || source.rubric.sha256 != rubric.sha256
+        || source
+            .rubric_permission
+            .as_ref()
+            .is_none_or(|p| p.authoring_project_id != package.project_id)
+        || binding.policy_id != policy.id
+        || binding.policy_revision != policy.revision
+        || binding.policy_sha256
+            != contracts::http::model_input_policy_sha256(policy)
+                .map_err(|_| ExecutionError::IdentityMismatch)?
+        || binding.selection_sha256
+            != contracts::http::frozen_model_input_selection_sha256(source, &hashes)
+                .map_err(|_| ExecutionError::IdentityMismatch)?
+    {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -2786,7 +3190,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn advisory_request(deadline_at: UtcTimestamp) -> InternalAgentLlmReviewRequest {
+    pub(super) fn advisory_request(deadline_at: UtcTimestamp) -> InternalAgentLlmReviewRequest {
         let project_id = ProjectId::new();
         let course_id = Some(CourseId::new());
         let submission = "submission";
@@ -2822,18 +3226,88 @@ mod tests {
             "activatedAt": "2026-09-08T00:00:00.000Z"
         }))
         .expect("test policy is valid");
-        InternalAgentLlmReviewRequest {
-            task_run_id: TaskRunId::new(),
+        let task_run_id = TaskRunId::new();
+        let frozen_submission_id = FrozenSubmissionId::new();
+        let archive = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "minio-primary".to_owned(),
+            object_version: "version-1".to_owned(),
+            size_bytes: submission.len() as u64,
+            media_type: "text/plain".to_owned(),
+        };
+        let rubric_artifact = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "minio-primary".to_owned(),
+            object_version: "version-1".to_owned(),
+            size_bytes: rubric.len() as u64,
+            media_type: "text/plain".to_owned(),
+        };
+        let source = contracts::http::FrozenModelInputSource {
+            task_run_id,
+            parent_lease_sha256: contracts::http::model_input_parent_lease_sha256(
+                uuid::Uuid::new_v4(),
+            ),
+            frozen_submission_id,
+            manifest_revision: contracts::Revision::new(1).expect("fixture revision"),
+            manifest_sha256: "a".repeat(64),
+            archive: archive.clone(),
+            content_sha256: "b".repeat(64),
+            evaluation_release_id: contracts::EvaluationReleaseId::new(),
+            evaluation_release_revision: contracts::Revision::new(1).expect("fixture revision"),
+            environment: contracts::submission::FrozenEnvironmentIdentity {
+                environment_id: contracts::EnvironmentId::new(),
+                environment_revision: contracts::Revision::new(1).expect("fixture revision"),
+                release_id: contracts::ReleaseId::new(),
+                release_version: 1,
+                runtime_kind: contracts::authoring::RuntimeKind::Container,
+                build_request_id: None,
+            },
+            rubric: contracts::http::ModelInputRubricIdentity {
+                package_id: contracts::ProblemPackageId::new(),
+                package_revision: contracts::Revision::new(1).expect("fixture revision"),
+                path: "rubric.md".to_owned(),
+                artifact: rubric_artifact.clone(),
+                sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
+            },
+            rubric_permission: Some(contracts::http::ModelInputRubricPermissionRef {
+                authoring_project_id: project_id,
+                policy_id: contracts::PolicyId::new(),
+                policy_revision: contracts::Revision::new(1).expect("fixture revision"),
+                approved_by: contracts::ActorId::new(),
+                approver_course_membership_revision: contracts::Revision::new(1)
+                    .expect("fixture revision"),
+            }),
+        };
+        let input_authorization = contracts::http::ModelInputAuthorizationBinding {
+            session_sha256: "c".repeat(64),
+            actor_id: contracts::ActorId::new(),
             project_id,
             course_id,
-            frozen_submission_id: FrozenSubmissionId::new(),
-            submission_artifact: ArtifactRef {
-                artifact_id: ArtifactId::new(),
-                store_binding: "minio-primary".to_owned(),
-                object_version: "version-1".to_owned(),
-                size_bytes: submission.len() as u64,
-                media_type: "text/plain".to_owned(),
-            },
+            operation_id: "freezeSubmission".to_owned(),
+            valid_until: deadline_at,
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)
+                .expect("fixture policy"),
+            selection_sha256: contracts::http::frozen_model_input_selection_sha256(
+                &source,
+                &[(
+                    "submission.md".to_owned(),
+                    Sha256Digest::of_bytes(submission.as_bytes()).to_string(),
+                )],
+            )
+            .expect("fixture selection"),
+            source: contracts::http::ModelInputAuthorizationSource::FrozenSubmission(Box::new(
+                source,
+            )),
+        };
+        InternalAgentLlmReviewRequest {
+            input_authorization,
+            task_run_id,
+            project_id,
+            course_id,
+            frozen_submission_id,
+            submission_artifact: archive,
             policy,
             files: vec![AgentLlmReviewFile {
                 path: "submission.md".to_owned(),
@@ -2841,13 +3315,7 @@ mod tests {
                 content: submission.to_owned(),
             }],
             rubric: AgentLlmReviewRubric {
-                artifact: ArtifactRef {
-                    artifact_id: ArtifactId::new(),
-                    store_binding: "minio-primary".to_owned(),
-                    object_version: "version-1".to_owned(),
-                    size_bytes: rubric.len() as u64,
-                    media_type: "text/plain".to_owned(),
-                },
+                artifact: rubric_artifact,
                 path: "rubric.md".to_owned(),
                 sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
                 content: rubric.to_owned(),
@@ -3061,12 +3529,50 @@ fn validate_frozen_archive(
 ) -> Result<(), ExecutionError> {
     if archive.len() != frozen.files.len()
         || frozen.files.iter().any(|file| {
-            archive
-                .get(&file.path)
-                .is_none_or(|content| u64::try_from(content.len()).ok() != Some(file.size_bytes))
+            archive.get(&file.path).is_none_or(|content| {
+                u64::try_from(content.len()).ok() != Some(file.size_bytes)
+                    || Sha256Digest::of_bytes(content).to_string() != file.sha256
+            })
         })
     {
         return Err(ExecutionError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn decode_frozen_archive(
+    frozen: &FrozenSubmission,
+    bytes: &[u8],
+) -> Result<BTreeMap<String, Vec<u8>>, ExecutionError> {
+    if Sha256Digest::of_bytes(bytes).to_string() != frozen.content_sha256 {
+        return Err(ExecutionError::IdentityMismatch);
+    }
+    let archive = decode_archive_metadata(bytes)?;
+    validate_frozen_archive(frozen, &archive)?;
+    Ok(archive)
+}
+
+fn validate_advisory_selection(
+    llm_readable: &[String],
+    frozen: &FrozenSubmission,
+    include: &[String],
+) -> Result<(), ExecutionError> {
+    let mut selected = BTreeSet::new();
+    if include.is_empty() || include.len() > InternalAgentLlmReviewRequest::MAX_FILES {
+        return Err(ExecutionError::Backend(
+            "advisory_include_empty_or_excessive".to_owned(),
+        ));
+    }
+    for path in include {
+        if contracts::validate_relative_path(path).is_err()
+            || !selected.insert(path)
+            || !llm_readable.contains(path)
+            || !frozen.files.iter().any(|file| &file.path == path)
+        {
+            return Err(ExecutionError::Backend(
+                "advisory_include_not_authorized".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -3171,7 +3677,7 @@ mod probe_recovery_tests {
     use crate::resource_client::{ResourceClient, ResourceClientConfiguration};
 
     const NAMESPACE: &str = "evaluation-tests";
-    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsicmVzb3VyY2UiLCJlbnZpcm9ubWVudCIsImNvbnRyb2wiLCJhZ2VudCJdfQ.sig";
+    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsicmVzb3VyY2UiLCJlbnZpcm9ubWVudCIsImNvbnRyb2wiLCJhZ2VudCIsImxhYndlYXZlci1ldmFsdWF0aW9uIl19.sig";
 
     #[derive(Default)]
     struct MockHttpState {
@@ -3180,9 +3686,17 @@ mod probe_recovery_tests {
         pods: Option<Value>,
         resource_request: Option<Value>,
         resource_status: Option<Value>,
+        cancel_on_ack: Option<tokio_util::sync::CancellationToken>,
         environment_binding_status: Option<StatusCode>,
         deleted: BTreeSet<String>,
         calls: Vec<(Method, String)>,
+        model_binding: Option<Value>,
+        model_denied: bool,
+        model_rechecks: usize,
+        model_deny_recheck_at: Option<usize>,
+        model_requests: Vec<Value>,
+        agent_receipt: Option<Value>,
+        agent_lose_create_response: bool,
     }
 
     struct MockS3Object {
@@ -3326,6 +3840,202 @@ mod probe_recovery_tests {
         actor_id: ActorId,
         release: contracts::evaluation::EvaluationRelease,
         run: EvaluationRun,
+    }
+
+    #[test]
+    fn input_identity_rejects_same_size_archive_and_file_changes() -> Result<(), Box<dyn Error>> {
+        let mut frozen =
+            frozen_submission(contracts::ProjectId::new(), CourseId::new(), ActorId::new())?;
+        let archive = serde_json::to_vec(&json!({
+            "apiVersion": "evaluation.labweaver.io/frozen-submission-archive/v1",
+            "files": [{"path": "answer.txt", "contentBase64": "eA=="}],
+        }))?;
+        frozen.content_sha256 = Sha256Digest::of_bytes(&archive).to_string();
+        assert_eq!(
+            super::decode_frozen_archive(&frozen, &archive)?["answer.txt"],
+            b"x"
+        );
+        let changed = serde_json::to_vec(&json!({
+            "apiVersion": "evaluation.labweaver.io/frozen-submission-archive/v1",
+            "files": [{"path": "answer.txt", "contentBase64": "eQ=="}],
+        }))?;
+        assert_eq!(archive.len(), changed.len());
+        assert!(matches!(
+            super::decode_frozen_archive(&frozen, &changed),
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        // A newly valid whole-object hash must not silently substitute a file whose pinned hash differs.
+        frozen.content_sha256 = Sha256Digest::of_bytes(&changed).to_string();
+        assert!(matches!(
+            super::decode_frozen_archive(&frozen, &changed),
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        frozen.files[0].sha256 = Sha256Digest::of_bytes(b"y").to_string();
+        assert_eq!(
+            super::decode_frozen_archive(&frozen, &changed)?["answer.txt"],
+            b"y"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn input_identity_advisory_uses_published_allowlist_and_actual_frozen_paths()
+    -> Result<(), Box<dyn Error>> {
+        let frozen =
+            frozen_submission(contracts::ProjectId::new(), CourseId::new(), ActorId::new())?;
+        let allowed = vec!["answer.txt".to_owned(), "missing.txt".to_owned()];
+        super::validate_advisory_selection(&allowed, &frozen, &["answer.txt".to_owned()])?;
+        for paths in [
+            vec![],
+            vec!["other.txt".to_owned()],
+            vec!["missing.txt".to_owned()],
+            vec!["../answer.txt".to_owned()],
+            vec!["answer.txt".to_owned(); 2],
+            vec!["answer.txt".to_owned(); 129],
+        ] {
+            assert!(super::validate_advisory_selection(&allowed, &frozen, &paths).is_err());
+        }
+        assert!(
+            super::validate_advisory_selection(&[], &frozen, &["answer.txt".to_owned()]).is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn input_identity_exact_package_read_rejects_same_size_change_without_reading_neighbors()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")?;
+        let runner = build_runner(&cluster, &authority, &temp, &pool).await?;
+        let mut package = evaluation_binding(contracts::ProjectId::new(), CourseId::new())?;
+        let file = package.package.files[0].clone();
+        let mut neighbor = file.clone();
+        neighbor.path = "unselected.txt".to_owned();
+        neighbor.object.artifact_id = ArtifactId::new();
+        package.object_locators.insert(
+            neighbor.object.artifact_id,
+            "evaluation-package-tests/unselected.txt".to_owned(),
+        );
+        package.package.files.push(neighbor);
+        let path = format!(
+            "/test-package-bucket/{}",
+            package.object_locators[&file.object.artifact_id]
+        );
+        cluster.state.lock().await.s3_objects.insert(
+            path.clone(),
+            MockS3Object {
+                body: b"x".to_vec(),
+                content_type: file.object.media_type.clone(),
+                version_id: file.object.object_version.clone(),
+            },
+        );
+        assert_eq!(runner.load_package_file(&package, &file).await?, b"x");
+        assert_eq!(cluster.calls().await, vec![(Method::GET, path.clone())]);
+        cluster
+            .state
+            .lock()
+            .await
+            .s3_objects
+            .get_mut(&path)
+            .ok_or("object missing")?
+            .body = b"y".to_vec();
+        assert!(matches!(
+            runner.load_package_file(&package, &file).await,
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        let mut substituted = file.clone();
+        substituted.object.artifact_id = ArtifactId::new();
+        assert!(matches!(
+            runner.load_package_file(&package, &substituted).await,
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        assert_eq!(
+            cluster.calls().await,
+            vec![(Method::GET, path.clone()), (Method::GET, path)]
+        );
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_handoff_settles_then_releases_without_submitting_job()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("handoff-cancel-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("step was not claimable")?;
+        let context = context(&fixture, &lease)?;
+        let status = resource_status(&lease, &fixture, false)?;
+        {
+            let mut state = cluster.state.lock().await;
+            state.resource_request = Some(serde_json::to_value(&status.request)?);
+            state.resource_status = Some(serde_json::to_value(&status)?);
+            state.cancel_on_ack = Some(context.cancellation.clone());
+        }
+        let completion = runner.execute(context).await;
+        let calls = cluster.calls().await;
+        let completion = completion.map_err(|error| format!("{error:?}; calls: {calls:?}"))?;
+        assert_eq!(completion.state, EvaluationStepRunState::Cancelled);
+        assert!(completion.cleanup_verified);
+        let calls = cluster.calls().await;
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::POST && path.ends_with("/ack"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::POST && path.ends_with("/release"))
+                .count(),
+            1
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(_, path)| !path.starts_with("/api/") && !path.starts_with("/apis/"))
+        );
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lost_lease_never_cancels_or_releases_same_attempt_resource()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("lost-lease-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("step was not claimable")?;
+        let context = context(&fixture, &lease)?;
+        context.cancellation.cancel();
+        context.lease_lost.cancel();
+        assert!(matches!(
+            runner.execute(context).await,
+            Err(crate::ExecutionError::LeaseLost)
+        ));
+        assert!(
+            cluster.calls().await.is_empty(),
+            "a stale owner cannot perform Resource or workload mutations"
+        );
+        cluster.stop().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -3620,6 +4330,96 @@ mod probe_recovery_tests {
             1,
             "the recovered Resource claim is released once after cleanup"
         );
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_recovery_lease_expiry_cleans_attempt_before_release()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("expired-probe-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("probe step missing")?;
+        let context = context(&fixture, &lease)?;
+        let request = probe_request(&context)?;
+        let mut status = resource_status(&lease, &fixture, false)?;
+        let admitted = KubernetesEvaluationRunner::admit_execution(
+            &context,
+            &context.execution_plan,
+            &status,
+        )?;
+        let intent = super::execution_resources(
+            &context,
+            NAMESPACE,
+            EvaluationExecutionKind::AnsibleProbe,
+            Some(admitted.binding().clone()),
+            &request,
+            Vec::new(),
+        )?;
+        fixture
+            .store
+            .persist_execution_intent(&lease, &intent)
+            .await?;
+        status.request.diagnostic_code = Some("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned());
+        cluster.install_probe(&request, &status).await?;
+        cluster.state.lock().await.resource_request = Some(serde_json::to_value(&status.request)?);
+        let progress = fixture
+            .store
+            .task_progress(
+                fixture.project_id,
+                fixture.run.actor_id,
+                fixture.run.id,
+                Some(&runner.resource),
+                &contracts::http::PageQuery {
+                    page: Some(1),
+                    page_size: Some(1),
+                },
+            )
+            .await?;
+        assert_eq!(
+            progress.current[0].progress.phase,
+            contracts::execution::TaskAttemptPhase::CleanupPending
+        );
+        assert_eq!(
+            progress.current[0].progress.task_run_id,
+            Some(lease.task_run_id)
+        );
+        assert_eq!(
+            progress.current[0].progress.diagnostic_code.as_deref(),
+            Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+        );
+        let completion = runner.execute(context).await?;
+        assert_eq!(completion.state, EvaluationStepRunState::Failed);
+        assert_eq!(
+            completion
+                .diagnostic_code
+                .as_ref()
+                .map(contracts::DiagnosticCode::as_str),
+            Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+        );
+        assert!(completion.cleanup_verified);
+        let calls = cluster.state.lock().await.calls.clone();
+        assert!(
+            !calls
+                .iter()
+                .any(|(method, path)| *method == Method::PATCH && path.starts_with("/apis/batch/"))
+        );
+        let release = calls
+            .iter()
+            .position(|(method, path)| *method == Method::POST && path.ends_with("/release"))
+            .ok_or("resource release missing")?;
+        let delete = calls
+            .iter()
+            .position(|(method, path)| *method == Method::DELETE && path.contains("/jobs/"))
+            .ok_or("owned Job cleanup missing")?;
+        assert!(delete < release, "cleanup must precede release");
         cluster.stop().await;
         Ok(())
     }
@@ -3940,16 +4740,6 @@ mod probe_recovery_tests {
             0,
             "identity rejection must not clean or mutate an unverified object"
         );
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|(method, path)| {
-                    *method == Method::GET && path.starts_with("/internal/v1/task-resources/")
-                })
-                .count(),
-            1,
-            "identity verification may load the exact Resource claim before failing closed"
-        );
         assert!(
             calls.iter().all(|(method, path)| {
                 !path.starts_with("/internal/v1/task-resources/") || *method == Method::GET
@@ -4032,8 +4822,67 @@ mod probe_recovery_tests {
     ) -> Response {
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
+        let body = if method == Method::POST
+            && (path.contains("model-input-authorizations") || path == "/internal/v1/llm-reviews")
+        {
+            let Ok(bytes) = axum::body::to_bytes(request.into_body(), 1024 * 1024).await else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            Some(body)
+        } else {
+            None
+        };
         let mut state = state.lock().await;
         state.calls.push((method.clone(), path.clone()));
+        if method == Method::GET && path.ends_with("/llm-egress-policy") {
+            return state.objects.get(&path).cloned().map_or_else(
+                || StatusCode::NOT_FOUND.into_response(),
+                |body| Json(body).into_response(),
+            );
+        }
+        if method == Method::POST && path.contains("model-input-authorizations") {
+            if let Some(body) = body {
+                state.model_requests.push(body);
+            }
+            if path.ends_with("/resolve") {
+                state.model_rechecks += 1;
+            }
+            if state.model_denied
+                || (path.ends_with("/resolve")
+                    && state
+                        .model_deny_recheck_at
+                        .is_some_and(|at| state.model_rechecks >= at))
+            {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            return state.model_binding.clone().map_or_else(
+                || StatusCode::FORBIDDEN.into_response(),
+                |binding| Json(json!({"binding":binding})).into_response(),
+            );
+        }
+        if method == Method::POST && path == "/internal/v1/llm-reviews" {
+            let Some(body) = body else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let Ok(hash) = Sha256Digest::of_canonical(&body) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let receipt = json!({"taskRunId":body["taskRunId"],"requestSha256":hash.to_string(),"state":"queued","review":null,"usage":null,"diagnosticCode":null,"startedAt":null,"finishedAt":null});
+            state.agent_receipt = Some(receipt.clone());
+            if state.agent_lose_create_response {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            return Json(receipt).into_response();
+        }
+        if method == Method::GET && path.starts_with("/internal/v1/llm-reviews/") {
+            return state.agent_receipt.clone().map_or_else(
+                || StatusCode::NOT_FOUND.into_response(),
+                |body| Json(body).into_response(),
+            );
+        }
         if method == Method::GET && path.ends_with("/pods") {
             return state.pods.clone().map_or_else(
                 || StatusCode::NOT_FOUND.into_response(),
@@ -4056,6 +4905,11 @@ mod probe_recovery_tests {
                 );
             }
             if method == Method::POST && matches!(segments.last(), Some(&("claim" | "ack"))) {
+                if segments.last() == Some(&"ack")
+                    && let Some(cancellation) = state.cancel_on_ack.take()
+                {
+                    cancellation.cancel();
+                }
                 return state.resource_status.clone().map_or_else(
                     || StatusCode::NOT_FOUND.into_response(),
                     |status| (StatusCode::OK, Json(status)).into_response(),
@@ -4666,6 +5520,7 @@ mod probe_recovery_tests {
             attempt: 1,
             manifest_revision: Revision::new(1)?,
             files: vec![FrozenFile {
+                sha256: Sha256Digest::of_bytes(b"x").to_string(),
                 path: "answer.txt".to_owned(),
                 size_bytes: 1,
                 media_type: "text/plain".to_owned(),
@@ -4764,6 +5619,7 @@ mod probe_recovery_tests {
                 course_id: Some(course_id),
                 revision: Revision::new(1)?,
                 files: vec![PackageFile {
+                    sha256: Sha256Digest::of_bytes(b"x").to_string(),
                     path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
                     object: ArtifactRef {
                         artifact_id,
@@ -4803,5 +5659,9 @@ mod probe_recovery_tests {
             evaluation_release_id: release.id,
             evaluation_release_revision: release.revision,
         }
+    }
+
+    mod frozen_advisory_tests {
+        include!("../tests/cases/frozen_advisory.rs");
     }
 }

@@ -87,6 +87,9 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
   - caller: labweaver-environment
     target: labweaver-control
     roles: [control.agent_run.read]
+  - caller: labweaver-agent
+    target: labweaver-control
+    roles: [control.agent_run.read]
   - caller: labweaver-evaluation
     target: labweaver-control
     roles: [control.authoring.read, control.llm_policy.read]
@@ -116,6 +119,7 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
       - resource.task.release
       - resource.task.cancel
       - resource.usage.record
+      - resource.credits.hold
   - caller: labweaver-evaluation
     target: labweaver-agent
     roles: [agent.llm_review.create, agent.llm_review.read, agent.llm_review.cancel]
@@ -144,6 +148,7 @@ identity_service_realm_role_assignments: # noqa: var-naming[no-role-prefix]
   - caller: labweaver-access
     roles: [query-users, view-users]
 identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256 # noqa: var-naming[no-role-prefix]
+identity_secret_locator_controller: false # noqa: var-naming[no-role-prefix]
 identity_storage_class: local-path # noqa: var-naming[no-role-prefix]
 identity_postgres_storage: 20Gi # noqa: var-naming[no-role-prefix]
 identity_keycloak_replicas: 2 # noqa: var-naming[no-role-prefix]

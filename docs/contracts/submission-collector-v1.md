@@ -43,7 +43,7 @@ entry outside the capability fail closed.
 
 ## SSH source
 
-The binding requires a private address, port 22, locked non-root guest user,
+The binding requires a private address, port 22, password-locked guest account resolved from the approved runtime UID,
 normalized absolute workspace root, pinned host-key blob SHA-256 and absolute
 paths to an ephemeral private key and OpenSSH user certificate. At connection
 time the certificate must:
@@ -106,6 +106,17 @@ SHA-256. The output media type is
 `application/vnd.labweaver.frozen-submission.v1+json` and the canonical JCS
 archive holds sorted path/base64 entries.
 
+Each `FrozenFile.sha256` contains the hash of the bytes from that collection read.
+Equal file sizes do not establish equal content. A same-size rewrite invalidates the
+previous preflight with `LW_COLLECT_SOURCE_CHANGED`. A completed frozen object remains
+unchanged when the user later edits the Work. The file hashes bind the manifest to the
+same submission attempt and exact archive object version.
+
+Evaluation consumers also compare the downloaded archive with `contentSha256` and
+each decoded file with its pinned `FrozenFile.sha256`. A valid whole-object hash
+does not replace the file identity check. Package object reads compare actual bytes
+with the pinned `PackageFile.sha256`; equal paths, sizes or media types are insufficient.
+
 ## Storage, persistence and event
 
 The object store binding must support bucket versioning and Governance Object
@@ -123,6 +134,71 @@ the stored contract; a different request under the same key conflicts.
 The v2 event data includes the complete `FrozenSubmission` and
 `sourceIdentitySha256`. Its object version, object SHA-256 and file manifest
 must therefore equal the database JSON and Object Lock version.
+
+## Internal model-input facts
+
+Control may read ledger metadata through
+`GET /internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts`.
+The route uses the existing `evaluation.control.invoke` service permission. It requires
+`x-labweaver-project-id`, `x-labweaver-actor-id` (the frozen owner selector), optional
+`x-labweaver-course-id`, and `If-Match` for the exact Evaluation release revision.
+The owner selector does not establish the requesting user's object permissions.
+
+The response contains `frozenSubmissionId`, `projectId`, `courseId`, `ownerActorId`,
+`manifestRevision`, canonical `manifestSha256`, `manifest`, the exact `archive` reference,
+`contentSha256`, `files`, `environment`, `evaluationRelease` (`id`, `revision`, `state`),
+and `inputAuthorizationContext`. It omits object keys, download URLs, worker placement,
+system-fact values, file content and rubric content. The read performs no object-store or
+Control request. A missing, incomplete, differently scoped or inconsistent ledger result
+is rejected. An active Evaluation release in the same scope is metadata; Control must still
+verify the original publication admission linking that release to the Environment release.
+
+`inputAuthorizationContext` consumes the complete, unchanged #216 Context from
+`592ac41681b54df19d1651468c444c5965c2961d`: original session digest, actor, project/course,
+operation and original decision `validUntil` evidence. Access must construct and overwrite
+`x-labweaver-model-input-authorization-context` from its real authorization decision.
+Evaluation checks the bounded JSON against the trusted forwarded session and scope, and
+stores the first context in the existing command JSON. Replay cannot replace it. Legacy
+commands or requests without that upstream evidence return a null context; model consumers
+must reject it rather than derive a session or deadline from the actor or service token.
+
+Access supplies this header from the verified original request and authorization decision.
+Evaluation persists the first value; it cannot replace it when another session replays the request.
+Facts and context are not visibility or egress grants. Hidden or unknown rubric permission
+must be rejected before object reads; fresh user/object authorization remains required.
+
+### Frozen advisory and parent task admission
+
+Before archive or rubric reads, Evaluation obtains the original context from its frozen ledger
+and calls Control's `POST /internal/v1/authoring/frozen-model-input-authorizations` with the
+existing `control.authoring.read` permission. It compares the returned binding with the exact
+freeze, manifest, archive/file hashes, Environment and Evaluation releases, separate rubric
+package/object/hash and permission reference, policy and selection. It forwards that unchanged
+binding in required `InternalAgentLlmReviewRequest.inputAuthorization`.
+
+Control uses the task-limited metadata route
+`GET /internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`.
+This route requires the existing `evaluation.control.invoke`, the original scope/owner headers
+and If-Match, plus one `x-labweaver-evaluation-lease-sha256` header. The response has exactly the
+original fact fields. No raw lease token, worker credentials or content is returned. Evaluation
+checks the actual run/step/current attempt, owner/scope/freeze/release, durable cancellation,
+current database lease digest and expiry, and original deadline. Unknown or inactive parents
+are refused. The ordinary metadata route cannot substitute for task admission.
+
+`parentLeaseSha256` uses the shared hash function on the actual fenced Evaluation lease token.
+The first request and selection digest retain it. Worker lease rotation invalidates the old
+binding even when taskRunId is unchanged. Recovery can reconcile an existing Agent receipt
+and its observed usage; it cannot refresh the old binding to permit another send.
+
+Before a full review request exists, immutable attempt creation time plus the existing five-minute
+window fixes the deadline. After the intent is stored, its original deadline is reused. Rechecks
+do not extend it. The current parent is checked before each content read, after preparation and
+before a missing Agent receipt permits sending. Initial refusal causes zero reads and sends;
+revocation during preparation prevents subsequent actions but cannot undo completed reads.
+Agent's Control rechecks before its first model call and every repair use the same parent path,
+so they do not depend on the cancellation RPC arriving first. Original content, context and
+deadline remain in the existing execution-intent JSON; response loss does not cause a new read
+or a duplicate create when the original receipt already exists.
 
 ## Stable failure diagnostics
 

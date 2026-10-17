@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import MaterialUploadView from '@/views/teacher/MaterialUploadView.vue'
 import {
+  createProjectAgentRun,
   getActiveProjectLlmPolicy,
   getProjectAgentRun,
   getProjectProblemPackage,
@@ -15,6 +16,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
+    createProjectAgentRun: vi.fn(),
     getActiveProjectLlmPolicy: vi.fn(),
     getProjectAgentRun: vi.fn(),
     getProjectProblemPackage: vi.fn(),
@@ -67,7 +69,28 @@ const mockPackage = {
   projectId: 'project-1',
   courseId: 'course-1',
   revision: 2,
-  files: [],
+  files: [
+    {
+      path: 'lab.md',
+      object: {
+        artifactId: 'artifact-lab',
+        mediaType: 'text/markdown',
+        objectVersion: 'v1',
+        sizeBytes: 64,
+        storeBinding: 'materials',
+      },
+    },
+    {
+      path: 'tests/check.py',
+      object: {
+        artifactId: 'artifact-check',
+        mediaType: 'text/x-python',
+        objectVersion: 'v1',
+        sizeBytes: 128,
+        storeBinding: 'materials',
+      },
+    },
+  ],
   retention: {},
   completedAt: '2026-07-11T00:00:00.000Z',
 }
@@ -263,6 +286,41 @@ describe('MaterialUploadView', () => {
     await wrapper.get('[data-testid="project-agent-run-history"] button.outlined-button').trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('该运行记录不是实验包生成任务'))
     expect(getProjectProblemPackage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('requires explicit selectedPaths before starting an experiment run', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
+    vi.mocked(getProjectProblemPackage).mockResolvedValue({ data: mockPackage as never, error: undefined as never })
+    vi.mocked(createProjectAgentRun).mockResolvedValue({
+      data: { ...experimentRun, state: 'requested', tracks: [] } as never,
+      error: undefined as never,
+    })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/teacher/materials', component: MaterialUploadView }],
+    })
+    await router.push('/teacher/materials?projectId=project-1&packageId=package-1')
+    await router.isReady()
+    const wrapper = mount(MaterialUploadView, { global: { plugins: [router] } })
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="model-input-path-picker"]').exists()).toBe(true))
+    const start = wrapper.get('[data-testid="material-start-run"]')
+    expect((start.element as HTMLButtonElement).disabled).toBe(true)
+    await wrapper.get('[data-testid="model-input-path-lab.md"]').setValue(true)
+    await vi.waitFor(() => expect((start.element as HTMLButtonElement).disabled).toBe(false))
+    await start.trigger('click')
+    await vi.waitFor(() => expect(createProjectAgentRun).toHaveBeenCalled())
+    expect(createProjectAgentRun).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({
+        packageId: 'package-1',
+        environmentClass: 'experiment',
+        selectedPaths: ['lab.md'],
+      }),
+    }))
+    expect(createProjectAgentRun.mock.calls[0][0].body.selectedPaths).toEqual(['lab.md'])
     wrapper.unmount()
   })
 })

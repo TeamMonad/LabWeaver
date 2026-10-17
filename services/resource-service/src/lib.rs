@@ -17,11 +17,16 @@ use contracts::resource::{
     ResourceRequestState,
 };
 use contracts::{Revision, UtcTimestamp};
+mod admission;
 pub mod api;
 pub mod capacity;
+pub mod costing;
+pub mod credits;
 pub mod messaging;
 pub mod outbox;
+mod pricing;
 pub mod process;
+pub mod runtime_authorization;
 pub mod store;
 
 pub use process::{ResourceProcessRuntime, ResourceProcessRuntimeError};
@@ -566,6 +571,7 @@ mod tests {
 
     fn approval(request_id: ResourceRequestId, resources: WorkloadResources) -> ResourceApproval {
         ResourceApproval {
+            runtime_authorization: None,
             id: ResourceApprovalId::new(),
             request_id,
             request_revision: Revision::new(1).unwrap_or_else(|_| unreachable!()),
@@ -583,3 +589,8 @@ mod tests {
         UtcTimestamp::from_str(value).unwrap_or_else(|_| unreachable!())
     }
 }
+
+/// Resource-owned build accounting, reused by the bounded Agent transaction coordinator.
+pub mod build_costing;
+
+pub mod environment_funding;

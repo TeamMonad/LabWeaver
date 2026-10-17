@@ -1,0 +1,50 @@
+{
+  "$defs": {
+    "ProjectObjectRole": {
+      "description": "Responsibilities granted by Control in one project, independent of Teacher/Student identity.",
+      "enum": [
+        "viewer",
+        "operator",
+        "editor",
+        "manager",
+        "owner"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The recipient must use this exact campus username. Access resolves it before forwarding.",
+  "properties": {
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "membershipExpiresAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "objectRole": {
+      "$ref": "#/$defs/ProjectObjectRole"
+    },
+    "username": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "username",
+    "objectRole",
+    "expiresAt"
+  ],
+  "title": "CreateProjectMembershipInvitation",
+  "type": "object"
+}

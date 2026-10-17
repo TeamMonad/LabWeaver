@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::access::validate_ssh_public_key;
 use contracts::authoring::{
     EnvironmentRuntimeSpec, NetworkPolicySpec, PrivilegeEscalationPolicy, PublicExposurePolicy,
-    RootFilesystemPolicy, RuntimeKind, RuntimeUserPolicy,
+    RootFilesystemPolicy, RuntimeKind,
 };
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
@@ -181,6 +181,23 @@ impl KubeVirtBackendFence {
         instance: &EnvironmentInstance,
         action: ReconcileAction,
     ) -> Result<Self, ProviderFailure> {
+        let deadline_at = if matches!(
+            action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            instance.operation.deadline_at.min(
+                instance
+                    .runtime_authorization
+                    .as_ref()
+                    .ok_or_else(invalid_observation)?
+                    .valid_until,
+            )
+        } else {
+            instance.operation.deadline_at
+        };
         let request_id = Sha256Digest::of_canonical(&json!({
             "protocolVersion": KUBEVIRT_BACKEND_PROTOCOL_VERSION,
             "environmentId": instance.id,
@@ -201,7 +218,7 @@ impl KubeVirtBackendFence {
             action,
             request_id,
             trace_id: instance.operation.trace_id.clone(),
-            deadline_at: instance.operation.deadline_at,
+            deadline_at,
         })
     }
 }
@@ -966,6 +983,7 @@ impl PgKubeVirtExecutorFenceStore {
         &self,
         envelope: &KubeVirtExecutorRequestEnvelope,
         instance: &KubeVirtExecutionInstance,
+        runtime_gate: Result<(), crate::RuntimeAdmissionError>,
     ) -> Result<KubeVirtExecutorAdmission, KubeVirtExecutorFenceError> {
         validate_kubevirt_executor_request(envelope)?;
         let fence = &envelope.fence;
@@ -1038,6 +1056,7 @@ impl PgKubeVirtExecutorFenceStore {
             {
                 return Err(KubeVirtExecutorFenceError::IdentityMismatch);
             }
+            runtime_gate?;
             sqlx::query(
                 "UPDATE environment.kubevirt_executor_fences SET highest_generation=$2, \
                  operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
@@ -1069,6 +1088,7 @@ impl PgKubeVirtExecutorFenceStore {
             if authority_now >= fence.deadline_at.get() {
                 return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
             }
+            runtime_gate?;
             let admitted = sqlx::query(
                 "INSERT INTO environment.kubevirt_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
@@ -1167,6 +1187,7 @@ struct ActiveKubeVirtExecution {
 pub struct FencedKubeVirtExecutor<B> {
     store: PgKubeVirtExecutorFenceStore,
     backend: B,
+    runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
     instance: KubeVirtExecutionInstance,
     active: Mutex<std::collections::BTreeMap<Uuid, ActiveKubeVirtExecution>>,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -1182,10 +1203,17 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         Self {
             store,
             backend,
+            runtime_admission: None,
             instance,
             active: Mutex::new(std::collections::BTreeMap::new()),
             shutdown: tokio::sync::watch::channel(false).0,
         }
+    }
+
+    #[must_use]
+    pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
+        self.runtime_admission = Some(admission);
+        self
     }
 
     /// Called once before listening, after the production PID1/PodSpec startup check.
@@ -1286,7 +1314,35 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         &self,
         envelope: &KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
-        match self.store.admit(envelope, &self.instance).await {
+        let runtime_gate = if match &envelope.request {
+            KubeVirtExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+            KubeVirtExecutorRequest::Start { .. } | KubeVirtExecutorRequest::Restart { .. } => true,
+            _ => false,
+        } && matches!(
+            envelope.fence.action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            crate::runtime_admission::executor_authorization(
+                self.runtime_admission.as_ref(),
+                self.store.pool.clone(),
+                envelope.fence.environment_id,
+                None,
+                envelope.fence.operation_id,
+                envelope.fence.environment_generation,
+                envelope.fence.deadline_at,
+            )
+            .await
+        } else {
+            Ok(())
+        };
+        match self
+            .store
+            .admit(envelope, &self.instance, runtime_gate)
+            .await
+        {
             Ok(KubeVirtExecutorAdmission::Replay(value)) => serde_json::from_value(value)
                 .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch),
             Err(KubeVirtExecutorFenceError::InProgress) => Ok(KubeVirtExecutorResponse::Pending),
@@ -1571,6 +1627,10 @@ fn validate_kubevirt_executor_request(
 
 const fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> ProviderFailure {
     match error {
+        KubeVirtExecutorFenceError::RuntimeAdmission(error) => ProviderFailure {
+            code: ProviderFailureCode::Rejected,
+            retryable: error.retryable(),
+        },
         KubeVirtExecutorFenceError::InProgress
         | KubeVirtExecutorFenceError::Database(_)
         | KubeVirtExecutorFenceError::Transport => unavailable(),
@@ -1603,6 +1663,8 @@ const fn kubevirt_action_name(action: ReconcileAction) -> &'static str {
 
 #[derive(Debug, thiserror::Error)]
 pub enum KubeVirtExecutorFenceError {
+    #[error(transparent)]
+    RuntimeAdmission(#[from] crate::RuntimeAdmissionError),
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CONFIGURATION_INVALID")]
     ConfigurationInvalid,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_IDENTITY_MISMATCH")]
@@ -1704,6 +1766,7 @@ pub struct KubeVirtSshBootstrap {
     pub evaluation_namespace: Option<String>,
     pub evaluation_pod_label: Option<String>,
     pub user_ca_public_key: String,
+    pub workspace_root: String,
 }
 
 impl KubeVirtSshBootstrap {
@@ -1731,7 +1794,26 @@ impl KubeVirtSshBootstrap {
             evaluation_namespace: None,
             evaluation_pod_label: None,
             user_ca_public_key: public_key.normalized_openssh,
+            workspace_root: "/workspace".to_owned(),
         })
+    }
+
+    pub fn with_workspace_root(mut self, root: String) -> Result<Self, ReleaseProjectionError> {
+        if root.len() < 2
+            || root.len() > 256
+            || !root.starts_with('/')
+            || !root
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"/._-".contains(&c))
+            || root
+                .split('/')
+                .skip(1)
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        self.workspace_root = root;
+        Ok(self)
     }
 
     /// Adds the exact namespace and pod label allowed to reach the VM for
@@ -2348,7 +2430,8 @@ where
         if instance.runtime_kind != RuntimeKind::VirtualMachine
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
-            || instance.project_id != projection.release.project_id
+            || (instance.class == contracts::authoring::EnvironmentClass::Work
+                && instance.project_id != projection.release.project_id)
             || instance.course_id != projection.release.course_id
             || instance.provider_binding != self.binding
         {
@@ -2378,8 +2461,6 @@ where
             || base_binding.source_registry_digest != base_disk.source_registry_digest
             || base_binding.capacity_bytes != base_disk.capacity_bytes
             || base_binding.format != *format
-            || projection.environment_spec.security.user_policy
-                != RuntimeUserPolicy::NonRootRequired
             || projection.environment_spec.security.root_filesystem_policy
                 != RootFilesystemPolicy::MutableRequired
             || projection
@@ -2540,7 +2621,9 @@ where
             "labweaver.io/cdi-importer-memory-limit-bytes": budget.cdi_importer_memory_limit_bytes.to_string(),
             "labweaver.io/cdi-scratch-storage-bytes": budget.cdi_scratch_storage_bytes.to_string(),
         });
-        let cloud_init = self.cloud_init_user_data(&base_binding.guest_user);
+        let guest_uid = crate::runtime_admission::authorized_uid(instance, projection)?;
+        let guest_user = guest_username(guest_uid, &base_binding.guest_user);
+        let cloud_init = self.cloud_init_user_data(guest_user, guest_uid);
         let cloud_init_data = BASE64_STANDARD.encode(cloud_init.as_bytes());
         let cloud_init_network_data = BASE64_STANDARD.encode(
             b"version: 2\nethernets:\n  default:\n    match:\n      name: \"en*\"\n    dhcp4: true\n",
@@ -2778,10 +2861,20 @@ where
         Ok(())
     }
 
-    fn cloud_init_user_data(&self, guest_user: &str) -> String {
+    fn cloud_init_user_data(&self, guest_user: &str, guest_uid: u32) -> String {
         format!(
-            "#cloud-config\nusers:\n  - name: {user}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n      labweaver-evaluation\n      labweaver-agent\n  - path: /etc/ssh/sshd_config.d/99-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin no\n      AllowTcpForwarding no\n      AllowAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n  - [install, -d, -o, {user}, -g, {user}, -m, '0700', /home/{user}/workspace]\n  - [sshd, -t]\n  - [systemctl, enable, --now, ssh.service]\n",
+            "#cloud-config\ndisable_root: false\nusers:\n  - name: {user}\n    uid: {uid}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n      labweaver-evaluation\n      labweaver-agent\n  - path: /etc/ssh/sshd_config.d/00-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin {root_login}\n      AllowTcpForwarding no\n      AllowAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n{uid_check}",
             user = guest_user,
+            uid = guest_uid,
+            root_login = if guest_uid == 0 {
+                "prohibit-password"
+            } else {
+                "no"
+            },
+            uid_check = format_args!(
+                "  - |\n      set -eu\n      systemctl stop ssh.service\n      current_uid=$(id -u {guest_user})\n      if [ \"$current_uid\" != \"{guest_uid}\" ]; then usermod -u {guest_uid} {guest_user}; fi\n      test \"$(id -u {guest_user})\" = \"{guest_uid}\"\n      install -d -o {guest_user} -g {guest_user} -m 0700 {}\n      sshd -t\n      systemctl enable --now ssh.service\n",
+                self.configuration.ssh.workspace_root
+            ),
             ca = self.configuration.ssh.user_ca_public_key,
         )
     }
@@ -3152,41 +3245,37 @@ fn approved_resources(
     instance: &EnvironmentInstance,
     projection: &ReleasePublished,
 ) -> Result<(u32, u64, u64, Option<GpuAllocation>), ReleaseProjectionError> {
-    match instance.class {
-        contracts::authoring::EnvironmentClass::Experiment => {
-            let resources = &projection.environment_spec.resources;
-            Ok((
-                resources.cpu_millicores,
-                resources.memory_bytes,
-                resources.storage_bytes,
-                experiment_gpu_allocation(instance, projection)?,
-            ))
+    if instance.has_resource_lease() {
+        let authorization = instance
+            .operation
+            .lease_authorization
+            .as_ref()
+            .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+        if authorization.project_id != instance.project_id
+            || authorization.course_id != instance.course_id
+            || authorization.owner_actor_id != instance.owner_id
+            || Some(authorization.lease_id) != instance.lease_id
+            || Some(authorization.capacity_binding.as_str()) != instance.capacity_binding.as_deref()
+        {
+            return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        contracts::authoring::EnvironmentClass::Work => {
-            let authorization = instance
-                .operation
-                .lease_authorization
-                .as_ref()
-                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
-            if authorization.project_id != instance.project_id
-                || authorization.course_id != instance.course_id
-                || authorization.owner_actor_id != instance.owner_id
-                || Some(authorization.lease_id) != instance.lease_id
-                || Some(authorization.capacity_binding.as_str())
-                    != instance.capacity_binding.as_deref()
-            {
-                return Err(ReleaseProjectionError::IdentityMismatch);
-            }
-            authorization
-                .validate()
-                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
-            Ok((
-                authorization.approved_resources.cpu_millicores,
-                authorization.approved_resources.memory_bytes,
-                authorization.approved_resources.storage_bytes,
-                authorization.gpu_allocation.clone(),
-            ))
-        }
+        authorization
+            .validate()
+            .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+        Ok((
+            authorization.approved_resources.cpu_millicores,
+            authorization.approved_resources.memory_bytes,
+            authorization.approved_resources.storage_bytes,
+            authorization.gpu_allocation.clone(),
+        ))
+    } else {
+        let resources = &projection.environment_spec.resources;
+        Ok((
+            resources.cpu_millicores,
+            resources.memory_bytes,
+            resources.storage_bytes,
+            experiment_gpu_allocation(instance, projection)?,
+        ))
     }
 }
 
@@ -3279,6 +3368,16 @@ pub(crate) fn valid_dns_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+pub(crate) fn guest_username(uid: u32, configured: &str) -> &str {
+    if uid == 0 {
+        "root"
+    } else if configured == "root" {
+        "labweaver"
+    } else {
+        configured
+    }
 }
 
 fn valid_guest_user(value: &str) -> bool {

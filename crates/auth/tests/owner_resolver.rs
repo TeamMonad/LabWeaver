@@ -324,6 +324,7 @@ async fn resolve_endpoint_eligibility(
         EndpointHealth::Healthy
     };
     let resolution = EnvironmentEndpointEligibility {
+        runtime_target: None,
         environment_id,
         project_id: request.project_id,
         course_id: request.course_id,

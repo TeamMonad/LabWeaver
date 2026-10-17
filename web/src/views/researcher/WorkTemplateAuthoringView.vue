@@ -88,12 +88,14 @@
         @retry="retryPackageLoad"
       />
 
+      <UploadRecoveryStatus :state="upload.state" :has-session="upload.session !== null" @cancel="upload.cancel" />
       <div class="form-actions">
         <button type="button" class="filled-button" :disabled="!canUpload" @click="upload.createSession">
           <template v-if="upload.state.kind === 'creating'">创建上传会话…</template>
           <template v-else-if="upload.state.kind === 'uploading'">上传中…</template>
           <template v-else-if="upload.state.kind === 'completing'">确认归档…</template>
           <template v-else-if="upload.state.kind === 'loading'">读取已归档材料包…</template>
+          <template v-else-if="upload.state.kind === 'needs-files'">继续上传</template>
           <template v-else>上传材料包</template>
         </button>
         <button v-if="packageDone" type="button" class="text-button" @click="upload.clear">清除材料</button>
@@ -116,7 +118,14 @@
         </button>
       </div>
 
-      <button type="button" class="filled-button" :disabled="!canStartRun" @click="startRun">
+      <ModelInputPathPicker
+        v-if="uploadedPackage"
+        :model-value="modelInputSelection.selectedPaths"
+        :files="uploadedPackage.files"
+        @update:model-value="modelInputSelection.setSelected"
+      />
+
+      <button type="button" class="filled-button" data-testid="work-template-start-run" :disabled="!canStartRun" @click="startRun">
         {{ agent.acting === 'start' ? '提交中…' : '启动 Work 模板生成' }}
       </button>
 
@@ -225,8 +234,10 @@
             </div>
           </details>
 
-          <details class="candidate-details" open>
-            <summary>查看完整环境规格</summary>
+          <RuntimePermissions class="candidate-permissions" :spec="data.candidate.spec" title="运行权限" />
+
+          <details class="candidate-details">
+            <summary>查看完整环境规格（JSON）</summary>
             <pre>{{ formatCandidateSpec(data.candidate.spec) }}</pre>
           </details>
 
@@ -259,7 +270,7 @@
 
           <label class="authorization-field candidate-confirmation">
             <input v-model="candidateReviewAcknowledged" data-testid="work-template-candidate-confirmation" type="checkbox" />
-            <span>我已查看完整环境规格、运行时产物、构建状态和安全约束，并确认这个候选用于当前 Work 项目。</span>
+            <span>我已查看运行权限、运行时产物和构建状态，并确认这个候选用于当前 Work 项目。</span>
           </label>
 
           <form v-if="!approvedCandidate" class="approval-form" data-testid="work-template-candidate-approval-form" @submit.prevent="approveCandidate">
@@ -346,9 +357,11 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import RuntimePermissions from '@/components/review/RuntimePermissions.vue'
 import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import UploadRecoveryStatus from '@/components/common/UploadRecoveryStatus.vue'
 import { appendProjectEnvironmentCandidateDecision, createEnvironmentTemplateRelease, getEnvironmentTemplateRelease, getProjectEnvironmentCandidate } from '@/generated/contracts'
 import type {
   AgentRunSchema,
@@ -362,6 +375,9 @@ import type {
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
 import { withdrawEnvironmentTemplateReleaseByUi } from '@/composables/useEnvironmentTemplateReleases'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
+import { useModelInputPathSelection } from '@/composables/useModelInputPathSelection'
+import { modelInputSelectionAction } from '@/utils/modelInputSelection'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { agentAttemptStateLabel } from '@/utils/stateLabels'
@@ -384,7 +400,7 @@ const runIdRef = computed(() => props.runId?.trim() || null)
 const releaseIdRef = computed(() => props.releaseId?.trim() || null)
 const policy = useActiveProjectLlmPolicy(projectIdRef)
 const policyRevision = computed(() => policy.state.kind === 'success' ? policy.state.data.revision : undefined)
-const upload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef)
+const upload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef, undefined, { recoveryScope: 'work-template' })
 const agent = useProjectAgentRun(projectIdRef, { kind: 'authoring', environmentClass: 'work' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -418,12 +434,13 @@ let releaseRequestKey: string | null = null
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed<ProblemPackageSchema | null>(() => upload.state.kind === 'done' ? upload.state.package : null)
+const modelInputSelection = useModelInputPathSelection(uploadedPackage)
 const candidateId = computed(() => {
   if (agent.run.kind !== 'success') return null
   return agent.run.data.tracks.find((track) => track.kind === 'environment')?.candidateId ?? null
 })
 const canUpload = computed(() => {
-  const ready = upload.state.kind === 'ready' || upload.state.kind === 'error'
+  const ready = ['ready', 'error', 'needs-files', 'cancelled'].includes(upload.state.kind)
   return Boolean(props.projectId && ready && upload.files.length > 0 && policyRevision.value !== undefined)
 })
 const agentRunForCurrentPackage = computed(() => (
@@ -434,6 +451,7 @@ const agentRunForCurrentPackage = computed(() => (
 const canStartRun = computed(() => Boolean(
   packageDone.value
   && uploadedPackage.value
+  && modelInputSelection.hasSelection
   && policy.state.kind === 'success'
   && agent.run.kind !== 'loading'
   && !agentRunForCurrentPackage.value
@@ -708,6 +726,7 @@ async function startRun() {
   const policyData = policy.state.kind === 'success' ? policy.state.data : null
   const projectId = props.projectId
   if (!projectId || !pkg || !policyData || agent.acting) return
+  if (!modelInputSelection.hasSelection) return
   const started = await agent.start({
     ...(props.courseId ? { courseId: props.courseId } : {}),
     packageId: pkg.id,
@@ -715,6 +734,7 @@ async function startRun() {
     policyId: policyData.id,
     policyRevision: policyData.revision,
     environmentClass: 'work',
+    selectedPaths: modelInputSelection.selectedPaths,
   })
   if (started && agent.run.kind === 'success') {
     loadedRouteRunId = agent.run.data.id
@@ -912,8 +932,14 @@ function runDiagnosticMessage(code: string, fallback: string): string {
       return '材料或项目 AI 设置已经变化，请刷新页面后重新启动任务。'
     case 'LW_CANDIDATE_NOT_FOUND':
       return '候选可能仍在服务端同步，请点击重试继续查看。'
-    default:
-      return fallback
+    case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_DENIED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
+      return modelInputSelectionAction(code) ?? fallback
+    default: {
+      const action = modelInputSelectionAction(code)
+      return action ?? fallback
+    }
   }
 }
 
@@ -1059,4 +1085,5 @@ onUnmounted(() => {
 .release-withdrawn { color: var(--md-sys-color-error); font: var(--md-sys-label-medium); }
 .release-withdrawal-note { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.5; }
 @media (max-width: 680px) { .file-row, .track-row { grid-template-columns: 1fr auto; } .file-size, .file-status { justify-self: start; } .section-heading { flex-direction: column; } .section-heading--compact { flex-direction: row; } }
+.candidate-permissions { margin-top: 16px; padding: 16px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
 </style>

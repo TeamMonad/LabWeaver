@@ -1,0 +1,71 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ObjectAction": {
+      "description": "An operation on an object. Platform identity alone does not grant these operations.",
+      "enum": [
+        "browse",
+        "edit",
+        "start",
+        "stop",
+        "configure_agent",
+        "grant_access",
+        "manage_members",
+        "view_costs",
+        "request_runtime_permissions",
+        "approve_runtime_permissions",
+        "manage_runtime_policy"
+      ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Current actions for the authenticated actor. It is advisory and never replaces a write check.",
+  "properties": {
+    "actions": {
+      "items": {
+        "$ref": "#/$defs/ObjectAction"
+      },
+      "type": "array"
+    },
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "membershipRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "validUntil": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "projectId",
+    "actorId",
+    "membershipRevision",
+    "actions",
+    "validUntil"
+  ],
+  "title": "AvailableObjectActions",
+  "type": "object"
+}

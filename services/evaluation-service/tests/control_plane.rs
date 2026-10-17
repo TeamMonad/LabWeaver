@@ -744,6 +744,37 @@ async fn worker_lease_fencing_retry_and_cleanup_are_authoritative()
         .expect("retried step must be claimable");
     assert_eq!(second.step_run_id, first.step_run_id);
     assert_eq!(second.attempt, 2);
+    assert_ne!(second.task_run_id, first.task_run_id);
+    let current = fixture.store.load_run(run.id).await?;
+    assert_eq!(current.steps[0].current_attempt, 2);
+    assert_eq!(current.steps[0].state, EvaluationStepRunState::Running);
+    assert!(current.steps[0].diagnostic_code.is_none());
+    let history: (String, Option<String>) = sqlx::query_as(
+        "SELECT state,diagnostic_code FROM evaluation.evaluation_step_attempts
+         WHERE step_run_id=$1 AND attempt=$2 AND task_run_id=$3",
+    )
+    .bind(first.step_run_id.as_uuid())
+    .bind(i32::try_from(first.attempt)?)
+    .bind(first.task_run_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(history.0, "failed");
+    assert!(
+        history.1.is_some(),
+        "retry must preserve the previous failure"
+    );
+    assert!(
+        complete_leased_step(
+            &fixture,
+            run.id,
+            &first,
+            &failed_completion(true),
+            "trace-stale-failure"
+        )
+        .await
+        .is_err(),
+        "late failure from the old attempt cannot overwrite retry progress"
+    );
 
     let succeeded = complete_leased_step(
         &fixture,
@@ -756,6 +787,263 @@ async fn worker_lease_fencing_retry_and_cleanup_are_authoritative()
     assert_eq!(succeeded.state, EvaluationRunState::Succeeded);
     assert_eq!(succeeded.awarded_score, 7);
     assert!(succeeded.cleanup_verified);
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one persisted retry sequence checks ownership, pagination and disclosure together"
+)]
+async fn task_progress_keeps_current_attempt_on_every_page_and_checks_owner_first()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::{execution::TaskAttemptPhase, http::PageQuery};
+    use evaluation_service::task_progress::EvaluationTaskProgressError;
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let run = fixture.create_seeded_run("trace-task-progress").await?;
+    let query = PageQuery {
+        page: Some(1),
+        page_size: Some(1),
+    };
+    let mut lease = fixture
+        .store
+        .claim_next_step("progress-worker", Duration::from_secs(30))
+        .await?
+        .ok_or("no initial attempt")?;
+    assert!(matches!(
+        fixture
+            .store
+            .task_progress(fixture.project_id, ActorId::new(), run.id, None, &query)
+            .await,
+        Err(EvaluationTaskProgressError::Store(
+            EvaluationControlStoreError::RunNotFound
+        ))
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .task_progress(ProjectId::new(), fixture.actor_id, run.id, None, &query)
+            .await,
+        Err(EvaluationTaskProgressError::Store(
+            EvaluationControlStoreError::RunNotFound
+        ))
+    ));
+    let preparing = fixture
+        .store
+        .task_progress(fixture.project_id, fixture.actor_id, run.id, None, &query)
+        .await?;
+    assert_eq!(
+        preparing.current[0].progress.phase,
+        TaskAttemptPhase::Preparing,
+        "local file assertions do not invent a Resource reservation"
+    );
+    for number in 1..=2 {
+        let failed = complete_leased_step(
+            &fixture,
+            run.id,
+            &lease,
+            &failed_completion(true),
+            "trace-task-progress",
+        )
+        .await?;
+        fixture
+            .store
+            .retry_step(
+                run.id,
+                lease.step_run_id,
+                &mutation(
+                    fixture.project_id,
+                    fixture.course_id,
+                    failed.revision,
+                    fixture.actor_id,
+                ),
+                &idempotency(&format!("task-progress-retry-{number}"))?,
+                fixture.now().await?,
+                "trace-task-progress",
+            )
+            .await?;
+        lease = fixture
+            .store
+            .claim_next_step("progress-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("retry missing")?;
+    }
+    complete_leased_step(
+        &fixture,
+        run.id,
+        &lease,
+        &success_completion(7),
+        "trace-task-progress",
+    )
+    .await?;
+    let first = fixture
+        .store
+        .task_progress(fixture.project_id, fixture.actor_id, run.id, None, &query)
+        .await?;
+    assert_eq!(first.current[0].progress.attempt, 3);
+    assert_eq!(first.current[0].progress.phase, TaskAttemptPhase::Succeeded);
+    assert!(first.current[0].progress.diagnostic_code.is_none());
+    assert_eq!(first.history[0].progress.attempt, 2);
+    assert_eq!(first.history[0].progress.phase, TaskAttemptPhase::Failed);
+    assert!(first.history[0].progress.diagnostic_code.is_some());
+    assert!(first.has_more);
+    let second = fixture
+        .store
+        .task_progress(
+            fixture.project_id,
+            fixture.actor_id,
+            run.id,
+            None,
+            &PageQuery {
+                page: Some(2),
+                ..query
+            },
+        )
+        .await?;
+    assert_eq!(second.current, first.current);
+    assert_eq!(second.history[0].progress.attempt, 1);
+    assert!(!second.has_more);
+    let empty = fixture
+        .store
+        .task_progress(
+            fixture.project_id,
+            fixture.actor_id,
+            run.id,
+            None,
+            &PageQuery {
+                page: Some(3),
+                ..query
+            },
+        )
+        .await?;
+    assert_eq!(empty.current, first.current);
+    assert!(empty.history.is_empty());
+    let linked = fixture
+        .store
+        .task_progress_for_submission(
+            fixture.project_id,
+            fixture.actor_id,
+            run.frozen_submission_id,
+            None,
+            &query,
+        )
+        .await?;
+    assert_eq!(linked.run_id, run.id);
+    assert_eq!(linked.current, first.current);
+    assert!(matches!(
+        fixture
+            .store
+            .task_progress_for_submission(
+                fixture.project_id,
+                ActorId::new(),
+                run.frozen_submission_id,
+                None,
+                &query
+            )
+            .await,
+        Err(EvaluationTaskProgressError::Store(
+            EvaluationControlStoreError::RunNotFound
+        ))
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .task_progress_for_submission(
+                fixture.project_id,
+                fixture.actor_id,
+                FrozenSubmissionId::new(),
+                None,
+                &query
+            )
+            .await,
+        Err(EvaluationTaskProgressError::Store(
+            EvaluationControlStoreError::RunNotFound
+        ))
+    ));
+    let wire = serde_json::to_value(&first)?;
+    assert!(wire.get("awardedScore").is_none());
+    assert!(wire.get("identity").is_none());
+    assert!(wire["current"][0].get("stepId").is_none());
+    assert!(matches!(
+        fixture
+            .store
+            .task_progress(
+                fixture.project_id,
+                fixture.actor_id,
+                run.id,
+                None,
+                &PageQuery {
+                    page: Some(0),
+                    ..query
+                }
+            )
+            .await,
+        Err(EvaluationTaskProgressError::PageInvalid)
+    ));
+    Ok(())
+}
+
+struct WaitingAttemptRunner {
+    context: tokio::sync::Mutex<
+        Option<tokio::sync::oneshot::Sender<evaluation_service::EvaluationAttemptContext>>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl evaluation_service::EvaluationAttemptRunner for WaitingAttemptRunner {
+    async fn execute(
+        &self,
+        context: evaluation_service::EvaluationAttemptContext,
+    ) -> Result<EvaluationStepCompletion, evaluation_service::ExecutionError> {
+        if let Some(sender) = self.context.lock().await.take() {
+            let _ = sender.send(context);
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn worker_lease_loss_transfers_recovery_without_user_cancellation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    fixture.create_seeded_run("trace-worker-handoff").await?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let runner = std::sync::Arc::new(WaitingAttemptRunner {
+        context: tokio::sync::Mutex::new(Some(sender)),
+    });
+    let worker = evaluation_service::EvaluationWorker::new(
+        fixture.store.clone(),
+        runner,
+        "worker-handoff-old".to_owned(),
+        Duration::from_secs(30),
+        Duration::from_millis(10),
+    )?;
+    let task = tokio::spawn(async move { worker.run_once().await });
+    let context = tokio::time::timeout(Duration::from_secs(5), receiver).await??;
+    expire_lease(&fixture.pool, context.lease.step_run_id).await?;
+    let recovered = fixture
+        .store
+        .claim_next_step("worker-handoff-new", Duration::from_secs(30))
+        .await?
+        .expect("same attempt remains recoverable");
+    assert_eq!(recovered.task_run_id, context.lease.task_run_id);
+    assert_eq!(recovered.attempt, context.lease.attempt);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(15), task).await??,
+        Err(evaluation_service::ExecutionError::LeaseLost)
+    ));
+    assert!(context.lease_lost.is_cancelled());
+    assert!(
+        !context.cancellation.is_cancelled(),
+        "lease loss cannot authorize user cancellation cleanup"
+    );
+    assert!(
+        fixture
+            .store
+            .load_execution_checkpoint(&recovered)
+            .await?
+            .is_none()
+    );
     Ok(())
 }
 
@@ -1653,6 +1941,27 @@ async fn advisory_failure_follows_declared_cleanup_semantics()
         .await?
         .expect("advisory must be first");
     assert_eq!(advisory.step_id, "lint-advisory");
+    let progress = fixture
+        .store
+        .task_progress(
+            fixture.project_id,
+            fixture.actor_id,
+            run.id,
+            None,
+            &contracts::http::PageQuery {
+                page: Some(1),
+                page_size: Some(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        progress.current[0].progress.task_run_id,
+        Some(advisory.task_run_id)
+    );
+    assert!(
+        progress.current[0].progress.resource_request_id.is_none(),
+        "advisory reads must not invent a Resource reservation"
+    );
     let after_advisory = complete_leased_step(
         &fixture,
         run.id,
@@ -1808,7 +2117,18 @@ async fn expired_completion_loses_to_database_clock_and_recovery_is_single_write
         .claim_next_step("worker-expired", Duration::from_secs(30))
         .await?
         .expect("single step must be claimable");
+    assert!(
+        fixture
+            .store
+            .load_execution_checkpoint(&lease)
+            .await?
+            .is_none()
+    );
     expire_lease(&fixture.pool, lease.step_run_id).await?;
+    assert!(matches!(
+        fixture.store.load_execution_checkpoint(&lease).await,
+        Err(EvaluationControlStoreError::LeaseLost)
+    ));
 
     let completion = fixture
         .store
@@ -1837,6 +2157,17 @@ async fn expired_completion_loses_to_database_clock_and_recovery_is_single_write
     assert_eq!(reassigned.step_run_id, lease.step_run_id);
     assert_eq!(reassigned.attempt, lease.attempt);
     assert_eq!(reassigned.task_run_id, lease.task_run_id);
+    assert!(
+        fixture
+            .store
+            .load_execution_checkpoint(&reassigned)
+            .await?
+            .is_none()
+    );
+    assert!(matches!(
+        fixture.store.load_execution_checkpoint(&lease).await,
+        Err(EvaluationControlStoreError::LeaseLost)
+    ));
     Ok(())
 }
 
@@ -1966,6 +2297,7 @@ impl TestContext {
             attempt: 1,
             manifest_revision: Revision::new(1)?,
             files: vec![FrozenFile {
+                sha256: "0".repeat(64),
                 path: "answer.txt".to_owned(),
                 size_bytes: 1,
                 media_type: "text/plain".to_owned(),
@@ -2143,6 +2475,7 @@ fn evaluation_execution_binding(
         course_id,
         revision: Revision::new(1).expect("valid revision"),
         files: vec![PackageFile {
+            sha256: "0".repeat(64),
             path: "program.json".to_owned(),
             object: ArtifactRef {
                 artifact_id,

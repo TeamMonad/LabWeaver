@@ -190,39 +190,34 @@ impl MeteringState {
         {
             return Err(EnvironmentStoreError::MeteringInvalid);
         }
-        match instance.class {
-            contracts::authoring::EnvironmentClass::Work => {
-                let authorization = instance
-                    .operation
-                    .lease_authorization
-                    .as_ref()
-                    .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
-                if !matches!(
-                    &self.target,
-                    contracts::resource::ResourceUsageTarget::ResourceRequest {
-                        request_id,
-                        lease_id: Some(target_lease_id),
-                    } if *request_id == authorization.resource_request_id
-                        && Some(*target_lease_id) == self.lease_id
-                        && Some(*target_lease_id) == instance.lease_id
-                ) {
-                    return Err(EnvironmentStoreError::MeteringInvalid);
-                }
+        if instance.has_resource_lease() {
+            let authorization = instance
+                .operation
+                .lease_authorization
+                .as_ref()
+                .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
+            if !matches!(
+                &self.target,
+                contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id,
+                    lease_id: Some(target_lease_id),
+                } if *request_id == authorization.resource_request_id
+                    && Some(*target_lease_id) == self.lease_id
+                    && Some(*target_lease_id) == instance.lease_id
+            ) {
+                return Err(EnvironmentStoreError::MeteringInvalid);
             }
-            contracts::authoring::EnvironmentClass::Experiment => {
-                if self.lease_id.is_some()
-                    || self.lease_revision.is_some()
-                    || self.capacity_binding.is_some()
-                    || !matches!(
-                        &self.target,
-                        contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
-                            environment_id,
-                        } if *environment_id == instance.id
-                    )
-                {
-                    return Err(EnvironmentStoreError::MeteringInvalid);
-                }
-            }
+        } else if self.lease_id.is_some()
+            || self.lease_revision.is_some()
+            || self.capacity_binding.is_some()
+            || !matches!(
+                &self.target,
+                contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                    environment_id,
+                } if *environment_id == instance.id
+            )
+        {
+            return Err(EnvironmentStoreError::MeteringInvalid);
         }
         self.approved_resources
             .validate()
@@ -265,13 +260,10 @@ pub(crate) async fn initialize(
     transaction: &mut Transaction<'_, Postgres>,
     instance: &EnvironmentInstance,
 ) -> Result<(), EnvironmentStoreError> {
-    let contract = match instance.class {
-        contracts::authoring::EnvironmentClass::Work => {
-            serde_json::to_value(MeteringState::from_authorization(instance)?)?
-        }
-        contracts::authoring::EnvironmentClass::Experiment => {
-            serde_json::to_value(MeteringState::from_experiment(instance)?)?
-        }
+    let contract = if instance.has_resource_lease() {
+        serde_json::to_value(MeteringState::from_authorization(instance)?)?
+    } else {
+        serde_json::to_value(MeteringState::from_experiment(instance)?)?
     };
     sqlx::query(
         "INSERT INTO environment.resource_metering_state (environment_id, contract) \
@@ -753,8 +745,7 @@ fn elapsed_milliseconds(
 fn multiply_milliseconds(value: u64, milliseconds: u128) -> Result<u64, EnvironmentStoreError> {
     let quantity = u128::from(value)
         .checked_mul(milliseconds)
-        .ok_or(EnvironmentStoreError::NumericOverflow("usage quantity"))?
-        / 1_000;
+        .ok_or(EnvironmentStoreError::NumericOverflow("usage quantity"))?;
     u64::try_from(quantity).map_err(|_| EnvironmentStoreError::NumericOverflow("usage quantity"))
 }
 
@@ -766,6 +757,7 @@ fn quantities(
 ) -> Result<ResourceUsageQuantities, EnvironmentStoreError> {
     let milliseconds = elapsed_milliseconds(measured_from, measured_until)?;
     Ok(ResourceUsageQuantities {
+        quantity_divisor: 1000,
         cpu_millicore_seconds: multiply_milliseconds(
             resources.cpu_millicores.into(),
             milliseconds,
@@ -786,6 +778,7 @@ fn storage_quantities(
 ) -> Result<ResourceUsageQuantities, EnvironmentStoreError> {
     let milliseconds = elapsed_milliseconds(measured_from, measured_until)?;
     Ok(ResourceUsageQuantities {
+        quantity_divisor: 1000,
         cpu_millicore_seconds: 0,
         memory_byte_seconds: 0,
         storage_byte_seconds: multiply_milliseconds(resources.storage_bytes, milliseconds)?,
@@ -1167,25 +1160,45 @@ impl ResourceUsageClient {
         Ok(body)
     }
 
-    async fn post_json<T: serde::Serialize>(
+    pub(crate) async fn post_json<T: serde::Serialize>(
         &self,
         path: &str,
         body: &T,
     ) -> Result<reqwest::Response, ResourceUsageClientError> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        self.token_client
-            .bearer_auth(&mut headers)
-            .await
-            .map_err(|_| ResourceUsageClientError::TokenExchange)?;
-        let response = self
+        let request = self
             .client
             .post(
                 self.base_uri
                     .join(path)
                     .map_err(|_| ResourceUsageClientError::Configuration)?,
             )
+            .json(body);
+        self.send_request(request).await
+    }
+
+    pub(crate) async fn get_json(
+        &self,
+        path: &str,
+    ) -> Result<reqwest::Response, ResourceUsageClientError> {
+        let request = self.client.get(
+            self.base_uri
+                .join(path)
+                .map_err(|_| ResourceUsageClientError::Configuration)?,
+        );
+        self.send_request(request).await
+    }
+
+    async fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ResourceUsageClientError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        self.token_client
+            .bearer_auth(&mut headers)
+            .await
+            .map_err(|_| ResourceUsageClientError::TokenExchange)?;
+        let response = request
             .headers(headers)
-            .json(body)
             .send()
             .await
             .map_err(|_| ResourceUsageClientError::Transport)?;
@@ -1379,6 +1392,10 @@ impl ResourceUsageClientError {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "bundle_configuration_tests.rs"]
+mod bundle_configuration_tests;
 
 #[cfg(test)]
 #[allow(
@@ -1633,7 +1650,7 @@ mod tests {
         assert!(state.storage_known);
 
         let storage = storage_quantities(&state.approved_resources, ready, deletion)?;
-        assert_eq!(storage.storage_byte_seconds, 20);
+        assert_eq!(storage.storage_byte_seconds, 20_000);
         Ok(())
     }
 
@@ -1661,16 +1678,16 @@ mod tests {
             timestamp_millis(0),
             timestamp_millis(1_200),
         )?;
-        assert_eq!(known.cpu_millicore_seconds, 600);
-        assert_eq!(known.memory_byte_seconds, 2_400);
-        assert_eq!(known.gpu_unit_seconds, 2);
+        assert_eq!(known.cpu_millicore_seconds, 600_000);
+        assert_eq!(known.memory_byte_seconds, 2_400_000);
+        assert_eq!(known.gpu_unit_seconds, 2_400);
 
         let subsecond = storage_quantities(
             &state.approved_resources,
             timestamp_millis(0),
             timestamp_millis(400),
         )?;
-        assert_eq!(subsecond.storage_byte_seconds, 2_800);
+        assert_eq!(subsecond.storage_byte_seconds, 2_800_000);
         Ok(())
     }
 }

@@ -4,9 +4,14 @@ import { canonicalRateAmount, equivalentRatePrice, rateVersionState } from '@/ut
 import { navigationGroupsForRoles, navigationTarget } from '@/utils/navigation'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
 import {
+  createCreditAdminOperation,
   createResourceRate,
   endResourceRate,
+  estimateProjectResourceCost,
+  getProjectCredits,
   listEnvironments,
+  listProjectCreditHolds,
+  listProjectCreditLedger,
   listProjectResourceLeases,
   listProjectResourceRequests,
   listProjectResourceUsage,
@@ -18,9 +23,14 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
+    createCreditAdminOperation: vi.fn(),
     createResourceRate: vi.fn(),
     endResourceRate: vi.fn(),
+    estimateProjectResourceCost: vi.fn(),
+    getProjectCredits: vi.fn(),
     listEnvironments: vi.fn(),
+    listProjectCreditHolds: vi.fn(),
+    listProjectCreditLedger: vi.fn(),
     listProjectResourceLeases: vi.fn(),
     listProjectResourceRequests: vi.fn(),
     listProjectResourceUsage: vi.fn(),
@@ -64,6 +74,46 @@ const routerMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/client', () => ({ apiClient: api }))
+
+function mockCreditsEmpty() {
+  vi.mocked(getProjectCredits).mockResolvedValue({
+    data: {
+      projectId: 'project-new',
+      currency: 'CREDITS',
+      balance: '0.000000',
+      available: '0.000000',
+      reserved: '0.000000',
+      spent: '0.000000',
+      pending: '0.000000',
+      unknown: '0.000000',
+      unknownCount: 0,
+      platformAbsorbed: '0.000000',
+      revision: 0,
+    },
+    error: undefined,
+  } as never)
+  vi.mocked(listProjectCreditLedger).mockResolvedValue({
+    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    error: undefined,
+  } as never)
+  vi.mocked(listProjectCreditHolds).mockResolvedValue({
+    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    error: undefined,
+  } as never)
+  vi.mocked(createCreditAdminOperation).mockResolvedValue({ data: [], error: undefined } as never)
+  vi.mocked(estimateProjectResourceCost).mockResolvedValue({
+    data: {
+      projectId: 'project-new',
+      input: {
+        compute: null,
+        storage: null,
+      },
+      lines: [],
+      total: { currency: 'CREDITS', amount: '0.000000' },
+    },
+    error: undefined,
+  } as never)
+}
 
 vi.mock('@/composables/useProjects', async () => {
   const { reactive } = await import('vue')
@@ -190,6 +240,7 @@ describe('ResourceFinanceView', () => {
     projectMocks.state!.projects = { kind: 'success', data: projectMocks.catalog }
     projectMocks.state!.selectedProjectId = 'project-new'
     projectMocks.state!.selectedProject = projectMocks.catalog[0]
+    mockCreditsEmpty()
   })
 
   it('keeps global rates usable with no project and does not infer project access from a global list', async () => {
@@ -206,6 +257,14 @@ describe('ResourceFinanceView', () => {
     await flushPromises()
     expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ gpuClass: 'nvidia-v100-2q', gpuMode: 'vm_vgpu', unitQuantity: 1, unitPrice: { amount: '0.250000', currency: 'USD' } }) }))
     expect(api.get).not.toHaveBeenCalled()
+  })
+
+  it('embeds ProjectCreditsPanel when a project is selected', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('项目 Credits 账户')
+    expect(wrapper.find('[data-testid="credits-account-summary"]').exists()).toBe(true)
+    expect(getProjectCredits).toHaveBeenCalled()
   })
 
   it('shows measured and unknown project usage with human targets and advanced identifiers', async () => {

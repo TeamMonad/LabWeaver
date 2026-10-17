@@ -11,9 +11,9 @@ use time::OffsetDateTime;
 pub struct AuthorizationContext {
     /// Verified OIDC actor.
     pub actor: AuthenticatedActor,
-    /// Current course memberships loaded from the Access authority.
+    /// Current course memberships loaded from the Control authority.
     pub course_memberships: Vec<CourseMembership>,
-    /// Current project memberships loaded from the Access authority.
+    /// Current project memberships loaded from the Control authority.
     pub project_memberships: Vec<ProjectMembership>,
     /// Time of decision supplied by the service clock.
     pub now: OffsetDateTime,
@@ -40,11 +40,20 @@ pub fn authorize(
             context.actor.expires_at,
         ),
         AuthorizationScope::Course { course_id } => {
-            let membership = active_course_membership(context, *course_id, required_roles)?;
-            (
-                membership.revision,
-                earliest(context.actor.expires_at, membership.expires_at),
-            )
+            if context.actor.roles.contains(&PlatformRole::PlatformAdmin)
+                && required_roles.contains(&PlatformRole::PlatformAdmin)
+            {
+                (
+                    Revision::new(1).map_err(|_| AuthorizationError::RoleDenied)?,
+                    context.actor.expires_at,
+                )
+            } else {
+                let membership = active_course_membership(context, *course_id, required_roles)?;
+                (
+                    membership.revision,
+                    earliest(context.actor.expires_at, membership.expires_at),
+                )
+            }
         }
         AuthorizationScope::Project { project_id } => {
             // PlatformAdmin is a global project authority only when the operation policy grants
@@ -212,6 +221,7 @@ mod tests {
         let context = AuthorizationContext {
             actor,
             course_memberships: vec![CourseMembership {
+                object_role: contracts::membership_governance::CourseObjectRole::Instructor,
                 course_id,
                 actor_id,
                 role: PlatformRole::Teacher,
@@ -255,6 +265,7 @@ mod tests {
         let context = AuthorizationContext {
             actor,
             course_memberships: vec![CourseMembership {
+                object_role: contracts::membership_governance::CourseObjectRole::Instructor,
                 course_id,
                 actor_id,
                 role: PlatformRole::Student,
@@ -263,6 +274,7 @@ mod tests {
                 expires_at: Some(timestamp("2026-07-14T02:00:00.000Z")?),
             }],
             project_memberships: vec![ProjectMembership {
+                object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
                 course_id: Some(course_id),
                 project_id,
                 actor_id,
@@ -309,6 +321,7 @@ mod tests {
             actor,
             course_memberships: Vec::new(),
             project_memberships: vec![ProjectMembership {
+                object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
                 course_id: None,
                 project_id: member_project,
                 actor_id,
@@ -384,6 +397,7 @@ mod tests {
             },
             course_memberships: Vec::new(),
             project_memberships: vec![ProjectMembership {
+                object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
                 course_id: None,
                 project_id: ProjectId::new(),
                 actor_id,
@@ -453,6 +467,7 @@ mod tests {
             },
             course_memberships: Vec::new(),
             project_memberships: vec![ProjectMembership {
+                object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
                 course_id: None,
                 project_id,
                 actor_id: owner_id,
