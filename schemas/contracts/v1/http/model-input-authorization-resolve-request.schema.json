@@ -1,0 +1,374 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "EvaluationReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.",
+      "type": "string"
+    },
+    "FrozenEnvironmentIdentity": {
+      "additionalProperties": false,
+      "description": "Frozen build and runtime identity used to reproduce collection.",
+      "properties": {
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "releaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "releaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
+        }
+      },
+      "required": [
+        "environmentId",
+        "environmentRevision",
+        "releaseId",
+        "releaseVersion",
+        "runtimeKind"
+      ],
+      "type": "object"
+    },
+    "FrozenSubmissionId": {
+      "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
+      "type": "string"
+    },
+    "ModelInputAuthorizationBinding": {
+      "additionalProperties": false,
+      "description": "Control-derived asynchronous recheck input, never accepted from a public create request.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "policySha256": {
+          "type": "string"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "selectionSha256": {
+          "type": "string"
+        },
+        "sessionSha256": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/ModelInputAuthorizationSource"
+        },
+        "validUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "sessionSha256",
+        "actorId",
+        "projectId",
+        "operationId",
+        "validUntil",
+        "source",
+        "policyId",
+        "policyRevision",
+        "policySha256",
+        "selectionSha256"
+      ],
+      "type": "object"
+    },
+    "ModelInputAuthorizationSource": {
+      "description": "A freeze identifier cannot be interpreted as a material package identifier.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "problem_package",
+              "type": "string"
+            },
+            "packageId": {
+              "$ref": "#/$defs/ProblemPackageId"
+            },
+            "packageRevision": {
+              "$ref": "#/$defs/Revision"
+            }
+          },
+          "required": [
+            "kind",
+            "packageId",
+            "packageRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Immutable freeze identities; Evaluation and Environment releases are distinct.",
+          "properties": {
+            "archive": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "contentSha256": {
+              "type": "string"
+            },
+            "environment": {
+              "$ref": "#/$defs/FrozenEnvironmentIdentity"
+            },
+            "evaluationReleaseId": {
+              "$ref": "#/$defs/EvaluationReleaseId"
+            },
+            "evaluationReleaseRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "frozenSubmissionId": {
+              "$ref": "#/$defs/FrozenSubmissionId"
+            },
+            "kind": {
+              "const": "frozen_submission",
+              "type": "string"
+            },
+            "manifestRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "manifestSha256": {
+              "type": "string"
+            },
+            "rubric": {
+              "$ref": "#/$defs/ModelInputRubricIdentity"
+            },
+            "rubricPermission": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelInputRubricPermissionRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Missing permission is representable for a refusal, never for model egress."
+            },
+            "taskRunId": {
+              "$ref": "#/$defs/TaskRunId"
+            }
+          },
+          "required": [
+            "kind",
+            "taskRunId",
+            "frozenSubmissionId",
+            "manifestRevision",
+            "manifestSha256",
+            "archive",
+            "contentSha256",
+            "evaluationReleaseId",
+            "evaluationReleaseRevision",
+            "environment",
+            "rubric"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ModelInputRubricIdentity": {
+      "additionalProperties": false,
+      "description": "Control-derived asynchronous recheck input, never accepted from a public create request.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "packageId": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "packageRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "packageId",
+        "packageRevision",
+        "path",
+        "artifact",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "ModelInputRubricPermissionRef": {
+      "additionalProperties": false,
+      "description": "References Control's current material-project policy and the approving instructor fact.",
+      "properties": {
+        "approvedBy": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "approverCourseMembershipRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "authoringProjectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "authoringProjectId",
+        "policyId",
+        "policyRevision",
+        "approvedBy",
+        "approverCourseMembershipRevision"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "binding": {
+      "$ref": "#/$defs/ModelInputAuthorizationBinding"
+    },
+    "selectedPaths": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "binding",
+    "selectedPaths"
+  ],
+  "title": "ModelInputAuthorizationResolveRequest",
+  "type": "object"
+}

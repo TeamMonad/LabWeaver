@@ -1,9 +1,4 @@
 ---
-- name: Load the immutable application identities
-  ansible.builtin.set_fact:
-    platform_application_lock: >-
-      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
-
 - name: Load the reviewed private application variable locator
   ansible.builtin.include_vars:
     file: "{{ platform_application_vars_file }}"
@@ -16,6 +11,12 @@
     "{{ item.key }}": "{{ item.value }}"
   loop: "{{ platform_application_reviewed_vars | default({}) | dict2items }}"
   when: platform_application_reviewed_vars is defined
+  no_log: true
+
+- name: Load the application identities from the selected Bundle
+  ansible.builtin.set_fact:
+    platform_application_lock: >-
+      {{ lookup('ansible.builtin.file', platform_application_versions_lock_file) | from_yaml }}
   no_log: true
 
 - name: Validate non-destructive application inputs

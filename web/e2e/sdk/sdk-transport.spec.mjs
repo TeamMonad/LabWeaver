@@ -1,8 +1,10 @@
 import { expect, test } from '@playwright/test'
 
 const courseId = '01900000-0000-7000-8000-000000000001'
+const projectId = '01900000-0000-7000-8000-000000000010'
 const environmentId = '01900000-0000-7000-8000-000000000002'
 const operationId = '01900000-0000-7000-8000-000000000003'
+const resourceRequestId = '01900000-0000-7000-8000-000000000004'
 const largeStreamSequence = '9007199254740993'
 
 test.beforeEach(async ({ page }) => {
@@ -44,7 +46,7 @@ test('generated client performs authenticated GET and POST without duplicating /
     })
   })
 
-  const result = await page.evaluate(async ({ courseId }) => {
+  const result = await page.evaluate(async ({ courseId, projectId, resourceRequestId }) => {
     const api = await import('/src/api/client.ts')
     const sdk = await import('/src/generated/contracts/index.ts')
     const client = api.createLabWeaverApiClient({
@@ -55,11 +57,18 @@ test('generated client performs authenticated GET and POST without duplicating /
     const created = await sdk.createEnvironment({
       client,
       headers: { 'Idempotency-Key': 'sdk-conformance-create-1' },
-      body: { courseId, releaseId: courseId, releaseVersion: 1, displayLabel: 'Browser contract' },
+      body: {
+        courseId,
+        projectId,
+        resourceRequestId,
+        releaseId: courseId,
+        releaseVersion: 1,
+        displayLabel: 'Browser contract',
+      },
       throwOnError: true,
     })
     return { snapshotSequence: listed.data.snapshotSequence, environmentId: created.data.environmentId }
-  }, { courseId })
+  }, { courseId, projectId, resourceRequestId })
 
   expect(result).toEqual({ snapshotSequence: largeStreamSequence, environmentId })
   expect(requests).toHaveLength(2)
@@ -68,7 +77,14 @@ test('generated client performs authenticated GET and POST without duplicating /
     expect(new URL(request.url).pathname).toBe('/api/v1/environments')
   }
   expect(requests[0].url).toContain(`courseId=${courseId}`)
-  expect(requests[1].body.displayLabel).toBe('Browser contract')
+  expect(requests[1].body).toMatchObject({
+    displayLabel: 'Browser contract',
+    projectId,
+    resourceRequestId,
+    courseId,
+    releaseId: courseId,
+    releaseVersion: 1,
+  })
 })
 
 test('strictly decodes RFC 9457 and preserves stable diagnostics', async ({ page }) => {
@@ -102,7 +118,7 @@ test('strictly decodes RFC 9457 and preserves stable diagnostics', async ({ page
     } catch (caught) {
       const problem = api.decodeProblemDetails(caught)
       return {
-        diagnosticCode: caught.diagnosticCode,
+        diagnosticCode: problem?.diagnosticCode,
         status: problem?.status,
         requestId: problem?.requestId,
       }
@@ -128,7 +144,7 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
   })
   await page.route('**/api/v1/environments**', async (route) => {
     const request = route.request()
-    requests.push({ method: request.method(), headers: request.headers() })
+    requests.push({ method: request.method(), headers: request.headers(), body: request.postDataJSON() })
     if (request.method() === 'POST') {
       await route.fulfill({
         status: 202,
@@ -144,7 +160,7 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
     }
   })
 
-  await page.evaluate(async ({ courseId }) => {
+  await page.evaluate(async ({ courseId, projectId, resourceRequestId }) => {
     const api = await import('/src/api/client.ts')
     const sdk = await import('/src/generated/contracts/index.ts')
     const client = api.createLabWeaverApiClient({
@@ -155,10 +171,10 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
     await sdk.createEnvironment({
       client,
       headers: { 'Idempotency-Key': 'sdk-bff-create-1' },
-      body: { courseId, releaseId: courseId, releaseVersion: 1 },
+      body: { courseId, projectId, resourceRequestId, releaseId: courseId, releaseVersion: 1 },
       throwOnError: true,
     })
-  }, { courseId })
+  }, { courseId, projectId, resourceRequestId })
 
   expect(csrfRequests).toBe(1)
   expect(requests).toHaveLength(2)
@@ -168,13 +184,18 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
   expect(requests[1].headers.cookie).toContain('labweaver_test_session=opaque-session')
   expect(requests[1].headers.authorization).toBeUndefined()
   expect(requests[1].headers['x-csrf-token']).toBe('synchronizer-token')
+  expect(requests[1].body).toMatchObject({ projectId, resourceRequestId, courseId, releaseId: courseId, releaseVersion: 1 })
 })
 
 test('preserves a stream cursor above Number.MAX_SAFE_INTEGER in SSE resume and events', async ({ page }) => {
   const requests = []
-  await page.route('**/api/v1/events**', async (route) => {
+  await page.route(`**/api/v1/projects/${projectId}/events**`, async (route) => {
     const request = route.request()
-    requests.push({ url: request.url(), lastEventId: request.headers()['last-event-id'] })
+    requests.push({
+      url: request.url(),
+      lastEventId: request.headers()['last-event-id'],
+      authorization: request.headers().authorization,
+    })
     await route.fulfill({
       status: 200,
       contentType: 'text/event-stream',
@@ -182,25 +203,28 @@ test('preserves a stream cursor above Number.MAX_SAFE_INTEGER in SSE resume and 
     })
   })
 
-  const result = await page.evaluate(async ({ courseId, largeStreamSequence }) => {
+  const result = await page.evaluate(async ({ projectId, largeStreamSequence }) => {
     const api = await import('/src/api/client.ts')
     const sdk = await import('/src/generated/contracts/index.ts')
     const client = api.createLabWeaverApiClient({
       baseUrl: window.location.origin,
       authentication: { mode: 'bearer', accessToken: async () => 'browser-conformance-token' },
     })
-    const events = await sdk.streamCourseEvents({
+    const events = await sdk.streamProjectEvents({
       client,
+      path: { projectId },
       headers: { 'Last-Event-ID': largeStreamSequence },
-      query: { courseId, after: largeStreamSequence },
+      query: { after: largeStreamSequence },
     })
     const first = await events.stream.next()
     return first.value.streamSequence
-  }, { courseId, largeStreamSequence })
+  }, { projectId, largeStreamSequence })
 
   expect(result).toBe(largeStreamSequence)
   expect(requests).toHaveLength(1)
+  expect(requests[0].authorization).toBe('Bearer browser-conformance-token')
   expect(requests[0].lastEventId).toBe(largeStreamSequence)
+  expect(new URL(requests[0].url).pathname).toBe(`/api/v1/projects/${projectId}/events`)
   expect(new URL(requests[0].url).searchParams.get('after')).toBe(largeStreamSequence)
 })
 
@@ -276,3 +300,55 @@ test('fails closed without a bearer and distinguishes cancellation', async ({ pa
     })
   expect(networkRequests).toBe(2)
 })
+
+test('SSE rejects missing bearer before any network request', async ({ page }) => {
+  let networkRequests = 0
+  await page.route(`**/api/v1/projects/${projectId}/events**`, async (route) => {
+    networkRequests += 1
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/problem+json',
+      body: JSON.stringify({
+        type: '/problems/no-auth',
+        title: 'No auth',
+        status: 401,
+        detail: 'NO_AUTH_ERROR',
+        instance: '/requests/sse-no-auth',
+        diagnosticCode: 'NO_AUTH_ERROR',
+        requestId: 'sse-no-auth',
+        retryable: false,
+      }),
+    })
+  })
+
+  const result = await page.evaluate(async ({ projectId }) => {
+    const api = await import('/src/api/client.ts')
+    const sdk = await import('/src/generated/contracts/index.ts')
+    const client = api.createLabWeaverApiClient({
+      baseUrl: window.location.origin,
+      authentication: { mode: 'bearer', accessToken: async () => undefined },
+    })
+    try {
+      const events = await sdk.streamProjectEvents({
+        client,
+        path: { projectId },
+        query: { after: '0' },
+      })
+      // If construction incorrectly succeeds, advancing must still not be required
+      // for the failure — but count any accidental fetch via the route counter.
+      await events.stream.next()
+      return { diagnosticCode: null }
+    } catch (error) {
+      return {
+        diagnosticCode: error?.diagnosticCode ?? null,
+        name: error?.name ?? null,
+        message: typeof error?.message === 'string' ? error.message : null,
+      }
+    }
+  }, { projectId })
+
+  expect(result.diagnosticCode).toBe('LW_SDK_AUTH_TOKEN_UNAVAILABLE')
+  expect(result.name).toBe('LabWeaverApiError')
+  expect(networkRequests).toBe(0)
+})
+

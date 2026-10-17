@@ -22,6 +22,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         };
     }
     document!(
+        "schemas/contracts/v1/runtime-authorization-binding.schema.json",
+        crate::runtime_authorization::RuntimeAuthorizationBinding
+    );
+    document!(
         "schemas/contracts/v1/problem-package.schema.json",
         crate::authoring::ProblemPackage
     );
@@ -34,8 +38,80 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProjectLlmPolicyOptions
     );
     document!(
+        "schemas/contracts/v1/available-object-actions.schema.json",
+        crate::object_authorization::AvailableObjectActions
+    );
+    document!(
+        "schemas/contracts/v1/membership-invitation.schema.json",
+        crate::membership_governance::MembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/membership-invitation-page.schema.json",
+        crate::membership_governance::MembershipInvitationPage
+    );
+    document!(
+        "schemas/contracts/v1/course-membership-page.schema.json",
+        crate::membership_governance::CourseMembershipPage
+    );
+    document!(
+        "schemas/contracts/v1/http/create-project-membership-invitation.schema.json",
+        crate::membership_governance::CreateProjectMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/create-course-membership-invitation.schema.json",
+        crate::membership_governance::CreateCourseMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/accept-membership-invitation.schema.json",
+        crate::membership_governance::AcceptMembershipInvitation
+    );
+    document!(
         "schemas/contracts/v1/project.schema.json",
         crate::project::Project
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-desired.schema.json",
+        crate::platform_configuration::PlatformConfigurationDesired
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-status.schema.json",
+        crate::platform_configuration::PlatformConfigurationStatus
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-version.schema.json",
+        crate::platform_configuration::PlatformConfigurationVersion
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-apply.schema.json",
+        crate::platform_configuration::PlatformConfigurationApply
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-bundle.schema.json",
+        crate::platform_configuration::PlatformConfigurationBundle
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-replica-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationReplicaObservation
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-deployment-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationDeploymentObservation
+    );
+    document!(
+        "schemas/contracts/v1/http/register-platform-configuration-bundle-request.schema.json",
+        crate::platform_configuration::RegisterPlatformConfigurationBundleRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/update-platform-configuration-request.schema.json",
+        crate::platform_configuration::UpdatePlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/apply-platform-configuration-request.schema.json",
+        crate::platform_configuration::ApplyPlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/report-platform-configuration-apply-request.schema.json",
+        crate::platform_configuration::ReportPlatformConfigurationApplyRequest
     );
     document!(
         "schemas/contracts/v1/agent-run.schema.json",
@@ -44,6 +120,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/agent-run-history-page.schema.json",
         crate::authoring::AgentRunHistoryPage
+    );
+    document!(
+        "schemas/contracts/v1/agent-run-task-progress.schema.json",
+        crate::authoring::AgentRunTaskProgress
+    );
+    document!(
+        "schemas/contracts/v1/task-attempt-progress.schema.json",
+        crate::execution::TaskAttemptProgress
     );
     document!(
         "schemas/contracts/v1/environment-candidate.schema.json",
@@ -86,6 +170,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/evaluation-run.schema.json",
         crate::evaluation::EvaluationRun
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-run-task-progress.schema.json",
+        crate::evaluation::EvaluationRunTaskProgress
     );
     document!(
         "schemas/contracts/v1/student-evaluation-result.schema.json",
@@ -204,6 +292,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::ResetEnvironmentRequest
     );
     document!(
+        "schemas/contracts/v1/environment-runtime-authorization-request.schema.json",
+        crate::environment::ResolveEnvironmentRuntimeAuthorizationRequest
+    );
+    document!(
+        "schemas/contracts/v1/environment-runtime-authorization-resolution.schema.json",
+        crate::environment::EnvironmentRuntimeAuthorizationResolution
+    );
+    document!(
         "schemas/contracts/v1/environment-lease-verification-request.schema.json",
         crate::environment::EnvironmentLeaseVerificationRequest
     );
@@ -262,6 +358,86 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/resource-usage-page.schema.json",
         crate::resource::ResourceUsagePage
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold-page.schema.json",
+        crate::resource::credits::CreditHoldPage
+    );
+    document!(
+        "schemas/contracts/v1/credit-account.schema.json",
+        crate::resource::credits::CreditAccount
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold.schema.json",
+        crate::resource::credits::CreditHold
+    );
+    document!(
+        "schemas/contracts/v1/credit-ledger-entry.schema.json",
+        crate::resource::credits::CreditLedgerEntry
+    );
+    document!(
+        "schemas/contracts/v1/credit-ledger-page.schema.json",
+        crate::resource::credits::CreditLedgerPage
+    );
+    document!(
+        "schemas/contracts/v1/credit-admin-operation.schema.json",
+        crate::resource::credits::CreditAdminOperation
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-estimate-request.schema.json",
+        crate::resource::build_costing::BuildCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-estimate.schema.json",
+        crate::resource::build_costing::BuildCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/environment-credit-grant.schema.json",
+        crate::resource::environment_funding::EnvironmentCreditGrant
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-record.schema.json",
+        crate::resource::build_costing::BuildCostRecord
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-reconciliation.schema.json",
+        crate::resource::build_costing::BuildCostReconciliation
+    );
+    document!(
+        "schemas/contracts/v1/build-usage-measurement.schema.json",
+        crate::resource::build_costing::BuildUsageMeasurement
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-admission-request.schema.json",
+        crate::resource::build_costing::BuildCostAdmissionRequest
+    );
+    document!(
+        "schemas/contracts/v1/observe-build-cost-request.schema.json",
+        crate::resource::build_costing::ObserveBuildCostRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-cost-estimate-request.schema.json",
+        crate::resource::costing::ResourceCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-cost-estimate.schema.json",
+        crate::resource::costing::ResourceCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold-request.schema.json",
+        crate::resource::costing::EstimatedCreditHoldRequest
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold.schema.json",
+        crate::resource::costing::EstimatedCreditHold
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold-request.schema.json",
+        crate::resource::credits::CreditHoldRequest
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold-resolution-request.schema.json",
+        crate::resource::credits::CreditHoldResolutionRequest
     );
     document!(
         "schemas/contracts/v1/resource-charge.schema.json",
@@ -414,6 +590,30 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/authorization-decision-request.schema.json",
         crate::auth::AuthorizationDecisionRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/maintain-rubric-model-input-rule-request.schema.json",
+        crate::http::MaintainRubricModelInputRuleRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/project-rubric-model-input-rules.schema.json",
+        crate::http::ProjectRubricModelInputRules
+    );
+    document!(
+        "schemas/contracts/v1/http/create-frozen-model-input-authorization-request.schema.json",
+        crate::http::CreateFrozenModelInputAuthorizationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/model-input-authorization-context.schema.json",
+        crate::http::ModelInputAuthorizationContext
+    );
+    document!(
+        "schemas/contracts/v1/http/model-input-authorization-resolve-request.schema.json",
+        crate::http::ModelInputAuthorizationResolveRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/model-input-authorization-resolution.schema.json",
+        crate::http::ModelInputAuthorizationResolution
     );
     document!(
         "schemas/contracts/v1/http/internal-create-agent-run-request.schema.json",
@@ -1038,6 +1238,23 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let mut parameters = path_parameters(operation.path);
         if matches!(
             operation.operation_id,
+            "getPlatformConfigurationVersion"
+                | "getPlatformConfigurationBundle"
+                | "getLoadedPlatformConfiguration"
+                | "registerPlatformConfigurationBundle"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "revision" {
+                    parameter["schema"] = json!({"type":"integer","minimum":1,"maximum":9_223_372_036_854_775_807_u64});
+                }
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            parameters.push(json!({"name":"expectedRevision","in":"query","required":true,"schema":{"type":"integer","minimum":0,"maximum":9_223_372_036_854_775_807_u64}}));
+            parameters.push(json!({"name":"configurationSha256","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9a-f]{64}$"}}));
+        }
+        if matches!(
+            operation.operation_id,
             "getProjectCandidateBuild" | "cancelProjectCandidateBuild"
         ) {
             for parameter in &mut parameters {
@@ -1078,7 +1295,18 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if matches!(
             operation.operation_id,
-            "listProjectAgentRuns" | "listProjectResourceUsage"
+            "listProjectAgentRuns"
+                | "listProjectResourceUsage"
+                | "listCourseMemberships"
+                | "listProjectMembershipInvitations"
+                | "listCourseMembershipInvitations"
+                | "listIncomingMembershipInvitations"
+                | "getProjectAgentTaskProgress"
+                | "getOwnProjectEvaluationTaskProgress"
+                | "getOwnProjectEvaluationTaskForSubmission"
+                | "getInternalAgentTaskProgress"
+                | "listProjectCreditLedger"
+                | "listProjectCreditHolds"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -1117,6 +1345,20 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ]);
         }
         parameters.extend(environment_management_parameters(operation.operation_id));
+        if operation.operation_id == "getBuildCost" {
+            parameters.push(json!({"name":"leaseToken","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if matches!(
+            operation.operation_id,
+            "getBuildCost" | "getProjectBuildCost"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "attempt" {
+                    parameter["schema"] =
+                        json!({"type":"integer","minimum":1,"maximum":2_147_483_647});
+                }
+            }
+        }
         if operation.operation_id == "streamProjectEvents" {
             let stream_cursor_schema = json!({
                 "type":"string",
@@ -1174,6 +1416,37 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ,"x-labweaver-problem-content-type":"application/problem+json"
             ,"x-labweaver-errors":["LW_CONTRACT_DOCUMENT_INVALID","LW_ACCESS_DENIED","LW_IDEMPOTENCY_CONFLICT","LW_REVISION_CONFLICT"]
         });
+        if matches!(
+            operation.operation_id,
+            "getPlatformConfiguration"
+                | "updatePlatformConfiguration"
+                | "getPlatformConfigurationVersion"
+                | "applyPlatformConfiguration"
+                | "getPlatformConfigurationApply"
+                | "reportPlatformConfigurationApply"
+                | "registerPlatformConfigurationBundle"
+                | "getPlatformConfigurationBundle"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_PLATFORM_CONFIGURATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+                "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+                "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+                "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+                "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+                "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+                "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+                "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_OPERATION_IN_PROGRESS"
+            ]);
+        }
         if operation.operation_id == "resolveEnvironmentOwner" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1196,6 +1469,26 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
                 "LW_ACCESS_DENIED",
                 "LW_AGENT_PERSISTENCE_FAILED",
+            ]);
+        }
+        if operation.scope == OperationScopeKind::Project
+            && let Some(action) =
+                crate::object_authorization::project_operation_action(operation.operation_id)
+        {
+            operation_json["x-labweaver-object-action"] = json!(action);
+        }
+        if matches!(
+            operation.operation_id,
+            "getProjectAgentTaskProgress"
+                | "getInternalAgentTaskProgress"
+                | "getOwnProjectEvaluationTaskProgress"
+                | "getOwnProjectEvaluationTaskForSubmission"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_TASK_PROGRESS_PAGE_INVALID",
+                "LW_TASK_PROGRESS_CHANGED",
+                "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+                "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
             ]);
         }
         if operation.operation_id == "addProjectMembership" {
@@ -1251,6 +1544,18 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if let Some(schema) = request_schema(operation.operation_id) {
             operation_json["requestBody"] =
                 json!({"required":true,"content":{"application/json":{"schema":schema}}});
+            if operation.operation_id == "updatePlatformConfiguration" {
+                operation_json["requestBody"]["content"]["application/yaml"] =
+                    json!({"schema":request_schema(operation.operation_id)});
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            operation_json["requestBody"] = json!({"required":true,"content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}});
+            operation_json["responses"]["413"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["responses"]["415"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["description"] = json!(
+                "Register received ciphertext and an administrator-declared binding to the current desired settings. Control computes the ciphertext digest but does not decrypt or approve deployment. Maximum upload: 73400320 bytes."
+            );
         }
         let entry = paths
             .entry(operation.path.to_owned())
@@ -1267,7 +1572,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
     } else {
         json!({"serviceJwt": {"type":"http","scheme":"bearer","bearerFormat":"JWT","description":"Short-lived service-account JWT validated against the configured issuer, audience, signature, expiry, and route permission. Service-to-service transport is protected by TLS."}})
     };
-    let value = json!({
+    let mut value = json!({
         "openapi": "3.1.0",
         "info": {"title": title, "version": "1.0.0", "description": "Generated from the contracts Rust crate. Runtime implementation is outside this artifact."},
         "servers": [{"url": if surface == ApiSurface::Public { "/" } else { "https://gateway-control.internal" }}],
@@ -1287,12 +1592,17 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"OrganizationUser": contract_ref("organization-user")
                  ,"OrganizationUserPage": contract_ref("organization-user-page")
                  ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
+                 ,"AgentRunTaskProgress": contract_ref("agent-run-task-progress")
+                 ,"TaskAttemptProgress": contract_ref("task-attempt-progress")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
                 ,"LogoutBrowserSessionResponse": contract_ref("logout-browser-session-response")
                 ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
                 ,"EnvironmentWorkConfigurationTargetQuery": contract_ref("http/environment-work-configuration-target-query")
+                 ,"CreateFrozenModelInputAuthorizationRequest": contract_ref("http/create-frozen-model-input-authorization-request")
+                 ,"ModelInputAuthorizationResolveRequest": contract_ref("http/model-input-authorization-resolve-request")
+                 ,"ModelInputAuthorizationResolution": contract_ref("http/model-input-authorization-resolution")
                  ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
                  ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
                  ,"InternalAgentLlmReviewRequest": contract_ref("http/internal-agent-llm-review-request")
@@ -1316,6 +1626,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"AgentWorkExecutionIntentQuery": contract_ref("http/agent-work-execution-intent-query")
                 ,"EvaluationRelease": contract_ref("evaluation-release")
                 ,"EvaluationRun": contract_ref("evaluation-run")
+                ,"EvaluationRunTaskProgress": contract_ref("evaluation-run-task-progress")
                 ,"StudentEvaluationResult": contract_ref("student-evaluation-result")
                 ,"InternalPublishEvaluationReleaseRequest": contract_ref("http/internal-publish-evaluation-release-request")
                 ,"InternalWithdrawEvaluationReleaseRequest": contract_ref("http/internal-withdraw-evaluation-release-request")
@@ -1335,6 +1646,16 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
     });
+    if surface == ApiSurface::Public
+        && let Some(schemas) = value
+            .pointer_mut("/components/schemas")
+            .and_then(Value::as_object_mut)
+    {
+        schemas.remove("CreateFrozenModelInputAuthorizationRequest");
+        schemas.remove("ModelInputAuthorizationResolveRequest");
+        schemas.remove("ModelInputAuthorizationResolution");
+        schemas.remove("InternalCreateAgentRunRequest");
+    }
     let document: utoipa::openapi::OpenApi = serde_json::from_value(value)?;
     Ok(serde_json::to_value(document)?)
 }
@@ -1344,11 +1665,11 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
         ApiSurface::Public => {
             paths.insert(
                 "/auth/login".to_owned(),
-                json!({"get":{"operationId":"beginOidcLogin","summary":"Begin OIDC Authorization Code + PKCE login","security":[],"parameters":[{"name":"return_to","in":"query","required":false,"schema":{"type":"string"}}],"responses":{"302":{"description":"Redirect to the configured OIDC provider"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"beginOidcLogin","summary":"Begin OIDC Authorization Code + PKCE login","description":"Creates a short-lived single-use login transaction and a Secure, HttpOnly, host-only cookie unique to this transaction. Navigate in the browser; retain cookies for the callback.","security":[],"parameters":[{"name":"return_to","in":"query","required":false,"description":"Portal path beginning with one slash, including optional query and fragment. External URLs, network paths, backslashes and control characters are rejected. Omission uses the configured portal destination.","schema":{"type":"string","minLength":1,"maxLength":2048}}],"responses":{"307":{"description":"Redirect to the configured OIDC provider with the transaction cookie"},"400":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/auth/callback".to_owned(),
-                json!({"get":{"operationId":"completeOidcLogin","summary":"Complete the one-time OIDC callback","security":[],"parameters":[{"name":"code","in":"query","required":true,"schema":{"type":"string","minLength":1}},{"name":"state","in":"query","required":true,"schema":{"type":"string","minLength":1}}],"responses":{"302":{"description":"Session established and redirected to the allowlisted return URL"},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"completeOidcLogin","summary":"Complete the one-time OIDC callback","description":"Requires the initiating browser's transaction cookie. Wrong-browser requests cannot consume the transaction. Matching callbacks consume it once and clear only that cookie, including provider refusal or exchange failure. Responses are not cached.","security":[],"parameters":[{"name":"code","in":"query","required":false,"schema":{"type":"string","minLength":1}},{"name":"state","in":"query","required":true,"schema":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[A-Za-z0-9_-]{64}$"}},{"name":"error","in":"query","required":false,"description":"Provider refusal; replaces code and consumes only a browser-bound transaction.","schema":{"type":"string"}}],"responses":{"307":{"description":"Session established and redirected to the validated same-origin portal path"},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/auth/backchannel-logout".to_owned(),
@@ -1368,6 +1689,9 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
         }
         ApiSurface::GatewayInternal => {
+            paths.insert("/internal/v1/authoring/frozen-model-input-authorizations".to_owned(), json!({"post":{"operationId":"createFrozenModelInputAuthorization","security":internal_security("control.authoring.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateFrozenModelInputAuthorizationRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact frozen input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
+            paths.insert("/internal/v1/authoring/model-input-authorizations/resolve".to_owned(), json!({"post":{"operationId":"resolveFrozenModelInputAuthorization","security":internal_security("control.authoring.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolveRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact frozen input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
+            paths.insert("/internal/v1/model-input-authorizations/resolve".to_owned(),json!({"post":{"operationId":"resolveModelInputAuthorization","summary":"Recheck current session, object action and explicitly selected material versions","security":internal_security("control.agent_run.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolveRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
             paths.insert(
                 "/internal/v1/auth/decision".to_owned(),
                 json!({"post":{"operationId":"decideAuthorization","summary":"Evaluate an actor session and exact resource scope for a service JWT caller","security": internal_security("authorization:decide"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecisionRequest"}}}},"responses":{"200":{"description":"Expiry-bounded authorization decision","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecision"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
@@ -1600,12 +1924,21 @@ fn contract_ref(name: &str) -> Value {
 
 fn request_schema(operation_id: &str) -> Option<Value> {
     let name = match operation_id {
+        "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
+        "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
+        "acceptMembershipInvitation" => "http/accept-membership-invitation",
+        "revokeMembershipInvitation" | "removeCourseMembership" | "removeProjectMembership" => {
+            "http/remove-project-membership-request"
+        }
+        "updatePlatformConfiguration" => "http/update-platform-configuration-request",
+        "applyPlatformConfiguration" => "http/apply-platform-configuration-request",
+        "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
         "createProject" => "http/create-project-request",
         "updateProject" => "http/update-project-request",
         "addProjectMembership" => "http/add-project-membership-request",
-        "removeProjectMembership" => "http/remove-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
+        "maintainProjectRubricModelInputRule" => "http/maintain-rubric-model-input-rule-request",
         "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
         "createProjectAgentRun" => "http/create-agent-run-request",
         "cancelProjectCandidateBuild" => "http/cancel-candidate-build-request",
@@ -1626,6 +1959,14 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "resetEnvironment" => "http/reset-environment-request",
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
+        "createCreditAdminOperation" => "credit-admin-operation",
+        "createCreditHold" => "credit-hold-request",
+        "estimateProjectResourceCost" => "resource-cost-estimate-request",
+        "estimateProjectBuildCost" => "build-cost-estimate-request",
+        "admitBuildCost" => "build-cost-admission-request",
+        "observeBuildCost" => "observe-build-cost-request",
+        "createEstimatedCreditHold" => "estimated-credit-hold-request",
+        "resolveCreditHold" => "credit-hold-resolution-request",
         "createResourceRate" => "http/create-resource-rate-request",
         "endResourceRate" => "http/end-resource-rate-request",
         "upsertProjectResourceBudget" => "http/upsert-resource-budget-request",
@@ -1673,6 +2014,29 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "getResourceRuntimeAuthorization" => contract_ref("runtime-authorization-binding"),
+        "createProjectMembershipInvitation"
+        | "createCourseMembershipInvitation"
+        | "getMembershipInvitation"
+        | "acceptMembershipInvitation"
+        | "revokeMembershipInvitation" => contract_ref("membership-invitation"),
+        "listIncomingMembershipInvitations"
+        | "listProjectMembershipInvitations"
+        | "listCourseMembershipInvitations" => contract_ref("membership-invitation-page"),
+        "listCourseMemberships" => contract_ref("course-membership-page"),
+        "removeCourseMembership" => contract_ref("course-membership"),
+        "getProjectAvailableActions" => contract_ref("available-object-actions"),
+        "getPlatformConfiguration"
+        | "updatePlatformConfiguration"
+        | "applyPlatformConfiguration"
+        | "registerPlatformConfigurationBundle"
+        | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
+        "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
+        "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
+        "getLoadedPlatformConfiguration" => {
+            contract_ref("control-configuration-replica-observation")
+        }
+        "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")
         }
@@ -1686,6 +2050,12 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }),
         "listOrganizationUsers" => contract_ref("organization-user-page"),
         "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
+        "getProjectAgentTaskProgress" | "getInternalAgentTaskProgress" => {
+            contract_ref("agent-run-task-progress")
+        }
+        "getOwnProjectEvaluationTaskProgress" | "getOwnProjectEvaluationTaskForSubmission" => {
+            contract_ref("evaluation-run-task-progress")
+        }
         "addProjectMembership" | "removeProjectMembership" => contract_ref("project-membership"),
         "createProjectProblemPackageUpload" => contract_ref("http/problem-package-upload-session"),
         "getProjectProblemPackage" | "completeProjectProblemPackageUpload" => {
@@ -1697,6 +2067,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
         "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
+        "maintainProjectRubricModelInputRule" | "getProjectRubricModelInputRules" => {
+            contract_ref("http/project-rubric-model-input-rules")
+        }
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"
@@ -1763,6 +2136,23 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"array","items":contract_ref("resource-rate")})
         }
         "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
+        "listProjectCreditHolds" => contract_ref("credit-hold-page"),
+        "getProjectCredits" => contract_ref("credit-account"),
+        "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
+        "getEnvironmentCreditGrant" => contract_ref("environment-credit-grant"),
+        "claimBuildCostReconciliations" => {
+            json!({"type":"array","items":contract_ref("build-cost-reconciliation")})
+        }
+        "estimateProjectBuildCost" => contract_ref("build-cost-estimate"),
+        "getProjectBuildCost" | "getBuildCost" | "admitBuildCost" | "observeBuildCost" => {
+            contract_ref("build-cost-record")
+        }
+        "createEstimatedCreditHold" => contract_ref("estimated-credit-hold"),
+        "listProjectCreditLedger" => contract_ref("credit-ledger-page"),
+        "createCreditAdminOperation" => {
+            json!({"type":"array","items":contract_ref("credit-ledger-entry")})
+        }
+        "createCreditHold" | "resolveCreditHold" => contract_ref("credit-hold"),
         "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
             contract_ref("resource-budget")
         }

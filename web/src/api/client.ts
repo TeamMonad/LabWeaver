@@ -2,6 +2,7 @@ import axios, { AxiosError, type AxiosInstance } from 'axios'
 import { API_AUTH_MODE, API_BASE_URL } from '@/config'
 import { getOidcAccessToken } from '@/composables/useAuth'
 import type { ProblemDetails } from '@/generated/contracts'
+import type { Auth } from '@/generated/contracts/core/auth.gen'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 
@@ -158,6 +159,26 @@ function attachResponseInterceptor(instance: AxiosInstance): void {
   )
 }
 
+/**
+ * Shared auth resolver for generated REST/SSE.
+ * Only HTTP bearer schemes receive an OIDC token; cookie/apiKey schemes return
+ * undefined so setAuthParams does not invent a handwritten Cookie header.
+ */
+function resolveBearerAuth(
+  accessToken: AccessTokenProvider,
+): (auth: Auth) => Promise<string | undefined> {
+  return async (auth) => {
+    if (auth.type !== 'http' || auth.scheme !== 'bearer') {
+      return undefined
+    }
+    const token = await accessToken()
+    if (!token) {
+      throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+    }
+    return token
+  }
+}
+
 /** The only supported Public SDK initialization path for browser consumers. */
 export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Client {
   const timeout = options.timeoutMilliseconds ?? 30_000
@@ -176,11 +197,24 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
   attachAuthInterceptor(instance, options.authentication)
   attachResponseInterceptor(instance)
 
+  // Axios interceptors cover REST; generated SSE uses fetch via createSseClient
+  // and only picks up Authorization through the generated `auth` resolver.
+  // That resolver must reject like the Axios interceptor — returning undefined
+  // lets generated SSE issue an unauthenticated fetch.
+  const authentication = options.authentication
+  const auth =
+    authentication.mode === 'bearer'
+      ? resolveBearerAuth(authentication.accessToken)
+      : undefined
+
   return createClient({
     axios: instance,
     baseURL: baseUrl,
     timeout,
-  })
+    auth,
+    // BFF SSE (fetch) must send the session cookie; REST already uses axios withCredentials.
+    ...(authentication.mode === 'bff' ? { credentials: 'include' } : {}),
+  } as Parameters<typeof createClient>[0])
 }
 
 export const apiClient = createLabWeaverApiClient({
@@ -218,9 +252,7 @@ export async function initializeSdkClient(): Promise<void> {
     baseURL: '',
     auth:
       API_AUTH_MODE === 'bearer'
-        ? async () => {
-            return getOidcAccessToken()
-          }
+        ? resolveBearerAuth(getOidcAccessToken)
         : // BFF mode relies on the session cookie; same-origin fetch sends it.
           undefined,
   })

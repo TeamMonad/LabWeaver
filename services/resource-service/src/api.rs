@@ -34,9 +34,17 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::ApprovalPolicy;
+use crate::runtime_authorization::RuntimeBindingError;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 
+mod build_costing;
+mod costing;
+mod credits;
+mod environment_funding;
+
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
+mod environment_runtime_authorization;
+mod runtime_authorization;
 
 /// User identity extracted from an Access-signed resource delegation.
 ///
@@ -56,6 +64,7 @@ pub struct ResourceApiState {
     access_service_client_id: Option<String>,
     environment_service_client_id: Option<String>,
     task_service_client_ids: Option<BTreeSet<String>>,
+    build_service_client_id: Option<String>,
 }
 
 impl ResourceApiState {
@@ -67,7 +76,15 @@ impl ResourceApiState {
             access_service_client_id: None,
             environment_service_client_id: None,
             task_service_client_ids: None,
+            build_service_client_id: None,
         }
+    }
+
+    /// Restricts build funding and observations to the configured Agent client.
+    #[must_use]
+    pub fn with_build_service_client_id(mut self, client_id: Option<String>) -> Self {
+        self.build_service_client_id = client_id;
+        self
     }
 
     /// Installs the JWKS-backed verifier used only by internal service routes.
@@ -88,6 +105,7 @@ impl ResourceApiState {
     /// Restricts Environment-owned usage records to the configured Environment service account.
     #[must_use]
     pub fn with_environment_service_client_id(mut self, client_id: String) -> Self {
+        self.store = self.store.with_environment_credit_owner(client_id.clone());
         self.environment_service_client_id = Some(client_id);
         self
     }
@@ -107,6 +125,9 @@ impl ResourceApiState {
 )]
 pub fn resource_api_router(state: ResourceApiState) -> Router {
     let public = Router::new()
+        .merge(credits::public_routes())
+        .merge(costing::public_routes())
+        .merge(build_costing::public_routes())
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests", get(list_requests))
         .route(
@@ -118,6 +139,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             get(list_leases_for_project),
         )
         .route("/api/v1/resource-requests/{request_id}", get(get_request))
+        .route(
+            "/api/v1/resource-requests/{request_id}/runtime-authorization",
+            get(runtime_authorization::get_binding),
+        )
         .route(
             "/api/v1/resource-requests/{request_id}/approve",
             post(approve_request),
@@ -168,6 +193,13 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .layer(Extension(state.service_verifier.clone()))
         .layer(Extension(state.access_service_client_id.clone()));
     let internal = Router::new()
+        .merge(credits::internal_routes())
+        .merge(costing::internal_routes())
+        .merge(build_costing::internal_routes())
+        .route(
+            "/internal/v1/environment-credit-grants/{lease_id}",
+            get(environment_funding::record),
+        )
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
             "/internal/v1/task-resources/{task_run_id}/request",
@@ -194,6 +226,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             post(cancel_task_resource),
         )
         .route("/internal/v1/resource/usage", post(record_internal_usage))
+        .route(
+            "/internal/v1/environment-runtime-authorization",
+            post(environment_runtime_authorization::resolve),
+        )
         .route(
             "/internal/v1/environment-resource-reservations",
             post(resolve_environment_resource_reservation),
@@ -463,6 +499,18 @@ async fn approve_request(
     )
     .map_err(|_| ResourceApiError::Invalid)?;
     let approval = contracts::resource::ResourceApproval {
+        runtime_authorization: if matches!(
+            request.target,
+            contracts::resource::ResourceTarget::Environment { .. }
+        ) {
+            Some(
+                crate::runtime_authorization::resolve_binding(&state.store.pool(), &request)
+                    .await
+                    .map_err(ResourceStoreError::from)?,
+            )
+        } else {
+            None
+        },
         id: contracts::ResourceApprovalId::new(),
         request_id,
         request_revision: input.expected_revision,
@@ -749,6 +797,9 @@ async fn create_task_resource(
     Json(input): Json<InternalCreateTaskResourceRequest>,
 ) -> Result<Response, ResourceApiError> {
     let idempotency_key = required_header(&headers, "idempotency-key")?;
+    if !(1..=3_600_000).contains(&input.approval_timeout_milliseconds) {
+        return Err(ResourceApiError::Invalid);
+    }
     let now = state.store.current_time().await?;
     let request = ResourceRequest {
         id: ResourceRequestId::new(),
@@ -770,7 +821,12 @@ async fn create_task_resource(
     };
     let stored = state
         .store
-        .create(&idempotency_key, &request, context.trace_id())
+        .create_task(
+            &idempotency_key,
+            &request,
+            input.approval_timeout_milliseconds,
+            context.trace_id(),
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(stored)).into_response())
 }
@@ -837,7 +893,7 @@ async fn claim_task_resource(
 
 async fn acknowledge_task_resource(
     State(state): State<ResourceApiState>,
-    Extension(_identity): Extension<auth::ServiceIdentity>,
+    Extension(identity): Extension<auth::ServiceIdentity>,
     Extension(context): Extension<telemetry::RequestContext>,
     Path(task_run_id): Path<TaskRunId>,
     Json(input): Json<AcknowledgeTaskResourceRequest>,
@@ -845,11 +901,10 @@ async fn acknowledge_task_resource(
     Ok(Json(
         state
             .store
-            .acknowledge_task_resource(
+            .acknowledge_funded_task_resource(
                 task_run_id,
-                input.expected_claim_revision,
-                input.expected_lease_revision,
-                &input.execution_namespace,
+                &input,
+                &identity.client_id,
                 context.trace_id(),
             )
             .await?,
@@ -1358,10 +1413,30 @@ async fn internal_service_auth(
 }
 
 fn internal_route_permission(path: &str) -> Option<&'static str> {
+    if path.starts_with("/internal/v1/environment-credit-grants/") {
+        return Some("resource.environment.resolve");
+    }
+    if path == "/internal/v1/build-cost-admissions"
+        || path == "/internal/v1/build-cost-reconciliations"
+        || path.starts_with("/internal/v1/build-costs/")
+    {
+        return Some("resource.credits.hold");
+    }
+    if path == "/internal/v1/build-cost-observations" {
+        return Some("resource.usage.record");
+    }
+    if path == "/internal/v1/credits/holds" || path == "/internal/v1/credits/estimated-holds" {
+        return Some("resource.credits.hold");
+    }
+    if path.starts_with("/internal/v1/credits/holds/") && path.ends_with("/resolve") {
+        return Some("resource.credits.resolve");
+    }
     if path == "/internal/v1/resource/usage" {
         return Some("resource.usage.record");
     }
-    if path == "/internal/v1/environment-resource-reservations" {
+    if path == "/internal/v1/environment-resource-reservations"
+        || path == "/internal/v1/environment-runtime-authorization"
+    {
         return Some("resource.environment.resolve");
     }
     if path == "/internal/v1/environment-resource-reservations/release" {
@@ -1484,14 +1559,36 @@ pub enum ResourceApiError {
 }
 
 impl IntoResponse for ResourceApiError {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the combined runtime and financial diagnostics stay in the single existing HTTP mapping"
+    )]
     fn into_response(self) -> Response {
         let diagnostic_code = resource_diagnostic_code(&self.to_string());
         let status = match &self {
-            Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
-            Self::ServiceConfiguration => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Invalid | Self::Store(ResourceStoreError::RateEndInvalid) => {
-                StatusCode::BAD_REQUEST
+            Self::Store(ResourceStoreError::RuntimeBinding(error)) => {
+                runtime_authorization::status(error)
             }
+            Self::CallerDenied
+            | Self::IdentityInvalid
+            | Self::ScopeDenied
+            | Self::Store(ResourceStoreError::Credits(crate::credits::CreditError::Denied)) => {
+                StatusCode::FORBIDDEN
+            }
+            Self::ServiceConfiguration
+            | Self::Store(ResourceStoreError::Credits(
+                crate::credits::CreditError::Storage(_)
+                | crate::credits::CreditError::Persistence(_)
+                | crate::credits::CreditError::Wire(_),
+            )) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Invalid
+            | Self::Store(
+                ResourceStoreError::RateEndInvalid
+                | ResourceStoreError::Credits(
+                    crate::credits::CreditError::Invalid
+                    | crate::credits::CreditError::Precision(_),
+                ),
+            ) => StatusCode::BAD_REQUEST,
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
             Self::Store(
                 ResourceStoreError::NotFound
@@ -1503,12 +1600,24 @@ impl IntoResponse for ResourceApiError {
         };
         let retryable = matches!(
             self,
-            Self::Store(ResourceStoreError::Persistence(_) | ResourceStoreError::Database(_))
+            Self::Store(
+                ResourceStoreError::Persistence(_)
+                    | ResourceStoreError::Database(_)
+                    | ResourceStoreError::RuntimeBinding(RuntimeBindingError::Unavailable
+                        | RuntimeBindingError::Authorization(contracts::runtime_authorization::RuntimeAuthorizationError::PolicyNotVerified))
+                    | ResourceStoreError::Credits(
+                        crate::credits::CreditError::Storage(_)
+                            | crate::credits::CreditError::Persistence(_)
+                    )
+            )
         );
         let context = telemetry::current_request_context()
             .unwrap_or_else(telemetry::RequestContext::generate);
         let request_id = context.request_id().to_owned();
         let detail = match &self {
+            Self::Store(ResourceStoreError::RuntimeBinding(error)) => {
+                runtime_authorization::detail(error)
+            }
             Self::Store(ResourceStoreError::GpuCapacityExhausted) => {
                 "GPU 容量不足，请等待资源释放或回收已有环境后重试。"
             }

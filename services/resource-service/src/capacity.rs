@@ -12,8 +12,8 @@ use std::time::Duration;
 use auth::ServiceTokenClient;
 use contracts::UtcTimestamp;
 use contracts::environment::{
-    ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkCleanupStatus, ResourceWorkHandoff,
-    ResourceWorkLeaseUpdate,
+    ObservedEnvironmentState, ResourceEnvironmentHandoff, ResourceWorkCleanup,
+    ResourceWorkCleanupStatus, ResourceWorkLeaseUpdate,
 };
 use contracts::resource::{GpuAllocationMode, GpuCatalogEntry, ResourceLeaseState, ResourceTarget};
 use contracts::{GpuCatalogEntryId, Revision};
@@ -778,7 +778,7 @@ impl EnvironmentHandoffClient {
         else {
             return Err(CapacityProviderError::TaskOwnerRequired);
         };
-        let handoff = ResourceWorkHandoff {
+        let handoff = ResourceEnvironmentHandoff {
             version: 1,
             request_id: item.request.id,
             request_revision: item.request.revision,
@@ -1041,10 +1041,10 @@ impl CapacityReconcileWorker {
         }
         if item.lease.state == ResourceLeaseState::Allocating {
             let now = self.store.current_time().await?;
-            let duration = i64::try_from(item.request.requested_duration_seconds)
-                .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
-            let expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(duration))
-                .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
+            let expires_at = self
+                .store
+                .environment_approval_deadline(item.lease.id, now)
+                .await?;
             self.store
                 .activate_lease(
                     item.lease.id,

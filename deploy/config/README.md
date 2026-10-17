@@ -1,5 +1,21 @@
 # Deployment configuration bundle
 
+The portable application Bundle uses one `config/bundle.yaml` model and encrypts its
+complete directory with age. See [the encrypted Bundle procedure](../../docs/deployment/encrypted-bundle.md)
+for validation, file references, derived inputs, recovery and the current scope.
+The archive includes a Control managed version. Its settings import uses the existing
+conditional administrator update. The Bundle also supplies the complete workload
+environment map. Helm reads that map without filling values from the legacy environment.
+First installs can prepare an unsaved zero-revision request with `settings-init`.
+The optional Resource profile uses the same archive and version lock, while keeping
+its existing renderer, independent Helm release, and unchanged capacity inputs.
+Do not edit the derived ConfigMap/Secret, Helm values or Ansible vars.
+
+The layout below is the existing object renderer's input contract. The encrypted
+entrypoint reuses that renderer internally. Existing local development and credential
+issuance callers still use the primitive renderer until their deployment entrypoints
+adopt the portable Bundle.
+
 `platform-bundle-manifest.json` is the exact ConfigMap and Secret input contract for the
 application deployment. Prepare values only under an ignored private
 directory using this layout:
@@ -28,6 +44,15 @@ existing infrastructure component.
 
 The checked-in `*.example` files document non-secret runtime configuration fields. They are not a
 deployable bundle and must not contain credentials.
+
+For the bounded existing-namespace Container Work profile, see
+[Environment lifecycle](../../docs/contracts/environment-lifecycle-v1.md#既有-namespace-运行落点).
+`container-placement.json.example` contains synthetic identifiers. The Helm value
+`containerPlacementProfileConfigMap` references one operator-supplied ConfigMap containing
+`profile.json`; both Environment and the Container executor mount the same object. The current
+strict legacy bundle manifest does not accept this optional object. Include its transport in
+the deployment's reviewed configuration inputs; the platform Bundle integration remains owned
+by #203. Do not copy a live namespace, UID, project identifier or credential into this example.
 
 The Control upload lifetime is configured only by the reviewed
 `control-service-config/config.yaml` document in the bundle. Keep

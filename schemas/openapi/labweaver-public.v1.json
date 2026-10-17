@@ -19,6 +19,9 @@
       "AgentRunHistoryPage": {
         "$ref": "../contracts/v1/agent-run-history-page.schema.json"
       },
+      "AgentRunTaskProgress": {
+        "$ref": "../contracts/v1/agent-run-task-progress.schema.json"
+      },
       "AgentWorkExecutionIntentMetadata": {
         "$ref": "../contracts/v1/http/agent-work-execution-intent-metadata.schema.json"
       },
@@ -70,6 +73,9 @@
       "EvaluationRun": {
         "$ref": "../contracts/v1/evaluation-run.schema.json"
       },
+      "EvaluationRunTaskProgress": {
+        "$ref": "../contracts/v1/evaluation-run-task-progress.schema.json"
+      },
       "GeneratedArtifactRecord": {
         "$ref": "../contracts/v1/http/generated-artifact-record.schema.json"
       },
@@ -99,9 +105,6 @@
       },
       "InternalCompleteEvaluationStepRequest": {
         "$ref": "../contracts/v1/http/internal-complete-evaluation-step-request.schema.json"
-      },
-      "InternalCreateAgentRunRequest": {
-        "$ref": "../contracts/v1/http/internal-create-agent-run-request.schema.json"
       },
       "InternalCreateEvaluationRunRequest": {
         "$ref": "../contracts/v1/http/internal-create-evaluation-run-request.schema.json"
@@ -244,6 +247,9 @@
       },
       "StudentEvaluationResult": {
         "$ref": "../contracts/v1/student-evaluation-result.schema.json"
+      },
+      "TaskAttemptProgress": {
+        "$ref": "../contracts/v1/task-attempt-progress.schema.json"
       },
       "WorkConfigurationAdmissionBinding": {
         "$ref": "../contracts/v1/http/work-configuration-admission-binding.schema.json"
@@ -1810,6 +1816,878 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/admin/platform-configuration": {
+      "get": {
+        "description": "Permission: platform_configuration:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfiguration",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getPlatformConfiguration",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "platform_configuration:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "patch": {
+        "description": "Permission: platform_configuration:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "updatePlatformConfiguration",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/update-platform-configuration-request.schema.json"
+              }
+            },
+            "application/yaml": {
+              "schema": {
+                "$ref": "../contracts/v1/http/update-platform-configuration-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "updatePlatformConfiguration",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "platform_configuration:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/admin/platform-configuration/applies": {
+      "post": {
+        "description": "Permission: platform_configuration:apply. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "applyPlatformConfiguration",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/apply-platform-configuration-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "applyPlatformConfiguration",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "platform_configuration:apply",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/admin/platform-configuration/applies/{applyId}": {
+      "get": {
+        "description": "Permission: platform_configuration:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfigurationApply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "applyId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-apply.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getPlatformConfigurationApply",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "platform_configuration:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/admin/platform-configuration/versions/{revision}": {
+      "get": {
+        "description": "Permission: platform_configuration:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfigurationVersion",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-version.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getPlatformConfigurationVersion",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "platform_configuration:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/admin/platform-configuration/versions/{revision}/bundle": {
+      "get": {
+        "description": "Permission: platform_configuration:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfigurationBundle",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-bundle.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getPlatformConfigurationBundle",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "platform_configuration:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "post": {
+        "description": "Register received ciphertext and an administrator-declared binding to the current desired settings. Control computes the ciphertext digest but does not decrypt or approve deployment. Maximum upload: 73400320 bytes.",
+        "operationId": "registerPlatformConfigurationBundle",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expectedRevision",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "configurationSha256",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "413": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "415": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "registerPlatformConfigurationBundle",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "platform_configuration:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/auth/csrf": {
       "get": {
         "operationId": "issueCsrfToken",
@@ -2598,6 +3476,483 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/courses/{courseId}/member-invitations": {
+      "get": {
+        "description": "Permission: membership_invitation:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listCourseMembershipInvitations",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:read"
+            ]
+          }
+        ],
+        "summary": "listCourseMembershipInvitations",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "membership_invitation:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "post": {
+        "description": "Permission: membership_invitation:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "createCourseMembershipInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/create-course-membership-invitation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:write"
+            ]
+          }
+        ],
+        "summary": "createCourseMembershipInvitation",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "membership_invitation:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/courses/{courseId}/members": {
+      "get": {
+        "description": "Permission: course_membership:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listCourseMemberships",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-membership-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_membership:read"
+            ]
+          }
+        ],
+        "summary": "listCourseMemberships",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "course_membership:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/courses/{courseId}/members/{actorId}": {
+      "delete": {
+        "description": "Permission: course_membership:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "removeCourseMembership",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "actorId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/remove-project-membership-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-membership.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_membership:write"
+            ]
+          }
+        ],
+        "summary": "removeCourseMembership",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "course_membership:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/directory/users": {
       "get": {
         "description": "Permission: directory:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -2903,6 +4258,7 @@
           "LW_HTTP_INTERNAL"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "environment:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -3005,6 +4361,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "environment:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -5077,6 +6434,454 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/member-invitations": {
+      "get": {
+        "description": "Permission: membership_invitation:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listIncomingMembershipInvitations",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:read"
+            ]
+          }
+        ],
+        "summary": "listIncomingMembershipInvitations",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "membership_invitation:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/member-invitations/{invitationId}": {
+      "get": {
+        "description": "Permission: membership_invitation:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getMembershipInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invitationId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:read"
+            ]
+          }
+        ],
+        "summary": "getMembershipInvitation",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "membership_invitation:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/member-invitations/{invitationId}/accept": {
+      "post": {
+        "description": "Permission: membership_invitation:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "acceptMembershipInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invitationId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/accept-membership-invitation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:write"
+            ]
+          }
+        ],
+        "summary": "acceptMembershipInvitation",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "membership_invitation:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/member-invitations/{invitationId}/revoke": {
+      "post": {
+        "description": "Permission: membership_invitation:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "revokeMembershipInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invitationId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/remove-project-membership-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:write"
+            ]
+          }
+        ],
+        "summary": "revokeMembershipInvitation",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "membership_invitation:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/projects": {
       "get": {
         "description": "Permission: project:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -5358,6 +7163,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "project:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -5478,6 +7284,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "project:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -5594,6 +7401,7 @@
           "LW_AGENT_PERSISTENCE_FAILED"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "agent_run:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -5706,6 +7514,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "configure_agent",
         "x-labweaver-permission": "agent_run:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -5811,6 +7620,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "agent_run:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -5932,7 +7742,134 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "configure_agent",
         "x-labweaver-permission": "agent_run:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/agent-runs/{runId}/task-progress": {
+      "get": {
+        "description": "Permission: agent_run:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getProjectAgentTaskProgress",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/agent-run-task-progress.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "agent_run:read"
+            ]
+          }
+        ],
+        "summary": "getProjectAgentTaskProgress",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_TASK_PROGRESS_PAGE_INVALID",
+          "LW_TASK_PROGRESS_CHANGED",
+          "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+          "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "agent_run:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "project",
@@ -6062,6 +7999,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "configure_agent",
         "x-labweaver-permission": "agent_run:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -6193,6 +8131,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "configure_agent",
         "x-labweaver-permission": "agent_run:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -6298,6 +8237,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "agent_run:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -6410,6 +8350,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "project:archive",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -6523,6 +8464,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "authoring:approve",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
@@ -6627,9 +8569,324 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "authoring:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/available-actions": {
+      "get": {
+        "description": "Permission: project:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getProjectAvailableActions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/available-object-actions.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "project:read"
+            ]
+          }
+        ],
+        "summary": "getProjectAvailableActions",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
+        "x-labweaver-permission": "project:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/build-cost-estimate": {
+      "post": {
+        "description": "Permission: credits:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "estimateProjectBuildCost",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/build-cost-estimate-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/build-cost-estimate.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "estimateProjectBuildCost",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "credits:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/build-costs/{buildRequestId}/attempts/{attempt}": {
+      "get": {
+        "description": "Permission: credits:read. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getProjectBuildCost",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "buildRequestId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attempt",
+            "required": true,
+            "schema": {
+              "maximum": 2147483647,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/build-cost-record.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getProjectBuildCost",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "credits:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": false,
         "x-labweaver-scope": "project",
         "x-labweaver-timeout-ms": 30000
       }
@@ -6744,6 +9001,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "candidate:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -6887,6 +9145,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "configure_agent",
         "x-labweaver-permission": "candidate:approve",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
@@ -6982,6 +9241,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "view_costs",
         "x-labweaver-permission": "resource_charge:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -7127,6 +9387,330 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/projects/{projectId}/credits": {
+      "get": {
+        "description": "Permission: credits:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getProjectCredits",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/credit-account.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "getProjectCredits",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "credits:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/credits/holds": {
+      "get": {
+        "description": "Permission: credits:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listProjectCreditHolds",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/credit-hold-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "listProjectCreditHolds",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "credits:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/credits/ledger": {
+      "get": {
+        "description": "Permission: credits:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listProjectCreditLedger",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/credit-ledger-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "listProjectCreditLedger",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "credits:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/projects/{projectId}/environment-candidates/{candidateId}": {
       "get": {
         "description": "Permission: candidate:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -7225,6 +9809,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "candidate:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -7357,6 +9942,7 @@
           "LW_CANDIDATE_KIND_MISMATCH"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "candidate:approve",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
@@ -7503,6 +10089,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "release:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -7615,6 +10202,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "release:publish",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -7732,6 +10320,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "release:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -7863,6 +10452,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "release:withdraw",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
@@ -7968,6 +10558,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "candidate:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -8100,6 +10691,7 @@
           "LW_CANDIDATE_KIND_MISMATCH"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "candidate:approve",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
@@ -8214,6 +10806,7 @@
           "LW_HTTP_INTERNAL"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "events:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -8318,6 +10911,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "submission:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -8440,6 +11034,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "llm_policy:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -8536,7 +11131,222 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "llm_policy:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules": {
+      "get": {
+        "description": "Permission: llm_policy:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getProjectRubricModelInputRules",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/project-rubric-model-input-rules.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "llm_policy:read"
+            ]
+          }
+        ],
+        "summary": "getProjectRubricModelInputRules",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
+        "x-labweaver-permission": "llm_policy:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "post": {
+        "description": "Permission: llm_policy:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "maintainProjectRubricModelInputRule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/maintain-rubric-model-input-rule-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/project-rubric-model-input-rules.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "llm_policy:write"
+            ]
+          }
+        ],
+        "summary": "maintainProjectRubricModelInputRule",
+        "x-labweaver-allowed-roles": [
+          "teacher"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "edit",
+        "x-labweaver-permission": "llm_policy:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "project",
@@ -8632,6 +11442,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "llm_policy:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -8875,6 +11686,485 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/projects/{projectId}/me/evaluation-tasks/submissions/{submissionId}": {
+      "get": {
+        "description": "Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getOwnProjectEvaluationTaskForSubmission",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "submissionId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/evaluation-run-task-progress.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "evaluation_result:read_own"
+            ]
+          }
+        ],
+        "summary": "getOwnProjectEvaluationTaskForSubmission",
+        "x-labweaver-allowed-roles": [
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_TASK_PROGRESS_PAGE_INVALID",
+          "LW_TASK_PROGRESS_CHANGED",
+          "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+          "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "evaluation_result:read_own",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/me/evaluation-tasks/{runId}": {
+      "get": {
+        "description": "Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getOwnProjectEvaluationTaskProgress",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/evaluation-run-task-progress.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "evaluation_result:read_own"
+            ]
+          }
+        ],
+        "summary": "getOwnProjectEvaluationTaskProgress",
+        "x-labweaver-allowed-roles": [
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_TASK_PROGRESS_PAGE_INVALID",
+          "LW_TASK_PROGRESS_CHANGED",
+          "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+          "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "evaluation_result:read_own",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/member-invitations": {
+      "get": {
+        "description": "Permission: membership_invitation:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listProjectMembershipInvitations",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:read"
+            ]
+          }
+        ],
+        "summary": "listProjectMembershipInvitations",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "manage_members",
+        "x-labweaver-permission": "membership_invitation:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "post": {
+        "description": "Permission: membership_invitation:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "createProjectMembershipInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/create-project-membership-invitation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/membership-invitation.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "membership_invitation:write"
+            ]
+          }
+        ],
+        "summary": "createProjectMembershipInvitation",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "manage_members",
+        "x-labweaver-permission": "membership_invitation:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/projects/{projectId}/members": {
       "get": {
         "description": "Permission: project_membership:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -8967,6 +12257,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "project_membership:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9083,6 +12374,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "manage_members",
         "x-labweaver-permission": "project_membership:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9214,6 +12506,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "manage_members",
         "x-labweaver-permission": "project_membership:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9328,6 +12621,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "problem_package:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9459,6 +12753,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "problem_package:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9564,6 +12859,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "problem_package:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9656,6 +12952,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "view_costs",
         "x-labweaver-permission": "resource_budget:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9783,7 +13080,112 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "manage_members",
         "x-labweaver-permission": "resource_budget:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/resource-cost-estimate": {
+      "post": {
+        "description": "Permission: credits:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "estimateProjectResourceCost",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/resource-cost-estimate-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-cost-estimate.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "estimateProjectResourceCost",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "credits:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "project",
@@ -9889,6 +13291,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "resource_lease:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -9995,6 +13398,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "resource_request:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -10123,6 +13527,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "resource_request:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -10236,6 +13641,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "view_costs",
         "x-labweaver-permission": "resource_charge:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -10350,6 +13756,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "configure_agent",
         "x-labweaver-permission": "agent_run:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -10667,6 +14074,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "start",
         "x-labweaver-permission": "resource_lease:renew",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -11009,6 +14417,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-object-action": "edit",
         "x-labweaver-permission": "resource_request:write",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -11378,6 +14787,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-object-action": "stop",
         "x-labweaver-permission": "resource_request:cancel",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
@@ -11793,6 +15203,226 @@
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/resource-requests/{requestId}/runtime-authorization": {
+      "get": {
+        "description": "Permission: runtime_authorization:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getResourceRuntimeAuthorization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "requestId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/runtime-authorization-binding.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "runtime_authorization:read"
+            ]
+          }
+        ],
+        "summary": "getResourceRuntimeAuthorization",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "browse",
+        "x-labweaver-permission": "runtime_authorization:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/resource/credits/operations": {
+      "post": {
+        "description": "Permission: credits:admin. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "createCreditAdminOperation",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "maxLength": 43,
+              "minLength": 43,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/credit-admin-operation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "../contracts/v1/credit-ledger-entry.schema.json"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "bffSession": []
+          }
+        ],
+        "summary": "createCreditAdminOperation",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "credits:admin",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -12367,12 +15997,13 @@
     },
     "/auth/callback": {
       "get": {
+        "description": "Requires the initiating browser's transaction cookie. Wrong-browser requests cannot consume the transaction. Matching callbacks consume it once and clear only that cookie, including provider refusal or exchange failure. Responses are not cached.",
         "operationId": "completeOidcLogin",
         "parameters": [
           {
             "in": "query",
             "name": "code",
-            "required": true,
+            "required": false,
             "schema": {
               "minLength": 1,
               "type": "string"
@@ -12383,14 +16014,25 @@
             "name": "state",
             "required": true,
             "schema": {
-              "minLength": 1,
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[A-Za-z0-9_-]{64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Provider refusal; replaces code and consumes only a browser-bound transaction.",
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
               "type": "string"
             }
           }
         ],
         "responses": {
-          "302": {
-            "description": "Session established and redirected to the allowlisted return URL"
+          "307": {
+            "description": "Session established and redirected to the validated same-origin portal path"
           },
           "401": {
             "$ref": "#/components/responses/Problem"
@@ -12405,20 +16047,27 @@
     },
     "/auth/login": {
       "get": {
+        "description": "Creates a short-lived single-use login transaction and a Secure, HttpOnly, host-only cookie unique to this transaction. Navigate in the browser; retain cookies for the callback.",
         "operationId": "beginOidcLogin",
         "parameters": [
           {
+            "description": "Portal path beginning with one slash, including optional query and fragment. External URLs, network paths, backslashes and control characters are rejected. Omission uses the configured portal destination.",
             "in": "query",
             "name": "return_to",
             "required": false,
             "schema": {
+              "maxLength": 2048,
+              "minLength": 1,
               "type": "string"
             }
           }
         ],
         "responses": {
-          "302": {
-            "description": "Redirect to the configured OIDC provider"
+          "307": {
+            "description": "Redirect to the configured OIDC provider with the transaction cookie"
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
           },
           "503": {
             "$ref": "#/components/responses/Problem"

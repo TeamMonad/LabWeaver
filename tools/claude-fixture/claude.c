@@ -70,7 +70,7 @@ static void emit_environment(int work) {
                  "\"network\":{\"mode\":\"deny_all\"},"
                  "\"entries\":[{\"name\":\"http\",\"protocol\":\"http\","
                  "\"servicePort\":8080}],"
-                 "\"security\":{\"userPolicy\":\"non_root_required\","
+                 "\"security\":{\"runAsUser\":65534,"
                  "\"rootFilesystemPolicy\":\"read_only_required\","
                  "\"privilegeEscalationPolicy\":\"deny\","
                  "\"publicExposurePolicy\":\"deny\","

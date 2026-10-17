@@ -84,6 +84,8 @@ pub struct EnvironmentCreateSpec {
     pub release_id: ReleaseId,
     pub release_version: u64,
     pub provider_binding: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<EnvironmentRuntimeAuthorizationResolution>,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
     /// Resources approved by the immutable ReleaseProjection or Work lease.
@@ -400,11 +402,97 @@ pub struct EnvironmentLeaseVerificationResponse {
     pub authorization: Option<EnvironmentLeaseAuthorization>,
 }
 
-/// Resource-to-Environment command to create one Work aggregate from an already-approved
-/// Lease and capacity shell. Environment resolves the release projection locally.
+/// Existing ResourceApproval resolution consumed by Environment before creating or replacing compute.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ResourceWorkHandoff {
+pub struct ResolveEnvironmentRuntimeAuthorizationRequest {
+    pub expected_lease_id: Option<LeaseId>,
+    pub resource_request_id: ResourceRequestId,
+    pub environment_id: Option<EnvironmentId>,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub owner_actor_id: ActorId,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+}
+
+/// A transport receipt of the original approval and its verified platform execution values.
+/// This is not a second grant, approval lifecycle, or client-supplied permission source.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentRuntimeAuthorizationResolution {
+    pub provider_binding: String,
+    pub valid_until: UtcTimestamp,
+    pub lease_authorization: EnvironmentLeaseAuthorization,
+    pub authorization: crate::runtime_authorization::RuntimeAuthorizationBinding,
+    pub owner_actor_id: ActorId,
+    pub default_container_uid: u32,
+    pub privileged_execution_location:
+        Option<crate::platform_configuration::PrivilegedExecutionLocation>,
+}
+
+impl EnvironmentRuntimeAuthorizationResolution {
+    /// The expected digest is computed from Environment's server-owned immutable release, never supplied by the user.
+    pub fn validate_for(
+        &self,
+        request: &ResolveEnvironmentRuntimeAuthorizationRequest,
+        spec: &crate::authoring::EnvironmentSpec,
+        expected_configuration_sha256: &str,
+    ) -> Result<EnvironmentId, EnvironmentError> {
+        let crate::resource::ResourceTarget::Environment {
+            environment_id,
+            release_id,
+            release_version,
+        } = self.authorization.target
+        else {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        };
+        self.lease_authorization.validate()?;
+        let scope_matches = match self.authorization.permissions.scope {
+            crate::platform_configuration::RuntimePreauthorizationScope::Project { project_id } => {
+                project_id == request.project_id
+            }
+            crate::platform_configuration::RuntimePreauthorizationScope::Course { course_id } => {
+                Some(course_id) == request.course_id
+                    && spec.class == crate::authoring::EnvironmentClass::Experiment
+            }
+        };
+        if !scope_matches
+            || self.authorization.configuration.course_id != request.course_id
+            || self.lease_authorization.resource_request_id != request.resource_request_id
+            || self.lease_authorization.environment_id != environment_id
+            || self.lease_authorization.project_id != request.project_id
+            || self.lease_authorization.course_id != request.course_id
+            || self.lease_authorization.owner_actor_id != request.owner_actor_id
+            || request
+                .expected_lease_id
+                .is_some_and(|id| id != self.lease_authorization.lease_id)
+            || self.authorization.request_id != request.resource_request_id
+            || self.authorization.project_id != request.project_id
+            || self.authorization.course_id != request.course_id
+            || self.owner_actor_id != request.owner_actor_id
+            || self.authorization.configuration.configuration_sha256
+                != expected_configuration_sha256
+            || request
+                .environment_id
+                .is_some_and(|expected| expected != environment_id)
+            || release_id != request.release_id
+            || release_version != request.release_version
+            || self.authorization.permissions.capabilities != spec.security.capabilities
+            || self.authorization.permissions.privileged != spec.security.privileged
+            || (spec.security.privileged && self.privileged_execution_location.is_none())
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(environment_id)
+    }
+}
+
+/// Resource-to-Environment handoff for the original lease and capacity shell.
+/// The receiving owner resolves Work/Experiment from its immutable release projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceEnvironmentHandoff {
     pub version: u8,
     pub request_id: ResourceRequestId,
     pub request_revision: Revision,
@@ -428,7 +516,31 @@ pub struct ResourceWorkHandoff {
     pub trace_id: String,
 }
 
-impl ResourceWorkHandoff {
+/// Existing Work consumers use the same concrete handoff while #207 updates its dispatch.
+pub type ResourceWorkHandoff = ResourceEnvironmentHandoff;
+
+impl ResourceEnvironmentHandoff {
+    /// Returns the server-owned purpose of the exact immutable release, never a caller-selected class.
+    pub fn class_for_release(
+        &self,
+        projection: &crate::events::ReleasePublished,
+    ) -> Result<crate::authoring::EnvironmentClass, EnvironmentError> {
+        self.validate()?;
+        projection
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        if projection.release.id != self.release_id
+            || projection.release.version != self.release_version
+            || (projection.release.project_id != self.project_id
+                && (projection.environment_spec.class == EnvironmentClass::Work
+                    || self.course_id.is_none()))
+            || projection.release.course_id != self.course_id
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(projection.environment_spec.class)
+    }
+
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.version != 1
             || self.request_revision.get() == 0
@@ -1134,6 +1246,9 @@ pub struct EnvironmentInstance {
     pub capacity_binding: Option<String>,
     pub approved_resources: WorkloadResources,
     pub provider_binding: String,
+    /// Receipt of the original ResourceApproval; the source is re-read before new compute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<EnvironmentRuntimeAuthorizationResolution>,
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
     pub revision: Revision,
@@ -1162,6 +1277,12 @@ pub struct EnvironmentInstance {
 }
 
 impl EnvironmentInstance {
+    /// Funding is bound to the original Resource lease, independently of Work/Experiment class.
+    #[must_use]
+    pub const fn has_resource_lease(&self) -> bool {
+        self.lease_id.is_some()
+    }
+
     /// Validates aggregate invariants without consulting provider state.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.display_label.trim().is_empty()
@@ -1207,7 +1328,7 @@ impl EnvironmentInstance {
         }
         match self.class {
             EnvironmentClass::Experiment
-                if self.lease_id.is_some() || self.capacity_binding.is_some() =>
+                if self.lease_id.is_none() && self.capacity_binding.is_some() =>
             {
                 return Err(EnvironmentError::InvalidAggregate);
             }
@@ -1223,6 +1344,13 @@ impl EnvironmentInstance {
                 return Err(EnvironmentError::LeaseRequired);
             }
             _ => {}
+        }
+        if self.has_resource_lease()
+            && (self.operation.lease_authorization.is_none()
+                || self.gpu_allocation.is_some()
+                || self.resource_reservation_released)
+        {
+            return Err(EnvironmentError::LeaseAuthorizationRequired);
         }
         if self.resource_reservation_released
             && (self.class != EnvironmentClass::Experiment
@@ -1255,7 +1383,7 @@ impl EnvironmentInstance {
             validate_reset_target(self, target)?;
         }
         if let Some(authorization) = &self.operation.lease_authorization
-            && (self.class != EnvironmentClass::Work
+            && (self.lease_id.is_none()
                 || Some(authorization.lease_id) != self.lease_id
                 || authorization.environment_id != self.id
                 || authorization.project_id != self.project_id
@@ -1724,7 +1852,7 @@ pub enum EnvironmentAccessSubjectKind {
 
 /// Environment-authoritative endpoint facts safe for Access Service.
 ///
-/// Host, port, credential, provider and network-policy data are deliberately absent.
+/// Credentials, provider and network-policy data are deliberately absent.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentEndpointEligibility {
@@ -1741,6 +1869,58 @@ pub struct EnvironmentEndpointEligibility {
     pub eligibility_expires_at: Option<UtcTimestamp>,
     pub lease_fence: Option<ConsoleLeaseFence>,
     pub endpoints: Vec<EnvironmentEndpoint>,
+    pub runtime_target: Option<ContainerServiceTarget>,
+}
+
+/// Internal, credential-free Container Service locator supplied by Environment.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerServiceTarget {
+    pub namespace: String,
+    pub service_name: String,
+}
+
+impl ContainerServiceTarget {
+    #[must_use]
+    pub fn valid_for(&self, environment_id: EnvironmentId) -> bool {
+        let names_valid = [&self.namespace, &self.service_name].iter().all(|s| {
+            !s.is_empty()
+                && s.len() <= 63
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && s.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+        });
+        names_valid
+            && (self.service_name == format!("lw-{environment_id}-runtime")
+                || (self.service_name == "runtime"
+                    && self.namespace == format!("lw-env-{environment_id}")))
+    }
+}
+
+#[cfg(test)]
+mod container_service_target_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_service_target_rejects_cross_environment_and_url_injection() {
+        let id = EnvironmentId::new();
+        let mut target = ContainerServiceTarget {
+            namespace: "synthetic-work-tests".to_owned(),
+            service_name: format!("lw-{id}-runtime"),
+        };
+        assert!(target.valid_for(id));
+        assert!(!target.valid_for(EnvironmentId::new()));
+        target.namespace = "attacker.example/path".to_owned();
+        assert!(!target.valid_for(id));
+        target.namespace = format!("lw-env-{id}");
+        target.service_name = "runtime".to_owned();
+        assert!(target.valid_for(id));
+        target.namespace = "default".to_owned();
+        assert!(!target.valid_for(id));
+        target.service_name = "kubernetes".to_owned();
+        assert!(!target.valid_for(id));
+    }
 }
 
 impl EnvironmentEndpointEligibility {
@@ -1759,7 +1939,11 @@ impl EnvironmentEndpointEligibility {
             .iter()
             .map(|endpoint| endpoint.id)
             .collect::<BTreeSet<_>>();
-        if request.endpoint_ids.is_empty()
+        if self
+            .runtime_target
+            .as_ref()
+            .is_some_and(|target| !target.valid_for(request.environment_id))
+            || request.endpoint_ids.is_empty()
             || requested.len() != request.endpoint_ids.len()
             || self.environment_id != request.environment_id
             || self.project_id != request.project_id

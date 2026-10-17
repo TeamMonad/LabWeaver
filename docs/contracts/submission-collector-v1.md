@@ -43,7 +43,7 @@ entry outside the capability fail closed.
 
 ## SSH source
 
-The binding requires a private address, port 22, locked non-root guest user,
+The binding requires a private address, port 22, password-locked guest account resolved from the approved runtime UID,
 normalized absolute workspace root, pinned host-key blob SHA-256 and absolute
 paths to an ephemeral private key and OpenSSH user certificate. At connection
 time the certificate must:

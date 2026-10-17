@@ -7,7 +7,7 @@
 - name: Load the locked gVisor and containerd releases
   ansible.builtin.set_fact:
     sandbox_runtime_lock: >-
-      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml')
+      {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml'))
          | from_yaml }}
 
 - name: Require the sandbox runtime inputs

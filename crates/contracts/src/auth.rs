@@ -18,7 +18,7 @@ pub enum PlatformRole {
     Teacher,
     /// Course student with an active course membership.
     Student,
-    /// Platform operator; course scope is still required for course data.
+    /// Global operator when an operation explicitly permits administrator access.
     PlatformAdmin,
 }
 
@@ -89,7 +89,7 @@ pub struct LogoutBrowserSessionResponse {
     pub logout_url: String,
 }
 
-/// Authoritative membership state owned by Access Service.
+/// Authoritative membership state owned by Control Service.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MembershipState {
@@ -111,6 +111,9 @@ pub struct CourseMembership {
     pub actor_id: ActorId,
     /// Role permitted by this course.
     pub role: PlatformRole,
+    /// Control-owned course responsibility, independent of platform identity.
+    #[serde(default)]
+    pub object_role: crate::membership_governance::CourseObjectRole,
     /// Current lifecycle state.
     pub state: MembershipState,
     /// Monotonic authorization revision.
@@ -138,6 +141,9 @@ pub struct ProjectMembership {
     pub display_name: Option<String>,
     /// Role permitted by this project.
     pub role: PlatformRole,
+    /// Project action responsibilities, independent of the verified platform role.
+    #[serde(default)]
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     /// Current lifecycle state.
     pub state: MembershipState,
     /// Monotonic authorization revision.

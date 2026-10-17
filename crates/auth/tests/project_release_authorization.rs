@@ -34,6 +34,7 @@ fn private_work_release_operations_authorize_student_and_platform_admin_owners()
             actor,
             course_memberships: Vec::new(),
             project_memberships: vec![ProjectMembership {
+                object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
                 course_id: None,
                 project_id,
                 actor_id,

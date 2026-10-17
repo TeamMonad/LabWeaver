@@ -91,7 +91,7 @@ const spec = {
     publicExposurePolicy: 'deny',
     rootFilesystemPolicy: 'read_only',
     securityProfileBinding: 'default',
-    userPolicy: 'non_root',
+    runAsUser: 65534,
   },
 }
 
@@ -374,6 +374,17 @@ describe('WorkTemplateAuthoringView', () => {
     expect((releaseButton.element as HTMLButtonElement).disabled).toBe(true)
     await wrapper.get('[data-testid="work-template-candidate-confirmation"]').setValue(true)
     expect((releaseButton.element as HTMLButtonElement).disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows readable runtime permissions before the raw spec', async () => {
+    const wrapper = await mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="runtime-permissions"]').exists()).toBe(true))
+    const candidate = wrapper.get('[data-testid="work-template-candidate"]')
+    expect(candidate.get('[data-testid="runtime-permissions"]').text()).toContain('运行身份与文件系统')
+    expect(candidate.get('[data-testid="runtime-permissions"]').text()).toContain('特权模式')
+    expect(candidate.get('[data-testid="permission-gap"]').text()).toContain('管理员策略允许的能力上限')
+    expect(candidate.get('details.candidate-details').attributes('open')).toBeUndefined()
     wrapper.unmount()
   })
 

@@ -6,9 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::authoring::{
-    EnvironmentRuntimeSpec, NetworkPolicySpec, RootFilesystemPolicy, RuntimeKind,
-};
+use contracts::authoring::{EnvironmentRuntimeSpec, NetworkPolicySpec, RuntimeKind};
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
@@ -67,9 +65,23 @@ pub struct ContainerResourcePlan {
     pub environment_id: contracts::EnvironmentId,
     pub project_id: contracts::ProjectId,
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_uid: Option<uuid::Uuid>,
     pub image: String,
     pub resources: Vec<ContainerResource>,
     pub plan_sha256: Sha256Digest,
+}
+
+impl ContainerResourcePlan {
+    #[must_use]
+    pub fn placement(&self) -> crate::ContainerPlacement {
+        crate::ContainerPlacement {
+            environment_id: self.environment_id,
+            project_id: self.project_id,
+            namespace: self.namespace.clone(),
+            namespace_uid: self.namespace_uid,
+        }
+    }
 }
 
 /// Sanitized backend observation; raw Kubernetes objects are never persisted.
@@ -101,6 +113,23 @@ impl ContainerBackendFence {
         instance: &EnvironmentInstance,
         action: ReconcileAction,
     ) -> Result<Self, ProviderFailure> {
+        let deadline_at = if matches!(
+            action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            instance.operation.deadline_at.min(
+                instance
+                    .runtime_authorization
+                    .as_ref()
+                    .ok_or_else(invalid_observation)?
+                    .valid_until,
+            )
+        } else {
+            instance.operation.deadline_at
+        };
         let request_id = Sha256Digest::of_canonical(&serde_json::json!({
             "protocolVersion": CONTAINER_BACKEND_PROTOCOL_VERSION,
             "environmentId": instance.id,
@@ -121,7 +150,7 @@ impl ContainerBackendFence {
             action,
             request_id,
             trace_id: instance.operation.trace_id.clone(),
-            deadline_at: instance.operation.deadline_at,
+            deadline_at,
         })
     }
 }
@@ -493,12 +522,22 @@ pub trait ContainerExecutorBackend: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct PgContainerExecutorFenceStore {
     pool: PgPool,
+    namespace_profile: crate::ContainerNamespaceProfile,
 }
 
 impl PgContainerExecutorFenceStore {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
+        }
+    }
+
+    #[must_use]
+    pub fn with_namespace_profile(mut self, profile: crate::ContainerNamespaceProfile) -> Self {
+        self.namespace_profile = profile;
+        self
     }
 
     #[allow(
@@ -508,10 +547,55 @@ impl PgContainerExecutorFenceStore {
     async fn admit(
         &self,
         envelope: &ContainerExecutorRequestEnvelope,
+        runtime_gate: Result<(), crate::RuntimeAdmissionError>,
     ) -> Result<ContainerExecutorAdmission, ContainerExecutorFenceError> {
         validate_container_executor_request(envelope)?;
         let fence = envelope.fence.clone();
         let mut transaction = self.pool.begin().await?;
+        let plan = container_executor_plan(&envelope.request);
+        if self
+            .namespace_profile
+            .for_identity(plan.environment_id, plan.project_id)
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?
+            != plan.placement()
+        {
+            return Err(ContainerExecutorFenceError::IdentityMismatch);
+        }
+        let new_placement = plan
+            .placement()
+            .pin(&mut transaction)
+            .await
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+        if plan.namespace_uid.is_some() {
+            if new_placement && sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM environment.container_executor_fences WHERE environment_id=$1)").bind(plan.environment_id.as_uuid()).fetch_one(&mut *transaction).await? {
+                return Err(ContainerExecutorFenceError::IdentityMismatch);
+            }
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM environment.environment_instances WHERE environment_id=$1 AND project_id=$2 AND contract->>'runtimeKind'='container' AND contract->>'class'='work')",
+            ).bind(plan.environment_id.as_uuid()).bind(plan.project_id.as_uuid()).fetch_one(&mut *transaction).await?;
+            if !valid {
+                return Err(ContainerExecutorFenceError::IdentityMismatch);
+            }
+        }
+        if (matches!(&envelope.request, ContainerExecutorRequest::Apply { .. })
+            || matches!(&envelope.request,ContainerExecutorRequest::Scale {replicas,..} if *replicas > 0))
+            && plan.resources.iter().any(|r| r.kind == "Deployment")
+        {
+            let row=sqlx::query("SELECT i.contract AS instance,p.contract AS projection FROM environment.environment_instances i JOIN environment.release_projections p ON p.release_id=i.release_id WHERE i.environment_id=$1")
+                .bind(plan.environment_id.as_uuid()).fetch_optional(&mut *transaction).await?.ok_or(ContainerExecutorFenceError::IdentityMismatch)?;
+            let instance: EnvironmentInstance = serde_json::from_value(row.try_get("instance")?)
+                .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            let projection: ReleasePublished =
+                serde_json::from_value(row.try_get("projection")?)
+                    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+            crate::runtime_admission::validate_container_runtime_plan(
+                &instance,
+                &projection,
+                plan,
+                fence.operation_generation,
+            )
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+        }
         let authority_now: time::OffsetDateTime =
             sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
                 .fetch_one(&mut *transaction)
@@ -581,6 +665,7 @@ impl PgContainerExecutorFenceStore {
             {
                 return Err(ContainerExecutorFenceError::IdentityMismatch);
             }
+            runtime_gate?;
             sqlx::query(
                 "UPDATE environment.container_executor_fences SET highest_generation=$2, \
                      operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
@@ -599,6 +684,7 @@ impl PgContainerExecutorFenceStore {
             .execute(&mut *transaction)
             .await?;
         } else {
+            runtime_gate?;
             sqlx::query(
                 "INSERT INTO environment.container_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
@@ -668,19 +754,57 @@ enum ContainerExecutorAdmission {
 pub struct FencedContainerExecutor<B> {
     store: PgContainerExecutorFenceStore,
     backend: B,
+    runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
 }
 
 impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
     #[must_use]
     pub const fn new(store: PgContainerExecutorFenceStore, backend: B) -> Self {
-        Self { store, backend }
+        Self {
+            store,
+            backend,
+            runtime_admission: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
+        self.runtime_admission = Some(admission);
+        self
     }
 
     pub async fn execute(
         &self,
         envelope: ContainerExecutorRequestEnvelope,
     ) -> Result<ContainerExecutorResponseEnvelope, ContainerExecutorFenceError> {
-        let response = match self.store.admit(&envelope).await? {
+        validate_container_executor_request(&envelope)?;
+        let runtime_gate = if match &envelope.request {
+            ContainerExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+            ContainerExecutorRequest::Scale { replicas, .. } => *replicas > 0,
+            ContainerExecutorRequest::Restart { .. } => true,
+            ContainerExecutorRequest::Observe { .. }
+            | ContainerExecutorRequest::DeleteNamespace { .. } => false,
+        } && matches!(
+            envelope.fence.action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+        ) {
+            crate::runtime_admission::executor_authorization(
+                self.runtime_admission.as_ref(),
+                self.store.pool.clone(),
+                envelope.fence.environment_id,
+                Some(container_executor_plan(&envelope.request).project_id),
+                envelope.fence.operation_id,
+                envelope.fence.operation_generation,
+                envelope.fence.deadline_at,
+            )
+            .await
+        } else {
+            Ok(())
+        };
+        let response = match self.store.admit(&envelope, runtime_gate).await? {
             ContainerExecutorAdmission::Execute(remaining) => {
                 let response = tokio::time::timeout(
                     remaining,
@@ -818,6 +942,10 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
 
 const fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFailure {
     match error {
+        ContainerExecutorFenceError::RuntimeAdmission(error) => ProviderFailure {
+            code: ProviderFailureCode::Rejected,
+            retryable: error.retryable(),
+        },
         ContainerExecutorFenceError::InProgress
         | ContainerExecutorFenceError::Database(_)
         | ContainerExecutorFenceError::Transport => ProviderFailure {
@@ -905,6 +1033,8 @@ const fn reconcile_action_name(action: ReconcileAction) -> &'static str {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContainerExecutorFenceError {
+    #[error(transparent)]
+    RuntimeAdmission(#[from] crate::RuntimeAdmissionError),
     #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_CONFIGURATION_INVALID")]
     ConfigurationInvalid,
     #[error("LW_ENVIRONMENT_CONTAINER_EXECUTOR_IDENTITY_MISMATCH")]
@@ -1278,6 +1408,7 @@ pub struct ContainerProvider<B, R> {
     image_pull_secret_name: String,
     workspace_storage_class_name: String,
     workspace_access_mode: ContainerWorkspaceAccessMode,
+    namespace_profile: crate::ContainerNamespaceProfile,
 }
 
 impl<B, R> ContainerProvider<B, R>
@@ -1305,7 +1436,19 @@ where
             image_pull_secret_name: configuration.image_pull_secret_name,
             workspace_storage_class_name: configuration.workspace_storage_class_name,
             workspace_access_mode: configuration.workspace_access_mode,
+            namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
         })
+    }
+
+    pub fn with_namespace_profile(
+        mut self,
+        profile: crate::ContainerNamespaceProfile,
+    ) -> Result<Self, ReleaseProjectionError> {
+        profile
+            .validate()
+            .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
+        self.namespace_profile = profile;
+        Ok(self)
     }
 
     #[allow(
@@ -1326,7 +1469,8 @@ where
         if instance.runtime_kind != RuntimeKind::Container
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
-            || instance.project_id != projection.release.project_id
+            || (instance.class == contracts::authoring::EnvironmentClass::Work
+                && instance.project_id != projection.release.project_id)
             || instance.course_id != projection.release.course_id
             || instance.provider_binding != self.binding
             || container_provider_binding(projection)? != self.binding
@@ -1355,8 +1499,17 @@ where
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
         let image = format!("{repository}@{digest}");
-        let namespace = format!("lw-env-{}", instance.id);
-        let app_name = "runtime";
+        let placement = self
+            .namespace_profile
+            .for_instance(instance)
+            .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
+        if placement.namespace_uid.is_some()
+            && projection.environment_spec.network != NetworkPolicySpec::DenyAll
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        let namespace = placement.namespace.clone();
+        let app_name = placement.resource_name("runtime");
         let mut labels = json!({
             "app.kubernetes.io/name": "labweaver-environment",
             "labweaver.io/environment-id": instance.id.to_string(),
@@ -1381,11 +1534,9 @@ where
         }) {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
-        if projection.environment_spec.security.root_filesystem_policy
-            != RootFilesystemPolicy::ReadOnlyRequired
-        {
-            return Err(ReleaseProjectionError::SecurityPostureInvalid);
-        }
+        let uid = crate::runtime_admission::authorized_uid(instance, projection)?;
+        let security_context =
+            crate::runtime_admission::container_security_context(instance, projection)?;
         let cpu = format!("{cpu_millicores}m");
         let memory = memory_bytes.to_string();
         let quota_request_cpu = cpu_millicores
@@ -1540,7 +1691,7 @@ where
             resource(
                 "Deployment",
                 Some(&namespace),
-                app_name,
+                &app_name,
                 json!({
                     "apiVersion":"apps/v1","kind":"Deployment",
                     "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
@@ -1552,26 +1703,25 @@ where
                             "metadata":{"labels":pod_labels},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
-                                // The shared NFS PVC is provisioned with the `nobody` owner.
-                                // Pinning the runtime identity to that non-root UID keeps the
-                                // student workspace writable. The fixed init command copies the
+                                // The approved identity is shared by the runtime and workspace seed.
+                                // The fixed init command copies the
                                 // approved image's seed exactly once and preserves an existing
                                 // workspace across stop/start and pod replacement.
-                                "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
+                                "securityContext":{"runAsNonRoot":uid!=0,"runAsUser":uid,"runAsGroup":uid,"fsGroup":uid,"seccompProfile":{"type":"RuntimeDefault"}},
                                 "initContainers":[{
                                     "name":"workspace-seed",
                                     "image":image,
                                     "imagePullPolicy":"IfNotPresent",
                                     "command":["/bin/sh","-c",WORKSPACE_SEED_COMMAND],
                                     "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"128Mi"}},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "securityContext":security_context,
                                     "volumeMounts":[{"name":"workspace","mountPath":WORKSPACE_ROOT}]
                                 }],
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
                                     "ports":[{"name":"service","containerPort":service_port}],
                                      "resources":{"requests":workload_requests,"limits":workload_limits},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "securityContext":security_context,
                                     "volumeMounts":[
                                         {"name":"workspace","mountPath":WORKSPACE_ROOT},
                                         {"name":"runtime-tmp","mountPath":"/tmp"}
@@ -1590,7 +1740,7 @@ where
             resource(
                 "Service",
                 Some(&namespace),
-                app_name,
+                &app_name,
                 json!({
                     "apiVersion":"v1","kind":"Service",
                     "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
@@ -1615,17 +1765,44 @@ where
                 })));
             }
         }
+        if placement.namespace_uid.is_some() {
+            // The deployment operator owns namespace-wide admission and network policy.
+            documents.retain(|resource| {
+                !matches!(
+                    resource.kind.as_str(),
+                    "Namespace" | "ResourceQuota" | "LimitRange" | "NetworkPolicy"
+                )
+            });
+            for document in &mut documents {
+                if document.name != app_name {
+                    document.name = placement.resource_name(&document.name);
+                }
+                document.document["metadata"]["name"] = json!(document.name);
+                if document.kind == "ServiceAccount" {
+                    document.document["imagePullSecrets"][0]["name"] =
+                        json!(placement.resource_name("registry-pull"));
+                }
+                if document.kind == "Deployment" {
+                    document.document["spec"]["template"]["spec"]["serviceAccountName"] =
+                        json!(app_name);
+                    document.document["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]
+                        ["claimName"] = json!(placement.resource_name("workspace"));
+                }
+            }
+        }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
             "releaseId": projection.release.id,
             "releaseVersion": projection.release.version,
             "image": image,
             "resources": documents,
+            "namespaceUid": placement.namespace_uid,
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
             project_id: instance.project_id,
             namespace,
+            namespace_uid: placement.namespace_uid,
             image,
             resources: documents,
             plan_sha256,
@@ -1659,17 +1836,23 @@ where
         {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        let namespace = format!("lw-env-{}", instance.id);
+        let placement = self
+            .namespace_profile
+            .for_instance(instance)
+            .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
+        let namespace = placement.namespace.clone();
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
             "projectId": instance.project_id,
             "namespace": namespace,
+            "namespaceUid": placement.namespace_uid,
             "action": "cleanup",
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
             project_id: instance.project_id,
             namespace,
+            namespace_uid: placement.namespace_uid,
             image: String::new(),
             resources: Vec::new(),
             plan_sha256,
@@ -1878,41 +2061,37 @@ fn approved_resources(
     instance: &EnvironmentInstance,
     projection: &ReleasePublished,
 ) -> Result<(u32, u64, u64, Option<GpuAllocation>), ReleaseProjectionError> {
-    match instance.class {
-        contracts::authoring::EnvironmentClass::Experiment => {
-            let resources = &projection.environment_spec.resources;
-            Ok((
-                resources.cpu_millicores,
-                resources.memory_bytes,
-                resources.storage_bytes,
-                experiment_gpu_allocation(instance, projection)?,
-            ))
+    if instance.has_resource_lease() {
+        let authorization = instance
+            .operation
+            .lease_authorization
+            .as_ref()
+            .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+        if authorization.project_id != instance.project_id
+            || authorization.course_id != instance.course_id
+            || authorization.owner_actor_id != instance.owner_id
+            || Some(authorization.lease_id) != instance.lease_id
+            || Some(authorization.capacity_binding.as_str()) != instance.capacity_binding.as_deref()
+        {
+            return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        contracts::authoring::EnvironmentClass::Work => {
-            let authorization = instance
-                .operation
-                .lease_authorization
-                .as_ref()
-                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
-            if authorization.project_id != instance.project_id
-                || authorization.course_id != instance.course_id
-                || authorization.owner_actor_id != instance.owner_id
-                || Some(authorization.lease_id) != instance.lease_id
-                || Some(authorization.capacity_binding.as_str())
-                    != instance.capacity_binding.as_deref()
-            {
-                return Err(ReleaseProjectionError::IdentityMismatch);
-            }
-            authorization
-                .validate()
-                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
-            Ok((
-                authorization.approved_resources.cpu_millicores,
-                authorization.approved_resources.memory_bytes,
-                authorization.approved_resources.storage_bytes,
-                authorization.gpu_allocation.clone(),
-            ))
-        }
+        authorization
+            .validate()
+            .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+        Ok((
+            authorization.approved_resources.cpu_millicores,
+            authorization.approved_resources.memory_bytes,
+            authorization.approved_resources.storage_bytes,
+            authorization.gpu_allocation.clone(),
+        ))
+    } else {
+        let resources = &projection.environment_spec.resources;
+        Ok((
+            resources.cpu_millicores,
+            resources.memory_bytes,
+            resources.storage_bytes,
+            experiment_gpu_allocation(instance, projection)?,
+        ))
     }
 }
 
@@ -2206,6 +2385,44 @@ mod tests {
     };
     use contracts::authoring::EnvironmentRuntimeSpec;
     use serde_json::json;
+
+    #[test]
+    fn compute_deadline_is_bounded_by_original_authorization_and_stop_stays_available()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut instance = crate::test_support::requested_instance();
+        instance.operation.deadline_at = crate::test_support::timestamp("2027-07-20T00:00:00.000Z");
+        let valid_until = crate::test_support::timestamp("2027-07-15T00:00:00.000Z");
+        instance
+            .runtime_authorization
+            .as_mut()
+            .ok_or("receipt")?
+            .valid_until = valid_until;
+        for action in [
+            crate::ReconcileAction::Provision,
+            crate::ReconcileAction::Start,
+            crate::ReconcileAction::Restart,
+            crate::ReconcileAction::Reset,
+        ] {
+            assert_eq!(
+                super::ContainerBackendFence::for_action(&instance, action)
+                    .map_err(|_| "compute fence")?
+                    .deadline_at,
+                valid_until
+            );
+        }
+        instance.runtime_authorization = None;
+        assert!(
+            super::ContainerBackendFence::for_action(&instance, crate::ReconcileAction::Provision)
+                .is_err()
+        );
+        assert_eq!(
+            super::ContainerBackendFence::for_action(&instance, crate::ReconcileAction::Stop)
+                .map_err(|_| "stop fence")?
+                .deadline_at,
+            instance.operation.deadline_at
+        );
+        Ok(())
+    }
 
     #[allow(
         clippy::expect_used,

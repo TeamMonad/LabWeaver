@@ -8,8 +8,14 @@
 pub mod api;
 mod candidate_builds;
 pub mod clients;
+mod membership_governance;
 pub mod messaging;
+mod model_input_authorization;
+mod object_authorization;
+pub mod platform_configuration;
 pub mod platform_image_jobs;
+mod rubric_model_input;
+mod runtime_authorization;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -403,6 +409,7 @@ pub struct ControlService {
     pool: PgPool,
     objects: Arc<dyn ImmutableObjectStore>,
     config: ControlConfig,
+    loaded_platform_configuration: Option<Arc<platform_configuration::LoadedConfiguration>>,
 }
 
 enum CompletionReservation {
@@ -441,7 +448,19 @@ impl ControlService {
             pool,
             objects,
             config,
+            loaded_platform_configuration: None,
         })
+    }
+
+    /// Attaches settings actually loaded at process startup from the private Bundle inputs.
+    /// Desired edits and executor report bodies cannot replace this process snapshot.
+    #[must_use]
+    pub fn with_loaded_platform_configuration(
+        mut self,
+        loaded: platform_configuration::LoadedConfiguration,
+    ) -> Self {
+        self.loaded_platform_configuration = Some(Arc::new(loaded));
+        self
     }
 
     /// Returns the non-secret deployment-owned project AI policy defaults.
@@ -450,7 +469,7 @@ impl ControlService {
         self.config.llm_policy_options.clone()
     }
 
-    /// Creates a project and its initial Access-owned owner membership in one
+    /// Creates a project and its initial Control-owned owner membership in one
     /// transaction. A course association is accepted only for an active
     /// membership with the owner's asserted platform role.
     pub async fn create_project(
@@ -508,7 +527,7 @@ impl ControlService {
             IdempotencyDecision::Reserved => {}
         }
         if let Some(course_id) = project.course_id {
-            auth::require_course_membership(
+            object_authorization::require_course_membership(
                 &mut transaction,
                 course_id,
                 owner_actor_id,
@@ -535,7 +554,7 @@ impl ControlService {
         .execute(&mut *transaction)
         .await
         .map_err(db)?;
-        auth::insert_project_owner_membership(
+        object_authorization::insert_project_owner_membership(
             &mut transaction,
             project.id,
             owner_actor_id,
@@ -557,7 +576,7 @@ impl ControlService {
         Ok(project)
     }
 
-    /// Lists active and archived projects visible through Access memberships.
+    /// Lists active and archived projects visible through Control memberships.
     pub async fn list_projects(
         &self,
         actor_id: ActorId,
@@ -566,7 +585,7 @@ impl ControlService {
         let rows = sqlx::query(
             "SELECT p.contract FROM control.projects p \
              WHERE $2 OR p.owner_actor_id=$1 OR EXISTS( \
-                 SELECT 1 FROM access.project_memberships m \
+                 SELECT 1 FROM control.project_memberships m \
                   WHERE m.project_id=p.project_id AND m.actor_id=$1 AND m.state='active' \
                     AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())) \
              ORDER BY p.updated_at DESC,p.project_id",
@@ -639,7 +658,16 @@ impl ControlService {
         .map_err(db)?
         .ok_or(ControlError::ProjectNotFound)?;
         let owner: Uuid = row.try_get("owner_actor_id").map_err(db)?;
-        if !platform_admin && owner != actor_id.as_uuid() {
+        if !platform_admin
+            && owner != actor_id.as_uuid()
+            && !object_authorization::permits_in_transaction(
+                &mut transaction,
+                project_id,
+                actor_id,
+                contracts::object_authorization::ObjectAction::Edit,
+            )
+            .await?
+        {
             return Err(ControlError::ProjectGovernanceDenied);
         }
         let revision = revision_from_i64(row.try_get("revision").map_err(db)?)?;
@@ -800,15 +828,15 @@ impl ControlService {
         Ok(project)
     }
 
-    /// Reads Access-owned memberships for a project in revision order.
+    /// Reads Control-owned memberships for a project in revision order.
     pub async fn project_memberships(
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<ProjectMembership>, ControlError> {
         let rows = sqlx::query(
-            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.state,pm.revision,pm.expires_at, \
+            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.object_role,pm.state,pm.revision,pm.expires_at, \
                     a.username,a.display_name \
-             FROM access.project_memberships pm \
+             FROM control.project_memberships pm \
              JOIN access.actors a ON a.actor_id=pm.actor_id \
              WHERE pm.project_id=$1 ORDER BY pm.actor_id,pm.role,pm.revision DESC",
         )
@@ -829,7 +857,10 @@ impl ControlService {
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
     ) -> Result<ProjectMembership, ControlError> {
-        if request.role == PlatformRole::PlatformAdmin || request.actor_id == actor_id {
+        if request.role == PlatformRole::PlatformAdmin
+            || request.actor_id == actor_id
+            || request.object_role == contracts::object_authorization::ProjectObjectRole::Owner
+        {
             return Err(ControlError::ProjectGovernanceDenied);
         }
         if request
@@ -864,49 +895,40 @@ impl ControlService {
             IdempotencyDecision::Reserved => {}
         }
         let project = project_from_tx(&mut transaction, project_id).await?;
-        if !platform_admin && project.owner_actor_id != actor_id {
+        if !platform_admin
+            && project.owner_actor_id != actor_id
+            && !object_authorization::permits_in_transaction(
+                &mut transaction,
+                project_id,
+                actor_id,
+                contracts::object_authorization::ObjectAction::ManageMembers,
+            )
+            .await?
+        {
             return Err(ControlError::ProjectGovernanceDenied);
+        }
+        if project.owner_actor_id == request.actor_id {
+            return Err(ControlError::OwnerMembershipProtected);
         }
         if project.state == ProjectState::Archived {
             return Err(ControlError::ProjectArchived);
         }
-        sqlx::query(
-            "INSERT INTO access.project_memberships \
-             (course_id,project_id,actor_id,role,state,revision,expires_at,updated_at) \
-             VALUES ($1,$2,$3,$4,'active',1,$5,$6) \
-             ON CONFLICT (project_id,actor_id) DO UPDATE SET \
-                 course_id=EXCLUDED.course_id, \
-                 role=EXCLUDED.role, \
-                 state='active', \
-                 revision=access.project_memberships.revision+1, \
-                 expires_at=EXCLUDED.expires_at, \
-                 updated_at=EXCLUDED.updated_at \
-             RETURNING project_id",
-        )
-        .bind(project.course_id.map(CourseId::as_uuid))
-        .bind(project_id.as_uuid())
-        .bind(request.actor_id.as_uuid())
-        .bind(platform_role_name(request.role))
-        .bind(request.expires_at.map(UtcTimestamp::get))
-        .bind(now.get())
-        .execute(&mut *transaction)
-        .await
-        .map_err(db)?;
-        let membership_row = sqlx::query(
-            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.state,pm.revision,pm.expires_at, \
-                    a.username,a.display_name \
-             FROM access.project_memberships pm \
-             JOIN access.actors a ON a.actor_id=pm.actor_id \
-             WHERE pm.project_id=$1 AND pm.actor_id=$2",
-        )
-        .bind(project_id.as_uuid())
-        .bind(request.actor_id.as_uuid())
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(db)?;
-        let membership = project_membership_from_row(&membership_row)?;
+        let membership =
+            object_authorization::upsert_project_member(&mut transaction, &project, request, now)
+                .await?;
         let contract =
             serde_json::to_value(&membership).map_err(|_| ControlError::ContractInvalid)?;
+        append_project_sse(
+            &mut transaction,
+            project_id,
+            "member_authorization.changed.v1",
+            membership.actor_id.as_uuid(),
+            membership.revision,
+            serde_json::json!({"projectId": project_id, "actorId": membership.actor_id,
+                "performedBy": actor_id, "revision": membership.revision, "state": membership.state,
+                "objectRole": membership.object_role}),
+        )
+        .await?;
         IdempotencyStore::complete(
             &mut transaction,
             Domain::Control,
@@ -966,16 +988,25 @@ impl ControlService {
             IdempotencyDecision::Reserved => {}
         }
         let project = project_from_tx(&mut transaction, project_id).await?;
-        if !platform_admin && project.owner_actor_id != actor_id {
+        if !platform_admin
+            && project.owner_actor_id != actor_id
+            && !object_authorization::permits_in_transaction(
+                &mut transaction,
+                project_id,
+                actor_id,
+                contracts::object_authorization::ObjectAction::ManageMembers,
+            )
+            .await?
+        {
             return Err(ControlError::ProjectGovernanceDenied);
         }
         if project.owner_actor_id == target_actor_id {
             return Err(ControlError::OwnerMembershipProtected);
         }
         let row = sqlx::query(
-            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.state,pm.revision,pm.expires_at, \
+            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.object_role,pm.state,pm.revision,pm.expires_at, \
                     a.username,a.display_name \
-             FROM access.project_memberships pm \
+             FROM control.project_memberships pm \
              JOIN access.actors a ON a.actor_id=pm.actor_id \
              WHERE pm.project_id=$1 AND pm.actor_id=$2 AND pm.state='active' FOR UPDATE",
         )
@@ -998,7 +1029,7 @@ impl ControlService {
         )
         .map_err(|_| ControlError::ContractInvalid)?;
         let updated = sqlx::query(
-            "UPDATE access.project_memberships SET state='revoked',revision=$3,updated_at=$4 \
+            "UPDATE control.project_memberships SET state='revoked',revision=$3,updated_at=$4 \
              WHERE project_id=$1 AND actor_id=$2 AND revision=$5",
         )
         .bind(project_id.as_uuid())
@@ -1019,6 +1050,17 @@ impl ControlService {
         };
         let contract =
             serde_json::to_value(&membership).map_err(|_| ControlError::ContractInvalid)?;
+        append_project_sse(
+            &mut transaction,
+            project_id,
+            "member_authorization.changed.v1",
+            membership.actor_id.as_uuid(),
+            membership.revision,
+            serde_json::json!({"projectId": project_id, "actorId": membership.actor_id,
+                "performedBy": actor_id, "revision": membership.revision, "state": membership.state,
+                "objectRole": membership.object_role}),
+        )
+        .await?;
         IdempotencyStore::complete(
             &mut transaction,
             Domain::Control,
@@ -2602,6 +2644,9 @@ impl ControlService {
         if current != expected_revision {
             return Err(ControlError::RevisionConflict);
         }
+        let existing_rules = sqlx::query_scalar::<_, Value>("SELECT contract FROM control.project_llm_policies WHERE project_id=$1 AND superseded_at IS NULL")
+            .bind(project_id.as_uuid()).fetch_optional(&mut *transaction).await.map_err(db)?
+            .map(rubric_model_input::decode_policy).transpose()?.map(|(_, rules)| rules).unwrap_or_default();
         let next = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(revision),0)+1 FROM control.project_llm_policies WHERE project_id=$1",
         )
@@ -2619,7 +2664,7 @@ impl ControlService {
         .execute(&mut *transaction)
         .await
         .map_err(db)?;
-        let contract = serde_json::to_value(&policy).map_err(|_| ControlError::ContractInvalid)?;
+        let contract = rubric_model_input::encode_policy(&policy, &existing_rules)?;
         sqlx::query(
             "INSERT INTO control.project_llm_policies \
              (policy_id,project_id,course_id,revision,contract_sha256,contract,activated_at) \
@@ -2629,7 +2674,7 @@ impl ControlService {
         .bind(policy.project_id.as_uuid())
         .bind(course_id.map(CourseId::as_uuid))
         .bind(i64_revision(policy.revision)?)
-        .bind(canonical_hash(&policy)?.to_string())
+        .bind(canonical_hash(&contract)?.to_string())
         .bind(&contract)
         .bind(policy.activated_at.get())
         .execute(&mut *transaction)
@@ -2661,7 +2706,7 @@ impl ControlService {
             Domain::Control,
             CREATE_POLICY,
             idempotency_key.as_str(),
-            &contract,
+            &serde_json::to_value(&policy).map_err(|_| ControlError::ContractInvalid)?,
         )
         .await
         .map_err(|_| ControlError::PersistenceFailed)?;
@@ -2674,7 +2719,7 @@ impl ControlService {
         &self,
         course_id: CourseId,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
-        load_contract(
+        rubric_model_input::load_policy(
             &self.pool,
             "SELECT contract FROM control.project_llm_policies WHERE course_id=$1 AND superseded_at IS NULL",
             course_id.as_uuid(),
@@ -2691,7 +2736,7 @@ impl ControlService {
         &self,
         project_id: ProjectId,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
-        load_contract(
+        rubric_model_input::load_policy(
             &self.pool,
             "SELECT contract FROM control.project_llm_policies \
              WHERE project_id=$1 AND superseded_at IS NULL",
@@ -3182,7 +3227,7 @@ impl ControlService {
 
     /// Rechecks the live Project and Access membership before a Work execution admission.
     ///
-    /// The check intentionally reads the Access-owned membership table directly through the
+    /// The check intentionally reads the Control-owned membership table directly through the
     /// constrained Control database grant.  This mirrors Access's project-scope rule, including
     /// the matching course membership required by a teaching-associated Project, while keeping
     /// cleanup/query of an already persisted Environment execution independent of this gate.
@@ -3199,16 +3244,17 @@ impl ControlService {
         let active = sqlx::query_scalar::<_, bool>(
             r"SELECT EXISTS (
                 SELECT 1
-                FROM access.project_memberships pm
+                FROM control.project_memberships pm
                 WHERE pm.project_id = $1
                   AND pm.actor_id = $2
                   AND pm.state = 'active'
+                  AND pm.object_role IN ('editor','manager','owner')
                   AND (pm.expires_at IS NULL OR pm.expires_at > clock_timestamp())
                   AND (
                       $3::uuid IS NULL
                       OR EXISTS (
                           SELECT 1
-                          FROM access.course_memberships cm
+                          FROM control.course_memberships cm
                           WHERE cm.course_id = $3
                             AND cm.actor_id = $2
                             AND cm.role = pm.role
@@ -3431,7 +3477,7 @@ impl ControlService {
                     releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract,\
                     projects.owner_actor_id,\
                     (projects.owner_actor_id=$4 OR EXISTS( \
-                         SELECT 1 FROM access.project_memberships m \
+                         SELECT 1 FROM control.project_memberships m \
                           WHERE m.project_id=projects.project_id AND m.actor_id=$4 \
                             AND m.state='active' \
                             AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
@@ -3489,7 +3535,7 @@ impl ControlService {
                     releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract,\
                     projects.owner_actor_id,\
                     (projects.owner_actor_id=$5 OR EXISTS( \
-                         SELECT 1 FROM access.project_memberships m \
+                         SELECT 1 FROM control.project_memberships m \
                           WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
                             AND m.state='active' \
                             AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
@@ -3515,7 +3561,7 @@ impl ControlService {
                AND releases.version>$3 \
                AND ( (candidates.contract->'spec'->>'class'='work' \
                      AND (projects.owner_actor_id=$5 OR EXISTS( \
-                          SELECT 1 FROM access.project_memberships m \
+                          SELECT 1 FROM control.project_memberships m \
                            WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
                              AND m.state='active' \
                              AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()) ))) \
@@ -4325,12 +4371,13 @@ impl ControlService {
         &self,
         project_id: ProjectId,
         request: &CompleteAuthoringApprovalRequest,
-        actor_id: ActorId,
+        actor: &contracts::AuthenticatedActor,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
         trace_id: &str,
         catalog: &[PlatformImageEntry],
     ) -> Result<AuthoringApproval, ControlError> {
+        let actor_id = actor.actor_id;
         if request.project_id != project_id
             || request.reason.trim().is_empty()
             || request.reason.chars().count() > 500
@@ -4349,6 +4396,9 @@ impl ControlService {
         }))?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         advisory_project_lock(&mut transaction, project_id).await?;
+        let teacher_scope =
+            runtime_authorization::teacher_scope(&mut transaction, actor, request.course_id, now)
+                .await?;
         match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Control,
@@ -4416,9 +4466,8 @@ impl ControlService {
         .await
         .map_err(db)?
         .ok_or(ControlError::PolicyNotFound)?;
-        let policy: ProjectLlmEgressPolicy =
-            serde_json::from_value(policy_row.try_get("contract").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        let policy =
+            rubric_model_input::decode_policy(policy_row.try_get("contract").map_err(db)?)?.0;
         policy
             .validate()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
@@ -4669,6 +4718,7 @@ impl ControlService {
         .await
         .map_err(db)?;
         let approval = AuthoringApproval {
+            teacher_scope,
             id: ApprovalId::new(),
             project_id,
             course_id: project.course_id,
@@ -5779,7 +5829,16 @@ impl ControlService {
         if project.state == ProjectState::Archived {
             return Err(ControlError::ProjectArchived);
         }
-        if !platform_admin && project.owner_actor_id != actor_id {
+        if !platform_admin
+            && project.owner_actor_id != actor_id
+            && !object_authorization::permits_in_transaction(
+                &mut transaction,
+                project_id,
+                actor_id,
+                contracts::object_authorization::ObjectAction::ManageMembers,
+            )
+            .await?
+        {
             return Err(ControlError::ProjectGovernanceDenied);
         }
         if project.course_id != request.course_id {
@@ -6090,7 +6149,16 @@ impl ControlService {
         let mut transaction = self.pool.begin().await.map_err(db)?;
         advisory_project_lock(&mut transaction, project_id).await?;
         let project = project_from_tx(&mut transaction, project_id).await?;
-        if !platform_admin && project.owner_actor_id != actor_id {
+        if !platform_admin
+            && project.owner_actor_id != actor_id
+            && !object_authorization::permits_in_transaction(
+                &mut transaction,
+                project_id,
+                actor_id,
+                contracts::object_authorization::ObjectAction::ManageMembers,
+            )
+            .await?
+        {
             return Err(ControlError::ProjectGovernanceDenied);
         }
         match IdempotencyStore::reserve(
@@ -8165,20 +8233,6 @@ fn reject_sensitive_payload(value: &Value) -> Result<(), ControlError> {
     Ok(())
 }
 
-async fn load_contract<T>(pool: &PgPool, query: &str, id: Uuid) -> Result<T, ControlError>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let row = sqlx::query(query)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::NotFound)?;
-    serde_json::from_value(row.try_get("contract").map_err(db)?)
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)
-}
-
 async fn load_contract_two<T>(
     pool: &PgPool,
     query: &str,
@@ -8389,6 +8443,10 @@ fn project_membership_from_row(
         _ => return Err(ControlError::PersistenceIdentityMismatch),
     };
     Ok(ProjectMembership {
+        object_role: serde_json::from_value(serde_json::Value::String(
+            row.try_get("object_role").map_err(db)?,
+        ))
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
         course_id,
         project_id,
         actor_id,
@@ -9111,6 +9169,20 @@ pub enum ControlError {
     MembershipNotFound,
     #[error("LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED")]
     OwnerMembershipProtected,
+    #[error("LW_MEMBERSHIP_INVITATION_DENIED")]
+    InvitationDenied,
+    #[error("LW_MEMBERSHIP_INVITATION_NOT_FOUND")]
+    InvitationNotFound,
+    #[error("LW_MEMBERSHIP_INVITATION_EXPIRED")]
+    InvitationExpired,
+    #[error("LW_MEMBERSHIP_INVITATION_STATE_CONFLICT")]
+    InvitationStateConflict,
+    #[error("LW_COURSE_GOVERNANCE_DENIED")]
+    CourseGovernanceDenied,
+    #[error("LW_COURSE_LAST_INSTRUCTOR_PROTECTED")]
+    CourseInstructorProtected,
+    #[error("LW_RUNTIME_TEACHER_APPROVAL_REQUIRED")]
+    TeacherApprovalDenied,
     #[error("LW_LLM_POLICY_INVALID")]
     PolicyInvalid,
     #[error("LW_LLM_POLICY_NOT_FOUND")]
@@ -9532,7 +9604,7 @@ mod tests {
                 "network": {"mode": "deny_all"},
                 "entries": [{"name": "ssh", "protocol": "ssh", "servicePort": 22}],
                 "security": {
-                    "userPolicy": "non_root_required",
+                    "runAsUser": 65534,
                     "rootFilesystemPolicy": "mutable_required",
                     "privilegeEscalationPolicy": "deny",
                     "publicExposurePolicy": "deny",

@@ -88,6 +88,7 @@ typed_id!(CandidateId);
 typed_id!(ConsoleCapabilityId);
 typed_id!(ConsoleSessionId);
 typed_id!(CourseId);
+typed_id!(MembershipInvitationId);
 typed_id!(EndpointGrantId);
 typed_id!(EndpointId);
 typed_id!(EnvironmentId);

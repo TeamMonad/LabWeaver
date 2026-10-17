@@ -14,7 +14,7 @@ use std::{
 
 use auth::ServiceTokenClient;
 
-use contracts::authoring::{AgentRun, AgentRunHistoryPage, AgentTrackKind};
+use contracts::authoring::{AgentRun, AgentRunHistoryPage, AgentRunTaskProgress, AgentTrackKind};
 use contracts::environment::{
     EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
 };
@@ -208,6 +208,25 @@ impl AgentClient {
                 self.config
                     .endpoint(&format!("internal/v1/agent-runs/{run_id}"))?,
             ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Reads the Agent-owned bounded history projection for one project.
+    pub async fn task_progress(
+        &self,
+        run_id: AgentRunId,
+        query: &PageQuery,
+    ) -> Result<AgentRunTaskProgress, DownstreamError> {
+        send_json(
+            self.client
+                .get(
+                    self.config
+                        .endpoint(&format!("internal/v1/agent-runs/{run_id}/task-progress"))?,
+                )
+                .query(query),
             &self.service_token_client,
             self.token_target,
         )
@@ -1085,4 +1104,26 @@ pub enum DownstreamError {
     Conflict,
     #[error("LW_AUTH_SCOPE_DENIED")]
     Denied,
+}
+
+impl EvaluationClient {
+    /// Protected metadata-only endpoint; no artifact bytes or storage locators are requested.
+    pub async fn frozen_model_input_facts(
+        &self,
+        input: &contracts::http::CreateFrozenModelInputAuthorizationRequest,
+    ) -> Result<serde_json::Value, DownstreamError> {
+        input
+            .validate()
+            .map_err(|_| DownstreamError::Configuration)?;
+        let context = &input.input_authorization_context;
+        let mut request = self.client.get(self.config.endpoint(&format!("internal/v1/evaluation-releases/{}/frozen-submissions/{}/model-input-facts/tasks/{}", input.evaluation_release_id, input.frozen_submission_id, input.task_run_id))?)
+            .header("x-labweaver-project-id", context.project_id.to_string())
+            .header("x-labweaver-actor-id", context.actor_id.to_string())
+            .header("x-labweaver-evaluation-lease-sha256", &input.parent_lease_sha256)
+            .header("If-Match", contracts::http::StrongEtag::from_revision(input.evaluation_release_revision).header_value());
+        if let Some(course) = context.course_id {
+            request = request.header("x-labweaver-course-id", course.to_string());
+        }
+        send_json(request, &self.service_token_client, self.token_target).await
+    }
 }

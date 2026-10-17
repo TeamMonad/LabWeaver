@@ -1,4 +1,5 @@
 import { activeScene, fixtureProjectId } from './scenes'
+import { agentRunHistory, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId, workCandidateView, workRun, workRunId } from './authoring'
 import type {
   AccessGrantSchema,
   AgentRunHistoryPageSchema,
@@ -241,6 +242,7 @@ function environmentInstance(id: string): EnvironmentInstanceSchema {
     providerBinding: 'fixture-kubernetes',
     capacityBinding: 'fixture-capacity-claim',
     leaseId: 'lease-env-physics',
+    approvedResources: { ...resource },
     generation: 1,
     observedGeneration: 1,
     revision: 12,
@@ -490,8 +492,30 @@ export async function listOrganizationUsers(_options?: FixtureOptions): Promise<
 }
 
 export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<FixtureResult<AgentRunHistoryPageSchema>> {
+  if (activeScene.value.id === 'teacher-review-empty') return fixtureResponse({ page: 1, pageSize: 20, hasMore: false, items: [] })
+  if (authoringScene() || activeScene.value.id === 'work-template-review') return fixtureResponse(agentRunHistory)
   return unsupportedResponse('项目 AgentRun 历史')
 }
+
+export async function getProjectAgentRun(options?: FixtureOptions) {
+  if (authoringScene() && options?.path?.runId === reviewRunId) return fixtureResponse(reviewRun)
+  if (activeScene.value.id === 'work-template-review' && options?.path?.runId === workRunId) return fixtureResponse(workRun)
+  return unsupportedResponse('读取项目任务')
+}
+export async function getProjectEnvironmentCandidate(_options?: FixtureOptions) {
+  if (activeScene.value.id === 'work-template-review') return fixtureResponse(workCandidateView)
+  return authoringScene() ? fixtureResponse(environmentCandidateView) : unsupportedResponse('读取环境候选')
+}
+export async function getProjectEvaluationCandidate(_options?: FixtureOptions) {
+  return authoringScene() ? fixtureResponse(evaluationCandidateView) : unsupportedResponse('读取评测候选')
+}
+export async function getProjectProblemPackage(_options?: FixtureOptions) {
+  return authoringScene() || activeScene.value.id === 'work-template-review' ? fixtureResponse(reviewPackage) : unsupportedResponse('读取材料包')
+}
+export async function getProjectAuthoringApproval() { return unsupportedResponse('读取实验包批准') }
+export async function completeProjectAuthoringApproval() { return unsupportedResponse('提交实验包批准') }
+export async function getProjectCandidateBuild() { return unsupportedResponse('读取候选构建任务') }
+export async function cancelProjectCandidateBuild() { return unsupportedResponse('取消候选构建任务') }
 
 export async function getProject(options?: FixtureOptions): Promise<FixtureResult<ProjectSchema>> {
   const projectId = options?.path?.projectId
@@ -697,3 +721,24 @@ export async function listResourceRates(_options?: FixtureOptions): Promise<Fixt
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
 export async function createResourceRate() { return unsupportedResponse('创建资源费率') }
 export async function endResourceRate() { return unsupportedResponse('结束资源费率') }
+
+// Preview-only boundary: SDK operations the gallery does not cover fail
+// explicitly instead of crashing the module graph or faking a success.
+export async function getActiveProjectLlmPolicy(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取项目 AI 设置') }
+export async function withdrawEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('撤回环境模板版本') }
+export async function getOwnProjectEvaluationResult(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取评测结果') }
+export async function listOwnProjectEvaluationResults(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取评测结果列表') }
+export async function cancelProjectAgentRun(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('取消项目任务') }
+export async function createProjectAgentRun(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('创建项目任务') }
+export async function createProjectWorkConfigurationRun(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('创建 Work 配置任务') }
+export async function retryProjectAgentRunTrack(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('重试项目任务') }
+export async function completeProjectProblemPackageUpload(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('完成材料上传') }
+export async function createProjectProblemPackageUpload(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('创建材料上传') }
+export async function listProjectResourceUsage(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取资源用量') }
+export async function createProjectLlmPolicy(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('保存项目 AI 设置') }
+export async function getProjectLlmPolicyOptions(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取项目 AI 选项') }
+export async function approveProjectWorkConfigurationRun(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('批准 Work 配置计划') }
+export async function getProjectWorkConfigurationPlan(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取 Work 配置计划') }
+export async function appendProjectEnvironmentCandidateDecision(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('记录环境候选决定') }
+export async function createEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('发布环境模板') }
+export async function getEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取环境模板版本') }
