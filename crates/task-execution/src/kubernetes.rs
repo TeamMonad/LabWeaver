@@ -1831,11 +1831,18 @@ mod tests {
         pod
     }
 
+    #[derive(Default)]
+    struct DeleteFixture {
+        replace_on_delete: Option<Value>,
+        requests: Vec<Value>,
+    }
+
     struct FakeCluster {
         api: KubernetesApiClient,
         objects: Arc<Mutex<BTreeMap<String, Value>>>,
         patches: Arc<AtomicUsize>,
         retain_on_delete: Arc<AtomicBool>,
+        deletes: Arc<Mutex<DeleteFixture>>,
         server: JoinHandle<()>,
         _token: tempfile::NamedTempFile,
     }
@@ -1868,6 +1875,7 @@ mod tests {
         objects: Arc<Mutex<BTreeMap<String, Value>>>,
         patches: Arc<AtomicUsize>,
         retain_on_delete: Arc<AtomicBool>,
+        deletes: Arc<Mutex<DeleteFixture>>,
     ) -> std::io::Result<()> {
         let mut request = Vec::new();
         let mut chunk = [0_u8; 4 * 1024];
@@ -1894,6 +1902,16 @@ mod tests {
             })
             .flatten()
             .unwrap_or(0);
+        if content_length > 64 * 1024 {
+            return respond(&mut stream, 413, &json!({})).await;
+        }
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok(());
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
         let line_end = request[..header_end]
             .windows(2)
             .position(|window| window == b"\r\n")
@@ -1947,12 +1965,24 @@ mod tests {
                 }
             }
             "DELETE" => {
+                let body = request
+                    .get(header_end..header_end + content_length)
+                    .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+                {
+                    let mut fixture = deletes
+                        .lock()
+                        .map_err(|_| std::io::Error::other("delete fixture poisoned"))?;
+                    fixture.requests.push(body.clone().unwrap_or(Value::Null));
+                    if let Some(replacement) = fixture.replace_on_delete.take() {
+                        objects
+                            .lock()
+                            .map_err(|_| std::io::Error::other("fake state poisoned"))?
+                            .insert(path.to_owned(), replacement);
+                    }
+                }
                 if retain_on_delete.load(Ordering::Relaxed) {
                     (200, json!({}))
                 } else {
-                    let body = request
-                        .get(header_end..header_end + content_length)
-                        .and_then(|body| serde_json::from_slice::<Value>(body).ok());
                     let expected_uid = body
                         .as_ref()
                         .and_then(|body| body.pointer("/preconditions/uid"))
@@ -2019,6 +2049,8 @@ mod tests {
         let server_objects = Arc::clone(&objects);
         let server_patches = Arc::clone(&patches);
         let server_retain = Arc::clone(&retain_on_delete);
+        let deletes = Arc::new(Mutex::new(DeleteFixture::default()));
+        let server_deletes = Arc::clone(&deletes);
         let server = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -2027,8 +2059,9 @@ mod tests {
                 let objects = Arc::clone(&server_objects);
                 let patches = Arc::clone(&server_patches);
                 let retain = Arc::clone(&server_retain);
+                let deletes = Arc::clone(&server_deletes);
                 tokio::spawn(async move {
-                    let _ = connection(stream, objects, patches, retain).await;
+                    let _ = connection(stream, objects, patches, retain, deletes).await;
                 });
             }
         });
@@ -2052,6 +2085,7 @@ mod tests {
             objects,
             patches,
             retain_on_delete,
+            deletes,
             server,
             _token: token,
         })
@@ -2114,6 +2148,176 @@ mod tests {
             .cleanup(NAMESPACE, JOB_NAME, &bundle.objects, &bundle.cleanup_plan)
             .await?;
         assert!(confirmed.is_confirmed());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_http_checkpoint_waits_for_actual_absence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let bundle = bundle(&ownership("request-sha"));
+        cluster.api.start(&bundle).await?;
+        let refs = cluster
+            .api
+            .capture_object_refs(&bundle.identity, &bundle.cleanup_plan)
+            .await?;
+        let persisted = serde_json::to_vec(&refs)?;
+        let restored = serde_json::from_slice::<Vec<super::ExecutionObjectRef>>(&persisted)?;
+        cluster.retain_on_delete.store(true, Ordering::Relaxed);
+        let pending = cluster
+            .api
+            .cleanup_recovery(&bundle.identity, &restored)
+            .await?;
+        assert!(matches!(
+            pending,
+            super::ExecutionCleanupStatus::Pending { .. }
+        ));
+        assert!(!pending.is_confirmed());
+        cluster.retain_on_delete.store(false, Ordering::Relaxed);
+        assert!(
+            cluster
+                .api
+                .cleanup_recovery(&bundle.identity, &restored)
+                .await?
+                .is_confirmed()
+        );
+        assert!(
+            cluster
+                .api
+                .cleanup_recovery(&bundle.identity, &restored)
+                .await?
+                .is_confirmed()
+        );
+        assert_eq!(
+            cluster.patches.load(Ordering::Relaxed),
+            1,
+            "recovery must not resubmit"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_http_refreshes_same_uid_cas_after_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let bundle = bundle(&ownership("request-sha"));
+        cluster.api.start(&bundle).await?;
+        let refs = cluster
+            .api
+            .capture_object_refs(&bundle.identity, &bundle.cleanup_plan)
+            .await?;
+        let path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+        let mut changed = cluster.objects.lock().map_err(|_| "fake state poisoned")?[&path].clone();
+        changed["metadata"]["resourceVersion"] = json!("rv-2");
+        cluster
+            .deletes
+            .lock()
+            .map_err(|_| "delete fixture poisoned")?
+            .replace_on_delete = Some(changed);
+        assert!(
+            cluster
+                .api
+                .cleanup_recovery(&bundle.identity, &refs)
+                .await?
+                .is_confirmed()
+        );
+        let fixture = cluster
+            .deletes
+            .lock()
+            .map_err(|_| "delete fixture poisoned")?;
+        assert_eq!(fixture.requests.len(), 2);
+        assert_eq!(
+            fixture.requests[0].pointer("/preconditions/resourceVersion"),
+            Some(&json!("rv-1"))
+        );
+        assert_eq!(
+            fixture.requests[1].pointer("/preconditions/resourceVersion"),
+            Some(&json!("rv-2"))
+        );
+        for body in &fixture.requests {
+            assert_eq!(
+                body.pointer("/preconditions/uid"),
+                Some(&json!(refs[0].uid))
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_http_preserves_replacement_uid_after_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let bundle = bundle(&ownership("request-sha"));
+        cluster.api.start(&bundle).await?;
+        let refs = cluster
+            .api
+            .capture_object_refs(&bundle.identity, &bundle.cleanup_plan)
+            .await?;
+        let path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+        let mut replacement =
+            cluster.objects.lock().map_err(|_| "fake state poisoned")?[&path].clone();
+        replacement["metadata"]["uid"] = json!("replacement-uid");
+        replacement["metadata"]["resourceVersion"] = json!("rv-2");
+        cluster
+            .deletes
+            .lock()
+            .map_err(|_| "delete fixture poisoned")?
+            .replace_on_delete = Some(replacement.clone());
+        let result = cluster.api.cleanup_recovery(&bundle.identity, &refs).await;
+        assert!(matches!(result, Err(KubernetesJobError::IdentityConflict)));
+        assert_eq!(
+            cluster
+                .deletes
+                .lock()
+                .map_err(|_| "delete fixture poisoned")?
+                .requests
+                .len(),
+            1
+        );
+        assert_eq!(
+            cluster
+                .objects
+                .lock()
+                .map_err(|_| "fake state poisoned")?
+                .get(&path),
+            Some(&replacement)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_http_rejects_another_attempt_before_delete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let bundle = bundle(&ownership("request-sha"));
+        cluster.api.start(&bundle).await?;
+        let refs = cluster
+            .api
+            .capture_object_refs(&bundle.identity, &bundle.cleanup_plan)
+            .await?;
+        let path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+        {
+            let mut objects = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            let current = objects.get_mut(&path).ok_or("job missing")?;
+            current["metadata"]["labels"]["labweaver.io/attempt-id"] = json!(Uuid::now_v7());
+        }
+        let result = cluster.api.cleanup_recovery(&bundle.identity, &refs).await;
+        assert!(matches!(result, Err(KubernetesJobError::IdentityConflict)));
+        assert!(
+            cluster
+                .deletes
+                .lock()
+                .map_err(|_| "delete fixture poisoned")?
+                .requests
+                .is_empty()
+        );
+        assert!(
+            cluster
+                .objects
+                .lock()
+                .map_err(|_| "fake state poisoned")?
+                .contains_key(&path)
+        );
         Ok(())
     }
 
