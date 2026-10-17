@@ -70,7 +70,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -91,6 +91,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
+        include_str!("../../../migrations/resource/0021_outbox_publication_claims.sql"),
     ))
     .execute(&pool)
     .await?;
@@ -3926,7 +3927,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -3946,7 +3947,8 @@ async fn migrated_pool()
         ),
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
-        )
+        ),
+        include_str!("../../../migrations/resource/0021_outbox_publication_claims.sql")
     ))
     .execute(&pool)
     .await?;
