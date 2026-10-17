@@ -2,7 +2,7 @@ name: Platform Images
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [main, develop]
     paths:
       - access-gateway/**
       - containers/**
@@ -10,6 +10,12 @@ on:
       - services/**
       - Cargo.toml
       - Cargo.lock
+      - .cargo/**
+      - .dockerignore
+      - migrations/**
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - vendor/**
       - deploy/helm/**
       - deploy/versions.lock.yml
       - schemas/results/platform-image-*.json
@@ -17,7 +23,7 @@ on:
       - xtask/**
       - .github/workflows/platform-images.yml
   push:
-    branches: [develop]
+    branches: [main, develop]
     paths:
       - access-gateway/**
       - containers/**
@@ -25,6 +31,12 @@ on:
       - services/**
       - Cargo.toml
       - Cargo.lock
+      - .cargo/**
+      - .dockerignore
+      - migrations/**
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - vendor/**
       - deploy/helm/**
       - deploy/versions.lock.yml
       - schemas/results/platform-image-*.json
