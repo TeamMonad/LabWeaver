@@ -39,6 +39,9 @@ workspace = true
 base64.workspace = true
 jsonwebtoken.workspace = true
 rcgen.workspace = true
+task-execution = { path = "../../crates/task-execution" }
+tempfile.workspace = true
 testcontainers = { version = "=0.25.0", features = ["blocking", "properties-config"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
 tower.workspace = true
+tokio-util.workspace = true

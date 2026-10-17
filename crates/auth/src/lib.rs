@@ -17,6 +17,8 @@ pub mod crypto;
 pub mod csrf;
 /// Bearer JWT verifier with JWKS rotation.
 pub mod jwt;
+pub mod live_authorization;
+pub mod object_authorization;
 /// One-time OIDC Authorization Code + PKCE transaction values.
 pub mod oidc;
 /// Environment-authoritative owner resolver JWT client.
@@ -26,6 +28,7 @@ pub mod repository;
 /// Short-lived signed identity delegation from Access to Resource.
 pub mod resource_delegation;
 pub mod roles;
+pub mod runtime_authorization;
 /// OAuth 2.0 client-credentials and service-token verification.
 pub mod service_auth;
 
@@ -48,10 +51,9 @@ pub use provider::{
 pub use repository::{
     AuthCleanupReport, BffSession, CreateBffSession, LocalActor, MembershipSnapshot,
     RepositoryError, bounded_idle_expiry, cleanup_expired_auth_state, configured_session_expiry,
-    consume_backchannel_logout, consume_oidc_transaction, create_bff_session,
-    insert_project_owner_membership, load_bff_session, load_logout_hint, load_membership_snapshot,
-    require_course_membership, revoke_bff_session, revoke_bff_sessions_by_sid, upsert_actor,
-    upsert_actor_with_metadata,
+    consume_backchannel_logout, consume_oidc_transaction, create_bff_session, load_bff_session,
+    load_logout_hint, load_membership_snapshot, revoke_bff_session, revoke_bff_sessions_by_sid,
+    upsert_actor, upsert_actor_with_metadata,
 };
 pub use resource_delegation::{
     ResourceDelegation, ResourceDelegationError, decode_resource_delegation,

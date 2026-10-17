@@ -294,6 +294,29 @@ pub struct EvaluationRun {
     pub completed_at: Option<UtcTimestamp>,
 }
 
+/// Read-only current attempts and bounded history. No grading inputs or scores are included.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationRunTaskProgress {
+    pub run_id: EvaluationRunId,
+    pub project_id: ProjectId,
+    pub revision: Revision,
+    pub state: EvaluationRunState,
+    pub current: Vec<EvaluationStepTaskProgress>,
+    pub history: Vec<EvaluationStepTaskProgress>,
+    pub page: u32,
+    pub page_size: u16,
+    pub has_more: bool,
+}
+
+/// A step identity and the progress of its real attempt, without private step contents.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationStepTaskProgress {
+    pub step_run_id: EvaluationStepRunId,
+    pub progress: crate::execution::TaskAttemptProgress,
+}
+
 /// Privacy-preserving terminal result exposed to the owning student.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

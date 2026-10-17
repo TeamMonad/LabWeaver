@@ -9,7 +9,9 @@
     verify_gateway_configmap_name: "gateway-body-{{ verify_run_id }}"
     verify_gateway_backend_name: "gateway-backend-{{ verify_run_id }}"
     verify_gateway_route_name: "gateway-probe-{{ verify_run_id }}"
-    verify_busybox_image: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).test_images.busybox }}"
+    verify_busybox_image: >-
+      {{ (lookup('file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml'))
+          | from_yaml).test_images.busybox }}
 
 - name: Require a bounded verification identity and digest-pinned image
   ansible.builtin.assert:

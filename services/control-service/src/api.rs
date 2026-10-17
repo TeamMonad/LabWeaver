@@ -5,6 +5,10 @@
     reason = "HTTP boundary functions keep validation adjacent to each route"
 )]
 
+pub mod event_stream;
+mod membership_governance;
+mod object_actions;
+
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,7 +18,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
@@ -48,7 +51,6 @@ use contracts::{
     PlatformImageId, PlatformRole, ProblemDetails, ProblemPackageId, ProjectId, ReleaseId,
     Revision, StreamSequence, UploadSessionId, UtcTimestamp,
 };
-use futures_util::stream;
 use persistence_sqlx::Sha256Digest;
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -59,6 +61,8 @@ use crate::clients::{
 };
 use crate::{ControlError, ControlService};
 use auth::ServiceTokenVerifier;
+
+mod platform_configuration;
 
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
@@ -89,6 +93,7 @@ pub struct GatewayPrincipal {
 /// Builds the complete Issue #48 public control-plane route table.
 pub fn router(state: Arc<ApiState>) -> Router {
     let router = Router::new()
+        .merge(membership_governance::routes())
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route(
             "/api/v1/projects/{project_id}",
@@ -97,6 +102,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/projects/{project_id}/archive",
             post(archive_project),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/available-actions",
+            get(object_actions::available_actions),
         )
         .route(
             "/api/v1/projects/{project_id}/members",
@@ -149,6 +158,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}",
             get(get_project_agent_run),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/task-progress",
+            get(get_project_agent_task_progress),
         )
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/cancel",
@@ -280,6 +293,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             "/api/v1/admin/images/{catalog_id}/disable",
             post(disable_admin_image),
         )
+        .merge(platform_configuration::public_routes())
         .with_state(state);
     telemetry::instrument_http(router, "control-service", "control-api")
 }
@@ -342,6 +356,10 @@ pub fn authenticated_router(state: &Arc<ApiState>, verifier: &Arc<ServiceTokenVe
     );
     Router::new()
         .merge(public)
+        .merge(platform_configuration::internal_routes(
+            Arc::clone(state),
+            Arc::clone(verifier),
+        ))
         .merge(internal)
         .merge(work_admission)
         .merge(evaluation_policy)
@@ -932,6 +950,39 @@ async fn get_project_agent_run(
     Ok(with_etag(StatusCode::OK, &run, run.revision))
 }
 
+async fn get_project_agent_task_progress(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, run_id)): Path<(ProjectId, AgentRunId)>,
+    Query(query): Query<PageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectAgentTaskProgress",
+        project_id,
+    )
+    .await?;
+    query
+        .normalized()
+        .map_err(|_| ApiError::bad_request("LW_TASK_PROGRESS_PAGE_INVALID"))?;
+    let run = current_project_agent_run(&state, project_id, run_id).await?;
+    let progress = state.agent.task_progress(run_id, &query).await?;
+    if progress.run_id != run_id
+        || progress.project_id != project_id
+        || progress.revision != run.revision
+    {
+        return Err(DownstreamError::IdentityMismatch.into());
+    }
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(progress),
+    )
+        .into_response())
+}
+
 async fn list_project_agent_runs(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -1409,7 +1460,7 @@ async fn complete_project_authoring_approval(
         .complete_authoring_approval(
             project_id,
             &request,
-            decision.actor.actor_id,
+            &decision.actor,
             &idempotency(&headers)?,
             now()?,
             &trace_id(&headers),
@@ -2181,66 +2232,14 @@ async fn events(
         contracts::http::SseResume::Beginning => None,
         contracts::http::SseResume::After(sequence) => Some(sequence.0),
     };
-    let records = state
-        .control
-        .sse_page(course_id, after, query.limit, now()?)
-        .await?;
-    let cursor = records
-        .last()
-        .map_or(after.unwrap_or(0), |record| record.sequence);
-    let output = stream::unfold(
-        EventStreamState {
-            control: state.control.clone(),
-            course_id,
-            cursor,
-            pending: records.into(),
-            valid_until: authorization.valid_until,
-        },
-        |mut state| async move {
-            loop {
-                let Ok(timestamp) = current_timestamp() else {
-                    tracing::error!(
-                        event = "control.sse.clock_failed",
-                        diagnostic = "LW_CONTROL_CLOCK_INVALID",
-                        course_id = %state.course_id,
-                        cursor = state.cursor,
-                    );
-                    return None;
-                };
-                if timestamp >= state.valid_until {
-                    return None;
-                }
-                if let Some(record) = state.pending.pop_front() {
-                    state.cursor = record.sequence;
-                    let event = Event::default()
-                        .id(record.sequence.to_string())
-                        .event(record.event_type)
-                        .data(record.payload.to_string());
-                    return Some((Ok::<_, std::convert::Infallible>(event), state));
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match state
-                    .control
-                    .sse_page(state.course_id, Some(state.cursor), 256, timestamp)
-                    .await
-                {
-                    Ok(records) => state.pending = records.into(),
-                    Err(error) => {
-                        tracing::error!(
-                            event = "control.sse.poll_failed",
-                            diagnostic = %error,
-                            course_id = %state.course_id,
-                            cursor = state.cursor,
-                        );
-                        return None;
-                    }
-                }
-            }
-        },
-    );
-    Ok(Sse::new(output)
-        .keep_alive(KeepAlive::default())
-        .into_response())
+    event_stream::response(
+        state.control.clone(),
+        authorization,
+        parse_header::<BffSessionId>(&headers, SESSION_HEADER)?,
+        after,
+        query.limit,
+    )
+    .await
 }
 
 async fn project_events(
@@ -2273,72 +2272,14 @@ async fn project_events(
         contracts::http::SseResume::Beginning => None,
         contracts::http::SseResume::After(sequence) => Some(sequence.0),
     };
-    let records = state
-        .control
-        .project_sse_page(project_id, after, query.limit, now()?)
-        .await?;
-    let cursor = records
-        .last()
-        .map_or(after.unwrap_or(0), |record| record.sequence);
-    let output = stream::unfold(
-        ProjectEventStreamState {
-            control: state.control.clone(),
-            project_id,
-            cursor,
-            pending: records.into(),
-            valid_until: authorization.valid_until,
-        },
-        |mut state| async move {
-            loop {
-                let Ok(timestamp) = current_timestamp() else {
-                    return None;
-                };
-                if timestamp >= state.valid_until {
-                    return None;
-                }
-                if let Some(record) = state.pending.pop_front() {
-                    state.cursor = record.sequence;
-                    let event = Event::default()
-                        .id(record.sequence.to_string())
-                        .event(record.event_type)
-                        .data(record.payload.to_string());
-                    return Some((Ok::<_, std::convert::Infallible>(event), state));
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match state
-                    .control
-                    .project_sse_page(state.project_id, Some(state.cursor), 256, timestamp)
-                    .await
-                {
-                    Ok(records) => state.pending = records.into(),
-                    Err(error) => {
-                        tracing::error!(event = "control.project_sse.poll_failed", diagnostic = %error,
-                            project_id = %state.project_id, cursor = state.cursor);
-                        return None;
-                    }
-                }
-            }
-        },
-    );
-    Ok(Sse::new(output)
-        .keep_alive(KeepAlive::default())
-        .into_response())
-}
-
-struct EventStreamState {
-    control: ControlService,
-    course_id: CourseId,
-    cursor: u64,
-    pending: std::collections::VecDeque<crate::SseRecord>,
-    valid_until: UtcTimestamp,
-}
-
-struct ProjectEventStreamState {
-    control: ControlService,
-    project_id: ProjectId,
-    cursor: u64,
-    pending: std::collections::VecDeque<crate::SseRecord>,
-    valid_until: UtcTimestamp,
+    event_stream::response(
+        state.control.clone(),
+        authorization,
+        parse_header::<BffSessionId>(&headers, SESSION_HEADER)?,
+        after,
+        query.limit,
+    )
+    .await
 }
 
 async fn authorize(
@@ -2811,12 +2752,15 @@ impl ApiError {
 impl From<ControlError> for ApiError {
     fn from(error: ControlError) -> Self {
         let status = match error {
-            ControlError::UploadNotFound
+            ControlError::InvitationNotFound
+            | ControlError::UploadNotFound
             | ControlError::CandidateNotFound
             | ControlError::ReleaseNotFound
             | ControlError::NotFound
             | ControlError::PolicyNotFound => StatusCode::NOT_FOUND,
-            ControlError::IdempotencyConflict
+            ControlError::InvitationStateConflict
+            | ControlError::CourseInstructorProtected
+            | ControlError::IdempotencyConflict
             | ControlError::OperationInProgress
             | ControlError::OperationLeaseLost
             | ControlError::UploadStateConflict
@@ -2826,10 +2770,14 @@ impl From<ControlError> for ApiError {
             | ControlError::ProjectionConflict
             | ControlError::ReleaseCandidateMismatch
             | ControlError::ArtifactMismatch => StatusCode::CONFLICT,
-            ControlError::SseCursorExpired | ControlError::PlatformImageUploadExpired => {
-                StatusCode::GONE
-            }
-            ControlError::CourseMismatch | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,
+            ControlError::InvitationExpired
+            | ControlError::SseCursorExpired
+            | ControlError::PlatformImageUploadExpired => StatusCode::GONE,
+            ControlError::TeacherApprovalDenied
+            | ControlError::InvitationDenied
+            | ControlError::CourseGovernanceDenied
+            | ControlError::CourseMismatch
+            | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,
             ControlError::ConfigurationInvalid
             | ControlError::PersistenceFailed
             | ControlError::ObjectStore(_)

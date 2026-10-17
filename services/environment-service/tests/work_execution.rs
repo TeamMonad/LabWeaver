@@ -66,7 +66,11 @@ async fn start_checks_admission_and_durably_fences_before_backend_execution()
 
     let accepted = service.start(request.clone()).await?;
     assert_eq!(accepted.state, ContainerWorkExecutionState::Running);
-    assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 0);
+    // Blocked holds the backend's return. The detached worker may enter execute as soon as
+    // start returns, so synchronize on its entry instead of relying on executor scheduling.
+    backend.execute_started.notified().await;
+    assert!(backend.durable_before_execute.load(Ordering::SeqCst));
+    assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
 
     let persisted_request: serde_json::Value = sqlx::query_scalar(
         "SELECT request_json
@@ -83,10 +87,6 @@ async fn start_checks_admission_and_durably_fences_before_backend_execution()
     let replay = service.start(request.clone()).await?;
     assert_eq!(replay.execution_id, accepted.execution_id);
     assert_eq!(admission_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 0);
-
-    backend.execute_started.notified().await;
-    assert!(backend.durable_before_execute.load(Ordering::SeqCst));
     assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
 
     backend.release_execute.notify_one();
@@ -98,6 +98,7 @@ async fn start_checks_admission_and_durably_fences_before_backend_execution()
     )
     .await?;
     assert_eq!(terminal.exit_code, Some(0));
+    assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -952,17 +953,15 @@ impl ContainerWorkExecutionBackend for TestBackend {
         _deadline_at: UtcTimestamp,
     ) -> Result<WorkExecutionOutcome, WorkExecutionError> {
         self.execute_calls.fetch_add(1, Ordering::SeqCst);
-        let durable: Option<Uuid> = sqlx::query_scalar(
-            "SELECT execution_id
-             FROM environment.work_configuration_executions
-             WHERE execution_id=$1",
+        let durable: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM environment.work_configuration_executions
+             WHERE execution_id=$1 AND revision>=2 AND receipt_json->>'startedAt' IS NOT NULL)",
         )
         .bind(execution_id)
-        .fetch_optional(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(WorkExecutionError::Database)?;
-        self.durable_before_execute
-            .store(durable == Some(execution_id), Ordering::SeqCst);
+        self.durable_before_execute.store(durable, Ordering::SeqCst);
         self.execute_started.notify_one();
         if matches!(self.execute_behavior, ExecuteBehavior::Blocked) {
             self.release_execute.notified().await;

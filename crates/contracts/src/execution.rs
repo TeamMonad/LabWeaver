@@ -18,6 +18,40 @@ use crate::{
     UtcTimestamp,
 };
 
+/// Display phase derived from an owner's attempt and Resource facts.
+/// This projection has no independent transitions or persistent authority.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskAttemptPhase {
+    Queued,
+    Preparing,
+    WaitingResourceApproval,
+    Allocating,
+    Executing,
+    AwaitingReview,
+    CleanupPending,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Blocked,
+}
+
+/// Payload-free read projection of one real attempt.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskAttemptProgress {
+    /// Native attempt number. Evaluation uses zero until the step is first claimed.
+    pub attempt: u32,
+    pub execution_generation: Option<u64>,
+    pub task_run_id: Option<TaskRunId>,
+    pub phase: TaskAttemptPhase,
+    pub resource_request_id: Option<ResourceRequestId>,
+    pub resource_state: Option<ResourceRequestState>,
+    pub diagnostic_code: Option<String>,
+    /// Existing operation IDs appropriate to the phase, without granting authorization.
+    pub next_steps: Vec<String>,
+}
+
 /// Durable identity of one admitted execution generation of a one-shot task.
 ///
 /// The value is created from an authoritative [`TaskResourceStatus`] that is already active and

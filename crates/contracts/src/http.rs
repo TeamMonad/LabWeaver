@@ -27,7 +27,7 @@ pub struct OperationAccepted {
     pub status_url: String,
 }
 
-/// Access-owned membership grant for one Project actor.
+/// Control-owned membership grant for one Project actor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddProjectMembershipRequest {
@@ -36,6 +36,8 @@ pub struct AddProjectMembershipRequest {
     /// browser request.
     pub username: String,
     pub role: PlatformRole,
+    #[serde(default)]
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 
@@ -47,6 +49,8 @@ pub struct AddProjectMembershipRequest {
 pub struct ResolvedProjectMembershipRequest {
     pub actor_id: ActorId,
     pub role: PlatformRole,
+    #[serde(default)]
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 
@@ -106,6 +110,10 @@ pub struct InternalCreateTaskResourceRequest {
     pub request_key: String,
     pub resources: crate::resource::WorkloadResources,
     pub duration_seconds: u64,
+    /// Approval wait captured once by Resource using its database clock.
+    /// Same-attempt recovery keeps the original deadline.
+    #[schemars(range(min = 1, max = 3_600_000))]
+    pub approval_timeout_milliseconds: u64,
 }
 
 /// PostgreSQL-authoritative one-shot task resource state returned to Evaluation.
@@ -2291,6 +2299,272 @@ macro_rules! op {
 }
 
 pub const OPERATIONS: &[OperationContract] = &[
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+        "registerPlatformConfigurationBundle",
+        "platform_configuration:write",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+        "getPlatformConfigurationBundle",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-requests/{requestId}/runtime-authorization",
+        "getResourceRuntimeAuthorization",
+        "runtime_authorization:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/member-invitations",
+        "listProjectMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/member-invitations",
+        "listCourseMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/member-invitations",
+        "createProjectMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/member-invitations",
+        "createCourseMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/members",
+        "listCourseMemberships",
+        "course_membership:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Delete,
+        "/api/v1/courses/{courseId}/members/{actorId}",
+        "removeCourseMembership",
+        "course_membership:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/member-invitations",
+        "listIncomingMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/member-invitations/{invitationId}",
+        "getMembershipInvitation",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/member-invitations/{invitationId}/accept",
+        "acceptMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/member-invitations/{invitationId}/revoke",
+        "revokeMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration",
+        "getPlatformConfiguration",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Patch,
+        "/api/v1/admin/platform-configuration",
+        "updatePlatformConfiguration",
+        "platform_configuration:write",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration/versions/{revision}",
+        "getPlatformConfigurationVersion",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/platform-configuration/applies",
+        "applyPlatformConfiguration",
+        "platform_configuration:apply",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration/applies/{applyId}",
+        "getPlatformConfigurationApply",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        GatewayInternal,
+        Put,
+        "/internal/v1/platform-configuration/applies/{applyId}",
+        "reportPlatformConfigurationApply",
+        "control.platform_configuration.apply",
+        ServiceJwt,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
     // Project is the cross-domain ownership root. The list and create operations
     // are actor-scoped by Access even though they do not carry a project path.
     op!(
@@ -2334,6 +2608,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         ALL_ROLES,
         Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/available-actions",
+        "getProjectAvailableActions",
+        "project:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
     ),
     op!(
         Public,
@@ -2592,6 +2880,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/projects/{projectId}/agent-runs/{runId}",
         "getProjectAgentRun",
+        "agent_run:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/agent-runs/{runId}/task-progress",
+        "getProjectAgentTaskProgress",
         "agent_run:read",
         Oidc,
         None,
@@ -3248,6 +3550,34 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/projects/{projectId}/me/evaluation-tasks/submissions/{submissionId}",
+        "getOwnProjectEvaluationTaskForSubmission",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Student],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/me/evaluation-tasks/{runId}",
+        "getOwnProjectEvaluationTaskProgress",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Student],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects/{projectId}/environment-template-releases",
         "listEnvironmentTemplateReleases",
         "release:read",
@@ -3810,6 +4140,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/internal/v1/agent-runs/{runId}/work-execution-intent",
         "getInternalAgentWorkExecutionIntent",
+        "agent.control.invoke",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/agent-runs/{runId}/task-progress",
+        "getInternalAgentTaskProgress",
         "agent.control.invoke",
         ServiceJwt,
         None,

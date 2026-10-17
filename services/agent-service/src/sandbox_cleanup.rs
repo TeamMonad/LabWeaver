@@ -405,7 +405,7 @@ impl Worker {
             .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
         // Settle the same immutable POST, including ambiguous accepted requests, then cancel it.
         lifecycle
-            .create()
+            .create(std::time::Duration::from_secs(request.duration_seconds))
             .await
             .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
         let identity = SandboxAuthoringProcess::attempt_identity(
@@ -567,6 +567,7 @@ impl Worker {
             }
             Ok(KubernetesJobObservation::Failed { observation, .. }) => Some(observation),
             Ok(KubernetesJobObservation::Missing) => None,
+            Ok(KubernetesJobObservation::Running) if pending.state == "failed" => None,
             Ok(KubernetesJobObservation::Running) => {
                 tracing::warn!(
                     event = "agent.authoring.sandbox.cleanup_recovery_deferred",
@@ -1355,6 +1356,131 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep durable cancellation, live workload and release guard in one fixture"
+    )]
+    async fn cancelled_running_recovery_deletes_owned_job_before_release()
+    -> Result<(), Box<dyn Error>> {
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                postgres.get_host_port_ipv4(5432).await?
+            ))
+            .await?;
+        apply_agent_migrations(&pool).await?;
+        let store = PostgresAgentRunStore::new(pool.clone());
+        let run = AgentRunId::new();
+        let task = TaskRunId::new();
+        let name = format!("cancelled-{}", &task.as_uuid().simple().to_string()[..20]);
+        let status = resource_status_value(task, false);
+        let typed_status: TaskResourceStatus = serde_json::from_value(status.clone())?;
+        let binding = contracts::execution::TaskExecutionBinding::from_admitted_status(
+            &typed_status,
+            1,
+            name.clone(),
+            "cancelled-recovery-test",
+        )?;
+        let intent = SandboxAttemptIntent {
+            run_id: run,
+            track: AgentTrackKind::Environment,
+            attempt: 1,
+            task_run_id: task.as_uuid(),
+            execution_generation: 1,
+            namespace: "runner".to_owned(),
+            workload_name: name.clone(),
+            binding: serde_json::to_value(binding)?,
+        };
+        insert_agent_run(&pool, run).await?;
+        store.begin_sandbox_attempt(&intent).await?;
+        store
+            .record_sandbox_objects(
+                &intent,
+                &serde_json::to_value(vec![ExecutionObjectRef {
+                    api_version: "batch/v1".to_owned(),
+                    resource: "jobs".to_owned(),
+                    name: name.clone(),
+                    uid: "job-uid-1".to_owned(),
+                }])?,
+            )
+            .await?;
+        store
+            .complete_sandbox_attempt(&intent, None, 1, Some("LW_AGENT_SANDBOX_CANCELLED"))
+            .await?;
+        sqlx::query("UPDATE agent.authoring_sandbox_attempts SET updated_at=now()-interval '10 seconds' WHERE run_id=$1")
+            .bind(run.as_uuid()).execute(&pool).await?;
+        let pending = select_pending_batch(&pool)
+            .await?
+            .into_iter()
+            .find(|attempt| attempt.task_run_id == task.as_uuid())
+            .ok_or("cancelled attempt not selected")?;
+        let resource = spawn_resource_client(status, 0).await?;
+        let ownership =
+            attempt_ownership_from_parts(run.as_uuid(), task, "cancelled-recovery-test");
+        let identity = SandboxAuthoringProcess::attempt_identity(
+            "runner",
+            &name,
+            ownership.clone(),
+            "cancelled-recovery-test",
+        );
+        let kube = spawn_kubernetes(identity, ownership, true).await?;
+        kube.state.job_running.store(true, Ordering::SeqCst);
+        *resource
+            .state
+            .cleanup_guard
+            .lock()
+            .map_err(|_| "resource guard poisoned")? = Some(Arc::clone(&kube.state.job_exists));
+        let token = tempfile::NamedTempFile::new()?;
+        std::fs::write(token.path(), b"test-kubernetes-token")?;
+        let api = KubernetesApiClient::for_test(
+            KubernetesApiConfiguration {
+                kubernetes_api_server: Url::parse(&kube.base_uri)?,
+                kubernetes_bearer_token_file: token.path().to_owned(),
+                kubernetes_ca_file: PathBuf::from("unused-test-ca"),
+                runner_namespace: "runner".to_owned(),
+                request_timeout_milliseconds: 5_000,
+            },
+            reqwest::Client::builder().no_proxy().build()?,
+            "labweaver-agent-test",
+            "agent-test",
+            "LW_AGENT_",
+            SANDBOX_MANAGED_BY,
+            SANDBOX_EVENT_SCOPE,
+        );
+        let worker = Worker {
+            api,
+            resources: resource.client.clone(),
+            store: store.clone(),
+            objects: test_objects().await?,
+            configuration: test_configuration(),
+        };
+        assert!(worker.reconcile(&pending).await?);
+        assert!(!kube.state.job_exists.load(Ordering::SeqCst));
+        assert_eq!(resource.state.release_count.load(Ordering::SeqCst), 1);
+        let saved = store
+            .load_sandbox_attempt(run, AgentTrackKind::Environment, 1, 1)
+            .await?
+            .ok_or("saved attempt missing")?;
+        assert_eq!(saved.state, "released");
+        assert_eq!(
+            saved.diagnostic_code.as_deref(),
+            Some("LW_AGENT_SANDBOX_CANCELLED")
+        );
+        assert!(
+            resource
+                .state
+                .usage_posts
+                .lock()
+                .map_err(|_| "usage posts poisoned")?
+                .is_empty(),
+            "a running Job without terminal timing must not be reported as zero usage"
+        );
+        Ok(())
+    }
+
     // The injected PostgreSQL write fault must leave the exact owned Job and Resource lease intact.
     #[allow(clippy::too_many_lines)]
     #[tokio::test]
@@ -1673,6 +1799,7 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeResourceState {
+        cleanup_guard: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>>,
         status: Arc<Mutex<Value>>,
         usage_posts: Arc<Mutex<Vec<Value>>>,
         failures_remaining: Arc<AtomicUsize>,
@@ -1761,6 +1888,7 @@ mod tests {
         )
         .await?;
         let state = FakeResourceState {
+            cleanup_guard: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new(status)),
             usage_posts: Arc::new(Mutex::new(Vec::new())),
             failures_remaining: Arc::new(AtomicUsize::new(fail_usage_count)),
@@ -1848,6 +1976,13 @@ mod tests {
         AxumPath(_task_run_id): AxumPath<String>,
         Json(_request): Json<Value>,
     ) -> Response {
+        if state.cleanup_guard.lock().map_or(true, |guard| {
+            guard
+                .as_ref()
+                .is_some_and(|exists| exists.load(Ordering::SeqCst))
+        }) {
+            return StatusCode::CONFLICT.into_response();
+        }
         state.release_count.fetch_add(1, Ordering::SeqCst);
         let Ok(mut status) = state.status.lock() else {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1941,7 +2076,8 @@ mod tests {
     }
 
     struct FakeKubernetesState {
-        job_exists: AtomicBool,
+        job_exists: Arc<AtomicBool>,
+        job_running: AtomicBool,
         job: Value,
         pods: Value,
     }
@@ -2004,7 +2140,8 @@ mod tests {
             }]}
         });
         let state = Arc::new(FakeKubernetesState {
-            job_exists: AtomicBool::new(job_exists),
+            job_exists: Arc::new(AtomicBool::new(job_exists)),
+            job_running: AtomicBool::new(false),
             job,
             pods: if job_exists {
                 json!({"items": [pod]})
@@ -2032,7 +2169,11 @@ mod tests {
 
     async fn kubernetes_get_job(State(state): State<Arc<FakeKubernetesState>>) -> Response {
         if state.job_exists.load(Ordering::SeqCst) {
-            Json(state.job.clone()).into_response()
+            let mut job = state.job.clone();
+            if state.job_running.load(Ordering::SeqCst) {
+                job["status"] = json!({"active":1});
+            }
+            Json(job).into_response()
         } else {
             StatusCode::NOT_FOUND.into_response()
         }

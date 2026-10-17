@@ -59,6 +59,7 @@ struct Authority {
     admin: Uuid,
     requests: Arc<Mutex<Vec<Value>>>,
     upstream: &'static str,
+    environment: Option<contracts::environment::EnvironmentInstance>,
 }
 
 async fn discovery(State(state): State<Authority>) -> Json<Value> {
@@ -190,6 +191,23 @@ async fn control(
         .or(delegated_actor.as_deref());
     let record = control_request_record(&method, &uri, &headers, &body, actor, state.upstream);
     state.requests.lock().await.push(record);
+    if state.upstream == "environment"
+        && let Some(environment) = &state.environment
+    {
+        if method == Method::GET && uri.path() == format!("/api/v1/environments/{}", environment.id)
+        {
+            return Json(environment.clone()).into_response();
+        }
+        if method == Method::POST
+            && uri.path() == format!("/api/v1/environments/{}/stop", environment.id)
+        {
+            return (
+                StatusCode::ACCEPTED,
+                Json(json!({"boundary": "request_record_only"})),
+            )
+                .into_response();
+        }
+    }
     if method == Method::GET && uri.path() == "/admin/realms/test/users" {
         return directory_users_response();
     }
@@ -356,10 +374,11 @@ async fn nats_boundary(tasks: &mut Tasks) -> Result<async_nats::Client, Box<dyn 
     clippy::too_many_lines,
     reason = "the real router fixture assembles existing auth and downstream clients without alternate production wiring"
 )]
-async fn state(
+async fn state_with_environment(
     pool: PgPool,
     admin: Uuid,
     tasks: &mut Tasks,
+    environment: Option<contracts::environment::EnvironmentInstance>,
 ) -> Result<(Arc<AppState>, Arc<Mutex<Vec<Value>>>), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("https://{}/", listener.local_addr()?);
@@ -380,6 +399,7 @@ async fn state(
         decoding_key: DecodingKey::from_ec_components(&x, &y)?,
         jwk: json!({"kty": "EC", "crv": "P-256", "x": x, "y": y, "use": "sig", "alg": "ES256", "kid": "fixture"}),
         upstream: "control",
+        environment,
     };
     let router = Router::new()
         .route(
@@ -414,6 +434,8 @@ async fn state(
     };
     let environment_router = Router::new()
         .route("/api/v1/environments", any(control))
+        .route("/api/v1/environments/{environment_id}", any(control))
+        .route("/api/v1/environments/{environment_id}/stop", any(control))
         .with_state(environment_authority);
     let environment_server_config = Arc::clone(&server_config);
     tasks.0.push(tokio::spawn(async move {
@@ -1322,7 +1344,7 @@ async fn non_owner_membership_add_is_rejected_before_directory_resolution()
     .await?;
     let project_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO access.project_memberships \
+        "INSERT INTO control.project_memberships \
          (course_id,project_id,actor_id,role,state,revision) \
          VALUES (NULL,$1,$2,'student','active',1)",
     )
@@ -1478,6 +1500,211 @@ async fn organization_directory_is_teacher_visible_and_student_denied_without_lo
         requests
             .iter()
             .filter(|request| request["path"] == "/admin/realms/test/users")
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+async fn state(
+    pool: PgPool,
+    admin: Uuid,
+    tasks: &mut Tasks,
+) -> Result<(Arc<AppState>, Arc<Mutex<Vec<Value>>>), Box<dyn Error>> {
+    Box::pin(state_with_environment(pool, admin, tasks, None)).await
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn owned_environment_requests_use_current_control_actions_and_reject_removed_creator()
+-> Result<(), Box<dyn Error>> {
+    use contracts::environment::{
+        DesiredEnvironmentState, EnvironmentInstance, EnvironmentOperation,
+        EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
+    };
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let actor = Uuid::now_v7();
+    let project = contracts::ProjectId::new();
+    let environment_id = contracts::EnvironmentId::new();
+    let course = contracts::CourseId::new();
+    let timestamp: contracts::UtcTimestamp = "2026-10-12T00:00:00.000Z".parse()?;
+    let instance = EnvironmentInstance {
+        id: environment_id,
+        project_id: project,
+        course_id: Some(course),
+        owner_id: actor.to_string().parse()?,
+        display_label: "synthetic owner boundary".to_owned(),
+        class: contracts::authoring::EnvironmentClass::Experiment,
+        runtime_kind: contracts::authoring::RuntimeKind::Container,
+        release_id: contracts::ReleaseId::new(),
+        release_version: 1,
+        lease_id: None,
+        capacity_binding: None,
+        approved_resources: contracts::resource::WorkloadResources {
+            cpu_millicores: 1000,
+            memory_bytes: 1_073_741_824,
+            storage_bytes: 2_147_483_648,
+            gpu: None,
+        },
+        provider_binding: "container-primary-v1".to_owned(),
+        desired_state: DesiredEnvironmentState::Running,
+        observed_state: ObservedEnvironmentState::Requested,
+        revision: contracts::Revision::new(1)?,
+        generation: 1,
+        observed_generation: 0,
+        operation: EnvironmentOperation {
+            id: contracts::OperationId::new(),
+            kind: EnvironmentOperationKind::Create,
+            state: OperationState::Accepted,
+            accepted_revision: contracts::Revision::new(1)?,
+            attempt: 1,
+            provider_step: 1,
+            max_attempts: 3,
+            next_attempt_at: timestamp,
+            actor_id: actor.to_string().parse()?,
+            trace_id: "synthetic-199".to_owned(),
+            accepted_at: timestamp,
+            deadline_at: "2026-10-12T00:10:00.000Z".parse()?,
+            cleanup_started_at: None,
+            diagnostic_code: None,
+            preserve_mutable_disk: false,
+            access_revocation_revision: None,
+            retry_from_phase: None,
+            reset_target: None,
+            lease_authorization: None,
+        },
+        gpu_allocation: None,
+        resource_reservation_released: false,
+        eligibility_expires_at: Some("2026-10-13T00:00:00.000Z".parse()?),
+        endpoints: Vec::new(),
+        last_diagnostic_code: None,
+        failed_phase: None,
+        cleanup_evidence: None,
+    };
+    instance.validate()?;
+    let mut tasks = Tasks(Vec::new());
+    let (state, requests) = Box::pin(state_with_environment(
+        pool.clone(),
+        actor,
+        &mut tasks,
+        Some(instance),
+    ))
+    .await?;
+    let bff = session(
+        &pool,
+        &state.key_ring,
+        actor,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    sqlx::query("INSERT INTO control.project_memberships(project_id,actor_id,course_id,role,object_role,state,revision) VALUES($1,$2,$3,'student','viewer','active',1)")
+        .bind(project.as_uuid()).bind(actor).bind(course.as_uuid()).execute(&pool).await?;
+    sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,state,revision) VALUES($1,$2,'student','active',1)")
+        .bind(course.as_uuid()).bind(actor).execute(&pool).await?;
+    // A more permissive unrelated project and a forged query cannot replace the Environment's project.
+    let unrelated = contracts::ProjectId::new();
+    sqlx::query("INSERT INTO control.project_memberships(project_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','owner','active',1)")
+        .bind(unrelated.as_uuid()).bind(actor).execute(&pool).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let app = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, bff.session_id
+    );
+    let endpoint =
+        format!("{base}/api/v1/environments/{environment_id}/stop?projectId={unrelated}");
+    let stop = || {
+        client
+            .post(&endpoint)
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, ORIGIN)
+            .header("x-csrf-token", bff.csrf_token.expose())
+            .header("idempotency-key", "synthetic-stop")
+            .header(header::IF_MATCH, "\"1\"")
+            .json(&json!({"expectedRevision":1}))
+    };
+    assert_eq!(stop().send().await?.status(), StatusCode::FORBIDDEN);
+    assert!(
+        requests.lock().await.iter().all(|r| r["method"] != "POST"),
+        "a viewer must not forward a mutation to the Environment boundary"
+    );
+    sqlx::query("UPDATE control.project_memberships SET object_role='operator',revision=2 WHERE project_id=$1 AND actor_id=$2")
+        .bind(project.as_uuid()).bind(actor).execute(&pool).await?;
+    assert_eq!(stop().send().await?.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r["method"] == "POST")
+            .count(),
+        1
+    );
+    let start = client
+        .post(format!("{base}/api/v1/environments/{environment_id}/start"))
+        .header(header::COOKIE, &cookie)
+        .header(header::ORIGIN, ORIGIN)
+        .header("x-csrf-token", bff.csrf_token.expose())
+        .header("idempotency-key", "synthetic-start")
+        .header(header::IF_MATCH, "\"1\"")
+        .json(&json!({"expectedRevision":1}))
+        .send()
+        .await?;
+    assert_eq!(
+        start.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "new admission requires a verified applied policy"
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r["method"] == "POST")
+            .count(),
+        1,
+        "policy denial must not reach Environment"
+    );
+    assert_eq!(
+        stop().send().await?.status(),
+        StatusCode::ACCEPTED,
+        "stopping remains available while no applied policy is verified"
+    );
+    sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=2 WHERE course_id=$1 AND actor_id=$2")
+        .bind(course.as_uuid()).bind(actor).execute(&pool).await?;
+    assert_eq!(
+        stop().send().await?.status(),
+        StatusCode::FORBIDDEN,
+        "a project role cannot replace revoked course scope"
+    );
+    sqlx::query("UPDATE control.course_memberships SET state='active',revision=3 WHERE course_id=$1 AND actor_id=$2")
+        .bind(course.as_uuid()).bind(actor).execute(&pool).await?;
+    sqlx::query("UPDATE control.project_memberships SET state='revoked',revision=3 WHERE project_id=$1 AND actor_id=$2")
+        .bind(project.as_uuid()).bind(actor).execute(&pool).await?;
+    assert_eq!(
+        stop().send().await?.status(),
+        StatusCode::FORBIDDEN,
+        "owning the old instance cannot survive Control member removal"
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r["method"] == "POST")
             .count(),
         2
     );

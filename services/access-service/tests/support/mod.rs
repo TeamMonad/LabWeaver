@@ -16,6 +16,29 @@ pub async fn apply_access_migrations(pool: &PgPool) -> Result<(), Box<dyn Error>
     )
     .execute(pool)
     .await?;
+    sqlx::raw_sql("CREATE SCHEMA IF NOT EXISTS control")
+        .execute(pool)
+        .await?;
+    let migration_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let catalog = MigrationCatalog::load(&migration_root.join("catalog.yaml"))?;
+    let control = catalog
+        .domains
+        .iter()
+        .find(|entry| entry.name == Domain::Control)
+        .ok_or_else(|| std::io::Error::other("no Control migrations"))?;
+    let mut control_connection = pool.acquire().await?;
+    sqlx::query("SET search_path = control, pg_catalog")
+        .execute(&mut *control_connection)
+        .await?;
+    for migration in &control.migrations {
+        sqlx::raw_sql(&MigrationCatalog::read_verified_sql(
+            &migration_root,
+            migration,
+        )?)
+        .execute(&mut *control_connection)
+        .await?;
+    }
+    drop(control_connection);
     let domain = Domain::Access;
     sqlx::query(&format!("CREATE SCHEMA {}", domain.schema()))
         .execute(pool)
