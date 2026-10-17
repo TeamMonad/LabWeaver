@@ -390,6 +390,7 @@ async fn spawn_api(
     registry_base: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let state = Arc::new(AgentApiState {
+        resource: None,
         store: PostgresAgentRunStore::new(pool.clone()),
         build_store: PgBuildStore::new(pool.clone()),
         generated_artifacts: GeneratedArtifactStore::new(pool.clone()),

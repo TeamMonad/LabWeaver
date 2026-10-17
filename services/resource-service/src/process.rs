@@ -74,6 +74,16 @@ impl ResourceProcessRuntime {
         if schema_ready.is_none() {
             return Err(ResourceProcessRuntimeError::SchemaMissing);
         }
+        let deadline_ready: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns WHERE table_schema='resource'
+            AND table_name='resource_requests' AND column_name='approval_deadline_at')",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if !deadline_ready {
+            return Err(ResourceProcessRuntimeError::SchemaMissing);
+        }
         let client = connect_nats_mtls(
             &required(NATS_SERVER)?,
             required_path(NATS_CA_PATH)?,
@@ -224,6 +234,12 @@ async fn run_outbox(
         tokio::select! {
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } }
             _ = interval.tick() => {
+                if let Err(error) = store.expire_pending_task_once().await {
+                    let safe_detail = resource_error_safe_detail(&error);
+                    tracing::warn!(event = "resource.task_expiry.failed", outcome = "will_retry",
+                        error_kind = resource_error_kind(&error), failure_stage = "task.expiry",
+                        safe_detail = safe_detail.as_str());
+                }
                 if let Err(ref e) = outbox.dispatch_once().await {
                     let safe_detail = e.safe_detail();
                     tracing::warn!(
