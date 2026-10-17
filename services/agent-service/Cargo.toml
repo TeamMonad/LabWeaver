@@ -49,6 +49,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+resource-service = { path = "../resource-service" }
 jsonschema.workspace = true
 jsonwebtoken.workspace = true
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }

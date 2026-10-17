@@ -264,6 +264,86 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::ResourceUsagePage
     );
     document!(
+        "schemas/contracts/v1/credit-hold-page.schema.json",
+        crate::resource::credits::CreditHoldPage
+    );
+    document!(
+        "schemas/contracts/v1/credit-account.schema.json",
+        crate::resource::credits::CreditAccount
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold.schema.json",
+        crate::resource::credits::CreditHold
+    );
+    document!(
+        "schemas/contracts/v1/credit-ledger-entry.schema.json",
+        crate::resource::credits::CreditLedgerEntry
+    );
+    document!(
+        "schemas/contracts/v1/credit-ledger-page.schema.json",
+        crate::resource::credits::CreditLedgerPage
+    );
+    document!(
+        "schemas/contracts/v1/credit-admin-operation.schema.json",
+        crate::resource::credits::CreditAdminOperation
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-estimate-request.schema.json",
+        crate::resource::build_costing::BuildCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-estimate.schema.json",
+        crate::resource::build_costing::BuildCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/environment-credit-grant.schema.json",
+        crate::resource::environment_funding::EnvironmentCreditGrant
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-record.schema.json",
+        crate::resource::build_costing::BuildCostRecord
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-reconciliation.schema.json",
+        crate::resource::build_costing::BuildCostReconciliation
+    );
+    document!(
+        "schemas/contracts/v1/build-usage-measurement.schema.json",
+        crate::resource::build_costing::BuildUsageMeasurement
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-admission-request.schema.json",
+        crate::resource::build_costing::BuildCostAdmissionRequest
+    );
+    document!(
+        "schemas/contracts/v1/observe-build-cost-request.schema.json",
+        crate::resource::build_costing::ObserveBuildCostRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-cost-estimate-request.schema.json",
+        crate::resource::costing::ResourceCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-cost-estimate.schema.json",
+        crate::resource::costing::ResourceCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold-request.schema.json",
+        crate::resource::costing::EstimatedCreditHoldRequest
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold.schema.json",
+        crate::resource::costing::EstimatedCreditHold
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold-request.schema.json",
+        crate::resource::credits::CreditHoldRequest
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold-resolution-request.schema.json",
+        crate::resource::credits::CreditHoldResolutionRequest
+    );
+    document!(
         "schemas/contracts/v1/resource-charge.schema.json",
         crate::resource::ResourceCharge
     );
@@ -1078,7 +1158,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if matches!(
             operation.operation_id,
-            "listProjectAgentRuns" | "listProjectResourceUsage"
+            "listProjectAgentRuns"
+                | "listProjectResourceUsage"
+                | "listProjectCreditLedger"
+                | "listProjectCreditHolds"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -1117,6 +1200,20 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ]);
         }
         parameters.extend(environment_management_parameters(operation.operation_id));
+        if operation.operation_id == "getBuildCost" {
+            parameters.push(json!({"name":"leaseToken","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if matches!(
+            operation.operation_id,
+            "getBuildCost" | "getProjectBuildCost"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "attempt" {
+                    parameter["schema"] =
+                        json!({"type":"integer","minimum":1,"maximum":2_147_483_647});
+                }
+            }
+        }
         if operation.operation_id == "streamProjectEvents" {
             let stream_cursor_schema = json!({
                 "type":"string",
@@ -1626,6 +1723,14 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "resetEnvironment" => "http/reset-environment-request",
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
+        "createCreditAdminOperation" => "credit-admin-operation",
+        "createCreditHold" => "credit-hold-request",
+        "estimateProjectResourceCost" => "resource-cost-estimate-request",
+        "estimateProjectBuildCost" => "build-cost-estimate-request",
+        "admitBuildCost" => "build-cost-admission-request",
+        "observeBuildCost" => "observe-build-cost-request",
+        "createEstimatedCreditHold" => "estimated-credit-hold-request",
+        "resolveCreditHold" => "credit-hold-resolution-request",
         "createResourceRate" => "http/create-resource-rate-request",
         "endResourceRate" => "http/end-resource-rate-request",
         "upsertProjectResourceBudget" => "http/upsert-resource-budget-request",
@@ -1763,6 +1868,23 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"array","items":contract_ref("resource-rate")})
         }
         "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
+        "listProjectCreditHolds" => contract_ref("credit-hold-page"),
+        "getProjectCredits" => contract_ref("credit-account"),
+        "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
+        "getEnvironmentCreditGrant" => contract_ref("environment-credit-grant"),
+        "claimBuildCostReconciliations" => {
+            json!({"type":"array","items":contract_ref("build-cost-reconciliation")})
+        }
+        "estimateProjectBuildCost" => contract_ref("build-cost-estimate"),
+        "getProjectBuildCost" | "getBuildCost" | "admitBuildCost" | "observeBuildCost" => {
+            contract_ref("build-cost-record")
+        }
+        "createEstimatedCreditHold" => contract_ref("estimated-credit-hold"),
+        "listProjectCreditLedger" => contract_ref("credit-ledger-page"),
+        "createCreditAdminOperation" => {
+            json!({"type":"array","items":contract_ref("credit-ledger-entry")})
+        }
+        "createCreditHold" | "resolveCreditHold" => contract_ref("credit-hold"),
         "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
             contract_ref("resource-budget")
         }

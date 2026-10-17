@@ -400,11 +400,11 @@ pub struct EnvironmentLeaseVerificationResponse {
     pub authorization: Option<EnvironmentLeaseAuthorization>,
 }
 
-/// Resource-to-Environment command to create one Work aggregate from an already-approved
-/// Lease and capacity shell. Environment resolves the release projection locally.
+/// Resource-to-Environment handoff for the original lease and capacity shell.
+/// The receiving owner resolves Work/Experiment from its immutable release projection.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ResourceWorkHandoff {
+pub struct ResourceEnvironmentHandoff {
     pub version: u8,
     pub request_id: ResourceRequestId,
     pub request_revision: Revision,
@@ -428,7 +428,29 @@ pub struct ResourceWorkHandoff {
     pub trace_id: String,
 }
 
-impl ResourceWorkHandoff {
+/// Existing Work consumers use the same concrete handoff while #207 updates its dispatch.
+pub type ResourceWorkHandoff = ResourceEnvironmentHandoff;
+
+impl ResourceEnvironmentHandoff {
+    /// Returns the server-owned purpose of the exact immutable release, never a caller-selected class.
+    pub fn class_for_release(
+        &self,
+        projection: &crate::events::ReleasePublished,
+    ) -> Result<crate::authoring::EnvironmentClass, EnvironmentError> {
+        self.validate()?;
+        projection
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        if projection.release.id != self.release_id
+            || projection.release.version != self.release_version
+            || projection.release.project_id != self.project_id
+            || projection.release.course_id != self.course_id
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(projection.environment_spec.class)
+    }
+
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.version != 1
             || self.request_revision.get() == 0

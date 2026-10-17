@@ -24,3 +24,11 @@
 Ansible/Helm 的本地测试检查渲染后配置、权限、网络、清理范围和无 Secret 输出。真实 KubeVirt、GPU 和集群流量需对应环境另行验证。
 
 运行受影响包和页面测试，公共契约/权限/持久化/费用扩大验证，最后进行整体检查。不要固定 sleep 等待业务，使用状态、事件或进程终态。日志和临时测试产物用于故障排查，不成为运行时准入条件。
+
+## 项目 Credits
+
+运行 `cargo test -p resource-service --locked` 与 `cargo test -p auth --test credits_policy --locked`。
+
+真实 PostgreSQL 用合成项目验证并发预占不透支、稳定业务键与事件幂等、结算与释放乱序、双边转移失败回滚、追加冲正、未知标记、尾部平台成本和不可变约束。服务 JWT 测试覆盖普通成员发币拒绝、网关拒绝、缺服务权限拒绝和错 owner 拒绝。项目授权覆盖非成员与撤销成员拒绝。
+
+费用计算与 Credits 扣收须在同一事务。实际回收前不能释放资金。与 #200 组合验证 Task deadline、ack 重放及 release 重放。测试结果和未验收项记在 Issue/PR。
