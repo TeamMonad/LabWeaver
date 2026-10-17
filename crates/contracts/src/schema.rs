@@ -38,6 +38,50 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::project::Project
     );
     document!(
+        "schemas/contracts/v1/platform-configuration-desired.schema.json",
+        crate::platform_configuration::PlatformConfigurationDesired
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-status.schema.json",
+        crate::platform_configuration::PlatformConfigurationStatus
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-version.schema.json",
+        crate::platform_configuration::PlatformConfigurationVersion
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-apply.schema.json",
+        crate::platform_configuration::PlatformConfigurationApply
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-bundle.schema.json",
+        crate::platform_configuration::PlatformConfigurationBundle
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-replica-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationReplicaObservation
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-deployment-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationDeploymentObservation
+    );
+    document!(
+        "schemas/contracts/v1/http/register-platform-configuration-bundle-request.schema.json",
+        crate::platform_configuration::RegisterPlatformConfigurationBundleRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/update-platform-configuration-request.schema.json",
+        crate::platform_configuration::UpdatePlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/apply-platform-configuration-request.schema.json",
+        crate::platform_configuration::ApplyPlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/report-platform-configuration-apply-request.schema.json",
+        crate::platform_configuration::ReportPlatformConfigurationApplyRequest
+    );
+    document!(
         "schemas/contracts/v1/agent-run.schema.json",
         crate::authoring::AgentRun
     );
@@ -1038,6 +1082,23 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let mut parameters = path_parameters(operation.path);
         if matches!(
             operation.operation_id,
+            "getPlatformConfigurationVersion"
+                | "getPlatformConfigurationBundle"
+                | "getLoadedPlatformConfiguration"
+                | "registerPlatformConfigurationBundle"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "revision" {
+                    parameter["schema"] = json!({"type":"integer","minimum":1,"maximum":9_223_372_036_854_775_807_u64});
+                }
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            parameters.push(json!({"name":"expectedRevision","in":"query","required":true,"schema":{"type":"integer","minimum":0,"maximum":9_223_372_036_854_775_807_u64}}));
+            parameters.push(json!({"name":"configurationSha256","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9a-f]{64}$"}}));
+        }
+        if matches!(
+            operation.operation_id,
             "getProjectCandidateBuild" | "cancelProjectCandidateBuild"
         ) {
             for parameter in &mut parameters {
@@ -1174,6 +1235,37 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ,"x-labweaver-problem-content-type":"application/problem+json"
             ,"x-labweaver-errors":["LW_CONTRACT_DOCUMENT_INVALID","LW_ACCESS_DENIED","LW_IDEMPOTENCY_CONFLICT","LW_REVISION_CONFLICT"]
         });
+        if matches!(
+            operation.operation_id,
+            "getPlatformConfiguration"
+                | "updatePlatformConfiguration"
+                | "getPlatformConfigurationVersion"
+                | "applyPlatformConfiguration"
+                | "getPlatformConfigurationApply"
+                | "reportPlatformConfigurationApply"
+                | "registerPlatformConfigurationBundle"
+                | "getPlatformConfigurationBundle"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_PLATFORM_CONFIGURATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+                "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+                "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+                "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+                "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+                "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+                "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+                "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_OPERATION_IN_PROGRESS"
+            ]);
+        }
         if operation.operation_id == "resolveEnvironmentOwner" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1251,6 +1343,18 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if let Some(schema) = request_schema(operation.operation_id) {
             operation_json["requestBody"] =
                 json!({"required":true,"content":{"application/json":{"schema":schema}}});
+            if operation.operation_id == "updatePlatformConfiguration" {
+                operation_json["requestBody"]["content"]["application/yaml"] =
+                    json!({"schema":request_schema(operation.operation_id)});
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            operation_json["requestBody"] = json!({"required":true,"content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}});
+            operation_json["responses"]["413"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["responses"]["415"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["description"] = json!(
+                "Register received ciphertext and an administrator-declared binding to the current desired settings. Control computes the ciphertext digest but does not decrypt or approve deployment. Maximum upload: 73400320 bytes."
+            );
         }
         let entry = paths
             .entry(operation.path.to_owned())
@@ -1344,11 +1448,11 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
         ApiSurface::Public => {
             paths.insert(
                 "/auth/login".to_owned(),
-                json!({"get":{"operationId":"beginOidcLogin","summary":"Begin OIDC Authorization Code + PKCE login","security":[],"parameters":[{"name":"return_to","in":"query","required":false,"schema":{"type":"string"}}],"responses":{"302":{"description":"Redirect to the configured OIDC provider"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"beginOidcLogin","summary":"Begin OIDC Authorization Code + PKCE login","description":"Creates a short-lived single-use login transaction and a Secure, HttpOnly, host-only cookie unique to this transaction. Navigate in the browser; retain cookies for the callback.","security":[],"parameters":[{"name":"return_to","in":"query","required":false,"description":"Portal path beginning with one slash, including optional query and fragment. External URLs, network paths, backslashes and control characters are rejected. Omission uses the configured portal destination.","schema":{"type":"string","minLength":1,"maxLength":2048}}],"responses":{"307":{"description":"Redirect to the configured OIDC provider with the transaction cookie"},"400":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/auth/callback".to_owned(),
-                json!({"get":{"operationId":"completeOidcLogin","summary":"Complete the one-time OIDC callback","security":[],"parameters":[{"name":"code","in":"query","required":true,"schema":{"type":"string","minLength":1}},{"name":"state","in":"query","required":true,"schema":{"type":"string","minLength":1}}],"responses":{"302":{"description":"Session established and redirected to the allowlisted return URL"},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"completeOidcLogin","summary":"Complete the one-time OIDC callback","description":"Requires the initiating browser's transaction cookie. Wrong-browser requests cannot consume the transaction. Matching callbacks consume it once and clear only that cookie, including provider refusal or exchange failure. Responses are not cached.","security":[],"parameters":[{"name":"code","in":"query","required":false,"schema":{"type":"string","minLength":1}},{"name":"state","in":"query","required":true,"schema":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[A-Za-z0-9_-]{64}$"}},{"name":"error","in":"query","required":false,"description":"Provider refusal; replaces code and consumes only a browser-bound transaction.","schema":{"type":"string"}}],"responses":{"307":{"description":"Session established and redirected to the validated same-origin portal path"},"401":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/auth/backchannel-logout".to_owned(),
@@ -1600,6 +1704,9 @@ fn contract_ref(name: &str) -> Value {
 
 fn request_schema(operation_id: &str) -> Option<Value> {
     let name = match operation_id {
+        "updatePlatformConfiguration" => "http/update-platform-configuration-request",
+        "applyPlatformConfiguration" => "http/apply-platform-configuration-request",
+        "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
         "createProject" => "http/create-project-request",
         "updateProject" => "http/update-project-request",
         "addProjectMembership" => "http/add-project-membership-request",
@@ -1673,6 +1780,17 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "getPlatformConfiguration"
+        | "updatePlatformConfiguration"
+        | "applyPlatformConfiguration"
+        | "registerPlatformConfigurationBundle"
+        | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
+        "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
+        "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
+        "getLoadedPlatformConfiguration" => {
+            contract_ref("control-configuration-replica-observation")
+        }
+        "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")
         }

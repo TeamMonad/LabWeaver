@@ -1381,6 +1381,10 @@ impl ResourceUsageClientError {
 }
 
 #[cfg(test)]
+#[path = "bundle_configuration_tests.rs"]
+mod bundle_configuration_tests;
+
+#[cfg(test)]
 #[allow(
     clippy::expect_used,
     reason = "fixed test identities and timestamps are intentional"
