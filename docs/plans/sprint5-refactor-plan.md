@@ -1,8 +1,8 @@
 # Sprint5 重构方案
 
-日期：2026-10-12。基线：`develop@7e354381195e9124dd5afd86bd306c6a62fae496`。状态：已完成产品决策和任务拆分，等待逐项实施。
+日期：2026-10-12，修订：2026-10-20。规划基线：`develop@7e354381195e9124dd5afd86bd306c6a62fae496`。状态：实施中，实际进度见 Issue/PR。
 
-Sprint5 纳入已确认的完整产品目标，分阶段交付，不预设截止日期。本轮只整理方案、调整开发流程文档并建立 GitHub 任务，不修改业务代码，不部署，不清空数据。
+Sprint5 纳入已确认的完整产品目标，分阶段交付，不预设截止日期。计划修改不授权部署、发布或清空数据。
 
 入口：[Sprint5 里程碑](https://github.com/TeamMonad/LabWeaver/milestone/6) · [Epic #196](https://github.com/TeamMonad/LabWeaver/issues/196)。细分任务见第 15 节。Issue/PR 保存进度、实际测试结果和未完成事项。本文维护目标、边界和验收规则，不另建状态数据库。
 
@@ -329,22 +329,22 @@ Headscale 的 OIDC、DERP 和客户端组合需按实际支持确认。不能把
 
 ## 15. GitHub 拆分与实施顺序
 
-一个 Sprint5 里程碑，一个 Epic，38 个细分 Issue。不固定人员分工。本轮由 Codex 负责后端，由 OMP 中的 Grok 负责前端。每个 Issue 包含目标、模块、实施边界、依赖、行为验收和增量测试范围。
+一个 Sprint5 里程碑，一个 Epic，39 个细分 Issue。每个 Issue 包含目标、模块、实施边界、依赖、行为验收和增量验证；按职责协作，不指定开发工具、模型或供应商。
 
-| 执行端 | 负责范围 | 交接要求 |
+| 职责 | 负责范围 | 交接要求 |
 | --- | --- | --- |
-| Codex | 六服务、共享 crate、数据库、权限/状态/账务规则、公共契约与生成 SDK、部署运维、跨模块集成 | 给出真实接口、权限、状态/错误语义和契约提交，整合前端后完成用户流程验收 |
-| OMP/Grok | 前端页面与组件、路由与项目上下文、交互、前端测试、用户手册中的界面步骤 | 使用现有生成 SDK，提交前端差异和受影响检查结果，接口缺口交回 Codex |
+| 后端与契约 | 六服务、共享 crate、数据库、权限/状态/账务规则、公共契约与生成 SDK、部署运维、跨模块集成 | 提供接口、权限、状态/错误语义和契约提交，覆盖完整用户流程 |
+| 前端 | 页面、组件、路由、项目上下文、交互、前端测试、用户操作说明 | 消费真实 SDK；接口缺口交回后端修改真源，不补模拟业务后端 |
 
-跨层 Issue 同时标注两端范围，不复制 Issue 或业务状态机。#201 的控制台实现和 #232 的界面操作手册由 OMP/Grok 主导，Codex 提供必要接口并复核业务语义。其余含前端的 Issue，由 Codex 协调契约与集成，OMP/Grok 完成相应界面。
+跨层 Issue 共用验收条件，分别注明前后端范围。#201 控制台和 #232 界面操作说明由前端主导，后端提供接口并复核权限、费用和持久性语义。
 
-默认按同一 Issue 串行交接。需要并行时使用独立分支/工作树和不重叠的文件所有权。生成契约、锁文件和共享配置明确唯一修改者，不让两个工具同时改同一工作树。具体交接流程见[开发约定](../development/README.md)。
+流程线与视觉线并行开发：流程线落实项目上下文、手工 Work、审核和评测；[S5-39 #276](https://github.com/TeamMonad/LabWeaver/issues/276) 统一视觉与交互基础。共享组件先整合结构和行为，再重放视觉改动；具体在途 PR 顺序在 Epic 维护，不在计划里保存进度快照。
 
-开发工具分工不改变平台产品的 Claude Code Agent 后端，不授权自动合并、发布或部署。OMP 启动时明确 Grok 的 provider/model，禁止自动换成其他模型。
+并行使用独立分支/工作树和明确的文件所有权；契约生成、迁移、锁文件和共享配置串行整合。具体流程见[开发约定](../development/README.md)。不授权自动合并、发布或部署；产品 Claude Code Agent 后端决定不变。
 
 | 阶段 | 交付门槛 | 主要任务 |
 | --- | --- | --- |
-| A：安全和业务基础 | 可靠身份/输入/权限，审批到任务可衔接，项目上下文一致 | 01/02/03/05/06/07/08/13/15/22/30/34 |
+| A：安全和业务基础 | 可靠身份/输入/权限，审批到任务可衔接，项目上下文与控制台基础一致 | 01/02/03/05/06/07/08/13/15/22/30/34/39 |
 | B：可运行的资源平台 | 隔离应用入口，持久盘，真实准入，预留和账务闭环 | 04/09/10/11/12/14/16/17/21 |
 | C：完整产品旅程 | 持续 Agent、GPU/VM、课程、评测和成绩流程 | 18/19/20/23/24/25/26/27 |
 | D：运营与对外使用 | 全局库存、观测、API、网络、账号退出 | 28/29/31/32/33 |
@@ -389,9 +389,10 @@ Headscale 的 OIDC、DERP 和客户端组合需按实际支持确认。不能把
 | [S5-33 #228](https://github.com/TeamMonad/LabWeaver/issues/228) | 统一成员离开、账号停用和项目归档的资源收尾 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#209](https://github.com/TeamMonad/LabWeaver/issues/209)、[#225](https://github.com/TeamMonad/LabWeaver/issues/225)、[#224](https://github.com/TeamMonad/LabWeaver/issues/224) |
 | [S5-34 #229](https://github.com/TeamMonad/LabWeaver/issues/229) | 统一进程排空、Outbox、分页和孤儿回收的恢复语义 | [#200](https://github.com/TeamMonad/LabWeaver/issues/200) |
 | [S5-35 #231](https://github.com/TeamMonad/LabWeaver/issues/231) | 完成 100 个 CPU 环境和 20 个并发创建的容量基准 | [#206](https://github.com/TeamMonad/LabWeaver/issues/206)、[#208](https://github.com/TeamMonad/LabWeaver/issues/208)、[#225](https://github.com/TeamMonad/LabWeaver/issues/225)、[#218](https://github.com/TeamMonad/LabWeaver/issues/218)、[#221](https://github.com/TeamMonad/LabWeaver/issues/221)、[#230](https://github.com/TeamMonad/LabWeaver/issues/230)、[#229](https://github.com/TeamMonad/LabWeaver/issues/229) |
-| [S5-36 #234](https://github.com/TeamMonad/LabWeaver/issues/234) | 收敛增量 CI、阶段发布与空数据切换流程 | 其余37项 |
+| [S5-36 #234](https://github.com/TeamMonad/LabWeaver/issues/234) | 收敛增量 CI、阶段发布与空数据切换流程 | 其余38项，CI 子切片可提前实施 |
 | [S5-37 #232](https://github.com/TeamMonad/LabWeaver/issues/232) | 交付按用户任务组织的完整使用手册 | [#199](https://github.com/TeamMonad/LabWeaver/issues/199)、[#202](https://github.com/TeamMonad/LabWeaver/issues/202)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#210](https://github.com/TeamMonad/LabWeaver/issues/210)、[#225](https://github.com/TeamMonad/LabWeaver/issues/225)、[#217](https://github.com/TeamMonad/LabWeaver/issues/217)、[#218](https://github.com/TeamMonad/LabWeaver/issues/218)、[#219](https://github.com/TeamMonad/LabWeaver/issues/219)、[#220](https://github.com/TeamMonad/LabWeaver/issues/220)、[#221](https://github.com/TeamMonad/LabWeaver/issues/221)、[#222](https://github.com/TeamMonad/LabWeaver/issues/222)、[#223](https://github.com/TeamMonad/LabWeaver/issues/223)、[#224](https://github.com/TeamMonad/LabWeaver/issues/224)、[#226](https://github.com/TeamMonad/LabWeaver/issues/226)、[#228](https://github.com/TeamMonad/LabWeaver/issues/228) |
 | [S5-38 #233](https://github.com/TeamMonad/LabWeaver/issues/233) | 交付完整安装、配置、升级和故障恢复手册 | [#203](https://github.com/TeamMonad/LabWeaver/issues/203)、[#206](https://github.com/TeamMonad/LabWeaver/issues/206)、[#205](https://github.com/TeamMonad/LabWeaver/issues/205)、[#208](https://github.com/TeamMonad/LabWeaver/issues/208)、[#213](https://github.com/TeamMonad/LabWeaver/issues/213)、[#214](https://github.com/TeamMonad/LabWeaver/issues/214)、[#230](https://github.com/TeamMonad/LabWeaver/issues/230)、[#227](https://github.com/TeamMonad/LabWeaver/issues/227)、[#229](https://github.com/TeamMonad/LabWeaver/issues/229)、[#231](https://github.com/TeamMonad/LabWeaver/issues/231)、[#207](https://github.com/TeamMonad/LabWeaver/issues/207)、[#215](https://github.com/TeamMonad/LabWeaver/issues/215) |
+| [S5-39 #276](https://github.com/TeamMonad/LabWeaver/issues/276) | 统一控制台设计 token、组件、键盘/焦点、状态、窄屏和表格 | 无硬前置；共享页面在 S5-06 流程结构后整合 |
 
 运行权限交付由 S5-11 落实环境契约、Pod 配置及专用执行边界，新增依赖 S5-08 的平台策略配置。S5-03 定义对象授权与预授权，S5-20/23 接入 Agent 声明和权限变更，S5-21 保持构建权限独立。S5-25/28 提供教师审核和管理员策略/审批界面。S5-31/37/38 同步 API、用户和部署说明。各任务按职责交付，不新增通用权限服务。
 
@@ -405,6 +406,20 @@ Headscale 的 OIDC、DERP 和客户端组合需按实际支持确认。不能把
 6. 阶段稳定后由维护者决定合入 main 和发布。
 
 S5-36 可提前整理 CI，但最终完成依赖其余交付。S5-37/38 随功能滚动写作，最终依赖对应功能和演练。没有自动批准、合并或发布。
+### 旅程检查点
+
+保留 A 至 E 阶段，按下表增量验收用户价值。所需功能切片合入 develop 后，在真实业务后端走查；不必等待相关大 Issue 的全部范围完成才做第一次走查，但检查点通过不能替代其余验收。结果和下一步记录在对应 Issue/Epic。每次同时检查第 11 节与 S5-39 的键盘、窄屏、诊断和破坏性操作确认。
+
+| 检查点 | 相关 Issue | 真实后端走查 | 对应手册章节 |
+| --- | --- | --- | --- |
+| 登录与项目上下文 | #198/#199/#201/#276 | 登录、多标签、项目切换/深链、无权恢复、首页关联对象、撤权终止连接 | 快速开始：登录与项目；协作：成员和权限 |
+| 无模型手工 Work | #199/#200/#201/#202/#203/#207/#209/#210 | 手工发布模板、估价/预占、创建容器与 VM、连接编辑、停止确认、继续后文件保留；重复请求不重复资源/扣费 | 快速开始：手工 Work；费用与数据说明 |
+| 教学到成绩 | #197/#200/#216/#219/#220/#221/#222 | 名单与小组、材料上传恢复、可读审核和学生预览、一次发布、提交后跟踪当前尝试、平台故障不计零分、重评申诉与归档 | 教学手册：发布、提交、反馈和成绩 |
+| 科研协作与 Agent | #199/#204/#207/#215/#216/#217/#218 | 共享 Work 按动作授权、隔离域应用/WebSocket、显式模型输入、持续会话、批准/取消/重连、配置与排障 | 科研与协作：Agent、应用与外部 IDE |
+| 资源与 GPU | #209/#210/#211/#212/#213/#214/#224/#225 | 预留与可抢占估价、停止借用、60秒保存宽限、5分钟召回、超时退款补偿、到期通知；真实设备逐模式计算 | 费用与数据说明；科研：GPU/VM |
+| 数据与管理收尾 | #205/#207/#208/#223/#224/#225/#226/#228 | 回收站、只读保留与导出、恢复、管理员搜索/审批/账务、账号退出资源收尾、用户 token API 示例 | 管理员手册；数据保留；API 使用说明 |
+| 安装、恢复与规模 | #203/#205/#206/#208/#227/#229/#230/#231/#232/#233/#234 | 按手册空环境安装/升级、独立备份恢复、故障后持久数据、100个 CPU 环境/20个并发创建、人工发布准备 | 部署、运维与恢复手册 |
+
 
 ## 16. 验收标准
 
