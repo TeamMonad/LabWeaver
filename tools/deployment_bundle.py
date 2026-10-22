@@ -665,7 +665,8 @@ def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
     if runtime["defaultContainerUid"] != 0:
         raise BundleError(
             "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
-            "runtimePolicy.defaultContainerUid has no execution-side consumer (see #207)"
+            f"runtimePolicy.defaultContainerUid={runtime['defaultContainerUid']} has no "
+            "execution-side consumer (see #207)"
         )
     unsupported = (
         (runtime["allowedCapabilities"], "runtimePolicy.allowedCapabilities"),
