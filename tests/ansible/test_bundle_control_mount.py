@@ -195,10 +195,21 @@ class BundleControlMountTests(unittest.TestCase):
             _,
         ):
             original = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
-            for change in ("missing", "binding", "replicas", "namespace", "override"):
+            for change in (
+                "missing",
+                "binding",
+                "policy",
+                "replicas",
+                "namespace",
+                "override",
+            ):
                 values = json.loads(json.dumps(original))
                 if change == "missing":
                     del values["managedControlConfiguration"]["sourceJson"]
+                elif change == "policy":
+                    values["platformConfigurationPolicy"]["runtimePolicy"][
+                        "allowedCapabilities"
+                    ] = ["NET_RAW"]
                 elif change == "override":
                     values["workloadInputs"]["control-service"]["env"][
                         "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE"

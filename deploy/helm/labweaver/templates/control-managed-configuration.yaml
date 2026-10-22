@@ -6,6 +6,12 @@
 {{- $parsedPolicy := mustFromJson $policy -}}
 {{- if ne $parsedPolicy.configurationSha256 $parsedVersion.configurationSha256 -}}
 {{- fail "platformConfigurationPolicy digest differs from managed configuration" -}}
+{{- $versionConfiguration := required "managedControlConfiguration.versionJson.configuration is required" $parsedVersion.configuration -}}
+{{- range $group := list "lifecycle" "runtimePolicy" "builderPolicy" }}
+{{- if ne (toJson (index $parsedPolicy $group)) (toJson (index $versionConfiguration $group)) }}
+{{- fail (printf "platformConfigurationPolicy.%s differs from authenticated version" $group) -}}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- $parsedSource := mustFromJson $source -}}
 {{- $control := index .Values.workloads "control-service" -}}

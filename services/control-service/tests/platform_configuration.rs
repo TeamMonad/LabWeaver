@@ -869,6 +869,23 @@ async fn http_json_yaml_share_revision_and_only_signed_executor_can_report() -> 
         serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
     assert_eq!(state.revision, 1);
     assert!(state.applied.is_none());
+    let replay = fixture
+        .router
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            root,
+            fixture.admin,
+            serde_json::to_vec(&update)?,
+            "application/json",
+            0,
+            "http-json-update",
+        )?)
+        .await?;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replayed: PlatformConfigurationStatus =
+        serde_json::from_slice(&to_bytes(replay.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(replayed.revision, 1);
     let stale_yaml = fixture
         .router
         .clone()

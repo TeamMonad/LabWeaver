@@ -1,5 +1,4 @@
 //! Administrator configuration routes share the existing Access decision boundary.
-
 use super::{
     ApiError, ApiState, GatewayPrincipal, authorize_global, idempotency, now,
     require_platform_admin,
@@ -16,13 +15,16 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
     ApplyPlatformConfigurationRequest, PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES,
-    RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
-    UpdatePlatformConfigurationRequest,
+    PlatformConfigurationStatus, RegisterPlatformConfigurationBundleRequest,
+    ReportPlatformConfigurationApplyRequest, UpdatePlatformConfigurationRequest,
 };
 use contracts::{OperationId, Revision};
 use futures_util::StreamExt;
+use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, Sha256Digest};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -212,6 +214,45 @@ async fn bundle(
     response(value, revision, StatusCode::OK)
 }
 
+async fn replay_completed(
+    state: &ApiState,
+    operation: &str,
+    key: &IdempotencyKey,
+    request: Value,
+    status: StatusCode,
+) -> Result<Option<Response>, ApiError> {
+    let hash = Sha256Digest::of_canonical(&request)
+        .map_err(|_| ApiError::bad_request("LW_PLATFORM_CONFIGURATION_INVALID"))?;
+    let decision = IdempotencyStore::lookup(
+        &state.control.pool,
+        Domain::Control,
+        operation,
+        key.as_str(),
+        hash,
+    )
+    .await
+    .map_err(|_| ApiError::internal("LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED"))?;
+    match decision {
+        Some(IdempotencyDecision::Replay(value)) => {
+            let value: PlatformConfigurationStatus = serde_json::from_value(value)
+                .map_err(|_| ApiError::internal("LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED"))?;
+            let revision = value.revision;
+            Ok(Some(response(value, revision, status)?))
+        }
+        Some(IdempotencyDecision::Conflict) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "LW_IDEMPOTENCY_CONFLICT",
+            false,
+        )),
+        Some(IdempotencyDecision::InProgress) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "LW_OPERATION_IN_PROGRESS",
+            true,
+        )),
+        Some(IdempotencyDecision::Reserved) | None => Ok(None),
+    }
+}
+
 async fn register_bundle(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -231,7 +272,6 @@ async fn register_bundle(
     .await?;
     let Query(binding) =
         query.map_err(|_| ApiError::bad_request("LW_PLATFORM_CONFIGURATION_INVALID"))?;
-    fence(request.headers(), binding.expected_revision)?;
     let key = idempotency(request.headers())?;
     if request
         .headers()
@@ -245,7 +285,27 @@ async fn register_bundle(
             false,
         ));
     }
+    let fence_headers = request.headers().clone();
     let ciphertext = receive_ciphertext(request.into_body()).await?;
+    let replay_request = json!({
+        "actor": actor,
+        "desiredRevision": revision,
+        "request": binding,
+        "digest": ciphertext.digest.to_string(),
+        "encryptedBytes": ciphertext.bytes,
+    });
+    if let Some(replay) = replay_completed(
+        &state,
+        "control_platform_configuration_register_bundle_v1",
+        &key,
+        replay_request,
+        StatusCode::OK,
+    )
+    .await?
+    {
+        return Ok(replay);
+    }
+    fence(&fence_headers, binding.expected_revision)?;
     let value = configuration::register_bundle(
         &state.control.pool,
         actor,
@@ -328,15 +388,20 @@ async fn update(
             ));
         }
     };
-    fence(&headers, request.expected_revision)?;
-    let value = configuration::update(
-        &state.control.pool,
-        actor,
-        &request,
-        &idempotency(&headers)?,
-        now()?,
+    let key = idempotency(&headers)?;
+    if let Some(replay) = replay_completed(
+        &state,
+        "control_platform_configuration_update_v1",
+        &key,
+        json!({"actor": actor, "request": request}),
+        StatusCode::OK,
     )
-    .await?;
+    .await?
+    {
+        return Ok(replay);
+    }
+    fence(&headers, request.expected_revision)?;
+    let value = configuration::update(&state.control.pool, actor, &request, &key, now()?).await?;
     let revision = value.revision;
     response(value, revision, StatusCode::OK)
 }
@@ -349,15 +414,21 @@ async fn apply(
 ) -> Result<Response, ApiError> {
     let actor = admin(&state, &principal, &headers, "applyPlatformConfiguration").await?;
     let request: ApplyPlatformConfigurationRequest = parse_json(&body)?;
-    fence(&headers, request.expected_revision)?;
-    let value = configuration::request_apply(
-        &state.control.pool,
-        actor,
-        &request,
-        &idempotency(&headers)?,
-        now()?,
+    let key = idempotency(&headers)?;
+    if let Some(replay) = replay_completed(
+        &state,
+        "control_platform_configuration_apply_v1",
+        &key,
+        json!({"actor": actor, "request": request}),
+        StatusCode::ACCEPTED,
     )
-    .await?;
+    .await?
+    {
+        return Ok(replay);
+    }
+    fence(&headers, request.expected_revision)?;
+    let value =
+        configuration::request_apply(&state.control.pool, actor, &request, &key, now()?).await?;
     let revision = value.revision;
     response(value, revision, StatusCode::ACCEPTED)
 }
@@ -369,7 +440,18 @@ async fn report(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let request: ReportPlatformConfigurationApplyRequest = parse_json(&body)?;
+    let key = idempotency(&headers)?;
+    if let Some(replay) = replay_completed(
+        &state,
+        "control_platform_configuration_report_v1",
+        &key,
+        json!({"executor": &executor.0, "id": id, "request": request}),
+        StatusCode::OK,
+    )
+    .await?
+    {
+        return Ok(replay);
+    }
     fence(&headers, request.expected_revision.get())?;
     let value = configuration::report(
         &state.control.pool,
@@ -377,7 +459,7 @@ async fn report(
         &executor.0,
         id,
         &request,
-        &idempotency(&headers)?,
+        &key,
         now()?,
     )
     .await?;

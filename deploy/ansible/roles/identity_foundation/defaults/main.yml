@@ -87,9 +87,6 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
   - caller: labweaver-environment
     target: labweaver-control
     roles: [control.agent_run.read]
-  - caller: labweaver-agent
-    target: labweaver-control
-    roles: [control.agent_run.read]
   - caller: labweaver-evaluation
     target: labweaver-control
     roles: [control.authoring.read, control.llm_policy.read]

@@ -101,15 +101,13 @@ nats:
   serverFile: /etc/labweaver/environment-authority/nats-server
 ```
 
-派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。原非 Bundle YAML 仍支持单个 server 字符串；server 与 serverFile 同时提供或均缺失时启动失败。
+派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。这里交付的是同源输入绑定接口；当前 Bundle PR 不实现 `serverFile` 的 Environment 启动消费者。原非 Bundle YAML 仍支持单个 server 字符串。
 
 有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
 
-`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。#207 的执行器启动在原 `EnvironmentRuntimeAdmission::from_env` 路径消费这些输入；需要同时使用包含该读取路径的 Environment 镜像。
+`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。Environment 的实际启动消费和资金授权属于 #207，当前 PR 只交付绑定输入和明确的外部前置条件。
 
-CI 显式运行 `metering::bundle_configuration_tests::authenticated_bundle_loads_both_executor_clients`。该测试生成合成 age 密文，通过原解密/派生入口取得文件，让两个消费进程读取同一 PostgreSQL 数据库，并以原 ResourceUsage client 读取 HTTPS 服务。它验证错误 client secret、错误 CA 与日志不含凭据。外部 issuer/token/Resource 响应和投影目录是合成边界；该结果不是 Kubernetes 安装、真实 NATS 身份或资金授权验收。
-
-原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照。它们不会把 Environment 配置渲染或上述本地消费测试当作其他服务已经部署、已加载或已应用的事实。
+原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照，不把 Environment 配置渲染当作已加载或已应用事实。
 
 ## Agent 的当前模型输入复核连接
 
@@ -117,13 +115,11 @@ Agent 的四项 `LABWEAVER_CONTROL_SERVICE_BASE_URI`、`CA_PATH`、`AUDIENCE`、
 
 Agent 保留自己的 service client ID、OIDC CA 与 client secret。其 `mtls-ca.pem` 必须和已有 Control 连接引用同一源文件；不复制 Environment 的身份。Agent scope 输入包含已有 `control.agent_run.read`，Control caller 输入包含该 Agent client ID。该名称已用于 Environment→Control 读取，本次不增加新 scope 或通配权限。
 
-既有 identity_foundation 角色输入增加 Agent→Control 的单个 `control.agent_run.read`。Bundle 静态 inventory 可通过原 `identity_service_role_assignments` 传递完整已评审配置；它仍位于同一加密目录。自定义 assignment 覆盖 defaults 时，必须保留正确 caller/target 的这条只读关系，并与 service client、audience 和 caller 输入相符。渲染这些输入不会证明 Keycloak 已存在该授权，也不会签发凭据。
+Bundle 静态 inventory 可通过原 `identity_service_role_assignments` 传递已评审配置；本 PR 不新增 Agent→Control role assignment，不签发凭据或修改真实身份。自定义 assignment 必须由 #216/#207 owner 在其消费者 PR 中校验 caller、target、service client、audience 和 scope。
 
 角色变更实施前，由维护者确认真实 issuer/client/audience、受信 CA、既有密钥挂载、最小角色 assignment、Control caller 与网络可达性，再由既有操作者在批准窗口执行。不要因为 scope 字符串或渲染成功就宣称服务已获授权。本切片没有执行 identity Job、修改真实权限或部署。
 
-消费验证固定使用已发表的 #216/#207 `50a812768a67f14e7107282c6ab8394d82998410`（含 PR264 `83f7ef6c`），把本候选的配置和合成 fixture 放入隔离工作树。`tools/check_agent_control_consumer.py` 临时添加单个 cfg(test) 模块，调用原 `ModelInputAuthorizationClient::from_env/resolve`，结束后逐字恢复生产模块。CI 显式执行该目标，不把 ignored 计通过。
-
-该目标通过真实 age、同源派生文件、HTTPS/OIDC、签名 JWT 与原 Control 使用的 verifier/只读 permission 检查消费配置；缺角色、错 caller/audience/secret/CA、超时越界、部分配置和 redirect 均拒绝。issuer 与对象响应为隔离合成边界，没有运行完整 Control 对象授权、真实模型、Keycloak 实例或 Kubernetes。原 #216 当前会话/成员/对象/取消语义及其历史结果不变；当前 #203 独立分支尚未包含该业务消费者，需要包含它的镜像或冻结组合。
+Agent→Control 的实际授权和消费者测试属于 #216/#207，不在本 PR 内实现。当前 PR 只从同一 Bundle 派生 HTTPS origin、CA、audience、timeout、caller 和 scope 输入，并在 Bundle/Helm 边界拒绝独立覆盖。渲染这些输入不会证明 Keycloak 已存在该授权，也不会签发凭据；维护者必须在目标 owner PR 和批准窗口中验证真实 role assignment、issuer、client、audience、CA、网络和服务镜像。
 
 ## 同一目录中的 Resource profile
 
@@ -419,7 +415,7 @@ Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob
 
 `exec` 为管理版本生成私有 `platform-configuration-source.json`，同时派生非秘密的 `platform-configuration-policy.json` 和同内容的 Helm `platformConfigurationPolicy`。两者都来自同一 Rust `PlatformConfigurationDesired` 快照；手写或缺少 lifecycle、runtimePolicy、builderPolicy 的 Helm values 在渲染时失败。策略摘要必须等于管理版本摘要，不能从第二份 YAML 覆盖。
 
-渲染时每个工作负载携带策略摘要 annotation。若 `runtimePolicy.privilegedAllowed` 为 true，必须提供有效的专用执行位置；`dedicated_node_pool` 会在 `kubevirt-executor` 上同时渲染 nodeSelector 和对应 NoSchedule taint toleration。`virtual_machine_guest` 不会伪造 Pod 调度约束，而要求对应 VM consumer 提供其 provider binding。builderPolicy 与 runtimePolicy 保持独立，runtime 设置不会放宽 builder 的硬编码安全上下文。
+渲染时每个工作负载携带策略摘要 annotation。当前唯一执行侧消费是 `dedicated_node_pool` 的 privileged runtime：它在 `kubevirt-executor` 上渲染 nodeSelector 和对应 NoSchedule taint toleration。`allowedCapabilities`、预授权、VM guest binding、builder capabilities/entitlements/提权，以及其他 privileged location 没有执行侧实现，Bundle 校验和 Helm 渲染会明确失败并提示“尚无执行侧实现（见 #207）”；不会静默忽略或伪造执行结果。builderPolicy 与 runtimePolicy 保持独立，runtime 设置不会放宽 builder 的硬编码安全上下文。
 
 Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，从实际读取的 typed 设置计算摘要，将快照固定在运行实例。原 apply/report 成功路径还要核对该快照与原尝试，不能只复制执行者的两个摘要。保存 desired、修改投影文件和命令退出成功均不会自动更新 applied。旧进程或错密文来源的成功回报被拒绝；失败保留最后验证的版本及待核对状态。具体输入与限制见[Control 启动加载](../contracts/platform-configuration.md#control-启动加载)。
 
@@ -452,4 +448,4 @@ python tools/observe_control_configuration.py \
 
 该入口提供代码、本地合成验证及Control副本观察能力。它没有执行真实集群安装，也没有覆盖全部lifecycle/runtime/builder消费者。全安装、实际replica/位置和其他服务的验收仍由唯一获准执行owner安排。
 
-隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。Bundle 渲染已对策略结构、摘要绑定和专用 kubevirt 执行位置 fail closed；完整运行授权、VM provider binding 的外部消费、其他服务的活动配置观察仍由对应领域 owner 和获准执行窗口完成。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。
+隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。Bundle 渲染已对策略结构、完整摘要绑定和当前可消费的专用 kubevirt 执行位置 fail closed；没有执行侧实现的 capability、预授权、VM guest binding、builder entitlement/提权和其他位置会明确拒绝，并由 #207 等领域 owner 完成后续消费。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。

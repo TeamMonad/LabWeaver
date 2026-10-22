@@ -51,6 +51,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and (index $runtime "privilegedAllowed") (not (index $runtime "privilegedExecutionLocation")) -}}
 {{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation is required when privilegedAllowed is true" -}}
 {{- end -}}
+{{- if index $runtime "allowedCapabilities" -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.allowedCapabilities has no execution-side consumer (see #207)" -}}
+{{- end -}}
+{{- if index $runtime "preauthorizations" -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.preauthorizations has no execution-side consumer (see #207)" -}}
+{{- end -}}
+{{- $builder := index $policy "builderPolicy" -}}
+{{- if index $builder "capabilities" -}}
+{{- fail "platformConfigurationPolicy.builderPolicy.capabilities has no execution-side consumer (see #207)" -}}
+{{- end -}}
+{{- if index $builder "entitlements" -}}
+{{- fail "platformConfigurationPolicy.builderPolicy.entitlements has no execution-side consumer (see #207)" -}}
+{{- end -}}
+{{- if index $builder "allowPrivilegeEscalation" -}}
+{{- fail "platformConfigurationPolicy.builderPolicy.allowPrivilegeEscalation has no execution-side consumer (see #207)" -}}
+{{- end -}}
+{{- $location := index $runtime "privilegedExecutionLocation" -}}
+{{- if and $location (ne (index $location "kind") "dedicated_node_pool") -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation has no execution-side consumer (see #207)" -}}
+{{- end -}}
 {{- $digest := required "platformConfigurationPolicy.configurationSha256 is required" (index $policy "configurationSha256") -}}
 {{- if not (regexMatch "^[0-9a-f]{64}$" $digest) -}}
 {{- fail "platformConfigurationPolicy.configurationSha256 must be a lowercase SHA-256" -}}

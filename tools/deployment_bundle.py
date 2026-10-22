@@ -660,6 +660,31 @@ def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
                 "LW_BUNDLE_CONFIGURATION_POLICY_INVALID: "
                 f"{group} missing {','.join(missing)}"
             )
+    runtime = configuration["runtimePolicy"]
+    builder = configuration["builderPolicy"]
+    unsupported = (
+        (runtime["allowedCapabilities"], "runtimePolicy.allowedCapabilities"),
+        (runtime["preauthorizations"], "runtimePolicy.preauthorizations"),
+        (builder["capabilities"], "builderPolicy.capabilities"),
+        (builder["entitlements"], "builderPolicy.entitlements"),
+    )
+    for value, field in unsupported:
+        if value:
+            raise BundleError(
+                "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+                f"{field} has no execution-side consumer (see #207)"
+            )
+    if builder["allowPrivilegeEscalation"]:
+        raise BundleError(
+            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+            "builderPolicy.allowPrivilegeEscalation has no execution-side consumer (see #207)"
+        )
+    location = runtime["privilegedExecutionLocation"]
+    if location is not None and location.get("kind") != "dedicated_node_pool":
+        raise BundleError(
+            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+            "runtimePolicy.privilegedExecutionLocation has no execution-side consumer (see #207)"
+        )
     return {
         "apiVersion": "deploy.labweaver.io/platform-policy/v1",
         "configurationSha256": digest,

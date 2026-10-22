@@ -171,15 +171,6 @@ Grok 可将版本 API 的完整 JSON 交给获准导出操作。归档选择使�
 
 测试在 loopback 随机端口启动 Control 与 Vite，不连接共享集群。临时目录保存合成身份、密文和浏览器输入，并在测试结束时清理。测试只回报有界诊断，不输出 Token、私钥或请求正文。Playwright CI 单独运行此目标；普通 Rust 测试将其标为 ignored，不能将 ignored 计作通过。
 
-### 原生登录和 CSRF
-
-另一个目标从真实 Keycloak 表单进入 Access HTTPS 门户。它使用实际 BFF 会话、CSRF、流式转发、Control API 和 PostgreSQL。Access 与 Control 的服务 JWT 也由临时 Keycloak 服务账户签发，服务客户端校验临时 CA。测试账户和密钥均为合成输入；测试结束后回收容器和临时目录。
-
-1. 准备上述依赖。
-2. 运行 `cargo test -p access-service --bin access-service browser_proxy_tests::platform_configuration_browser_tests::chromium_login_and_csrf_reach_real_platform_configuration --locked -- --ignored --exact --test-threads=1`。
-3. 核对登录、缺失或错误 CSRF、错误 Origin、非管理员、实际文件登记、刷新与退出结果。测试使用明确标记的 SDK 页面，不将测试页面称作产品控制台。
-
-管理员 App 另有独立目标。在包含管理员配置页面的 Web 工作树上，将 `LABWEAVER_TEST_WEB_ROOT` 设为该工作树的 `web` 绝对路径，然后运行 `cargo test -p access-service --bin access-service browser_proxy_tests::platform_configuration_browser_tests::chromium_login_and_csrf_reach_platform_configuration_page --locked -- --ignored --exact --test-threads=1`。它从受保护路由开始，经过原生登录后操作实际页面；不注入服务 Token、手造会话 Cookie 或替换配置 API。
 
 `LABWEAVER_TEST_CHROMIUM` 可指定已有 Chromium。默认截图保存在测试临时目录中；需要保留时，将 `LABWEAVER_TEST_BROWSER_EVIDENCE_DIR` 设为测试专用输出目录。截图不包含密码、Token 或解密身份。CI 显式运行原生 SDK/BFF 目标；App 目标需要已组合的 Web 源码，普通 Rust 的 ignored 不表示通过。
 

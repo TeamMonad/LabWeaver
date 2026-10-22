@@ -102,24 +102,36 @@ pub(super) fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
     })
 }
 
+fn age_binary(name: &str, fallback: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let value = std::env::var(name).unwrap_or_else(|_| fallback.to_owned());
+    if value.trim().is_empty() {
+        return Err(format!("LW_CONTROL_TEST_AGE_BINARY_MISSING:{name}").into());
+    }
+    Ok(value)
+}
+
 pub(super) fn ciphertext() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let identity = directory.path().join("synthetic-identity");
     let plaintext = directory.path().join("synthetic-plaintext");
     let archive = directory.path().join("synthetic.age");
-    let generate = std::process::Command::new("age-keygen")
+    let age_keygen = age_binary("AGE_KEYGEN", "age-keygen")?;
+    let age = age_binary("AGE", "age")?;
+    let generate = std::process::Command::new(&age_keygen)
         .arg("-o")
         .arg(&identity)
-        .output()?;
+        .output()
+        .map_err(|_| "LW_CONTROL_TEST_AGE_KEYGEN_MISSING")?;
     if !generate.status.success() {
-        return Err("synthetic age key generation failed".into());
+        return Err("LW_CONTROL_TEST_AGE_KEYGEN_FAILED".into());
     }
-    let recipient = std::process::Command::new("age-keygen")
+    let recipient = std::process::Command::new(&age_keygen)
         .arg("-y")
         .arg(&identity)
-        .output()?;
+        .output()
+        .map_err(|_| "LW_CONTROL_TEST_AGE_KEYGEN_MISSING")?;
     if !recipient.status.success() {
-        return Err("synthetic age recipient failed".into());
+        return Err("LW_CONTROL_TEST_AGE_RECIPIENT_FAILED".into());
     }
     std::fs::write(&plaintext, b"synthetic-only-configuration-and-secret")?;
     #[cfg(unix)]
@@ -127,15 +139,16 @@ pub(super) fn ciphertext() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&plaintext, std::fs::Permissions::from_mode(0o600))?;
     }
-    let encrypted = std::process::Command::new("age")
+    let encrypted = std::process::Command::new(&age)
         .arg("-r")
         .arg(String::from_utf8(recipient.stdout)?.trim())
         .arg("-o")
         .arg(&archive)
         .arg(&plaintext)
-        .output()?;
+        .output()
+        .map_err(|_| "LW_CONTROL_TEST_AGE_MISSING")?;
     if !encrypted.status.success() {
-        return Err("synthetic age encryption failed".into());
+        return Err("LW_CONTROL_TEST_AGE_ENCRYPTION_FAILED".into());
     }
     Ok(std::fs::read(archive)?)
 }

@@ -243,7 +243,6 @@ class DeploymentBundleTests(unittest.TestCase):
         self,
     ) -> None:
         self.configuration["runtimePolicy"].update(
-            allowedCapabilities=["NET_ADMIN", "NET_RAW"],
             privilegedAllowed=True,
             privilegedExecutionLocation={
                 "kind": "dedicated_node_pool",
@@ -427,6 +426,22 @@ class DeploymentBundleTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue().strip(), "LW_BUNDLE_IO_FAILED")
         self.assertNotIn(self.secret.decode(), stderr.getvalue())
 
+    def test_policy_without_an_execution_consumer_fails_before_seal(self) -> None:
+        for group, field, value in (
+            ("runtimePolicy", "allowedCapabilities", ["NET_ADMIN"]),
+            ("builderPolicy", "capabilities", ["NET_ADMIN"]),
+            ("builderPolicy", "entitlements", ["network.host"]),
+        ):
+            self.configuration[group][field] = value
+            self.save_version()
+            with self.assertRaisesRegex(
+                bundle.BundleError,
+                "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED",
+            ):
+                bundle.load_bundle(self.root)
+            self.configuration[group][field] = []
+            self.save_version()
+
     def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(
         self,
     ) -> None:
@@ -435,11 +450,12 @@ class DeploymentBundleTests(unittest.TestCase):
             helm, "The pinned Helm renderer is required for Bundle input tests."
         )
         self.configuration["runtimePolicy"].update(
-            allowedCapabilities=["SYS_ADMIN"],
             privilegedAllowed=True,
             privilegedExecutionLocation={
-                "kind": "virtual_machine_guest",
-                "providerBinding": "synthetic-vm",
+                "kind": "dedicated_node_pool",
+                "nodeSelector": {"labweaver.io/pool": "research"},
+                "taintKey": "labweaver.io/research",
+                "taintValue": "reserved",
             },
         )
         self.save_version()
