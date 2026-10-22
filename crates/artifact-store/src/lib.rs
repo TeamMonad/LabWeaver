@@ -180,7 +180,11 @@ pub trait ImmutableObjectStore: Send + Sync {
     /// Returns the deployment binding used in every public artifact reference.
     fn binding(&self) -> &str;
 
-    /// Signs one conditional immutable upload.
+    /// Signs one conditional immutable upload using a caller-enforced upper bound.
+    ///
+    /// `size_bytes` is validated against the configured maximum but is not enforced by the storage
+    /// service in the signed PUT. Variable-sized Agent callers must reject oversized files before
+    /// sending; material callers must use [`Self::presign_upload_exact`].
     async fn presign_upload(
         &self,
         key: &str,
@@ -1131,7 +1135,8 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
 
     /// Presigns one bounded write-once object for variable-sized Agent output.
     ///
-    /// The sandbox checks the generated file against its configured maximum before sending it.
+    /// The sandbox checks the generated file against its configured maximum before sending. This
+    /// bounded PUT does not enforce that upper bound in S3/MinIO; use the exact signer for material.
     async fn presign_upload(
         &self,
         key: &str,
