@@ -7,7 +7,7 @@ Control 保存材料上传会话和材料包。Evaluation 保存学生冻结提�
 
 1. 在发送创建请求前，保存本次操作的 `Idempotency-Key`。
 2. 调用 `POST /api/v1/projects/{projectId}/problem-package-uploads`。保存返回的上传会话 ID。
-3. 按 `uploadTargets` 上传文件。每个 PUT 必须包含返回的 `requiredHeaders`。
+3. 按 `uploadTargets` 上传文件。每个 PUT 必须包含返回的 `requiredHeaders`，其中签名的 `Content-Length` 必须等于该文件声明的 `sizeBytes`。
 4. 响应丢失或重新打开页面后，调用 `GET /api/v1/projects/{projectId}/problem-package-uploads/{uploadId}`。
 5. 对 `pending` 会话，只上传查询返回的缺失文件。`uploadedPaths` 表示对象的大小和媒体类型匹配，完成操作还会验证实际内容。
 6. 保存完成操作的幂等键及首次 `If-Match`，再调用 `POST /api/v1/projects/{projectId}/problem-package-uploads/{uploadId}/complete`。

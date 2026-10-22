@@ -24,7 +24,7 @@ use axum::{
 };
 use contracts::{
     ActorId, DiagnosticCode, EnvironmentId, EvaluationReleaseId, EvaluationRunId,
-    EvaluationStepRunId, FrozenSubmissionId, OperationId, ProblemDetails, Revision,
+    EvaluationStepRunId, FrozenSubmissionId, OperationId, ProblemDetails, Revision, UtcTimestamp,
     evaluation::{EvaluationRelease, EvaluationRun, StudentEvaluationResult},
     http::{
         AuthoringPublicationAdmissionQuery, CursorPage, DEFAULT_PAGE_LIMIT,
@@ -185,12 +185,14 @@ async fn freeze_submission(
     }
     let environment_revision = if_match(&headers)?;
     let idempotency_key = idempotency_key(&headers)?;
+    let requested_at = state.commands.authority_now().await?;
     let command = SubmissionFreezeCommand {
         input_authorization_context: model_input_context(
             &headers,
             project_id,
             request.course_id.or(course_id),
             actor_id,
+            requested_at,
         )?,
         worker_dispatch: crate::FreezeWorkerDispatch::Pending,
         frozen_submission_id: FrozenSubmissionId::new(),
@@ -204,7 +206,7 @@ async fn freeze_submission(
         manifest: request.manifest,
         idempotency_key: idempotency_key.as_str().to_owned(),
         trace_id: trace_id()?,
-        requested_at: state.commands.authority_now().await?,
+        requested_at,
     };
     let accepted = state.commands.accept(&command).await?;
     tracing::info!(
@@ -737,6 +739,7 @@ fn model_input_context(
     project_id: contracts::ProjectId,
     course_id: Option<contracts::CourseId>,
     actor_id: ActorId,
+    now: UtcTimestamp,
 ) -> Result<Option<contracts::http::ModelInputAuthorizationContext>, EvaluationApiError> {
     let Some(value) = headers.get(MODEL_CONTEXT_HEADER) else {
         return Ok(None);
@@ -750,6 +753,9 @@ fn model_input_context(
     context
         .validate()
         .map_err(|_| EvaluationApiError::IdentityInvalid)?;
+    if context.valid_until <= now {
+        return Err(EvaluationApiError::IdentityInvalid);
+    }
     if context.session_sha256 != session_sha256(headers)?
         || context.actor_id != actor_id
         || context.project_id != project_id
@@ -808,9 +814,10 @@ mod model_input_facts_tests {
         let project_id = contracts::ProjectId::new();
         let course_id = Some(contracts::CourseId::new());
         let mut headers = HeaderMap::new();
+        let now: UtcTimestamp = "2026-10-01T00:00:00.000Z".parse()?;
         headers.insert(SESSION_HEADER, session.to_string().parse()?);
         assert_eq!(
-            model_input_context(&headers, project_id, course_id, actor_id)?,
+            model_input_context(&headers, project_id, course_id, actor_id, now)?,
             None
         );
         let context = contracts::http::ModelInputAuthorizationContext {
@@ -827,8 +834,18 @@ mod model_input_facts_tests {
             serde_json::to_string(&value)?.parse()?,
         );
         assert_eq!(
-            model_input_context(&headers, project_id, course_id, actor_id)?,
+            model_input_context(&headers, project_id, course_id, actor_id, now)?,
             Some(context)
+        );
+        let mut expired = value.clone();
+        expired["validUntil"] = serde_json::json!("2026-09-30T23:59:59.000Z");
+        headers.insert(
+            MODEL_CONTEXT_HEADER,
+            serde_json::to_string(&expired)?.parse()?,
+        );
+        assert!(
+            model_input_context(&headers, project_id, course_id, actor_id, now).is_err(),
+            "expired evidence header was accepted"
         );
         for (field, replacement) in [
             ("sessionSha256", serde_json::json!("0".repeat(64))),
@@ -846,7 +863,7 @@ mod model_input_facts_tests {
                 serde_json::to_string(&invalid)?.parse()?,
             );
             assert!(
-                model_input_context(&headers, project_id, course_id, actor_id).is_err(),
+                model_input_context(&headers, project_id, course_id, actor_id, now).is_err(),
                 "accepted {field}"
             );
         }
@@ -859,7 +876,7 @@ mod model_input_facts_tests {
             MODEL_CONTEXT_HEADER,
             serde_json::to_string(&missing)?.parse()?,
         );
-        assert!(model_input_context(&headers, project_id, course_id, actor_id).is_err());
+        assert!(model_input_context(&headers, project_id, course_id, actor_id, now).is_err());
         Ok(())
     }
 }

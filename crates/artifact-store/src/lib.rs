@@ -771,8 +771,12 @@ impl S3ImmutableObjectStore {
 
     fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
         let prefix = self.config.object_prefix.trim_matches('/');
+        let in_prefix = key == prefix
+            || key
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'));
         if key.is_empty()
-            || !key.starts_with(prefix)
+            || !in_prefix
             || key.contains("..")
             || key.bytes().any(|byte| byte.is_ascii_control())
         {
@@ -1092,13 +1096,10 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         }
     }
 
-    /// Presigns one write once object.
+    /// Presigns one write-once object with the exact declared body length.
     ///
-    /// `size_bytes` is the reviewed upper bound of the write, not the size of the body a writer
-    /// sends: the body of a sandbox attempt result only exists inside the attempt. The bound
-    /// therefore stays a caller-side check — the writer refuses to upload beyond it and the reader
-    /// verifies the exact size it was promised — while the signature must not pin `Content-Length`,
-    /// because a pinned length makes every writer whose body is smaller than the bound fail.
+    /// The signed `Content-Length` is part of the object identity. Callers must know the complete
+    /// body size before requesting this URL; a smaller or larger body is rejected by S3/MinIO.
     async fn presign_upload(
         &self,
         key: &str,
@@ -1146,6 +1147,9 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .put_object()
             .bucket(&self.config.bucket)
             .key(key)
+            .content_length(
+                i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectIdentityInvalid)?,
+            )
             .content_type(media_type)
             .if_none_match("*")
             .presigned(
@@ -1918,27 +1922,49 @@ mod tests {
         }
         let response = request.body(bytes.to_vec()).send().await?;
         assert!(response.status().is_success());
-        // A writer that uploads less than the reviewed bound must still succeed: the size bound is
-        // a caller-side check, so the signature never pins a body length.
-        let bounded = store
+        let exact = store
             .presign_upload(
-                "problem-packages/course/upload/bounded-object",
-                store.config.max_object_bytes,
+                "problem-packages/course/upload/exact-object",
+                u64::try_from(bytes.len())?,
                 "text/plain",
                 current_test_time()?,
             )
             .await?;
-        let mut bounded_request = http.put(&bounded.url);
-        for (name, value) in &bounded.required_headers {
-            bounded_request = bounded_request.header(name, value);
+        let mut exact_request = http.put(&exact.url);
+        for (name, value) in &exact.required_headers {
+            exact_request = exact_request.header(name, value);
         }
         assert!(
-            bounded_request
+            exact_request
                 .body(bytes.to_vec())
                 .send()
                 .await?
                 .status()
                 .is_success()
+        );
+        let oversized = store
+            .presign_upload(
+                "problem-packages/course/upload/oversized-object",
+                u64::try_from(bytes.len())?,
+                "text/plain",
+                current_test_time()?,
+            )
+            .await?;
+        let mut oversized_request = http.put(&oversized.url);
+        for (name, value) in &oversized.required_headers {
+            if !name.eq_ignore_ascii_case("content-length") {
+                oversized_request = oversized_request.header(name, value);
+            }
+        }
+        oversized_request = oversized_request.header(
+            reqwest::header::CONTENT_LENGTH,
+            u64::try_from(bytes.len() + 1)?,
+        );
+        let oversized_response = oversized_request.body(bytes.to_vec()).send().await?;
+        assert!(
+            !oversized_response.status().is_success(),
+            "oversized body was accepted: {}",
+            oversized_response.status()
         );
         let mut overwrite = http.put(&presigned.url);
         for (name, value) in &presigned.required_headers {
@@ -1998,7 +2024,7 @@ mod tests {
         assert!(!streamed_path.exists());
         let frozen_file = store
             .freeze_current_file(
-                "problem-packages/course/upload/bounded-object",
+                "problem-packages/course/upload/exact-object",
                 u64::try_from(bytes.len())?,
                 "text/plain",
             )
@@ -2340,6 +2366,15 @@ mod tests {
             store.list_key_versions("unowned-key").await,
             Err(super::ObjectStoreError::ObjectIdentityInvalid)
         );
+        for foreign_key in [
+            "problem-packages-foreign/course/upload/object",
+            "problem-packagesx/course/upload/object",
+        ] {
+            assert_eq!(
+                store.list_key_versions(foreign_key).await,
+                Err(super::ObjectStoreError::ObjectIdentityInvalid)
+            );
+        }
         for version in versions {
             store.delete_orphan(key, &version).await?;
         }
