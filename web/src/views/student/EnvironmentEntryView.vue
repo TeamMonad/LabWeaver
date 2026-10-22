@@ -16,7 +16,7 @@
     />
 
     <section
-      v-if="!isEnvironmentLoaded || environmentToolsOpen"
+      v-if="!isWorkRoute && (!isEnvironmentLoaded || environmentToolsOpen)"
       aria-labelledby="releases-heading"
     >
       <h3
@@ -195,7 +195,7 @@
                   size="sm"
                   aria-hidden="true"
                 />
-                <span>{{ environmentToolsOpen ? '收起创建与切换' : '创建或切换环境' }}</span>
+                <span>{{ environmentToolsLabel }}</span>
               </button>
             </div>
           </div>
@@ -370,6 +370,10 @@
                       <span class="meta-item__label">材料保留至</span>
                       <span class="meta-item__value">{{ environmentMaterialDeadlineLabel(data.eligibilityExpiresAt) }}</span>
                     </div>
+                    <div class="meta-item">
+                      <span class="meta-item__label">模板版本</span>
+                      <span class="meta-item__value">固定使用 v{{ data.releaseVersion }}</span>
+                    </div>
                   </div>
                   <details class="environment-id-details">
                     <summary>查看高级详情</summary>
@@ -378,6 +382,14 @@
                     <span>内部修订版本：rev-{{ data.revision }}</span>
                   </details>
                 </div>
+
+                <EnvironmentConnectionSummary
+                  :instance="data"
+                  :endpoints="access.endpoints"
+                  :grant="access.grant"
+                  :instance-block-reason="accessGrantBlockReason(data)"
+                  @open-console="activeTab = 'terminal'"
+                />
 
                 <div class="access-section">
                   <h4 class="section-subtitle">
@@ -1080,6 +1092,7 @@ import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import GcpActionBar from '@/components/common/GcpActionBar.vue'
+import EnvironmentConnectionSummary from '@/components/environment/EnvironmentConnectionSummary.vue'
 import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 import { environmentStateLabel, endpointHealthLabel, accessGrantStateLabel, environmentOperationKindLabel, environmentOperationStateLabel } from '@/utils/stateLabels'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
@@ -1132,8 +1145,9 @@ const routeProjectId = computed(() => {
   const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || undefined
 })
-const waitForEnvironmentHandoff = computed(() => route.path.startsWith('/researcher/'))
-const handoffProjectId = computed(() => waitForEnvironmentHandoff.value
+/** Work is created through a resource request on the Work list, never from this console. */
+const isWorkRoute = computed(() => route.path.startsWith('/researcher/'))
+const handoffProjectId = computed(() => isWorkRoute.value
   ? routeProjectId.value ?? projects.selectedProjectId ?? undefined
   : undefined)
 const env = useEnvironmentInstance(selectedEnvironmentId, handoffProjectId)
@@ -1157,21 +1171,25 @@ const courseId = computed(() => {
   return selectedProject.value?.courseId ?? undefined
 })
 const isContextMissing = computed(() => !projectId.value)
-const isWorkConnection = computed(() => waitForEnvironmentHandoff.value || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
+const isWorkConnection = computed(() => isWorkRoute.value || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
 const environmentListPath = computed(() => props.teacherMode
   ? '/teacher/environments'
-  : isWorkConnection.value ? '/researcher/workspaces' : '/student/labs')
+  : isWorkConnection.value ? '/researcher/environments' : '/student/labs')
 const environmentListActionLabel = computed(() => props.teacherMode
   ? '查看项目环境'
-  : isWorkConnection.value ? '选择已有 Work 环境' : '选择已有实验环境')
+  : isWorkConnection.value ? '返回 Work 列表' : '选择已有实验环境')
 const environmentEmptyHint = computed(() => props.teacherMode
   ? '请从教师项目环境列表选择已有环境，或从上方创建环境。'
   : isWorkConnection.value
-    ? '请从项目工作空间选择已有 Work 环境，或在资源申请中创建新的 Work 环境。'
+    ? '请在 Work 列表中选择已有 Work，或选择模板新建 Work。'
     : '请从课程实验列表选择已有环境，或从上方已发布模板创建环境。')
 const breadcrumbLabel = computed(() => props.teacherMode
   ? '教师项目环境'
-  : isWorkConnection.value ? 'Work 项目环境' : '课程实验环境')
+  : isWorkConnection.value ? 'Work 环境' : '课程实验环境')
+const environmentToolsLabel = computed(() => {
+  if (isWorkRoute.value) return environmentToolsOpen.value ? '收起切换' : '按环境 ID 切换'
+  return environmentToolsOpen.value ? '收起创建与切换' : '创建或切换环境'
+})
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
 const lifecycle = useEnvironmentLifecycle(projectId, courseId)
 

@@ -53,6 +53,47 @@
         </AsyncStateView>
       </section>
 
+      <section
+        v-if="preparingRequests.length > 0 || requestsDiagnostic"
+        class="work-section"
+        aria-labelledby="preparing-heading"
+        data-testid="preparing-work"
+      >
+        <h2 id="preparing-heading">准备中的 Work</h2>
+        <DiagnosticBanner
+          v-if="requestsDiagnostic"
+          :code="requestsDiagnostic.code"
+          :request-id="requestsDiagnostic.requestId"
+          :message="`无法读取准备中的 Work：${requestsDiagnostic.message}`"
+          :retryable="requestsDiagnostic.retryable"
+          severity="warning"
+          @retry="resources.load()"
+        />
+        <ul v-if="preparingRequests.length > 0" class="work-list">
+          <li
+            v-for="request in preparingRequests"
+            :key="request.id"
+            class="work-row md-card"
+            :data-request-id="request.id"
+          >
+            <div class="work-row__main">
+              <strong>模板 v{{ request.target.releaseVersion }} · {{ resourceSummary(request.requestedResources) }}</strong>
+              <span class="work-row__meta">申请于 {{ formatTimestamp(request.createdAt) }} · {{ preparingStateText(request) }}</span>
+              <span v-if="resourceAllocationFailureMessage(request.diagnosticCode)" class="work-row__meta work-row__meta--error">
+                {{ resourceAllocationFailureMessage(request.diagnosticCode) }}
+              </span>
+            </div>
+            <RouterLink
+              class="outlined-button small"
+              :to="{ path: '/researcher/environments', query: { projectId, environmentId: request.target.environmentId } }"
+            >
+              查看准备进度
+            </RouterLink>
+          </li>
+        </ul>
+        <p v-if="preparingRequests.length > 0" class="section-hint">审批通过后平台自动创建 Work，创建完成后会出现在“项目中的 Work”。</p>
+      </section>
+
       <section class="work-section md-card create-card" aria-labelledby="create-heading">
         <h2 id="create-heading">新建 Work</h2>
         <ol class="create-steps" aria-label="新建 Work 的步骤">
@@ -148,9 +189,11 @@ import { useAgentAvailability } from '@/composables/useAgentAvailability'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useProjects } from '@/composables/useProjects'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
-import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import { resourceSummary, useProjectResources } from '@/composables/useProjectResources'
+import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema, ResourceRequestSchema } from '@/generated/contracts'
 import type { AsyncState } from '@/types/async'
 import { formatTimestamp } from '@/utils/format'
+import { resourceAllocationFailureMessage } from '@/utils/stateLabels'
 import { isUsableRelease, runtimeKindLabel, workTemplateArtifactLabel, workTemplateTitle } from '@/utils/workTemplate'
 
 const route = useRoute()
@@ -186,6 +229,47 @@ const selectedRelease = computed(() => {
 })
 watch(launcherProjectId, () => { selectedReleaseKey.value = '' })
 
+type EnvironmentRequest = ResourceRequestSchema & { target: Extract<ResourceRequestSchema['target'], { kind: 'environment' }> }
+
+const resources = useProjectResources(launcherProjectId)
+const requestsDiagnostic = computed(() => {
+  const state = resources.requests
+  return state.kind === 'success' || state.kind === 'empty' || state.kind === 'idle' || state.kind === 'loading' ? null : state.diagnostic
+})
+
+/**
+ * Work requests that have not produced an environment yet. Once the
+ * environment exists it is listed above with its own lifecycle state. An
+ * active request is only called "being created" when the Work list was read
+ * and does not contain its environment.
+ */
+const preparingRequests = computed<EnvironmentRequest[]>(() => {
+  if (resources.requests.kind !== 'success') return []
+  const list = workEnvironments.environments
+  const listKnown = list.kind === 'success' || list.kind === 'empty'
+  const created = new Set(list.kind === 'success' ? list.data.map((environment) => environment.id) : [])
+  return resources.requests.data.filter((request): request is EnvironmentRequest => (
+    request.target.kind === 'environment'
+    && (request.state === 'reviewing' || request.state === 'allocating' || (request.state === 'active' && listKnown))
+    && !created.has(request.target.environmentId)
+  ))
+})
+
+// Resource requests are re-read while they are still moving. Each new reading
+// taken while Work is being prepared may mean an environment now exists, so the
+// Work list is re-read in the background without blanking it.
+let preparingBeforeRead = false
+watch(() => resources.requests, () => {
+  if (preparingBeforeRead || preparingRequests.value.length > 0) void workEnvironments.refresh()
+  preparingBeforeRead = preparingRequests.value.length > 0
+})
+
+function preparingStateText(request: EnvironmentRequest): string {
+  if (request.state === 'reviewing') return '等待管理员审批'
+  if (request.state === 'allocating') return '已批准，正在分配资源'
+  return '资源已分配，正在创建环境'
+}
+
 const environmentIdInput = ref('')
 
 function releaseKey(release: Pick<EnvironmentTemplateReleaseViewSchema, 'id' | 'version'>) {
@@ -220,6 +304,7 @@ function openById() {
 .work-row__main { display: grid; gap: 2px; min-width: 0; }
 .work-row__main strong { overflow-wrap: anywhere; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
 .work-row__meta { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.work-row__meta--error { color: var(--md-sys-color-error); }
 .create-card { padding: 20px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-large); }
 .create-steps { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0; padding: 0; list-style: none; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-large); }
 .create-steps [aria-current='step'] { color: var(--md-sys-color-primary); }

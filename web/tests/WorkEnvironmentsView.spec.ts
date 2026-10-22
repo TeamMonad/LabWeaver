@@ -3,12 +3,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkEnvironmentsView from '@/views/researcher/WorkEnvironmentsView.vue'
-import { getActiveProjectLlmPolicy, listEnvironments, listEnvironmentTemplateReleases } from '@/generated/contracts'
+import {
+  getActiveProjectLlmPolicy,
+  listEnvironments,
+  listEnvironmentTemplateReleases,
+  listProjectResourceLeases,
+  listProjectResourceRequests,
+} from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', () => ({
   getActiveProjectLlmPolicy: vi.fn(),
   listEnvironments: vi.fn(),
   listEnvironmentTemplateReleases: vi.fn(),
+  listProjectResourceLeases: vi.fn(),
+  listProjectResourceRequests: vi.fn(),
   withdrawEnvironmentTemplateRelease: vi.fn(),
 }))
 
@@ -76,6 +84,24 @@ function problem(status: number, diagnosticCode: string) {
   return { data: undefined, error: { status, diagnosticCode, detail: diagnosticCode, requestId: 'req-1', retryable: false, title: 'x', type: 'about:blank', instance: '/x' } }
 }
 
+function workRequest(environmentId: string, state: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id: `request-${environmentId}`,
+    projectId: 'project-1',
+    requestKey: `work-${environmentId}`,
+    requesterId: 'student-1',
+    state,
+    generation: 1,
+    revision: 1,
+    requestedDurationSeconds: 3600,
+    requestedResources: { cpuMillicores: 1000, memoryBytes: 2 * 1024 ** 3, storageBytes: 10 * 1024 ** 3 },
+    target: { kind: 'environment', environmentId, releaseId: 'release-container', releaseVersion: 3 },
+    createdAt: '2026-09-14T09:00:00.000Z',
+    updatedAt: '2026-09-14T09:00:00.000Z',
+    ...overrides,
+  }
+}
+
 async function mountAt(query: Record<string, string> = { projectId: 'project-1' }) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -100,6 +126,8 @@ describe('WorkEnvironmentsView', () => {
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue(problem(404, 'LW_LLM_POLICY_NOT_FOUND') as never)
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [workSummary], nextCursor: null }, error: undefined } as never)
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [containerRelease, vmRelease, withdrawnRelease], nextCursor: null }, error: undefined } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined } as never)
   })
 
   it('creates Work without a model: Agent is off with a reason, templates stay selectable', async () => {
@@ -192,5 +220,72 @@ describe('WorkEnvironmentsView', () => {
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({ projectId: 'project-1', environmentId: 'env-typed' })
     wrapper.unmount()
+  })
+
+  it('shows submitted Work that has no environment yet, with the server state and a progress entry', async () => {
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [
+        workRequest('env-reviewing', 'reviewing'),
+        workRequest('env-allocating', 'allocating', { diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }),
+        workRequest('env-creating', 'active'),
+        // Already listed as Work: shown only in the Work list.
+        workRequest('env-work-1', 'active'),
+        workRequest('env-rejected', 'rejected'),
+        { ...workRequest('task', 'reviewing'), target: { kind: 'task', taskRunId: 'task-1' } },
+      ],
+      error: undefined,
+    } as never)
+    const { wrapper } = await mountAt()
+    const preparing = wrapper.get('[data-testid="preparing-work"]')
+    expect(preparing.findAll('[data-request-id]').map((row) => row.attributes('data-request-id'))).toEqual([
+      'request-env-reviewing',
+      'request-env-allocating',
+      'request-env-creating',
+    ])
+    expect(preparing.get('[data-request-id="request-env-reviewing"]').text()).toContain('等待管理员审批')
+    expect(preparing.get('[data-request-id="request-env-allocating"]').text()).toContain('分配失败，请回收后重新申请。')
+    expect(preparing.get('[data-request-id="request-env-creating"]').text()).toContain('资源已分配，正在创建环境')
+    expect(preparing.get('[data-request-id="request-env-creating"] a').attributes('href')).toContain('environmentId=env-creating')
+    wrapper.unmount()
+  })
+
+  it('does not claim an active request is still being created when the Work list could not be read', async () => {
+    vi.mocked(listEnvironments).mockResolvedValue(problem(503, 'LW_ENVIRONMENT_UNAVAILABLE') as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-creating', 'active')], error: undefined } as never)
+    const { wrapper } = await mountAt()
+    expect(wrapper.find('[data-testid="preparing-work"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('reports unreadable resource requests instead of hiding pending Work', async () => {
+    vi.mocked(listProjectResourceRequests).mockResolvedValue(problem(503, 'LW_RESOURCE_UNAVAILABLE') as never)
+    const { wrapper } = await mountAt()
+    const preparing = wrapper.get('[data-testid="preparing-work"]')
+    expect(preparing.text()).toContain('无法读取准备中的 Work')
+    expect(preparing.text()).toContain('LW_RESOURCE_UNAVAILABLE')
+    wrapper.unmount()
+  })
+
+  it('re-reads the Work list without blanking it while submitted Work is being prepared', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-new', 'allocating')], error: undefined } as never)
+      const { wrapper } = await mountAt()
+      expect(wrapper.find('[data-request-id="request-env-new"]').exists()).toBe(true)
+      const listCalls = vi.mocked(listEnvironments).mock.calls.length
+
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-new', 'active')], error: undefined } as never)
+      vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [workSummary, { ...workSummary, id: 'env-new', displayLabel: '新 Work', observedState: 'provisioning' }], nextCursor: null }, error: undefined } as never)
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+
+      expect(vi.mocked(listEnvironments).mock.calls.length).toBeGreaterThan(listCalls)
+      expect(wrapper.find('[data-environment-id="env-work-1"]').exists()).toBe(true)
+      expect(wrapper.get('[data-environment-id="env-new"]').text()).toContain('新 Work')
+      expect(wrapper.find('[data-testid="preparing-work"]').exists()).toBe(false)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

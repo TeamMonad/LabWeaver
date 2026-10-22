@@ -280,7 +280,8 @@ describe('EnvironmentEntryView', () => {
     expect(router.currentRoute.value.query.projectId).toBe('project-1')
   })
 
-  it('offers the project Work environment list before the advanced ID input', async () => {
+  it('sends Work back to the Work list instead of offering a second creation path', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [mockRelease] }, error: undefined as never } as never)
     const { wrapper } = await mountAt(
       { projectId: 'project-1' },
       false,
@@ -288,9 +289,13 @@ describe('EnvironmentEntryView', () => {
       '/researcher/environments',
     )
 
-    await vi.waitFor(() => expect(wrapper.text()).toContain('选择已有 Work 环境'))
-    const listLink = wrapper.get('a[href="/researcher/workspaces?projectId=project-1"]')
-    expect(listLink.text()).toContain('选择已有 Work 环境')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('返回 Work 列表'))
+    const listLink = wrapper.get('a[href="/researcher/environments?projectId=project-1"]')
+    expect(listLink.text()).toContain('返回 Work 列表')
+    expect(wrapper.text()).toContain('请在 Work 列表中选择已有 Work，或选择模板新建 Work。')
+    // Work is created through a resource request; the console never creates it directly.
+    expect(wrapper.text()).not.toContain('已发布环境模板')
+    expect(wrapper.findAll('button').some((button) => button.text() === '创建环境')).toBe(false)
     expect(wrapper.get('.environment-id-input-details').attributes('open')).toBeUndefined()
     expect(wrapper.get('.environment-id-input-details summary').text()).toContain('高级')
   })
@@ -1317,6 +1322,55 @@ describe('EnvironmentEntryView', () => {
       expect(description).toContain('提交停止不代表已停止计量')
       expect(description).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
       expect(description).not.toMatch(/GPU 预留(会|已)?释放|资源租约会保留|不再计量|存储费率/)
+    })
+  })
+
+  describe('connection readiness', () => {
+    const healthyEndpoint = { id: 'endpoint-1', protocol: 'https', health: 'healthy', revision: 1, observedAt: '2026-07-11T10:00:00.000Z' }
+
+    it('separates a running instance from a connection that still needs an access grant', async () => {
+      mockEnvironmentInstance({ class: 'work', courseId: null })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [healthyEndpoint] }, error: undefined as never } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="connection-summary"]').attributes('data-readiness')).toBe('needs-grant'))
+      const summary = wrapper.get('[data-testid="connection-summary"]')
+      expect(summary.get('[data-testid="instance-state"]').text()).toBe('运行中')
+      expect(summary.get('[data-testid="connection-state"]').text()).toBe('待授权')
+      expect(summary.text()).toContain('签发访问授权后即可连接')
+      expect(summary.findAll('[data-method]').map((item) => item.attributes('data-method'))).toEqual(['console', 'app'])
+      expect(wrapper.get('.env-meta-grid').text()).toContain('固定使用 v1')
+
+      await summary.findAll('button').find((button) => button.text() === '打开 Web 终端')!.trigger('click')
+      await vi.waitFor(() => expect(wrapper.text()).toContain('立即签发授权并连接终端'))
+    })
+
+    it('does not call a stopped instance connectable and keeps the console entry disabled with the reason', async () => {
+      mockEnvironmentInstance({ desiredState: 'stopped', observedState: 'stopped' })
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="connection-summary"]').attributes('data-readiness')).toBe('instance-not-ready'))
+      const summary = wrapper.get('[data-testid="connection-summary"]')
+      expect(summary.get('[data-testid="instance-state"]').text()).toBe('已停止')
+      expect(summary.text()).toContain('环境已停止，启动后才能签发访问授权。')
+      const openConsole = summary.findAll('button').find((button) => button.text() === '打开 Web 终端')!
+      expect((openConsole.element as HTMLButtonElement).disabled).toBe(true)
+      expect(openConsole.attributes('title')).toBe('环境已停止，启动后才能签发访问授权。')
+    })
+
+    it('reports endpoints still being checked instead of a ready connection', async () => {
+      mockEnvironmentInstance({ runtimeKind: 'virtual_machine' })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
+        data: { items: [{ ...healthyEndpoint, protocol: 'ssh', health: 'pending' }] },
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="connection-summary"]').attributes('data-readiness')).toBe('endpoints-pending'))
+      const summary = wrapper.get('[data-testid="connection-summary"]')
+      expect(summary.get('[data-testid="instance-state"]').text()).toBe('运行中')
+      expect(summary.get('[data-testid="connection-state"]').text()).toBe('入口检查中')
+      expect(summary.findAll('[data-method]').map((item) => item.attributes('data-method'))).toEqual(['desktop', 'ssh'])
     })
   })
 })

@@ -34,7 +34,7 @@ import {
   waitForDeletedEnvironment,
 } from '../support/real-work.mjs'
 import { readActorId } from '../support/real-experiment.mjs'
-import { runTerminalCudaProbe } from '../support/real-gpu.mjs'
+import { runTerminalCommandByUi, runTerminalCudaProbe } from '../support/real-gpu.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
 import { confirmEnvironmentLifecycleByUi } from '../support/environment-lifecycle.mjs'
 import {
@@ -761,7 +761,16 @@ test('student provisions a Work environment, configures it, and releases its cap
     project = await createProjectByUi(page, `live-work-${Date.now()}-${uuidv7().slice(0, 8)}`)
   }
   await selectProjectByUi(page, project.id)
-  if (!PRESERVE_EXISTING_PROJECT) await configureProjectPolicyByUi(page, project.id)
+  if (!PRESERVE_EXISTING_PROJECT) {
+    // A new project has no AI setting yet: the Work page turns off only the
+    // Agent, says why, and keeps the manual template path.
+    await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+    const agentNote = page.getByTestId('agent-availability')
+    await expect(agentNote).toContainText('未配置模型', { timeout: 120_000 })
+    await expect(agentNote).toContainText('手工创建和连接 Work 不受影响')
+    await expect(page.getByTestId('templates-empty')).toContainText('当前项目还没有可用的 Work 模板', { timeout: 120_000 })
+    await configureProjectPolicyByUi(page, project.id)
+  }
   const packageCopy = !resumed && (REAL_WORK_VM || REAL_WORK_CONFIG)
     ? await createRealWorkPackage(REAL_WORK_VM ? null : REAL_WORK_CONFIG.goldenBaseImage, {
       gpu: REAL_WORK_GPU,
@@ -823,12 +832,18 @@ test('student provisions a Work environment, configures it, and releases its cap
       }
     }
 
-    await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+    // Work is created by hand from the Work page: pick the published template
+    // card, then continue to the resource request with that exact version.
+    await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: 'Work 环境', exact: true, level: 1 })).toBeVisible({ timeout: 120_000 })
+    const templateCard = page.locator(`[role="radio"][data-release-id="${release.id}"]`)
+    await expect(templateCard).toBeVisible({ timeout: 120_000 })
+    await templateCard.click()
+    await expect(templateCard).toHaveAttribute('aria-checked', 'true')
+    await page.getByTestId('continue-to-resources').click()
     await expect(page.getByRole('heading', { name: '资源申请', exact: true, level: 2 })).toBeVisible()
-    await selectProjectByUi(page, project.id)
     const releaseSelect = page.getByLabel('已发布版本')
-    await expect(releaseSelect.locator(`option[value="${release.id}:${release.version}"]`)).toHaveCount(1, { timeout: 120_000 })
-    await releaseSelect.selectOption(`${release.id}:${release.version}`)
+    await expect(releaseSelect).toHaveValue(`${release.id}:${release.version}`, { timeout: 120_000 })
     if (REAL_WORK_GPU) {
       const requiredRuntimeKind = REAL_WORK_VM ? 'virtual_machine' : 'container'
       if (release.runtimeKind !== requiredRuntimeKind) {
@@ -905,9 +920,14 @@ test('student provisions a Work environment, configures it, and releases its cap
       revision: expect.any(Number),
     })
 
-    await page.reload({ waitUntil: 'domcontentloaded' })
-    const connectLink = page.getByRole('link', { name: '连接', exact: true })
-    await expect(connectLink).toBeVisible({ timeout: 120_000 })
+    // The Work list shows the submitted Work until its environment exists, then
+    // lists it with a connect entry; the user never types an environment ID.
+    await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+    const workRow = page.locator(`[data-environment-id="${environmentId}"]`)
+    await expect(workRow).toBeVisible({ timeout: 120_000 })
+    await expect(workRow).toContainText(`固定使用模板 v${release.version}`)
+    const connectLink = workRow.getByRole('link', { name: '连接', exact: true })
+    await expect(connectLink).toBeVisible({ timeout: REAL_WORK_VM ? VM_ENVIRONMENT_READY_TIMEOUT_MS : ENVIRONMENT_READY_TIMEOUT_MS })
     await connectLink.click()
     await expect(page).toHaveURL(new RegExp(`[?&]environmentId=${encodeURIComponent(environmentId)}(?:&|$)`))
     // The console titles a Work environment `work-<environment id>`, so match the
@@ -916,6 +936,11 @@ test('student provisions a Work environment, configures it, and releases its cap
       page.locator('.resource-title-row').getByRole('heading', { name: environmentId }),
     ).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.env-meta-grid')).toContainText(REAL_WORK_VM ? '虚拟机' : '容器')
+    await expect(page.locator('.env-meta-grid')).toContainText(`固定使用 v${release.version}`)
+    // Instance readiness and connection readiness are reported separately.
+    const connectionSummary = page.getByTestId('connection-summary')
+    await expect(connectionSummary.getByTestId('instance-state')).toHaveText('运行中', { timeout: 120_000 })
+    await expect(connectionSummary).toHaveAttribute('data-readiness', /^(needs-grant|ready)$/, { timeout: 120_000 })
     const environment = await waitForEnvironment(
       page.request,
       environmentId,
@@ -1030,10 +1055,23 @@ test('student provisions a Work environment, configures it, and releases its cap
       expect(runtimeBody).toContain('Welcome to nginx')
       }
     }
-    if (REAL_WORK_GPU && !REAL_WORK_VM) {
+    if (!REAL_WORK_VM) {
+      // Container Work is reachable through the product Web terminal on the
+      // Work route, not only through its HTTP endpoint.
       const terminalPage = await page.context().newPage()
+      const terminalTarget = { projectId: project.id, environmentId, routePrefix: 'researcher' }
       try {
-        expect(await runTerminalCudaProbe(terminalPage, project.id, environmentId)).toEqual({ count: 256, sum: 32640, max: 255 })
+        const output = await runTerminalCommandByUi(
+          terminalPage,
+          terminalTarget,
+          'printf "%s\\n" "LW_WORK_TERMINAL_$((40+2))"',
+          'LABWEAVER_WORK_TERMINAL_DONE',
+        )
+        expect(output).toContain('LW_WORK_TERMINAL_42')
+        await expect(terminalPage.getByTestId('connection-summary')).toHaveAttribute('data-readiness', 'ready')
+        if (REAL_WORK_GPU) {
+          expect(await runTerminalCudaProbe(terminalPage, project.id, environmentId, 'researcher')).toEqual({ count: 256, sum: 32640, max: 255 })
+        }
       } finally {
         await terminalPage.close()
       }

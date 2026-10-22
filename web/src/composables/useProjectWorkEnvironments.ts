@@ -100,7 +100,7 @@ export function useProjectWorkEnvironments(projectId: Ref<string | null | undefi
   const environments = ref<AsyncState<EnvironmentSummary[]>>({ kind: 'idle' })
   let loadGeneration = 0
 
-  async function load() {
+  async function read(silent: boolean) {
     const id = projectId.value
     const generation = ++loadGeneration
     if (!id) {
@@ -108,7 +108,7 @@ export function useProjectWorkEnvironments(projectId: Ref<string | null | undefi
       return
     }
 
-    environments.value = { kind: 'loading', message: '加载 Work 环境…' }
+    if (!silent) environments.value = { kind: 'loading', message: '加载 Work 环境…' }
     let items: EnvironmentSummary[]
     try {
       items = await fetchProjectWorkEnvironments(id)
@@ -128,8 +128,13 @@ export function useProjectWorkEnvironments(projectId: Ref<string | null | undefi
     environments.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 
+  /** Shows the loading state while reading. */
+  const load = () => read(false)
+  /** Re-reads in the background, keeping the current list on screen until the answer arrives. */
+  const refresh = () => read(true)
+
   watch(projectId, () => void load(), { immediate: true })
   onScopeDispose(() => { loadGeneration += 1 })
 
-  return reactive({ environments, load })
+  return reactive({ environments, load, refresh })
 }
