@@ -480,6 +480,72 @@ class DeploymentBundleTests(unittest.TestCase):
             "platformConfigurationPolicy requires authenticated managedControlConfiguration",
             result.stderr,
         )
+    def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(
+        self,
+    ) -> None:
+        helm = shutil.which("helm")
+        self.assertIsNotNone(
+            helm, "The pinned Helm renderer is required for Bundle input tests."
+        )
+        self.configuration["runtimePolicy"].update(
+            privilegedAllowed=True,
+            privilegedExecutionLocation={
+                "kind": "dedicated_node_pool",
+                "nodeSelector": {"labweaver.io/pool": "research"},
+                "taintKey": "labweaver.io/research",
+                "taintValue": "reserved",
+            },
+        )
+        self.save_version()
+        self.model["application"]["workloadInputs"]["control-service"]["env"][
+            "LABWEAVER_SERVICE_SCOPES"
+        ] = "synthetic.bundle.scope"
+        self.save_model()
+        recipient = self.key()
+        bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (
+            _,
+            loaded,
+            _,
+        ):
+            result = subprocess.run(
+                [
+                    helm,
+                    "template",
+                    "labweaver",
+                    str(bundle.WORKLOADS_FILE.parent),
+                    "--namespace",
+                    "labweaver-system",
+                    "--values",
+                    str(loaded / "helm-values.yaml"),
+                    "--set-string",
+                    "workloads.control-service.env.LEGACY_ONLY=must-not-be-rendered",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            deployments = {
+                item["metadata"]["name"]: item
+                for item in yaml.safe_load_all(result.stdout)
+                if item and item.get("kind") == "Deployment"
+            }
+            control = deployments["control-service"]["spec"]["template"][
+                "spec"
+            ]["containers"][0]
+            env = {item["name"]: item for item in control["env"]}
+            self.assertEqual(
+                env["LABWEAVER_SERVICE_SCOPES"]["value"], "synthetic.bundle.scope"
+            )
+            self.assertNotIn("LEGACY_ONLY", env)
+            builder = deployments["build-executor"]["spec"]["template"]["spec"][
+                "containers"
+            ][0]
+            self.assertFalse(builder["securityContext"]["allowPrivilegeEscalation"])
+            self.assertEqual(
+                builder["securityContext"]["capabilities"], {"drop": ["ALL"]}
+            )
+        self.clean_runtime()
 
     def key(self, path: Path | None = None) -> str:
         if shutil.which("age") is None or shutil.which("age-keygen") is None:
