@@ -319,7 +319,7 @@ async fn all_control_replicas_must_report_actual_loaded_source_before_applied() 
     let old_effective = effective.applied.clone().ok_or("no effective")?;
 
     let mut changed = old_effective.configuration.clone();
-    changed.runtime_policy.default_container_uid = 1000;
+    changed.lifecycle.detailed_log_retention_seconds = 60;
     let desired = configuration::update(
         &pool,
         ActorId::new(),
