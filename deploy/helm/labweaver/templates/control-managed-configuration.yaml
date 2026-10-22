@@ -4,15 +4,11 @@
 {{- $parsedVersion := mustFromJson $version -}}
 {{- $policy := include "labweaver.platformPolicy" . -}}
 {{- $parsedPolicy := mustFromJson $policy -}}
-{{- if ne $parsedPolicy.configurationSha256 $parsedVersion.configurationSha256 -}}
-{{- fail "platformConfigurationPolicy digest differs from managed configuration" -}}
 {{- $versionConfiguration := required "managedControlConfiguration.versionJson.configuration is required" $parsedVersion.configuration -}}
-{{- range $group := list "lifecycle" "runtimePolicy" "builderPolicy" }}
-{{- if ne (toJson (index $parsedPolicy $group)) (toJson (index $versionConfiguration $group)) }}
-{{- fail (printf "platformConfigurationPolicy.%s differs from authenticated version" $group) -}}
-{{- end }}
-{{- end }}
-{{- end }}
+{{- $expectedPolicy := dict "apiVersion" "deploy.labweaver.io/platform-policy/v1" "configurationSha256" $parsedVersion.configurationSha256 "lifecycle" (index $versionConfiguration "lifecycle") "runtimePolicy" (index $versionConfiguration "runtimePolicy") "builderPolicy" (index $versionConfiguration "builderPolicy") -}}
+{{- if ne (toJson $parsedPolicy) (toJson $expectedPolicy) -}}
+{{- fail "platformConfigurationPolicy differs from authenticated version (including apiVersion, digest, or unknown fields)" -}}
+{{- end -}}
 {{- $parsedSource := mustFromJson $source -}}
 {{- $control := index .Values.workloads "control-service" -}}
 {{- if not $control.enabled }}

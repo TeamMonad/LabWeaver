@@ -428,6 +428,7 @@ class DeploymentBundleTests(unittest.TestCase):
 
     def test_policy_without_an_execution_consumer_fails_before_seal(self) -> None:
         for group, field, value in (
+            ("runtimePolicy", "defaultContainerUid", 1000),
             ("runtimePolicy", "allowedCapabilities", ["NET_ADMIN"]),
             ("builderPolicy", "capabilities", ["NET_ADMIN"]),
             ("builderPolicy", "entitlements", ["network.host"]),

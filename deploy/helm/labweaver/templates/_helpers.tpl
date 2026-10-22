@@ -51,6 +51,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and (index $runtime "privilegedAllowed") (not (index $runtime "privilegedExecutionLocation")) -}}
 {{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation is required when privilegedAllowed is true" -}}
 {{- end -}}
+{{- if ne (int (index $runtime "defaultContainerUid")) 0 -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.defaultContainerUid has no execution-side consumer (see #207)" -}}
+{{- end -}}
 {{- if index $runtime "allowedCapabilities" -}}
 {{- fail "platformConfigurationPolicy.runtimePolicy.allowedCapabilities has no execution-side consumer (see #207)" -}}
 {{- end -}}

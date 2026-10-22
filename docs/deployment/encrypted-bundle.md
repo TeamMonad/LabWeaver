@@ -415,7 +415,7 @@ Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob
 
 `exec` 为管理版本生成私有 `platform-configuration-source.json`，同时派生非秘密的 `platform-configuration-policy.json` 和同内容的 Helm `platformConfigurationPolicy`。两者都来自同一 Rust `PlatformConfigurationDesired` 快照；手写或缺少 lifecycle、runtimePolicy、builderPolicy 的 Helm values 在渲染时失败。策略摘要必须等于管理版本摘要，不能从第二份 YAML 覆盖。
 
-渲染时每个工作负载携带策略摘要 annotation。当前唯一执行侧消费是 `dedicated_node_pool` 的 privileged runtime：它在 `kubevirt-executor` 上渲染 nodeSelector 和对应 NoSchedule taint toleration。`allowedCapabilities`、预授权、VM guest binding、builder capabilities/entitlements/提权，以及其他 privileged location 没有执行侧实现，Bundle 校验和 Helm 渲染会明确失败并提示“尚无执行侧实现（见 #207）”；不会静默忽略或伪造执行结果。builderPolicy 与 runtimePolicy 保持独立，runtime 设置不会放宽 builder 的硬编码安全上下文。
+渲染时每个工作负载携带策略摘要 annotation。当前唯一执行侧消费是 `dedicated_node_pool` 的 privileged runtime：它在 `kubevirt-executor` 上渲染 nodeSelector 和对应 NoSchedule taint toleration。`runtimePolicy.defaultContainerUid` 仅允许默认值0；`allowedCapabilities`、预授权、VM guest binding、builder capabilities/entitlements/提权，以及其他 privileged location 没有执行侧实现，Bundle 校验和 Helm 渲染会明确失败并提示“尚无执行侧实现（见 #207）”；不会静默忽略或伪造执行结果。builderPolicy 与 runtimePolicy 保持独立，runtime 设置不会放宽 builder 的硬编码安全上下文。
 
 Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，从实际读取的 typed 设置计算摘要，将快照固定在运行实例。原 apply/report 成功路径还要核对该快照与原尝试，不能只复制执行者的两个摘要。保存 desired、修改投影文件和命令退出成功均不会自动更新 applied。旧进程或错密文来源的成功回报被拒绝；失败保留最后验证的版本及待核对状态。具体输入与限制见[Control 启动加载](../contracts/platform-configuration.md#control-启动加载)。
 

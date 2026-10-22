@@ -199,6 +199,8 @@ class BundleControlMountTests(unittest.TestCase):
                 "missing",
                 "binding",
                 "policy",
+                "policy-top-level",
+                "policy-api",
                 "replicas",
                 "namespace",
                 "override",
@@ -210,6 +212,10 @@ class BundleControlMountTests(unittest.TestCase):
                     values["platformConfigurationPolicy"]["runtimePolicy"][
                         "allowedCapabilities"
                     ] = ["NET_RAW"]
+                elif change == "policy-top-level":
+                    values["platformConfigurationPolicy"]["unexpected"] = "tampered"
+                elif change == "policy-api":
+                    values["platformConfigurationPolicy"]["apiVersion"] = "tampered/v9"
                 elif change == "override":
                     values["workloadInputs"]["control-service"]["env"][
                         "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE"

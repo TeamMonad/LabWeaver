@@ -660,8 +660,11 @@ def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
                 "LW_BUNDLE_CONFIGURATION_POLICY_INVALID: "
                 f"{group} missing {','.join(missing)}"
             )
-    runtime = configuration["runtimePolicy"]
-    builder = configuration["builderPolicy"]
+    if runtime["defaultContainerUid"] != 0:
+        raise BundleError(
+            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+            "runtimePolicy.defaultContainerUid has no execution-side consumer (see #207)"
+        )
     unsupported = (
         (runtime["allowedCapabilities"], "runtimePolicy.allowedCapabilities"),
         (runtime["preauthorizations"], "runtimePolicy.preauthorizations"),

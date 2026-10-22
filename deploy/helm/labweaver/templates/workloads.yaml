@@ -9,6 +9,10 @@
 {{- if and $platformPolicy (hasKey $platformPolicy "runtimePolicy") }}
 {{- $runtimePolicy = index $platformPolicy "runtimePolicy" -}}
 {{- end }}
+{{- $managedSource := $root.Values.managedControlConfiguration -}}
+{{- if and $platformPolicy (not $managedSource) }}
+{{- fail "platformConfigurationPolicy requires authenticated managedControlConfiguration" }}
+{{- end }}
 {{- if $root.Values.workloadInputs }}
 {{- if not (hasKey $root.Values.workloadInputs $name) }}
 {{- fail (printf "workloadInputs.%s is required" $name) }}
