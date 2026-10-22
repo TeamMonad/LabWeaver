@@ -311,7 +311,7 @@ pub struct CapacityClaim {
     pub gpu_allocation: Option<GpuAllocation>,
     pub state: CapacityClaimState,
     pub revision: Revision,
-    /// Database-authoritative claim update time, present on snapshots written after v1.
+    /// Database-authoritative claim update time, present on expired-fence snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<UtcTimestamp>,
 }

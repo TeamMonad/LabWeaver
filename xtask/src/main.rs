@@ -403,15 +403,20 @@ fn contracts_check() -> Result<(), AppError> {
                 })?
                 .to_string_lossy()
                 .replace(std::path::MAIN_SEPARATOR, "/");
-            if relative.starts_with("schemas/contracts/v1/internal/") {
-                continue;
-            }
-            if !generated_paths.contains(relative.as_str()) {
+            if !is_registered_generated_path(relative.as_str(), &generated_paths) {
                 return Err(AppError::ContractDrift { path: relative });
             }
         }
     }
     Ok(())
+}
+
+fn is_registered_generated_path(
+    relative: &str,
+    generated_paths: &BTreeSet<&str>,
+) -> bool {
+    relative == "schemas/contracts/v1/internal/labweaver-log-v1.schema.json"
+        || generated_paths.contains(relative)
 }
 
 fn repository_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
@@ -1016,11 +1021,25 @@ fn run_cargo<const N: usize>(role: &'static str, arguments: [&str; N]) -> Result
 mod tests {
     #[cfg(target_os = "linux")]
     use super::is_uuid_v7_run_id;
+    use super::is_registered_generated_path;
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
         identity_foundation, platform_application, platform_buildkit, platform_foundation,
         platform_harbor_route,
     };
+    #[test]
+    fn unregistered_internal_contract_is_an_orphan() {
+        let registered = std::collections::BTreeSet::new();
+        assert!(is_registered_generated_path(
+            "schemas/contracts/v1/internal/labweaver-log-v1.schema.json",
+            &registered,
+        ));
+        assert!(!is_registered_generated_path(
+            "schemas/contracts/v1/internal/other.schema.json",
+            &registered,
+        ));
+    }
+
 
     #[cfg(target_os = "linux")]
     #[test]
