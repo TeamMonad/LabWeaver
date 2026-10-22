@@ -332,10 +332,33 @@ const {
 }
 
 .title-with-pill h2 {
-  font: var(--md-sys-headline-small);
+  font: var(--md-sys-headline-medium);
   color: var(--md-sys-color-on-surface);
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+/* Once an environment is open, the page heading becomes a quiet eyebrow so the
+   environment title owns the hierarchy. */
+.environment-entry:has(.gcp-resource-view) > .page-header h2 {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-large);
+  letter-spacing: 0.04em;
+}
+
+.environment-entry:has(.gcp-resource-view) > .page-header .page-subtitle {
+  font: var(--md-sys-body-small);
+}
+
+/* The section heading duplicates the breadcrumb once an environment is open;
+   keep it for assistive tech only. */
+.console-section:has(.gcp-resource-view) > #console-heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 /* GCP Detail Tabs */
@@ -472,5 +495,47 @@ const {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+@media (max-width: 599px) {
+  .title-with-pill {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .title-with-pill h2 {
+    font: var(--md-sys-headline-small);
+  }
+}
+
+/* Cloudscape detail-page header: breadcrumbs + title/status on the left,
+   page actions on the same row to the right (desktop). The lifecycle bar
+   wrapper is `display: contents`, so its action bar is a grid item here. */
+@media (min-width: 1200px) {
+  .gcp-resource-view {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-6);
+    row-gap: var(--layout-page-section-gap);
+  }
+
+  .gcp-resource-view > *,
+  .gcp-resource-view :deep(.lifecycle-bar > *) {
+    grid-column: 1 / -1;
+  }
+
+  .gcp-resource-view > .gcp-resource-header {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .gcp-resource-view :deep(.lifecycle-bar > .gcp-action-bar) {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    margin-bottom: 0;
+    padding: 0;
+    border-bottom: 0;
+  }
 }
 </style>
