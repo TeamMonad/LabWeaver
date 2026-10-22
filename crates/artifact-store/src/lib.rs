@@ -188,6 +188,39 @@ pub trait ImmutableObjectStore: Send + Sync {
         media_type: &str,
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError>;
+    /// Signs one conditional upload with an exact `Content-Length`.
+    ///
+    /// Material upload callers use this method because they know the complete file size before
+    /// requesting authority. Variable-sized sandbox outputs must use [`Self::presign_upload`]
+    /// together with their bounded uploader-side check.
+    async fn presign_upload_exact(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.presign_upload(key, size_bytes, media_type, now).await
+    }
+
+    /// Reissues exact-length upload authority without extending the session deadline.
+    async fn presign_upload_exact_until(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let signed = self
+            .presign_upload_exact(key, size_bytes, media_type, now)
+            .await?;
+        if signed.expires_at > expires_at {
+            return Err(ObjectStoreError::ConfigurationInvalid);
+        }
+        Ok(signed)
+    }
+
 
     /// Reissues conditional upload authority without extending the session deadline.
     async fn presign_upload_until(
@@ -1096,10 +1129,9 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         }
     }
 
-    /// Presigns one write-once object with the exact declared body length.
+    /// Presigns one bounded write-once object for variable-sized Agent output.
     ///
-    /// The signed `Content-Length` is part of the object identity. Callers must know the complete
-    /// body size before requesting this URL; a smaller or larger body is rejected by S3/MinIO.
+    /// The sandbox checks the generated file against its configured maximum before sending it.
     async fn presign_upload(
         &self,
         key: &str,
@@ -1147,9 +1179,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .put_object()
             .bucket(&self.config.bucket)
             .key(key)
-            .content_length(
-                i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectIdentityInvalid)?,
-            )
             .content_type(media_type)
             .if_none_match("*")
             .presigned(
@@ -1168,6 +1197,76 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         Ok(PresignedUpload {
             url: request.uri().to_string(),
             required_headers,
+            expires_at,
+        })
+    }
+
+    async fn presign_upload_exact(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let expires_at = UtcTimestamp::from_utc(
+            now.get()
+                + time::Duration::seconds(
+                    i64::try_from(self.config.upload_ttl_seconds)
+                        .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+                ),
+        )
+        .map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+        self.presign_upload_exact_until(key, size_bytes, media_type, now, expires_at)
+            .await
+    }
+
+    async fn presign_upload_exact_until(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.validate_key(key)?;
+        if size_bytes == 0
+            || size_bytes > self.config.max_object_bytes
+            || media_type.trim().is_empty()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let remaining = (expires_at.get() - now.get()).whole_seconds();
+        let remaining =
+            u64::try_from(remaining).map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+        if remaining == 0 || remaining > self.config.upload_ttl_seconds {
+            return Err(ObjectStoreError::ConfigurationInvalid);
+        }
+        let request = self
+            .client
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .content_length(
+                i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectIdentityInvalid)?,
+            )
+            .content_type(media_type)
+            .if_none_match("*")
+            .presigned(
+                PresigningConfig::builder()
+                    .start_time(system_time_from_utc(now)?)
+                    .expires_in(Duration::from_secs(remaining))
+                    .build()
+                    .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+            )
+            .await
+            .map_err(|_| ObjectStoreError::SigningFailed)?;
+        Ok(PresignedUpload {
+            url: request.uri().to_string(),
+            required_headers: request
+                .headers()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
             expires_at,
         })
     }
@@ -1922,14 +2021,40 @@ mod tests {
         }
         let response = request.body(bytes.to_vec()).send().await?;
         assert!(response.status().is_success());
-        let exact = store
+        let bounded = store
             .presign_upload(
+                "problem-packages/course/upload/bounded-object",
+                store.config.max_object_bytes,
+                "text/plain",
+                current_test_time()?,
+            )
+            .await?;
+        let mut bounded_request = http.put(&bounded.url);
+        for (name, value) in &bounded.required_headers {
+            bounded_request = bounded_request.header(name, value);
+        }
+        assert!(
+            bounded_request
+                .body(bytes.to_vec())
+                .send()
+                .await?
+                .status()
+                .is_success()
+        );
+        let exact = store
+            .presign_upload_exact(
                 "problem-packages/course/upload/exact-object",
                 u64::try_from(bytes.len())?,
                 "text/plain",
                 current_test_time()?,
             )
             .await?;
+        assert!(
+            exact
+                .required_headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("content-length"))
+        );
         let mut exact_request = http.put(&exact.url);
         for (name, value) in &exact.required_headers {
             exact_request = exact_request.header(name, value);
@@ -1943,7 +2068,7 @@ mod tests {
                 .is_success()
         );
         let oversized = store
-            .presign_upload(
+            .presign_upload_exact(
                 "problem-packages/course/upload/oversized-object",
                 u64::try_from(bytes.len())?,
                 "text/plain",
@@ -1972,7 +2097,7 @@ mod tests {
                 .is_empty()
         );
         let underfilled = store
-            .presign_upload(
+            .presign_upload_exact(
                 "problem-packages/course/upload/underfilled-object",
                 u64::try_from(bytes.len())?,
                 "text/plain",

@@ -80,7 +80,7 @@ impl ControlService {
                     Err(ObjectStoreError::ObjectNotFound) => {
                         let signed = self
                             .objects
-                            .presign_upload_until(
+                            .presign_upload_exact_until(
                                 &key,
                                 file.size_bytes,
                                 &file.media_type,

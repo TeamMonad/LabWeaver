@@ -1107,7 +1107,7 @@ impl ControlService {
             );
             let signed = self
                 .objects
-                .presign_upload(&key, file.size_bytes, &file.media_type, now)
+                .presign_upload_exact(&key, file.size_bytes, &file.media_type, now)
                 .await?;
             if signed.expires_at != expires_at {
                 return Err(ControlError::ObjectStoreIdentityMismatch);
