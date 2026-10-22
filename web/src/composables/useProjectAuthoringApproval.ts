@@ -295,6 +295,53 @@ export function useProjectAuthoringApproval(
     },
   )
 
+  /**
+   * Approval behind an existing Environment release of this run. An
+   * authoring release carries the id of the complete approval, which binds the
+   * package and both candidates; the Environment candidate alone cannot tell
+   * whether only the Evaluation candidate or the package changed since.
+   */
+  const releaseApprovalRecord = ref<AsyncState<AuthoringApprovalSchema>>({ kind: 'idle' })
+  let releaseApprovalGeneration = 0
+
+  async function loadReleaseApproval(id: string | null) {
+    const generation = ++releaseApprovalGeneration
+    const project = projectId.value
+    if (!project || !id) {
+      releaseApprovalRecord.value = { kind: 'idle' }
+      return
+    }
+    releaseApprovalRecord.value = { kind: 'loading', message: '核对已发布版本…' }
+    const result = await getProjectAuthoringApproval({ path: { projectId: project, approvalId: id } })
+    if (generation !== releaseApprovalGeneration) return
+    if (result.error) {
+      releaseApprovalRecord.value = {
+        kind: 'error',
+        diagnostic: errorDiagnostic(result.error, 'PROJECT_RELEASE_APPROVAL_LOAD_FAILED', '读取已发布版本的批准记录失败，无法确认这一版是否已经发布。'),
+      }
+      return
+    }
+    if (result.data.approval.id !== id || result.data.approval.projectId !== project) {
+      releaseApprovalRecord.value = { kind: 'error', diagnostic: staleContextDiagnostic('已发布版本的批准记录') }
+      return
+    }
+    releaseApprovalRecord.value = { kind: 'success', data: result.data.approval }
+  }
+
+  /**
+   * How the release's approval relates to the loaded version: `none` without a
+   * release, `match` only when package and both candidates agree at their
+   * current revisions, `unknown` when the record or the version cannot be read.
+   */
+  const releaseBinding = computed<'none' | 'pending' | 'match' | 'mismatch' | 'unknown'>(() => {
+    const record = releaseApprovalRecord.value
+    if (record.kind === 'idle') return 'none'
+    if (record.kind === 'loading') return 'pending'
+    if (record.kind !== 'success') return 'unknown'
+    const binding = approvalBinding(record.data)
+    return binding === 'unverifiable' ? 'unknown' : binding
+  })
+
   async function loadPublication(id = approvalId.value, silent = false) {
     const project = projectId.value
     const publicationId = id?.trim()
@@ -501,6 +548,7 @@ export function useProjectAuthoringApproval(
   onScopeDispose(() => {
     loadGeneration += 1
     publicationGeneration += 1
+    releaseApprovalGeneration += 1
     resetCandidatePolling()
     stopPublicationPolling()
   })
@@ -513,6 +561,9 @@ export function useProjectAuthoringApproval(
     approval,
     publication,
     rejectedApproval,
+    releaseApprovalRecord,
+    releaseBinding,
+    loadReleaseApproval,
     imageArtifact,
     runnerImageArtifact,
     evaluationRunnerImageArtifact: runnerImageArtifact,

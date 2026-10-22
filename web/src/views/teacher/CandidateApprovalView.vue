@@ -243,6 +243,17 @@
                   severity="warning"
                   data-testid="approval-mismatch"
                 />
+                <DiagnosticBanner
+                  v-if="authoring.releaseApprovalRecord.kind === 'error'"
+                  :code="authoring.releaseApprovalRecord.diagnostic.code"
+                  :request-id="authoring.releaseApprovalRecord.diagnostic.requestId"
+                  :next-step="authoring.releaseApprovalRecord.diagnostic.nextStep"
+                  :message="authoring.releaseApprovalRecord.diagnostic.message"
+                  :retryable="true"
+                  severity="error"
+                  data-testid="release-verify-error"
+                  @retry="authoring.loadReleaseApproval(runRelease?.approval.id ?? null)"
+                />
 
                 <div v-if="publishedRelease && authoring.approval.kind !== 'success'" class="approved" role="status" data-testid="review-published">
                   <SvgIcon name="check_circle" size="md" aria-hidden="true" />
@@ -254,7 +265,7 @@
 
                 <template v-else-if="authoring.approval.kind !== 'success'">
                   <p v-if="supersededRelease" class="pane-note" role="status" data-testid="review-superseded">
-                    这个任务之前发布过版本 {{ supersededRelease.version }}，之后候选有变化。当前候选需要重新审核，批准后会发布为新版本，已发布的版本不受影响。
+                    这个任务之前发布过版本 {{ supersededRelease.version }}，之后材料包、环境或评分规则有变化。当前版本需要重新审核，批准后会发布为新版本，已发布的版本不受影响。
                   </p>
                   <p class="pane-note">一次批准绑定这一版的材料包、环境、运行权限、镜像和评分规则，并自动发布。网络失败后重试或重复点击沿用同一次提交，只产生一个版本；之后材料或配置有变化，会成为新的候选。</p>
                   <label class="confirm-row">
@@ -416,13 +427,35 @@ const projectReleases = computed(() => {
 })
 /** Active release of this run, read from the server's release list. */
 const runRelease = computed(() => (runId.value && projectReleases.value?.get(runId.value)) || null)
-/** The release publishes exactly the candidate under review: nothing left to approve. */
-const publishedRelease = computed(() => {
+
+/** Read the complete approval behind the run's release; it binds package and both candidates. */
+watch(
+  () => [runRelease.value?.approval.id ?? null, runId.value, projectId.value] as const,
+  ([releaseApprovalId]) => void authoring.loadReleaseApproval(releaseApprovalId),
+  { immediate: true },
+)
+
+/**
+ * Whether this version is already published. The Environment candidate alone
+ * is not enough: a retried Evaluation track or a new package revision keeps the
+ * Environment candidate but needs a new approval. Unknown states fail closed.
+ */
+const releaseState = computed<'none' | 'pending' | 'unknown' | 'published' | 'superseded'>(() => {
   const release = runRelease.value
-  return release && environment.value && releaseMatchesCandidate(release, environment.value.candidate) ? release : null
+  if (!release) return 'none'
+  if (!environment.value) return 'pending'
+  if (!releaseMatchesCandidate(release, environment.value.candidate)) return 'superseded'
+  switch (authoring.releaseBinding) {
+    case 'match': return 'published'
+    case 'mismatch': return 'superseded'
+    case 'unknown': return 'unknown'
+    default: return 'pending'
+  }
 })
-/** An earlier candidate of this run was published; the current one needs its own approval. */
-const supersededRelease = computed(() => (runRelease.value && environment.value && !publishedRelease.value ? runRelease.value : null))
+/** The release publishes exactly the version under review: nothing left to approve. */
+const publishedRelease = computed(() => (releaseState.value === 'published' ? runRelease.value : null))
+/** An earlier version of this run was published; the current one needs its own approval. */
+const supersededRelease = computed(() => (releaseState.value === 'superseded' ? runRelease.value : null))
 const approvalDetail = computed(() => {
   if (authoring.approval.kind === 'success') return '已批准'
   if (publishedRelease.value) return `已发布版本 ${publishedRelease.value.version}`
@@ -449,12 +482,18 @@ const blockingReason = computed(() => {
   }
   const missing = readiness.value.slice(0, 3).filter((item) => !item.ready).map((item) => item.label)
   if (missing.length) return `${missing.join('、')}尚未就绪，就绪后才能批准。`
+  if (releaseState.value === 'unknown') return '没能核对已发布版本的批准记录，无法确认这一版是否已经发布。重试成功后才能批准。'
+  if (releaseState.value === 'pending') return '正在核对已发布版本，核对完成后才能批准。'
   if (approvalId.value && !authoring.rejectedApproval) return '正在核对链接中的批准记录，核对完成前不能再次批准。'
   return '生成任务尚未完成，暂时不能批准。'
 })
 
-/** Approval needs a known release state: an unreadable release list fails closed. */
-const approvalAllowed = computed(() => authoring.canApprove && projectReleases.value !== null && !publishedRelease.value)
+/** Approval needs a known release state: an unreadable or unverified release fails closed. */
+const approvalAllowed = computed(() => (
+  authoring.canApprove
+  && projectReleases.value !== null
+  && (releaseState.value === 'none' || releaseState.value === 'superseded')
+))
 
 const canSubmit = computed(() => {
   const length = reason.value.trim().length

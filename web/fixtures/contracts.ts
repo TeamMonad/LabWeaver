@@ -1,5 +1,5 @@
 import { activeScene, fixtureProjectId } from './scenes'
-import { agentRunHistory, authoringReleases, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
+import { agentRunHistory, authoringPublicationStatus, authoringReleases, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
 import type {
   AccessGrantSchema,
   AgentRunHistoryPageSchema,
@@ -525,7 +525,10 @@ export async function getProjectEvaluationCandidate(_options?: FixtureOptions) {
 export async function getProjectProblemPackage(_options?: FixtureOptions) {
   return authoringScene() ? fixtureResponse(reviewPackage) : unsupportedResponse('读取材料包')
 }
-export async function getProjectAuthoringApproval() { return unsupportedResponse('读取实验包批准') }
+export async function getProjectAuthoringApproval(options?: FixtureOptions) {
+  const status = authoringPublicationStatus(options?.path?.approvalId)
+  return status ? fixtureResponse(status) : unsupportedResponse('读取实验包批准')
+}
 export async function completeProjectAuthoringApproval() { return unsupportedResponse('提交实验包批准') }
 export async function getProjectCandidateBuild() { return unsupportedResponse('读取候选构建任务') }
 export async function cancelProjectCandidateBuild() { return unsupportedResponse('取消候选构建任务') }

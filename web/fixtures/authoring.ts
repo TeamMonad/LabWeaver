@@ -2,6 +2,7 @@ import { activeScene, fixtureProjectId } from './scenes'
 import type {
   AgentRunHistoryPageSchema,
   AgentRunSchema,
+  AuthoringApprovalPublicationStatusSchema,
   EnvironmentCandidateViewSchema,
   EnvironmentTemplateReleaseViewSchema,
   EvaluationCandidateViewSchema,
@@ -169,4 +170,33 @@ export const reviewRunRelease = {
 
 export function authoringReleases(): EnvironmentTemplateReleaseViewSchema[] {
   return activeScene.value.id === 'teacher-review-published' ? [reviewRunRelease] : []
+}
+
+/** Complete approval behind `reviewRunRelease`: package and both candidates at their current revisions. */
+const reviewRunPublication = {
+  approval: {
+    id: 'approval-optics-env',
+    projectId: fixtureProjectId,
+    courseId: 'course-physics-2026',
+    revision: 1,
+    actorId: 'fixture-teacher',
+    approvedAt: '2026-10-11T04:00:00.000Z',
+    reason: '已核对题面与评分标准',
+    packageId,
+    packageRevision: 2,
+    environmentCandidateId,
+    environmentCandidateRevision: 3,
+    evaluationCandidateId,
+    evaluationCandidateRevision: 2,
+    imageArtifact: containerArtifact,
+  },
+  status: 'ready',
+  environmentReleaseId: 'release-optics-env',
+  evaluationReleaseId: 'release-optics-eval',
+  revision: 2,
+  updatedAt: '2026-10-11T04:05:00.000Z',
+} as unknown as AuthoringApprovalPublicationStatusSchema
+
+export function authoringPublicationStatus(approvalId: string | undefined): AuthoringApprovalPublicationStatusSchema | null {
+  return activeScene.value.id === 'teacher-review-published' && approvalId === reviewRunPublication.approval.id ? reviewRunPublication : null
 }
