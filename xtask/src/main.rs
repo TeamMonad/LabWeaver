@@ -1,9 +1,9 @@
 //! Repository workflow entry point for `LabWeaver`.
 
+use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -372,10 +372,15 @@ fn contracts_generate() -> Result<(), AppError> {
 
 fn contracts_check() -> Result<(), AppError> {
     let root = repository_root();
-    for artifact in contracts::schema::generate_all().map_err(|error| AppError::Io {
+    let artifacts = contracts::schema::generate_all().map_err(|error| AppError::Io {
         role: "generate contracts",
         detail: error.to_string(),
-    })? {
+    })?;
+    let generated_paths = artifacts
+        .iter()
+        .map(|artifact| artifact.relative_path.as_str())
+        .collect::<BTreeSet<_>>();
+    for artifact in &artifacts {
         let checked_in =
             fs::read(root.join(&artifact.relative_path)).map_err(|error| AppError::Io {
                 role: "read checked-in contract",
@@ -383,11 +388,48 @@ fn contracts_check() -> Result<(), AppError> {
             })?;
         if checked_in != artifact.bytes {
             return Err(AppError::ContractDrift {
-                path: artifact.relative_path,
+                path: artifact.relative_path.clone(),
             });
         }
     }
+    for generated_root in ["schemas/contracts", "schemas/openapi"] {
+        for path in repository_files(&root.join(generated_root))? {
+            let relative = path
+                .strip_prefix(&root)
+                .map_err(|error| AppError::Io {
+                    role: "resolve checked-in contract path",
+                    detail: error.to_string(),
+                })?
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            if !generated_paths.contains(relative.as_str()) {
+                return Err(AppError::ContractDrift { path: relative });
+            }
+        }
+    }
     Ok(())
+}
+
+fn repository_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let mut files = Vec::new();
+    let entries = fs::read_dir(root).map_err(|error| AppError::Io {
+        role: "read generated contract directory",
+        detail: format!("{}: {error}", root.display()),
+    })?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| AppError::Io {
+                role: "read generated contract entry",
+                detail: error.to_string(),
+            })?
+            .path();
+        if path.is_dir() {
+            files.extend(repository_files(&path)?);
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 fn contract_test_suite() -> Result<(), AppError> {

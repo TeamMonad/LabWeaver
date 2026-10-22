@@ -861,6 +861,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::ResourceLeaseChanged>
     );
     document!(
+        "schemas/contracts/v1/events/resource-lease-activated.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
         "schemas/contracts/v1/events/resource-lease-renewed.schema.json",
         CloudEvent<events::ResourceLeaseChanged>
     );
