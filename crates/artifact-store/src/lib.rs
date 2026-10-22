@@ -1956,15 +1956,49 @@ mod tests {
                 oversized_request = oversized_request.header(name, value);
             }
         }
-        oversized_request = oversized_request.header(
-            reqwest::header::CONTENT_LENGTH,
-            u64::try_from(bytes.len() + 1)?,
-        );
-        let oversized_response = oversized_request.body(bytes.to_vec()).send().await?;
+        let oversized_response = oversized_request
+            .body(vec![b'x'; bytes.len() + 1])
+            .send()
+            .await?;
         assert!(
             !oversized_response.status().is_success(),
             "oversized body was accepted: {}",
             oversized_response.status()
+        );
+        assert!(
+            store
+                .list_key_versions("problem-packages/course/upload/oversized-object")
+                .await?
+                .is_empty()
+        );
+        let underfilled = store
+            .presign_upload(
+                "problem-packages/course/upload/underfilled-object",
+                u64::try_from(bytes.len())?,
+                "text/plain",
+                current_test_time()?,
+            )
+            .await?;
+        let mut underfilled_request = http.put(&underfilled.url);
+        for (name, value) in &underfilled.required_headers {
+            if !name.eq_ignore_ascii_case("content-length") {
+                underfilled_request = underfilled_request.header(name, value);
+            }
+        }
+        let underfilled_response = underfilled_request
+            .body(bytes[..bytes.len() - 1].to_vec())
+            .send()
+            .await?;
+        assert!(
+            !underfilled_response.status().is_success(),
+            "underfilled body was accepted: {}",
+            underfilled_response.status()
+        );
+        assert!(
+            store
+                .list_key_versions("problem-packages/course/upload/underfilled-object")
+                .await?
+                .is_empty()
         );
         let mut overwrite = http.put(&presigned.url);
         for (name, value) in &presigned.required_headers {
