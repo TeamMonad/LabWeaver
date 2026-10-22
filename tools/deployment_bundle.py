@@ -1047,7 +1047,7 @@ def load_bundle(
         _infrastructure_model(model, files, references)
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
-    _settings(model, files)
+    _configuration_policy(_settings(model, files))
     _workload_inputs(application, manifest)
     _environment_executor_bindings(model, files, manifest)
     lock = _document(files[versions["lockFile"]])

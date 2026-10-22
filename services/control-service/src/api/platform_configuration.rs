@@ -440,6 +440,7 @@ async fn report(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    let request: ReportPlatformConfigurationApplyRequest = parse_json(&body)?;
     let key = idempotency(&headers)?;
     if let Some(replay) = replay_completed(
         &state,

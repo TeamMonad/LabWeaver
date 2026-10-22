@@ -25,14 +25,11 @@ dependencies = [
 name = "access-service"
 version = "0.1.0"
 dependencies = [
- "artifact-store",
  "async-nats",
- "async-trait",
  "auth",
  "axum 0.8.9",
  "base64 0.22.1",
  "contracts",
- "control-service",
  "futures-util",
  "hyper 1.10.1",
  "hyper-util",
@@ -53,7 +50,6 @@ dependencies = [
  "sqlx",
  "subtle",
  "telemetry",
- "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.18",
