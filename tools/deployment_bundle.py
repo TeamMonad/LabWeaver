@@ -620,6 +620,54 @@ def _settings(model: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
         raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
     return dict(document, configurationMode=mode)
 
+def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
+    """Return the non-secret policy projection from the validated Rust model."""
+    configuration = version.get("configuration")
+    digest = version.get("configurationSha256")
+    if not isinstance(configuration, dict):
+        raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_INVALID: configuration")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_INVALID: configurationSha256")
+    required_groups = {
+        "lifecycle": {
+            "readOnlyRetentionSeconds",
+            "detailedLogRetentionSeconds",
+            "expiryReminderSeconds",
+            "preemptionGraceSeconds",
+        },
+        "runtimePolicy": {
+            "defaultContainerUid",
+            "allowedCapabilities",
+            "preauthorizations",
+            "privilegedAllowed",
+            "privilegedExecutionLocation",
+        },
+        "builderPolicy": {
+            "capabilities",
+            "allowPrivilegeEscalation",
+            "entitlements",
+        },
+    }
+    for group, fields in required_groups.items():
+        value = configuration.get(group)
+        if not isinstance(value, dict):
+            raise BundleError(
+                f"LW_BUNDLE_CONFIGURATION_POLICY_INVALID: missing {group}"
+            )
+        missing = sorted(fields - set(value))
+        if missing:
+            raise BundleError(
+                "LW_BUNDLE_CONFIGURATION_POLICY_INVALID: "
+                f"{group} missing {','.join(missing)}"
+            )
+    return {
+        "apiVersion": "deploy.labweaver.io/platform-policy/v1",
+        "configurationSha256": digest,
+        "lifecycle": configuration["lifecycle"],
+        "runtimePolicy": configuration["runtimePolicy"],
+        "builderPolicy": configuration["builderPolicy"],
+    }
+
 
 def _environment_executor_bindings(
     model: dict[str, Any], files: dict[str, bytes], manifest: dict[str, Any]
@@ -946,6 +994,7 @@ def load_bundle(
         "workloadInputs",
         "managedControlConfiguration",
         "environmentExecutorAuthority",
+        "platformConfigurationPolicy",
     } & set(application["helmValues"]):
         raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
     for key in application["ansibleVariables"]:
@@ -1092,6 +1141,10 @@ def derive_bundle(
     }
     values["deploymentIdentity"] = {"configurationBundleSha256": digest}
     version = _settings(model, files)
+    policy = _configuration_policy(version)
+    policy_payload = json.dumps(policy, sort_keys=True).encode()
+    _write(output / "platform-configuration-policy.json", policy_payload)
+    values["platformConfigurationPolicy"] = policy
     _write(
         output / "platform-configuration.json",
         json.dumps(

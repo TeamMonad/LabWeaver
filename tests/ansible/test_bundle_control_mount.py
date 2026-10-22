@@ -76,7 +76,26 @@ class BundleControlMountTests(unittest.TestCase):
                 source_map["data"]["platform-configuration.json"].encode(),
                 (loaded / "platform-configuration.json").read_bytes(),
             )
+            policy = json.loads(
+                source_map["data"]["platform-configuration-policy.json"]
+            )
+            self.assertEqual(
+                policy,
+                json.loads(
+                    (loaded / "platform-configuration-policy.json").read_bytes()
+                ),
+            )
+            self.assertEqual(
+                policy["configurationSha256"],
+                f.version["configurationSha256"],
+            )
             pod = control["spec"]["template"]["spec"]
+            self.assertEqual(
+                control["spec"]["template"]["metadata"]["annotations"][
+                    "labweaver.io/platform-policy-sha256"
+                ],
+                f.version["configurationSha256"],
+            )
             main = pod["containers"][0]
             initialize = pod["initContainers"][0]
             self.assertEqual(main["image"], initialize["image"])
@@ -120,6 +139,50 @@ class BundleControlMountTests(unittest.TestCase):
                         },
                     )
             self.assertNotIn(f.secret.decode(), json.dumps(source_map))
+        f.clean_runtime()
+
+    def test_privileged_runtime_uses_the_bundle_dedicated_node_pool(self):
+        f = self.fixture
+        f.configuration["runtimePolicy"].update(
+            privilegedAllowed=True,
+            privilegedExecutionLocation={
+                "kind": "dedicated_node_pool",
+                "nodeSelector": {"labweaver.io/pool": "research"},
+                "taintKey": "labweaver.io/research",
+                "taintValue": "reserved",
+            },
+        )
+        f.save_version()
+        recipient = f.key()
+        fixtures.bundle.seal_bundle(f.root, f.archive, [recipient], f.runtime)
+        with fixtures.bundle.opened_bundle(f.archive, f.identity, f.runtime) as (
+            _,
+            loaded,
+            _,
+        ):
+            rendered = self.render(loaded / "helm-values.yaml")
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            objects = list(yaml.safe_load_all(rendered.stdout))
+            executor = next(
+                item
+                for item in objects
+                if item
+                and item["kind"] == "Deployment"
+                and item["metadata"]["name"] == "kubevirt-executor"
+            )
+            pod = executor["spec"]["template"]["spec"]
+            self.assertEqual(pod["nodeSelector"], {"labweaver.io/pool": "research"})
+            self.assertEqual(
+                pod["tolerations"],
+                [
+                    {
+                        "key": "labweaver.io/research",
+                        "operator": "Equal",
+                        "value": "reserved",
+                        "effect": "NoSchedule",
+                    }
+                ],
+            )
         f.clean_runtime()
 
     def test_missing_source_wrong_binding_or_override_fails_actual_helm(self):

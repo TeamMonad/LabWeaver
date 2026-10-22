@@ -28,6 +28,36 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s\n%s" (required "managedControlConfiguration.versionJson is required" .Values.managedControlConfiguration.versionJson) (required "managedControlConfiguration.sourceJson is required" .Values.managedControlConfiguration.sourceJson) | sha256sum -}}
 {{- end -}}
 
+{{- define "labweaver.platformPolicy" -}}
+{{- $policy := required "platformConfigurationPolicy is required when a Bundle is rendered" .Values.platformConfigurationPolicy -}}
+{{- if not (kindIs "map" $policy) -}}
+{{- fail "platformConfigurationPolicy must be a mapping" -}}
+{{- end -}}
+{{- range $group := list "lifecycle" "runtimePolicy" "builderPolicy" -}}
+  {{- if not (hasKey $policy $group) -}}
+    {{- fail (printf "platformConfigurationPolicy.%s is required" $group) -}}
+  {{- end -}}
+  {{- if not (kindIs "map" (index $policy $group)) -}}
+    {{- fail (printf "platformConfigurationPolicy.%s must be a mapping" $group) -}}
+  {{- end -}}
+{{- end -}}
+{{- $runtime := index $policy "runtimePolicy" -}}
+{{- if not (hasKey $runtime "privilegedAllowed") -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedAllowed is required" -}}
+{{- end -}}
+{{- if not (hasKey $runtime "privilegedExecutionLocation") -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation is required" -}}
+{{- end -}}
+{{- if and (index $runtime "privilegedAllowed") (not (index $runtime "privilegedExecutionLocation")) -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation is required when privilegedAllowed is true" -}}
+{{- end -}}
+{{- $digest := required "platformConfigurationPolicy.configurationSha256 is required" (index $policy "configurationSha256") -}}
+{{- if not (regexMatch "^[0-9a-f]{64}$" $digest) -}}
+{{- fail "platformConfigurationPolicy.configurationSha256 must be a lowercase SHA-256" -}}
+{{- end -}}
+{{- toJson $policy -}}
+{{- end -}}
+
 {{- define "labweaver.agentControlConnection" -}}
 {{- $inputs := .Values.workloads -}}
 {{- if .Values.workloadInputs -}}

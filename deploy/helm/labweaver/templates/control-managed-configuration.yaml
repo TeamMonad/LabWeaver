@@ -2,6 +2,11 @@
 {{- $version := required "managedControlConfiguration.versionJson is required" .Values.managedControlConfiguration.versionJson -}}
 {{- $source := required "managedControlConfiguration.sourceJson is required" .Values.managedControlConfiguration.sourceJson -}}
 {{- $parsedVersion := mustFromJson $version -}}
+{{- $policy := include "labweaver.platformPolicy" . -}}
+{{- $parsedPolicy := mustFromJson $policy -}}
+{{- if ne $parsedPolicy.configurationSha256 $parsedVersion.configurationSha256 -}}
+{{- fail "platformConfigurationPolicy digest differs from managed configuration" -}}
+{{- end }}
 {{- $parsedSource := mustFromJson $source -}}
 {{- $control := index .Values.workloads "control-service" -}}
 {{- if not $control.enabled }}
@@ -30,4 +35,5 @@ immutable: true
 data:
   platform-configuration.json: {{ $version | quote }}
   platform-configuration-source.json: {{ $source | quote }}
+  platform-configuration-policy.json: {{ $policy | quote }}
 {{- end }}
