@@ -4,6 +4,11 @@
 {{- $input := $configuration }}
 {{- $managedControl := and (eq $name "control-service") $root.Values.managedControlConfiguration }}
 {{- $environmentAuthority := and (has $name (list "container-executor" "kubevirt-executor")) $root.Values.environmentExecutorAuthority }}
+{{- $platformPolicy := $root.Values.platformConfigurationPolicy -}}
+{{- $runtimePolicy := dict -}}
+{{- if and $platformPolicy (hasKey $platformPolicy "runtimePolicy") }}
+{{- $runtimePolicy = index $platformPolicy "runtimePolicy" -}}
+{{- end }}
 {{- if $root.Values.workloadInputs }}
 {{- if not (hasKey $root.Values.workloadInputs $name) }}
 {{- fail (printf "workloadInputs.%s is required" $name) }}
@@ -54,6 +59,9 @@ spec:
         {{- if $managedControl }}
         checksum/control-loaded-configuration: {{ include "labweaver.controlManagedChecksum" $root | quote }}
         {{- end }}
+        {{- if $platformPolicy }}
+        labweaver.io/platform-policy-sha256: {{ required "platformConfigurationPolicy.configurationSha256 is required" $platformPolicy.configurationSha256 | quote }}
+        {{- end }}
       {{- if and (eq $name "web") $root.Values.objectStoreRoute.enabled }}
         checksum/object-store-proxy: {{ printf "%s\n%s\n%s\n%s" $root.Values.objectStoreRoute.caCertificate $root.Values.objectStoreRoute.backendHostname $root.Values.objectStoreRoute.pathPrefix $root.Values.objectStoreRoute.serviceName | sha256sum | quote }}
       {{- end }}
@@ -61,6 +69,18 @@ spec:
       {{- if eq $name "kubevirt-executor" }}
       hostPID: false
       shareProcessNamespace: false
+      {{- end }}
+      {{- if and (eq $name "kubevirt-executor") $platformPolicy (index $runtimePolicy "privilegedAllowed") }}
+      {{- $location := index $runtimePolicy "privilegedExecutionLocation" }}
+      {{- if and $location (eq (index $location "kind") "dedicated_node_pool") }}
+      nodeSelector:
+        {{- toYaml (index $location "nodeSelector") | nindent 8 }}
+      tolerations:
+        - key: {{ required "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation.taintKey is required" (index $location "taintKey") | quote }}
+          operator: Equal
+          value: {{ required "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation.taintValue is required" (index $location "taintValue") | quote }}
+          effect: NoSchedule
+      {{- end }}
       {{- end }}
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: {{ default false $configuration.kubernetesApi }}

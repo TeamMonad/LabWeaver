@@ -355,6 +355,7 @@ Cluster network、identity、verify、admin tools、foundation、Harbor、sandbo
 | `LW_BUNDLE_CONFIGURATION_TOOL_REQUIRED` | 构建同一版本的 xtask，并提供正确二进制路径 |
 | `LW_BUNDLE_CONFIGURATION_INVALID` | 取得完整管理版本，核对 capability、执行位置和字段 |
 | `LW_BUNDLE_CONFIGURATION_DIGEST_MISMATCH` | 重新导出管理版本，不手改快照或摘要 |
+| `LW_BUNDLE_CONFIGURATION_POLICY_INVALID` | 检查 lifecycle、runtimePolicy、builderPolicy 三组完整字段和设置摘要；不要手写 Helm policy |
 | `LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH` | 将 Bundle revision 与引用的管理版本保持一致 |
 | `LW_BUNDLE_INITIAL_REVISION_INVALID` | 首装请求 expectedRevision 使用0，首装 Bundle revision 使用1。已有安装继续使用条件更新 |
 | `LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT` | 保留独立 Resource release，移除其他 workload 的启用覆盖 |
@@ -414,9 +415,11 @@ Kubernetes 的 [root CA publisher](https://github.com/kubernetes/kubernetes/blob
 
 ## 执行与观察边界
 
-管理版本、离线首装请求、Resource profile、静态 inventory，以及 identity/Harbor/公网入口 locator 使用同一加密目录。PKI/NATS 签发 workspace 和实际安装步骤仍有独立输入，恢复不会自动执行它们。管理配置的保留、提醒、抢占、运行及 builder 策略尚未由全部服务消费。
+管理版本、离线首装请求、Resource profile、静态 inventory，以及 identity/Harbor/公网入口 locator 使用同一加密目录。PKI/NATS 签发 workspace 和实际安装步骤仍有独立输入，恢复不会自动执行它们。管理配置的保留、提醒、抢占以及其他生命周期服务的消费仍由其领域 owner 接入；本入口不把清理证据 TTL 当作磁盘 TTL。
 
-`exec` 为管理版本生成私有 `platform-configuration-source.json`。密文摘要来自同一份实际解密输入快照，设置摘要来自原 Rust 类型校验；文件记录 Bundle 的 revision 和 namespace/releaseName。`validate`、直接渲染和未保存的首装请求不产生此加载来源。来源文件不含解密身份或 Secret，并与其他临时派生文件一起清理。
+`exec` 为管理版本生成私有 `platform-configuration-source.json`，同时派生非秘密的 `platform-configuration-policy.json` 和同内容的 Helm `platformConfigurationPolicy`。两者都来自同一 Rust `PlatformConfigurationDesired` 快照；手写或缺少 lifecycle、runtimePolicy、builderPolicy 的 Helm values 在渲染时失败。策略摘要必须等于管理版本摘要，不能从第二份 YAML 覆盖。
+
+渲染时每个工作负载携带策略摘要 annotation。若 `runtimePolicy.privilegedAllowed` 为 true，必须提供有效的专用执行位置；`dedicated_node_pool` 会在 `kubevirt-executor` 上同时渲染 nodeSelector 和对应 NoSchedule taint toleration。`virtual_machine_guest` 不会伪造 Pod 调度约束，而要求对应 VM consumer 提供其 provider binding。builderPolicy 与 runtimePolicy 保持独立，runtime 设置不会放宽 builder 的硬编码安全上下文。
 
 Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE` 与 `LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE`，从实际读取的 typed 设置计算摘要，将快照固定在运行实例。原 apply/report 成功路径还要核对该快照与原尝试，不能只复制执行者的两个摘要。保存 desired、修改投影文件和命令退出成功均不会自动更新 applied。旧进程或错密文来源的成功回报被拒绝；失败保留最后验证的版本及待核对状态。具体输入与限制见[Control 启动加载](../contracts/platform-configuration.md#control-启动加载)。
 
@@ -424,7 +427,7 @@ Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FI
 
 ## Control 挂载与副本观察
 
-认证打开管理版本后，派生 Helm values 包含同一版本和来源的两个 JSON输入。chart只为现有Control部署生成不可变ConfigMap、Pod checksum、初始化复制及主进程只读挂载；别的workload不挂载。初始化使用原Control摘要镜像、原非root身份、drop ALL、只读根文件系统和禁用的服务账户token，不启用新权限或签发身份。
+认证打开管理版本后，派生 Helm values 包含同一版本、来源和非秘密 policy 的三个 JSON 输入。chart 为现有 Control 部署生成不可变 ConfigMap、Pod checksum 和策略摘要 annotation；ConfigMap 保留 policy 供后续受限消费者核对，Control 初始化仍只复制并加载版本和来源两个文件。初始化使用原 Control 摘要镜像、原非 root 身份、drop ALL、只读根文件系统和禁用的服务账户 token，不启用新权限或签发身份。
 
 Kubernetes [AtomicWriter](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/volume/util/atomic_writer.go) 用同一代次目录和符号链接发布投影。因此初始化命令固定一个 `..data` 代次，校验字节checksum后写入普通0600文件，保留加载器原有的链接拒绝。主进程的身份来自 [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)；挂载文件改变不会替换已经加载的进程快照。
 
@@ -449,4 +452,4 @@ python tools/observe_control_configuration.py \
 
 该入口提供代码、本地合成验证及Control副本观察能力。它没有执行真实集群安装，也没有覆盖全部lifecycle/runtime/builder消费者。全安装、实际replica/位置和其他服务的验收仍由唯一获准执行owner安排。
 
-隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。本入口没有落实运行策略的实际对象授权或执行位置。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。
+隔离验收清单的 restricted 标签只用于专用测试 namespace，不改变生产 namespace 准入。Bundle 渲染已对策略结构、摘要绑定和专用 kubevirt 执行位置 fail closed；完整运行授权、VM provider binding 的外部消费、其他服务的活动配置观察仍由对应领域 owner 和获准执行窗口完成。生成 SDK 从 `crates/contracts` 产生；本地加密、秘密读取和状态测试不能替代实际安装及消费事实。

@@ -51,7 +51,9 @@ sshGatewayService:
 # in workloads. Do not edit a generated Bundle values file.
 workloadInputs: {}
 
-# Filled only by the authenticated encrypted Bundle opening path.
+# Derived exclusively from the Bundle's validated PlatformConfigurationDesired.
+# Handwritten values must not provide a second policy source.
+platformConfigurationPolicy: {}
 managedControlConfiguration: {}
 environmentExecutorAuthority: {}
 

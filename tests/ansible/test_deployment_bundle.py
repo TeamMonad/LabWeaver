@@ -484,6 +484,10 @@ class DeploymentBundleTests(unittest.TestCase):
         ][0]
         self.assertFalse(builder["securityContext"]["allowPrivilegeEscalation"])
         self.assertEqual(builder["securityContext"]["capabilities"], {"drop": ["ALL"]})
+        policy_annotation = deployments["control-service"]["spec"]["template"][
+            "metadata"
+        ]["annotations"]["labweaver.io/platform-policy-sha256"]
+        self.assertEqual(policy_annotation, self.version["configurationSha256"])
 
     def key(self, path: Path | None = None) -> str:
         if shutil.which("age") is None or shutil.which("age-keygen") is None:
