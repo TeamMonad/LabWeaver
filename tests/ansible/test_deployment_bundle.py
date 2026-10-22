@@ -433,6 +433,7 @@ class DeploymentBundleTests(unittest.TestCase):
             ("builderPolicy", "capabilities", ["NET_ADMIN"]),
             ("builderPolicy", "entitlements", ["network.host"]),
         ):
+            original = self.configuration[group][field]
             self.configuration[group][field] = value
             self.save_version()
             with self.assertRaisesRegex(
@@ -440,12 +441,10 @@ class DeploymentBundleTests(unittest.TestCase):
                 "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED",
             ):
                 bundle.load_bundle(self.root)
-            self.configuration[group][field] = []
+            self.configuration[group][field] = original
             self.save_version()
 
-    def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(
-        self,
-    ) -> None:
+    def test_plain_helm_rejects_policy_without_authenticated_source(self) -> None:
         helm = shutil.which("helm")
         self.assertIsNotNone(
             helm, "The pinned Helm renderer is required for Bundle input tests."
@@ -460,10 +459,6 @@ class DeploymentBundleTests(unittest.TestCase):
             },
         )
         self.save_version()
-        self.model["application"]["workloadInputs"]["control-service"]["env"][
-            "LABWEAVER_SERVICE_SCOPES"
-        ] = "synthetic.bundle.scope"
-        self.save_model()
         rendered = self.private / "helm-rendered"
         bundle.derive_bundle(self.root, rendered)
         result = subprocess.run(
@@ -476,35 +471,15 @@ class DeploymentBundleTests(unittest.TestCase):
                 "labweaver-system",
                 "--values",
                 str(rendered / "helm-values.yaml"),
-                "--set-string",
-                "workloads.control-service.env.LEGACY_ONLY=must-not-be-rendered",
             ],
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        deployments = {
-            item["metadata"]["name"]: item
-            for item in yaml.safe_load_all(result.stdout)
-            if item and item.get("kind") == "Deployment"
-        }
-        control = deployments["control-service"]["spec"]["template"]["spec"][
-            "containers"
-        ][0]
-        env = {item["name"]: item for item in control["env"]}
-        self.assertEqual(
-            env["LABWEAVER_SERVICE_SCOPES"]["value"], "synthetic.bundle.scope"
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "platformConfigurationPolicy requires authenticated managedControlConfiguration",
+            result.stderr,
         )
-        self.assertNotIn("LEGACY_ONLY", env)
-        builder = deployments["build-executor"]["spec"]["template"]["spec"][
-            "containers"
-        ][0]
-        self.assertFalse(builder["securityContext"]["allowPrivilegeEscalation"])
-        self.assertEqual(builder["securityContext"]["capabilities"], {"drop": ["ALL"]})
-        policy_annotation = deployments["control-service"]["spec"]["template"][
-            "metadata"
-        ]["annotations"]["labweaver.io/platform-policy-sha256"]
-        self.assertEqual(policy_annotation, self.version["configurationSha256"])
 
     def key(self, path: Path | None = None) -> str:
         if shutil.which("age") is None or shutil.which("age-keygen") is None:
