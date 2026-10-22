@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use artifact_store_test::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
+use artifact_store::{
+    ImmutableObjectStore, ObjectStoreError, PresignedUpload, S3Credential, S3ImmutableObjectStore,
+    S3StoreConfig, VerifiedObject,
+};
 use async_trait::async_trait;
 use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
@@ -3379,7 +3382,11 @@ async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
             upload = upload.header(name, value);
         }
         let response = upload.body(bytes.to_vec()).send().await?;
-        assert!(response.status().is_success(), "PUT failed: {}", response.status());
+        assert!(
+            response.status().is_success(),
+            "PUT failed: {}",
+            response.status()
+        );
     }
     let first_target = session
         .upload_targets
@@ -3390,11 +3397,7 @@ async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
         overwrite = overwrite.header(name, value);
     }
     assert_eq!(
-        overwrite
-            .body(b"statement".to_vec())
-            .send()
-            .await?
-            .status(),
+        overwrite.body(b"statement".to_vec()).send().await?.status(),
         reqwest::StatusCode::PRECONDITION_FAILED
     );
 
@@ -3469,7 +3472,14 @@ async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
         for (name, value) in &target.required_headers {
             upload = upload.header(name, value);
         }
-        assert!(upload.body(bytes.to_vec()).send().await?.status().is_success());
+        assert!(
+            upload
+                .body(bytes.to_vec())
+                .send()
+                .await?
+                .status()
+                .is_success()
+        );
     }
     let cancelled = service
         .cancel_project_upload(
@@ -3480,7 +3490,10 @@ async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
             now,
         )
         .await?;
-    assert_eq!(cancelled.state, contracts::http::ProblemPackageUploadState::Cancelled);
+    assert_eq!(
+        cancelled.state,
+        contracts::http::ProblemPackageUploadState::Cancelled
+    );
     sqlx::query(
         "UPDATE control.problem_package_upload_sessions \
          SET expires_at=$2-interval '1 second',cleanup_versions_next_attempt_at=$2-interval '1 second' \
@@ -3496,12 +3509,17 @@ async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
             .await?,
     )?;
     service.reconcile_material_uploads(cleanup_now).await?;
+    let cleanup_due_now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
     assert_eq!(
-        service.cleanup_one_object(cleanup_now).await?,
+        service.cleanup_one_object(cleanup_due_now).await?,
         control_service::CleanupOutcome::Deleted
     );
     assert_eq!(
-        service.cleanup_one_object(cleanup_now).await?,
+        service.cleanup_one_object(cleanup_due_now).await?,
         control_service::CleanupOutcome::Deleted
     );
     for key in cancel_keys {

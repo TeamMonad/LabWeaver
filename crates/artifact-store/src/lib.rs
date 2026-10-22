@@ -428,7 +428,12 @@ impl S3ImmutableObjectStore {
         })
     }
 
-    /// Builds a local HTTP client for the real MinIO integration fixture.
+    /// Builds a local HTTP client for the real `MinIO` integration fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectStoreError::ConfigurationInvalid`] for non-local endpoints or invalid
+    /// storage settings.
     #[cfg(feature = "test-support")]
     pub async fn new_for_test(
         config: S3StoreConfig,
@@ -454,7 +459,12 @@ impl S3ImmutableObjectStore {
         Self::build(config, credential).await
     }
 
-    /// Creates and versions the dedicated bucket used by the real MinIO fixture.
+    /// Creates and versions the dedicated bucket used by the real `MinIO` fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectStoreError::ObjectUnavailable`] when the fixture cannot create or version
+    /// its bucket.
     #[cfg(feature = "test-support")]
     pub async fn ensure_bucket_for_test(&self) -> Result<(), ObjectStoreError> {
         use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};

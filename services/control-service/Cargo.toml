@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-artifact-store = { path = "../../crates/artifact-store" }
+artifact-store = { path = "../../crates/artifact-store", features = ["test-support"] }
 auth = { path = "../../crates/auth" }
 async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 async-trait.workspace = true
@@ -39,7 +39,6 @@ rcgen.workspace = true
 tempfile.workspace = true
 testcontainers = { version = "=0.25.0", features = ["blocking"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
-artifact-store-test = { package = "artifact-store", path = "../../crates/artifact-store", features = ["test-support"] }
 
 [lints]
 workspace = true
