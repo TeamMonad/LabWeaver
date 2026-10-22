@@ -39,7 +39,6 @@ use super::*;
 #[path = "oidc_login_tests.rs"]
 mod oidc_login_tests;
 
-
 #[path = "../tests/support/mod.rs"]
 mod support;
 
