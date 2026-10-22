@@ -36,6 +36,13 @@ import {
 import { issueAccessGrantAndConnect, hasTerminalLine, typeTerminalCommand } from '../support/real-gpu.mjs'
 import { deleteEnvironmentByUi, stopEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 import { issueEnvironmentAccessGrantByUi, revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
+import {
+  approveAndPublishByUi,
+  expectPublicationStatusByUi,
+  expectReviewTechnicalIdentitiesByUi,
+  openAuthoringReviewByUi,
+  reopenAuthoringReviewByLink,
+} from '../support/authoring-review.mjs'
 
 const LAB_ROOT = fileURLToPath(new URL('../../../examples', import.meta.url))
 
@@ -315,34 +322,14 @@ async function waitForBuiltCandidate(request, projectId, candidateId, onPendingR
 }
 
 async function approveAndPublish(page, projectId, runId, packageData, environmentCandidateId, evaluationCandidateId, artifact) {
-  await page.goto(`/teacher/approvals?projectId=${encodeURIComponent(projectId)}&runId=${encodeURIComponent(runId)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await selectProjectByUi(page, projectId)
-  await expect(page.getByRole('heading', { name: '实验包批准', exact: true })).toBeVisible()
-  await expect(page.locator('input[aria-label="AgentRun ID"]')).toHaveValue(runId)
-  const candidateCards = page.locator('.candidate-card')
-  await expect(candidateCards).toHaveCount(2, { timeout: 120_000 })
-  for (let index = 0; index < 2; index += 1) {
-    await candidateCards.nth(index).locator('summary', { hasText: '查看候选技术详情' }).click()
-  }
-  await expect(page.getByText(environmentCandidateId, { exact: true }).first()).toBeVisible({ timeout: 120_000 })
-  await expect(page.getByText(evaluationCandidateId, { exact: true }).first()).toBeVisible({ timeout: 120_000 })
-  await expect(page.locator('.approval-card')).toBeVisible()
-
-  const approvalButton = page.getByRole('button', { name: '批准完整实验包', exact: true })
-  await expect(approvalButton).toBeDisabled()
-  await page.getByRole('checkbox').check()
-  await page.locator('textarea.reason-input').fill('已核对真实生成的 Environment、Evaluation 候选与构建产物摘要。')
-  await expect(approvalButton).toBeEnabled({ timeout: 240_000 })
-
-  const responsePromise = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'POST'
-      && url.pathname === `/api/v1/projects/${projectId}/authoring-approvals`
-  })
-  await approvalButton.click()
-  const approval = await expectJson(await responsePromise, 'LAB_EXPERIMENT_APPROVAL_FAILED')
+  await openAuthoringReviewByUi(page, projectId, runId)
+  await expectReviewTechnicalIdentitiesByUi(page, [environmentCandidateId, evaluationCandidateId])
+  const approval = await approveAndPublishByUi(
+    page,
+    projectId,
+    '已核对真实生成的环境、评分规则候选与构建产物摘要。',
+    { label: 'LAB_EXPERIMENT_APPROVAL_FAILED' },
+  )
   expect(approval.imageArtifact).toMatchObject({
     id: artifact.id,
     kind: 'container',
@@ -361,6 +348,7 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
   if (publication.status !== 'ready') {
     throw new Error(`LAB_EXPERIMENT_PUBLICATION_FAILED:${publication.diagnosticCode ?? 'diagnostic missing'}`)
   }
+  await expectPublicationStatusByUi(page, 'ready')
   return { approval, publication }
 }
 
@@ -411,25 +399,10 @@ async function readExistingPublishedApproval(
   // AuthoringApproval has no runId field; the exact candidate pair binds it to this AgentRun.
   expect(approval.imageArtifact).toEqual(artifact)
 
-  const query = new URLSearchParams({ projectId, runId: targetRunId, approvalId })
-  await page.goto(`/teacher/approvals?${query.toString()}`, { waitUntil: 'domcontentloaded' })
-  await selectProjectByUi(page, projectId)
-  await expect(page.getByRole('heading', { name: '实验包批准', exact: true })).toBeVisible()
-  await expect(page.locator('input[aria-label="AgentRun ID"]')).toHaveValue(targetRunId)
-
-  const approvalSuccess = page.locator('.approval-success')
-  await expect(approvalSuccess).toBeVisible({ timeout: 120_000 })
-  const approvalDetails = approvalSuccess.locator('details')
-  await approvalDetails.locator('summary').click()
-  await expect(approvalDetails.getByText(approvalId, { exact: true })).toBeVisible()
-
-  const publicationCard = page.locator('.publication-status')
-  await expect(publicationCard).toBeVisible({ timeout: 120_000 })
-  await expect(publicationCard).toHaveAttribute('data-status', 'ready')
-  await expect(publicationCard).toContainText('Environment 与 Evaluation 已发布，可以继续配置学生实验。')
-  const publicationDetails = publicationCard.locator('details')
-  await publicationDetails.locator('summary').click()
-  await expect(publicationDetails.getByText(publication.environmentReleaseId, { exact: true })).toBeVisible()
+  await reopenAuthoringReviewByLink(page, projectId, targetRunId, approvalId)
+  await expectPublicationStatusByUi(page, 'ready')
+  await expect(page.getByTestId('approve-publish')).toHaveCount(0)
+  await expectReviewTechnicalIdentitiesByUi(page, [approvalId, publication.environmentReleaseId])
 
   return { approval, publication }
 }

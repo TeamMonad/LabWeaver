@@ -2,7 +2,7 @@
   <div class="review-page">
     <header class="review-header">
       <h2>审核与发布</h2>
-      <p>选择待审核版本，查看题面材料、环境、运行权限、评分规则和学生看到的内容，确认后一次批准并发布。</p>
+      <p>选择待审核版本，查看题面材料、环境、运行权限和评分规则，确认后一次批准并发布。</p>
     </header>
 
     <DiagnosticBanner
@@ -14,7 +14,7 @@
     />
 
     <div v-else class="review-layout">
-      <ReviewQueue :project-id="projectId" :selected-run-id="runId" @loaded="onQueueLoaded" />
+      <ReviewQueue ref="queue" :project-id="projectId" :selected-run-id="runId" @loaded="onQueueLoaded" />
 
       <main class="review-main" aria-labelledby="review-title">
         <div v-if="!runId" class="review-placeholder md-card" role="status" data-testid="review-placeholder">
@@ -174,7 +174,7 @@
                     <template #success="{ data: pkg }">
                       <section class="pane-card md-card" aria-labelledby="materials-heading">
                         <h4 id="materials-heading">材料包 · {{ pkg.files.length }} 个文件</h4>
-                        <p class="pane-note">上传于 {{ formatTimestamp(pkg.completedAt) }}。教师材料不会出现在学生环境中，学生能看到的内容见“学生预览”。</p>
+                        <p class="pane-note">上传于 {{ formatTimestamp(pkg.completedAt) }}。教师材料不会复制到学生环境中。</p>
                         <ul class="file-list">
                           <li v-for="file in pkg.files" :key="file.path">
                             <code>{{ file.path }}</code>
@@ -184,34 +184,6 @@
                       </section>
                     </template>
                   </AsyncStateView>
-                </TabsContent>
-
-                <TabsContent value="preview" class="tab-pane">
-                  <section v-if="preview" class="student-preview md-card" aria-labelledby="preview-heading" data-testid="student-preview">
-                    <p class="preview-badge">学生视角预览</p>
-                    <h4 id="preview-heading">{{ preview.title }}</h4>
-                    <p class="preview-meta">{{ preview.runtime }} · {{ preview.entries.join('、') }}</p>
-                    <dl class="meta-grid">
-                      <template v-for="row in preview.resources" :key="row.label">
-                        <dt>{{ row.label }}</dt><dd>{{ row.value }}</dd>
-                      </template>
-                      <dt>网络</dt><dd>{{ preview.network }}</dd>
-                      <template v-for="row in preview.collects" :key="row.label">
-                        <dt>{{ row.label }}</dt><dd>{{ row.value }}</dd>
-                      </template>
-                      <template v-if="preview.requiredFiles.length">
-                        <dt>必须提交</dt><dd>{{ preview.requiredFiles.join('、') }}</dd>
-                      </template>
-                    </dl>
-                    <h5>评分方式 · 满分 {{ preview.maxScore }} 分</h5>
-                    <ul class="preview-score">
-                      <li v-if="preview.gateCount">提交前先做 {{ preview.gateCount }} 项检查，不通过不计分</li>
-                      <li v-for="item in preview.scoreItems" :key="item.label">{{ item.label }}：最多 {{ item.points }} 分</li>
-                      <li v-if="preview.hasAdvisory">另有 AI 评语，不影响分数</li>
-                    </ul>
-                    <p class="pane-note">预览只包含学生可见的字段：不含测试代码、测试组、检查参数和教师材料。批准后学生看到的就是这个版本。</p>
-                  </section>
-                  <p v-else class="pane-note" role="status">环境和评分规则都加载完成后才能预览。</p>
                 </TabsContent>
 
                 <TabsContent value="technical" class="tab-pane">
@@ -228,6 +200,18 @@
                       </template>
                       <template v-for="entry in boundArtifacts" :key="entry.label">
                         <dt>{{ entry.label }}</dt><dd><code>{{ entry.value }}</code></dd>
+                      </template>
+                      <template v-if="authoring.approval.kind === 'success'">
+                        <dt>批准记录</dt><dd><code>{{ authoring.approval.data.id }}</code></dd>
+                      </template>
+                      <template v-if="publicationData?.environmentReleaseId">
+                        <dt>环境发布</dt><dd><code>{{ publicationData.environmentReleaseId }}</code></dd>
+                      </template>
+                      <template v-if="publicationData?.evaluationReleaseId">
+                        <dt>评分规则发布</dt><dd><code>{{ publicationData.evaluationReleaseId }}</code></dd>
+                      </template>
+                      <template v-if="runRelease">
+                        <dt>已发布版本</dt><dd><code>{{ runRelease.id }}</code> · 版本 {{ runRelease.version }} · 候选 rev-{{ runRelease.candidateRevision }}</dd>
                       </template>
                     </dl>
                     <details v-if="environment" class="spec-details"><summary>环境配置 JSON</summary><pre>{{ formatJson(environment.candidate.spec) }}</pre></details>
@@ -252,11 +236,22 @@
                   建议：{{ diagnosticAction(authoring.approval.diagnostic.code) }}
                 </p>
 
-                <template v-if="authoring.approval.kind !== 'success'">
-                  <p class="pane-note">一次批准绑定这一版的材料包、环境、运行权限、镜像和评分规则，并自动发布。重复提交只会产生一个版本；之后材料或配置有变化，会成为新的候选。</p>
+                <div v-if="publishedRelease && authoring.approval.kind !== 'success'" class="approved" role="status" data-testid="review-published">
+                  <SvgIcon name="check_circle" size="md" aria-hidden="true" />
+                  <span>
+                    <strong>这一版已发布为版本 {{ publishedRelease.version }}</strong>（{{ formatTimestamp(publishedRelease.publishedAt) }}）。
+                    可以在<RouterLink :to="{ path: '/teacher/labs', query: { projectId } }">已发布环境模板</RouterLink>中查看，不需要再次批准。
+                  </span>
+                </div>
+
+                <template v-else-if="authoring.approval.kind !== 'success'">
+                  <p v-if="supersededRelease" class="pane-note" role="status" data-testid="review-superseded">
+                    这个任务之前发布过版本 {{ supersededRelease.version }}，之后候选有变化。当前候选需要重新审核，批准后会发布为新版本，已发布的版本不受影响。
+                  </p>
+                  <p class="pane-note">一次批准绑定这一版的材料包、环境、运行权限、镜像和评分规则，并自动发布。网络失败后重试或重复点击沿用同一次提交，只产生一个版本；之后材料或配置有变化，会成为新的候选。</p>
                   <label class="confirm-row">
                     <input v-model="ownerConfirmed" type="checkbox">
-                    <span>我已查看环境、运行权限、评分规则和学生预览。</span>
+                    <span>我已查看材料、环境、运行权限和评分规则。</span>
                   </label>
                   <label class="reason-field">
                     <span>批准说明（必填，最多 500 字）</span>
@@ -272,17 +267,25 @@
 
                 <div v-else class="approved" role="status">
                   <SvgIcon name="check_circle" size="md" aria-hidden="true" />
-                  <strong>已批准，正在发布</strong>
+                  <strong>已批准</strong>
                 </div>
 
                 <AsyncStateView v-if="authoring.publication.kind !== 'idle'" :state="authoring.publication" @retry="authoring.loadPublication">
                   <template #success="{ data }">
-                    <div class="publication" :data-status="data.status" role="status">
+                    <div class="publication" :data-status="data.status" role="status" data-testid="publication-status">
                       <span class="state-chip" :class="`state-chip--${data.status}`">{{ publicationStateLabel(data.status) }}</span>
-                      <span v-if="data.status === 'ready'">已发布。可以在“实验总览”中为课程配置这个实验。</span>
-                      <span v-else-if="data.status === 'failed'">发布未完成<code v-if="data.diagnosticCode">{{ data.diagnosticCode }}</code>。处理后点击重试，会沿用同一次批准。</span>
-                      <span v-else>正在发布，页面会自动更新。</span>
+                      <span v-if="data.status === 'ready'">
+                        已发布。可以在<RouterLink :to="{ path: '/teacher/labs', query: { projectId } }">已发布环境模板</RouterLink>中查看。
+                      </span>
+                      <span v-else-if="data.status !== 'failed'">正在发布，页面会自动更新。</span>
                     </div>
+                    <DiagnosticBanner
+                      v-if="data.status === 'failed'"
+                      :code="data.diagnosticCode ?? 'PROJECT_AUTHORING_PUBLICATION_FAILED'"
+                      message="批准已记录，但发布没有完成。请把诊断信息发给平台管理员处理。"
+                      :retryable="false"
+                      severity="error"
+                    />
                   </template>
                 </AsyncStateView>
               </section>
@@ -308,19 +311,20 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import ReviewQueue from '@/components/review/ReviewQueue.vue'
 import { useProjects } from '@/composables/useProjects'
 import { useProjectAuthoringApproval } from '@/composables/useProjectAuthoringApproval'
-import type { AgentRunHistoryItem, AuthoringPublicationState, CompleteAuthoringApprovalRequestSchemaImageArtifact } from '@/generated/contracts'
+import type { AuthoringPublicationState, CompleteAuthoringApprovalRequestSchemaImageArtifact } from '@/generated/contracts'
 import {
   attemptStateLabel,
   buildStateLabel,
   entryLabels,
   permissionRows,
+  releaseMatchesCandidate,
   resourceRows,
   runStateLabel,
   runtimeLabel,
   stepSummaries,
-  studentPreview,
   submissionRows,
   trackHistories,
+  type ReviewQueueSnapshot,
 } from '@/utils/authoringReview'
 import { formatBytes, formatTimestamp } from '@/utils/format'
 
@@ -344,14 +348,25 @@ watch(
   { immediate: true },
 )
 
-/** Open the first reviewable version when the page is entered without one. */
-const queueSize = ref<number | null>(null)
-function onQueueLoaded(items: AgentRunHistoryItem[]) {
-  queueSize.value = items.length
+/** Open the first unpublished reviewable version when the page is entered without one. */
+const queue = ref<InstanceType<typeof ReviewQueue> | null>(null)
+const queueSnapshot = ref<ReviewQueueSnapshot | null>(null)
+const queueSize = computed(() => queueSnapshot.value?.items.length ?? null)
+function onQueueLoaded(snapshot: ReviewQueueSnapshot) {
+  queueSnapshot.value = snapshot
   if (runId.value) return
-  const first = items.find((item) => item.state === 'awaiting_approval') ?? items.find((item) => item.state === 'succeeded' || item.state === 'partially_succeeded')
+  const pending = snapshot.items.filter((item) => !snapshot.releasesByRun.has(item.id))
+  const first = pending.find((item) => item.state === 'awaiting_approval') ?? pending.find((item) => item.state === 'succeeded' || item.state === 'partially_succeeded')
   if (first) void router.replace({ query: { ...route.query, projectId: projectId.value ?? undefined, runId: first.id } })
 }
+
+/** A finished publication moves the version to “已发布” in the queue. */
+watch(
+  () => authoring.publication.kind === 'success' ? authoring.publication.data.status : undefined,
+  (status, previous) => {
+    if (status === 'ready' && previous !== 'ready') void queue.value?.load()
+  },
+)
 
 watch(
   () => authoring.approval.kind === 'success' ? authoring.approval.data.id : undefined,
@@ -366,7 +381,6 @@ const tabs = [
   { value: 'environment', label: '环境与权限' },
   { value: 'scoring', label: '评分规则' },
   { value: 'materials', label: '材料' },
-  { value: 'preview', label: '学生预览' },
   { value: 'technical', label: '技术详情' },
 ]
 const tab = ref('overview')
@@ -381,11 +395,26 @@ watch(runId, () => {
 const environment = computed(() => authoring.environmentCandidate.kind === 'success' ? authoring.environmentCandidate.data : null)
 const evaluation = computed(() => authoring.evaluationCandidate.kind === 'success' ? authoring.evaluationCandidate.data : null)
 const pkgData = computed(() => authoring.problemPackage.kind === 'success' ? authoring.problemPackage.data : null)
+const publicationData = computed(() => authoring.publication.kind === 'success' ? authoring.publication.data : null)
 
 const experimentTitle = computed(() => environment.value?.candidate.spec.name ?? '实验候选')
 const evaluationName = computed(() => evaluation.value ? `${evaluation.value.candidate.spec.metadata.name} ${evaluation.value.candidate.spec.metadata.version}` : '')
 const runtimeText = computed(() => environment.value ? runtimeLabel(environment.value.candidate.spec.runtime.kind) : '运行方式待确认')
-const preview = computed(() => environment.value && evaluation.value ? studentPreview(environment.value.candidate.spec, evaluation.value.candidate.spec.spec) : null)
+
+/** Active release of this run, read from the server's release list. */
+const runRelease = computed(() => (runId.value && queueSnapshot.value?.releasesByRun.get(runId.value)) || null)
+/** The release publishes exactly the candidate under review: nothing left to approve. */
+const publishedRelease = computed(() => {
+  const release = runRelease.value
+  return release && environment.value && releaseMatchesCandidate(release, environment.value.candidate) ? release : null
+})
+/** An earlier candidate of this run was published; the current one needs its own approval. */
+const supersededRelease = computed(() => (runRelease.value && environment.value && !publishedRelease.value ? runRelease.value : null))
+const approvalDetail = computed(() => {
+  if (authoring.approval.kind === 'success') return '已批准'
+  if (publishedRelease.value) return `已发布版本 ${publishedRelease.value.version}`
+  return '等待批准'
+})
 
 const readiness = computed(() => {
   const env = environment.value
@@ -395,7 +424,7 @@ const readiness = computed(() => {
     { label: '材料包', ready: Boolean(pkgData.value), detail: pkgData.value ? `${pkgData.value.files.length} 个文件` : '读取中' },
     { label: '环境', ready: Boolean(env?.imageArtifact), detail: env ? buildStateLabel(env.build?.state) : '读取中' },
     { label: '评分规则', ready: Boolean(evalView) && runnerReady, detail: evalView ? `${evalView.candidate.spec.spec.steps.length} 个步骤 · ${runnerReady ? '评测环境就绪' : buildStateLabel(evalView.runnerBuild?.state)}` : '读取中' },
-    { label: '批准', ready: authoring.approval.kind === 'success', detail: authoring.approval.kind === 'success' ? '已批准' : '等待批准' },
+    { label: '批准', ready: authoring.approval.kind === 'success' || Boolean(publishedRelease.value), detail: approvalDetail.value },
   ]
 })
 
@@ -406,7 +435,7 @@ const blockingReason = computed(() => {
 
 const canSubmit = computed(() => {
   const length = reason.value.trim().length
-  return ownerConfirmed.value && length >= 1 && length <= 500 && authoring.canApprove && !authoring.acting
+  return ownerConfirmed.value && length >= 1 && length <= 500 && authoring.canApprove && !authoring.acting && !publishedRelease.value
 })
 
 async function completeApproval() {
@@ -488,7 +517,7 @@ function publicationStateLabel(state: AuthoringPublicationState): string {
 .tab-pane:focus-visible { outline: 2px solid var(--md-sys-color-primary); outline-offset: 2px; }
 .pane-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .pane-card { display: grid; align-content: start; gap: 10px; padding: 16px; min-width: 0; }
-.pane-card h4, .student-preview h4 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
+.pane-card h4 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
 .pane-note { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .meta-grid { display: grid; grid-template-columns: minmax(96px, 140px) minmax(0, 1fr); gap: 8px 16px; margin: 0; }
 .meta-grid dt { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
@@ -510,11 +539,6 @@ function publicationStateLabel(state: AuthoringPublicationState): string {
 .file-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font: var(--md-sys-body-medium); }
 .file-list li { display: flex; justify-content: space-between; gap: 12px; }
 .file-list span { color: var(--md-sys-color-on-surface-variant); }
-.student-preview { display: grid; gap: 10px; max-width: 720px; padding: 20px; border-style: dashed; background: var(--md-sys-color-surface); }
-.student-preview h5 { margin: 6px 0 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
-.preview-badge { justify-self: start; margin: 0; padding: 2px 10px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); font: var(--md-sys-label-medium); }
-.preview-meta { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
-.preview-score { margin: 0; padding-left: 18px; color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .spec-details summary { color: var(--md-sys-color-primary); cursor: pointer; font: var(--md-sys-label-large); }
 .spec-details pre { max-height: 320px; overflow: auto; padding: 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container); font: var(--md-sys-body-small); }
 .approve-card { display: grid; gap: 10px; padding: 16px 20px; }
@@ -526,8 +550,9 @@ function publicationStateLabel(state: AuthoringPublicationState): string {
 .filled-button { min-height: 40px; padding: 0 24px; border: 0; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); font: var(--md-sys-label-large); cursor: pointer; }
 .filled-button:disabled { background: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent); color: color-mix(in srgb, var(--md-sys-color-on-surface) 38%, transparent); cursor: not-allowed; }
 .approved { display: flex; align-items: center; gap: 8px; color: var(--md-sys-color-primary); font: var(--md-sys-title-small); }
+.approved span { color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
+.approved a, .publication a { color: var(--md-sys-color-primary); }
 .publication { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font: var(--md-sys-body-medium); }
-.publication code { margin-left: 4px; }
 .state-chip { padding: 2px 10px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-container-high); font: var(--md-sys-label-medium); }
 .state-chip--ready { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .state-chip--failed { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }

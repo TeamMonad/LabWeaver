@@ -1,5 +1,5 @@
 import { activeScene, fixtureProjectId } from './scenes'
-import { agentRunHistory, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
+import { agentRunHistory, authoringReleases, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
 import type {
   AccessGrantSchema,
   AgentRunHistoryPageSchema,
@@ -304,6 +304,7 @@ function projectsForScene(): ProjectSchema[] {
 }
 
 function releasesForScene(): EnvironmentTemplateReleaseViewSchema[] {
+  if (authoringScene()) return authoringReleases()
   return activeScene.value.id === 'teacher-template-empty' || activeScene.value.id === 'resource-empty'
     ? []
     : [release, vmRelease]

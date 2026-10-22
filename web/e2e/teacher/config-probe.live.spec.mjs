@@ -22,6 +22,9 @@ import {
 } from '../support/ssh-access.mjs'
 import { validateConfigProbeBaseDiskCatalogEntry } from '../support/config-probe-catalog.mjs'
 import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
+import {
+  approveAndPublishByUi, expectPublicationStatusByUi, expectReviewTechnicalIdentitiesByUi, openAuthoringReviewByUi,
+} from '../support/authoring-review.mjs'
 
 const PACKAGE_ROOT = (() => {
   const configured = process.env.LABWEAVER_E2E_CONFIG_PROBE_PACKAGE_DIR
@@ -254,20 +257,14 @@ async function authorAndPublish(page, adminPage, project, environmentSpec, evalu
   expect(candidates.evaluation.candidate.spec.spec).toEqual(evaluationSpec.spec)
   const artifact = candidates.environment.imageArtifact
   expect(artifact).toMatchObject({ kind: 'virtual_machine', format: 'qcow2', base_disk: environmentSpec.runtime.base_disk })
-  await page.goto(`/teacher/approvals?projectId=${project.id}&runId=${run.id}`, { waitUntil: 'domcontentloaded' })
-  await selectProjectByUi(page, project.id)
-  await expect(page.getByRole('heading', { name: '实验包批准', exact: true })).toBeVisible()
-  await expect(page.locator('input[aria-label="AgentRun ID"]')).toHaveValue(run.id)
-  await expect(page.locator('.candidate-card')).toHaveCount(2, { timeout: 120_000 })
-  const approve = page.getByRole('button', { name: '批准完整实验包', exact: true })
-  await expect(approve).toBeDisabled()
-  await page.getByRole('checkbox').check()
-  await page.locator('textarea.reason-input').fill('已核对 VM 绑定、仅报告冻结清单与只读实时配置检查，保留原始内容和权限评分要求。')
-  await expect(approve).toBeEnabled({ timeout: 240_000 })
-  const approvalResponse = page.waitForResponse((response) => response.request().method() === 'POST'
-    && new URL(response.url()).pathname === `/api/v1/projects/${project.id}/authoring-approvals`)
-  await approve.click()
-  const approval = await expectJson(await approvalResponse, 'CONFIG_PROBE_APPROVAL_FAILED')
+  await openAuthoringReviewByUi(page, project.id, run.id)
+  await expectReviewTechnicalIdentitiesByUi(page, [candidates.environment.candidate.id, candidates.evaluation.candidate.id])
+  const approval = await approveAndPublishByUi(
+    page,
+    project.id,
+    '已核对 VM 绑定、仅报告冻结清单与只读实时配置检查，保留原始内容和权限评分要求。',
+    { label: 'CONFIG_PROBE_APPROVAL_FAILED' },
+  )
   expect(approval.imageArtifact).toEqual(artifact)
   expect(approval).toMatchObject({
     projectId: project.id, packageId: packageData.id,
@@ -278,7 +275,7 @@ async function authorAndPublish(page, adminPage, project, environmentSpec, evalu
     `/api/v1/projects/${project.id}/authoring-approvals/${approval.id}`,
     (value) => ['ready', 'failed'].includes(value.status), 'CONFIG_PROBE_PUBLICATION_STATUS_FAILED', 600_000)
   if (publication.status !== 'ready') throw new Error('CONFIG_PROBE_PUBLICATION_FAILED')
-  await expect(page.locator('.publication-status')).toHaveAttribute('data-status', 'ready', { timeout: 120_000 })
+  await expectPublicationStatusByUi(page, 'ready')
   return publication
 }
 

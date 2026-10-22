@@ -3,6 +3,7 @@ import type {
   AgentRunHistoryPageSchema,
   AgentRunSchema,
   EnvironmentCandidateViewSchema,
+  EnvironmentTemplateReleaseViewSchema,
   EvaluationCandidateViewSchema,
   ProblemPackageSchema,
 } from '../src/generated/contracts/types.gen'
@@ -139,3 +140,33 @@ export const reviewPackage = {
     { path: 'hidden/tests/spacing.py', object: { artifactId: 'a4', mediaType: 'text/x-python', objectVersion: 'v1', sha256: 'sha256:04', sizeBytes: 3100 } },
   ],
 } as unknown as ProblemPackageSchema
+
+/** Release that publishes exactly the candidate under review (scene “已发布”). */
+export const reviewRunRelease = {
+  id: 'release-optics-env',
+  version: 1,
+  projectId: fixtureProjectId,
+  courseId: 'course-physics-2026',
+  runtimeKind: 'container',
+  publishedAt: '2026-10-11T04:05:00.000Z',
+  publishedBy: 'fixture-teacher',
+  agentRunId: reviewRunId,
+  candidateId: environmentCandidateId,
+  candidateRevision: 3,
+  approval: {
+    actorId: 'fixture-teacher',
+    candidateId: environmentCandidateId,
+    candidateRevision: 3,
+    decidedAt: '2026-10-11T04:00:00.000Z',
+    decision: 'approved',
+    id: 'approval-optics-env',
+    policyRevision: 2,
+    reason: '已核对题面与评分标准',
+    trustRevision: 4,
+  },
+  artifact: containerArtifact,
+} as unknown as EnvironmentTemplateReleaseViewSchema
+
+export function authoringReleases(): EnvironmentTemplateReleaseViewSchema[] {
+  return activeScene.value.id === 'teacher-review-published' ? [reviewRunRelease] : []
+}

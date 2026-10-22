@@ -3,6 +3,7 @@ import type {
   AgentRunSchema,
   CandidateBuildState,
   EnvironmentCandidateViewSchema,
+  EnvironmentTemplateReleaseViewSchema,
   EvaluationCandidateViewSchema,
 } from '@/generated/contracts'
 import { formatBytes } from '@/utils/format'
@@ -16,14 +17,20 @@ export type Row = { label: string; value: string; hint?: string }
 
 // ---- Review queue -----------------------------------------------------------
 
-export type QueueGroup = 'review' | 'generating' | 'unfinished'
+export type QueueGroup = 'review' | 'generating' | 'unfinished' | 'published'
 
 /** Only experiment authoring runs produce a package teachers approve here. */
 export function isExperimentAuthoringRun(item: Pick<AgentRunHistoryItem, 'purpose'>): boolean {
   return item.purpose.kind === 'authoring' && item.purpose.environmentClass === 'experiment'
 }
 
-export function queueGroup(state: RunState): QueueGroup {
+/**
+ * Groups a run by what the teacher can do next. A run whose package already
+ * has an active (not withdrawn) Environment release is listed as published;
+ * the release itself is the server's record of a completed approval.
+ */
+export function queueGroup(state: RunState, published = false): QueueGroup {
+  if (published) return 'published'
   if (state === 'awaiting_approval' || state === 'succeeded' || state === 'partially_succeeded') return 'review'
   if (state === 'failed' || state === 'cancelled') return 'unfinished'
   return 'generating'
@@ -33,6 +40,38 @@ export const QUEUE_GROUP_LABEL: Record<QueueGroup, string> = {
   review: '可以审核',
   generating: '生成中',
   unfinished: '未完成，需回到材料页处理',
+  published: '已发布',
+}
+
+export type ReleaseView = EnvironmentTemplateReleaseViewSchema
+
+/** Latest active Environment release per authoring run, keyed by run id. */
+export function activeReleasesByRun(releases: readonly ReleaseView[]): Map<string, ReleaseView> {
+  const byRun = new Map<string, ReleaseView>()
+  for (const release of releases) {
+    if (release.withdrawal) continue
+    const current = byRun.get(release.agentRunId)
+    if (!current || release.version > current.version) byRun.set(release.agentRunId, release)
+  }
+  return byRun
+}
+
+/**
+ * Whether a release publishes exactly the candidate under review. A release of
+ * an earlier candidate revision means the material or configuration changed
+ * after approval and the current candidate needs its own approval.
+ */
+export function releaseMatchesCandidate(release: ReleaseView, candidate: { id: string; revision: number }): boolean {
+  return release.candidateId === candidate.id && release.candidateRevision === candidate.revision
+}
+
+/** What the review queue read for one project, shared with the review page. */
+export type ReviewQueueSnapshot = {
+  items: AgentRunHistoryItem[]
+  releasesByRun: Map<string, ReleaseView>
+  /** Diagnostic code when releases could not be read; publication state is then unknown. */
+  releaseError: string | null
+  hasMore: boolean
 }
 
 export function runStateLabel(state: RunState): string {
@@ -202,50 +241,4 @@ export function trackHistories(run: AgentRunSchema): TrackHistory[] {
 
 export function attemptStateLabel(state: string): string {
   return ({ pending: '等待', running: '生成中', repairing: '修复中', awaiting_approval: '等待审核', succeeded: '成功', failed: '失败', cancelled: '已取消' } as Record<string, string>)[state] ?? state
-}
-
-// ---- Student preview ---------------------------------------------------------
-
-export type StudentPreview = {
-  title: string
-  runtime: string
-  entries: string[]
-  resources: Row[]
-  network: string
-  collects: Row[]
-  requiredFiles: string[]
-  maxScore: number
-  scoreItems: { label: string; points: number }[]
-  gateCount: number
-  hasAdvisory: boolean
-}
-
-/**
- * What a student sees for this version, built from an allow-list of fields.
- * Test sources, checker parameters, test group names and teacher materials are
- * never copied in, so hidden rules cannot leak through the preview.
- */
-export function studentPreview(environment: EnvironmentSpec, evaluation: EvaluationBody): StudentPreview {
-  const requiredFiles = new Set<string>()
-  for (const step of evaluation.steps) {
-    if (step.role === 'gate' && step.runner.kind === 'file_assertion') step.runner.requiredFiles.forEach((file) => requiredFiles.add(file))
-  }
-  const collector = evaluation.submission.collector
-  return {
-    title: environment.name,
-    runtime: runtimeLabel(environment.runtime.kind),
-    entries: entryLabels(environment),
-    resources: resourceRows(environment),
-    network: networkLabel(environment.network),
-    collects: collector.kind === 'workspace_snapshot'
-      ? [{ label: '提交时收集', value: collector.include.join('、') }, { label: '大小上限', value: formatBytes(collector.maxBytes) }]
-      : [{ label: '提交时检查系统状态', value: `${collector.facts.length} 项` }, { label: '大小上限', value: formatBytes(collector.maxBytes) }],
-    requiredFiles: [...requiredFiles],
-    maxScore: evaluation.aggregation.maxScore,
-    scoreItems: evaluation.steps
-      .flatMap((step) => step.role === 'score' ? [step.score.max] : [])
-      .map((points, index) => ({ label: `评分项 ${index + 1}`, points })),
-    gateCount: evaluation.steps.filter((step) => step.role === 'gate').length,
-    hasAdvisory: evaluation.steps.some((step) => step.role === 'advisory'),
-  }
 }

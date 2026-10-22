@@ -29,6 +29,12 @@ import {
 } from '../support/real-experiment.mjs'
 import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 import { revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
+import {
+  approveAndPublishByUi,
+  expectPublicationStatusByUi,
+  expectReviewTechnicalIdentitiesByUi,
+  openAuthoringReviewByUi,
+} from '../support/authoring-review.mjs'
 
 const REAL_CHAIN_TIMEOUT_MS = 3_600_000
 // The real chain must prove a single uncontested provider attempt, so it opts out
@@ -92,35 +98,14 @@ async function waitForBuiltCandidate(request, projectId, candidateId) {
 }
 
 async function approveAndPublish(page, projectId, runId, packageData, environmentCandidateId, evaluationCandidateId, artifact) {
-  await page.goto(`/teacher/approvals?projectId=${encodeURIComponent(projectId)}&runId=${encodeURIComponent(runId)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await selectProjectByUi(page, projectId)
-  await expect(page.getByRole('heading', { name: '实验包批准', exact: true })).toBeVisible()
-  await expect(page.locator('input[aria-label="AgentRun ID"]')).toHaveValue(runId)
-  const candidateCards = page.locator('.candidate-card')
-  await expect(candidateCards).toHaveCount(2, { timeout: 120_000 })
-  for (let index = 0; index < 2; index += 1) {
-    await candidateCards.nth(index).locator('summary', { hasText: '查看候选技术详情' }).click()
-  }
-  await expect(page.getByText(environmentCandidateId, { exact: true }).first()).toBeVisible({ timeout: 120_000 })
-  await expect(page.getByText(evaluationCandidateId, { exact: true }).first()).toBeVisible({ timeout: 120_000 })
-  await expect(page.locator('.approval-card')).toBeVisible()
-
-  const approvalButton = page.getByRole('button', { name: '批准完整实验包', exact: true })
-  await expect(approvalButton).toBeDisabled()
-  await page.getByRole('checkbox').check()
-  await page.locator('textarea.reason-input').fill('已核对真实生成的 Environment、Evaluation、私有黄金基础镜像来源和构建产物摘要。')
-  await expect(approvalButton).toBeEnabled({ timeout: 240_000 })
-
-  const responsePromise = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'POST'
-      && url.pathname === `/api/v1/projects/${projectId}/authoring-approvals`
-  })
-  await approvalButton.click()
-  const response = await responsePromise
-  const approval = await expectJson(response, 'REAL_EXPERIMENT_APPROVAL_FAILED')
+  await openAuthoringReviewByUi(page, projectId, runId)
+  await expectReviewTechnicalIdentitiesByUi(page, [environmentCandidateId, evaluationCandidateId])
+  const approval = await approveAndPublishByUi(
+    page,
+    projectId,
+    '已核对真实生成的环境、评分规则、私有黄金基础镜像来源和构建产物摘要。',
+    { label: 'REAL_EXPERIMENT_APPROVAL_FAILED' },
+  )
   expect(approval.imageArtifact).toMatchObject({
     id: artifact.id,
     kind: 'container',
@@ -139,7 +124,7 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
   if (publication.status !== 'ready') throw new Error(`REAL_EXPERIMENT_PUBLICATION_FAILED:${publication.diagnosticCode ?? 'diagnostic missing'}`)
   expect(publication.environmentReleaseId).toEqual(expect.any(String))
   expect(publication.evaluationReleaseId).toEqual(expect.any(String))
-  await expect(page.locator('.publication-status')).toHaveAttribute('data-status', 'ready', { timeout: 120_000 })
+  await expectPublicationStatusByUi(page, 'ready')
   return { approval, publication }
 }
 

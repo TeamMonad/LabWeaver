@@ -120,7 +120,7 @@ export function useProjectAuthoringApproval(
       environmentCandidateRetryCount = 0
       environmentArtifactRetryCount = 0
     }
-    if (!silent) environmentCandidate.value = { kind: 'loading', message: '加载 Environment 候选…' }
+    if (!silent) environmentCandidate.value = { kind: 'loading', message: '读取环境候选…' }
     const result = await getProjectEnvironmentCandidate({ path: { projectId: project, candidateId } })
     if (generation !== loadGeneration) return
     if (result.error) {
@@ -128,13 +128,13 @@ export function useProjectAuthoringApproval(
       const candidateProjectionPending = result.response?.status === 404 && problem?.diagnosticCode === 'LW_CANDIDATE_NOT_FOUND'
       if (candidateProjectionPending && environmentCandidateRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES) {
         environmentCandidateRetryCount += 1
-        environmentCandidate.value = { kind: 'loading', message: '等待 Environment 候选同步…' }
+        environmentCandidate.value = { kind: 'loading', message: '等待环境候选同步…' }
         scheduleEnvironmentCandidateRetry(project, candidateId, generation)
         return
       }
       environmentCandidate.value = candidateProjectionPending
-        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', 'Environment 候选在限定时间内仍未同步，请重试。', true) }
-        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_ENVIRONMENT_LOAD_FAILED', '加载 Environment 候选失败') }
+        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', '环境候选在限定时间内仍未同步，请重试。', true) }
+        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_ENVIRONMENT_LOAD_FAILED', '读取环境候选失败') }
       return
     }
     if (
@@ -142,7 +142,7 @@ export function useProjectAuthoringApproval(
       || result.data.candidate.projectId !== project
       || result.data.candidate.runId !== runId.value
     ) {
-      environmentCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('Environment 候选') }
+      environmentCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('环境候选') }
       stopCandidatePolling()
       return
     }
@@ -171,7 +171,7 @@ export function useProjectAuthoringApproval(
       evaluationCandidateRetryCount = 0
       evaluationArtifactRetryCount = 0
     }
-    if (!silent) evaluationCandidate.value = { kind: 'loading', message: '加载 Evaluation 候选…' }
+    if (!silent) evaluationCandidate.value = { kind: 'loading', message: '读取评分规则候选…' }
     const result = await getProjectEvaluationCandidate({ path: { projectId: project, candidateId } })
     if (generation !== loadGeneration) return
     if (result.error) {
@@ -179,13 +179,13 @@ export function useProjectAuthoringApproval(
       const candidateProjectionPending = result.response?.status === 404 && problem?.diagnosticCode === 'LW_CANDIDATE_NOT_FOUND'
       if (candidateProjectionPending && evaluationCandidateRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES) {
         evaluationCandidateRetryCount += 1
-        evaluationCandidate.value = { kind: 'loading', message: '等待 Evaluation 候选同步…' }
+        evaluationCandidate.value = { kind: 'loading', message: '等待评分规则候选同步…' }
         scheduleEvaluationCandidateRetry(project, candidateId, generation)
         return
       }
       evaluationCandidate.value = candidateProjectionPending
-        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', 'Evaluation 候选在限定时间内仍未同步，请重试。', true) }
-        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_EVALUATION_LOAD_FAILED', '加载 Evaluation 候选失败') }
+        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', '评分规则候选在限定时间内仍未同步，请重试。', true) }
+        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_EVALUATION_LOAD_FAILED', '读取评分规则候选失败') }
       return
     }
     if (
@@ -193,7 +193,7 @@ export function useProjectAuthoringApproval(
       || result.data.candidate.projectId !== project
       || result.data.candidate.runId !== runId.value
     ) {
-      evaluationCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('Evaluation 候选') }
+      evaluationCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('评分规则候选') }
       stopCandidatePolling()
       return
     }
@@ -306,21 +306,21 @@ export function useProjectAuthoringApproval(
     const rid = runId.value
     reset()
     if (!id || !rid) {
-      run.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_CONTEXT_MISSING', '请选择项目并提供 AgentRun ID。', false) }
+      run.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_CONTEXT_MISSING', '请选择项目，并从待审核列表选择一个版本。', false) }
       return
     }
 
     if (approvalId.value) void loadPublication(approvalId.value)
 
-    run.value = { kind: 'loading', message: '加载 AgentRun…' }
+    run.value = { kind: 'loading', message: '读取生成任务…' }
     const runResult = await getProjectAgentRun({ path: { projectId: id, runId: rid } })
     if (generation !== loadGeneration) return
     if (runResult.error) {
-      run.value = { kind: 'error', diagnostic: errorDiagnostic(runResult.error, 'PROJECT_APPROVAL_RUN_LOAD_FAILED', '加载 AgentRun 失败') }
+      run.value = { kind: 'error', diagnostic: errorDiagnostic(runResult.error, 'PROJECT_APPROVAL_RUN_LOAD_FAILED', '读取生成任务失败') }
       return
     }
     if (runResult.data.id !== rid || runResult.data.projectId !== id) {
-      run.value = { kind: 'error', diagnostic: staleContextDiagnostic('AgentRun') }
+      run.value = { kind: 'error', diagnostic: staleContextDiagnostic('生成任务') }
       return
     }
     if (runResult.data.purpose.kind !== 'authoring' || runResult.data.purpose.environmentClass !== 'experiment') {
@@ -337,17 +337,17 @@ export function useProjectAuthoringApproval(
     const candidateJobs: Promise<unknown>[] = []
 
     if (environmentTrack?.candidateId) {
-      environmentCandidate.value = { kind: 'loading', message: '加载 Environment 候选…' }
+      environmentCandidate.value = { kind: 'loading', message: '读取环境候选…' }
       candidateJobs.push(loadEnvironmentCandidate(id, environmentTrack.candidateId, generation))
     } else {
-      environmentCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_ENVIRONMENT_MISSING', '该 AgentRun 尚未生成 Environment 候选。', false) }
+      environmentCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_ENVIRONMENT_MISSING', '这个生成任务还没有环境候选。', false) }
     }
 
     if (evaluationTrack?.candidateId) {
-      evaluationCandidate.value = { kind: 'loading', message: '加载 Evaluation 候选…' }
+      evaluationCandidate.value = { kind: 'loading', message: '读取评分规则候选…' }
       candidateJobs.push(loadEvaluationCandidate(id, evaluationTrack.candidateId, generation))
     } else {
-      evaluationCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_EVALUATION_MISSING', '该 AgentRun 尚未生成 Evaluation 候选。', false) }
+      evaluationCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_EVALUATION_MISSING', '这个生成任务还没有评分规则候选。', false) }
     }
 
     problemPackage.value = { kind: 'loading', message: '加载材料包…' }
