@@ -3066,6 +3066,8 @@ mod project_scope_tests {
     )]
     async fn gateway_session_revision_conflict_is_owner_scoped_through_overdue_close()
     -> Result<(), Box<dyn std::error::Error>> {
+        use axum::response::IntoResponse;
+
         let container = Postgres::default().with_tag("17.5-alpine").start().await?;
         let url = format!(
             "postgres://postgres:postgres@127.0.0.1:{}/postgres",
@@ -3169,6 +3171,19 @@ mod project_scope_tests {
             .ok_or_else(|| std::io::Error::other("owner must receive current revision"))?;
         assert_eq!(body["currentRevision"], 1);
         assert_eq!(body["state"], "active");
+        // Gateway heartbeat/close decodes exactly these three fields with
+        // deny_unknown_fields; the HTTP formatter must preserve this response.
+        let response = owner_conflict.into_response();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        let bytes = axum::body::to_bytes(response.into_body(), 16_384).await?;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes)?,
+            json!({
+                "diagnosticCode": "LW_REVISION_CONFLICT",
+                "currentRevision": 1,
+                "state": "active"
+            })
+        );
 
         let wrong_gateway =
             gateway_session_revision_conflict(&pool, session_id, "gateway-b", "connection-a")

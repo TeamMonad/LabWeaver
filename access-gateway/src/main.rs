@@ -552,8 +552,15 @@ async fn force_command(
         close_session(config, &mut session, connection_id, false).await?;
         return Err(GatewayError::Target);
     };
-    let (result, target_stopped) =
-        run_target(config, &mut session, connection_id, &mut child, signals).await;
+    let (result, target_stopped) = run_target(
+        config,
+        &mut session,
+        connection_id,
+        &mut child,
+        signals,
+        Duration::from_secs(15),
+    )
+    .await;
     if !target_stopped {
         return Err(match result {
             Ok(()) => GatewayError::Target,
@@ -570,8 +577,9 @@ async fn run_target(
     connection_id: &str,
     child: &mut tokio::process::Child,
     signals: &mut GatewaySignals,
+    heartbeat_interval: Duration,
 ) -> (Result<(), GatewayError>, bool) {
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    let mut heartbeat = tokio::time::interval(heartbeat_interval);
     let target_stopped;
     let result = loop {
         tokio::select! {
@@ -1083,6 +1091,7 @@ mod tests {
         token_status: u16,
         close_responses: Mutex<VecDeque<MockResponse>>,
         close_requests: Mutex<Vec<MockCloseRequest>>,
+        heartbeat_response: Mutex<Option<MockResponse>>,
     }
 
     struct MockAuthority {
@@ -1103,6 +1112,7 @@ mod tests {
                 token_status,
                 close_responses: Mutex::new(close_responses.into()),
                 close_requests: Mutex::new(Vec::new()),
+                heartbeat_response: Mutex::new(None),
             });
             let task_state = state.clone();
             let task_base_url = base_url.clone();
@@ -1127,6 +1137,9 @@ mod tests {
 
         async fn close_requests(&self) -> Vec<MockCloseRequest> {
             self.state.close_requests.lock().await.clone()
+        }
+        async fn set_heartbeat_response(&self, response: MockResponse) {
+            *self.state.heartbeat_response.lock().await = Some(response);
         }
     }
 
@@ -1226,6 +1239,17 @@ mod tests {
                 serde_json::json!({"error": "temporarily_unavailable"}).to_string()
             };
             (status, body)
+        } else if request.path.ends_with("/heartbeat") {
+            let response = state
+                .heartbeat_response
+                .lock()
+                .await
+                .take()
+                .unwrap_or_else(|| MockResponse::json(500, &serde_json::json!({})));
+            if response.drop_connection {
+                return;
+            }
+            (response.status, response.body)
         } else if request.path.ends_with("/close") {
             state.close_requests.lock().await.push(MockCloseRequest {
                 if_match: request.headers.get("if-match").cloned(),
@@ -1647,6 +1671,58 @@ mod tests {
         let result = close_session(&config, &mut session, "connection-a", false).await;
         assert!(matches!(result, Err(GatewayError::Authority)));
         assert!(authority.close_requests().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn heartbeat_termination_stops_target_process() -> Result<(), GatewayError> {
+        let authority =
+            MockAuthority::start(200, vec![MockResponse::json(200, &serde_json::json!({}))])
+                .await
+                .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let mut terminating = session.clone();
+        terminating.revision = Revision::new(2).map_err(|_| GatewayError::Configuration)?;
+        terminating.state = GatewaySessionState::Terminating;
+        terminating.termination_requested_at = Some(terminating.last_heartbeat_at);
+        terminating.terminate_by = Some(
+            UtcTimestamp::from_utc(
+                terminating.last_heartbeat_at.get() + time::Duration::seconds(60),
+            )
+            .map_err(|_| GatewayError::Configuration)?,
+        );
+        authority
+            .set_heartbeat_response(MockResponse::json(
+                200,
+                &serde_json::to_value(&terminating).map_err(|_| GatewayError::Configuration)?,
+            ))
+            .await;
+
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .map_err(|_| GatewayError::Target)?;
+        let mut signals = GatewaySignals::new()?;
+        let (result, target_stopped) = run_target(
+            &config,
+            &mut session,
+            "connection-a",
+            &mut child,
+            &mut signals,
+            Duration::from_millis(1),
+        )
+        .await;
+        assert!(matches!(result, Err(GatewayError::Authority)));
+        assert!(target_stopped);
+        assert!(
+            child
+                .try_wait()
+                .map_err(|_| GatewayError::Target)?
+                .is_some()
+        );
+        close_session(&config, &mut session, "connection-a", false).await?;
+        assert_eq!(authority.close_requests().await.len(), 1);
         Ok(())
     }
 }
