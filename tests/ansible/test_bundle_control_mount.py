@@ -246,8 +246,11 @@ class BundleControlMountTests(unittest.TestCase):
         output = f.private / "derive-only"
         fixtures.bundle.derive_bundle(f.root, output)
         rendered = self.render(output / "helm-values.yaml")
-        self.assertEqual(rendered.returncode, 0, rendered.stderr)
-        self.assertNotIn("prepare-managed-configuration", rendered.stdout)
+        self.assertNotEqual(rendered.returncode, 0)
+        self.assertIn(
+            "platformConfigurationPolicy requires authenticated managedControlConfiguration",
+            rendered.stderr,
+        )
         f.model["application"]["helmValues"]["managedControlConfiguration"] = {
             "sourceJson": "handwritten"
         }
