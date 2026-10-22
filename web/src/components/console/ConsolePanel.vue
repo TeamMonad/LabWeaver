@@ -97,7 +97,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type {
   AccessGrantSchema,
   ConsoleCapabilitySchema,
@@ -219,6 +219,10 @@ watch(
 onMounted(() => {
   capability.load()
 })
+
+// The parent unmounts the panel when the access grant stops being usable;
+// the live socket must not outlive it.
+onBeforeUnmount(closeConsole)
 </script>
 
 <style scoped>

@@ -28,14 +28,16 @@ export function useEnvironmentAccess(
   const grant = ref<AsyncState<AccessGrantSchema>>({ kind: 'idle' })
   const creating = ref(false)
 
-  async function loadEndpoints() {
+  /** `silent` re-reads keep the current answer on screen until the new one arrives. */
+  async function loadEndpoints(silent = false) {
     const id = environmentId.value
     if (!id) {
       endpoints.value = { kind: 'idle' }
       return
     }
-    endpoints.value = { kind: 'loading', message: '加载环境入口…' }
+    if (!silent) endpoints.value = { kind: 'loading', message: '加载环境入口…' }
     const result = await listEnvironmentEndpoints({ path: { environmentId: id } })
+    if (id !== environmentId.value) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
       endpoints.value = {
@@ -105,17 +107,18 @@ export function useEnvironmentAccess(
     }
   }
 
-  async function loadCurrentGrant() {
+  async function loadCurrentGrant(silent = false) {
     const id = environmentId.value
     if (!id) {
       grant.value = { kind: 'idle' }
       return { ok: true }
     }
-    grant.value = { kind: 'loading', message: '加载当前访问授权…' }
+    if (!silent) grant.value = { kind: 'loading', message: '加载当前访问授权…' }
     const result = await listEnvironmentAccessGrants({
       path: { environmentId: id },
       query: { state: 'active', includeTerminal: false, limit: 2 },
     })
+    if (id !== environmentId.value) return { ok: false }
     if (result.error) {
       const problem = extractProblemDetails(result.error)
       const diagnostic = makeDiagnostic(
@@ -142,6 +145,7 @@ export function useEnvironmentAccess(
       return { ok: false, diagnostic }
     }
     const loaded = await getAccessGrant({ path: { grantId: items[0].id } })
+    if (id !== environmentId.value) return { ok: false }
     if (loaded.error) {
       const problem = extractProblemDetails(loaded.error)
       const diagnostic = makeDiagnostic(

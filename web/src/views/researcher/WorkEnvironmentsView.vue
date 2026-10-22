@@ -54,44 +54,83 @@
       </section>
 
       <section
-        v-if="preparingRequests.length > 0 || requestsDiagnostic"
+        v-if="preparingRequests.length > 0 || endedRequests.length > 0 || requestsDiagnostic"
         class="work-section"
         aria-labelledby="preparing-heading"
         data-testid="preparing-work"
       >
-        <h2 id="preparing-heading">准备中的 Work</h2>
+        <h2 id="preparing-heading">Work 申请</h2>
         <DiagnosticBanner
           v-if="requestsDiagnostic"
           :code="requestsDiagnostic.code"
           :request-id="requestsDiagnostic.requestId"
-          :message="`无法读取准备中的 Work：${requestsDiagnostic.message}`"
+          :message="`无法读取 Work 申请，可能有已提交但尚未创建的 Work：${requestsDiagnostic.message}`"
           :retryable="requestsDiagnostic.retryable"
           severity="warning"
           @retry="resources.load()"
         />
-        <ul v-if="preparingRequests.length > 0" class="work-list">
-          <li
-            v-for="request in preparingRequests"
-            :key="request.id"
-            class="work-row md-card"
-            :data-request-id="request.id"
-          >
-            <div class="work-row__main">
-              <strong>模板 v{{ request.target.releaseVersion }} · {{ resourceSummary(request.requestedResources) }}</strong>
-              <span class="work-row__meta">申请于 {{ formatTimestamp(request.createdAt) }} · {{ preparingStateText(request) }}</span>
-              <span v-if="resourceAllocationFailureMessage(request.diagnosticCode)" class="work-row__meta work-row__meta--error">
-                {{ resourceAllocationFailureMessage(request.diagnosticCode) }}
-              </span>
-            </div>
-            <RouterLink
-              class="outlined-button small"
-              :to="{ path: '/researcher/environments', query: { projectId, environmentId: request.target.environmentId } }"
+        <template v-if="preparingRequests.length > 0">
+          <h3 class="subsection-title">准备中</h3>
+          <ul class="work-list" data-testid="preparing-list">
+            <li
+              v-for="request in preparingRequests"
+              :key="request.id"
+              class="work-row md-card"
+              :data-request-id="request.id"
+              :data-request-state="request.state"
             >
-              查看准备进度
-            </RouterLink>
-          </li>
-        </ul>
-        <p v-if="preparingRequests.length > 0" class="section-hint">审批通过后平台自动创建 Work，创建完成后会出现在“项目中的 Work”。</p>
+              <div class="work-row__main">
+                <strong>模板 v{{ request.target.releaseVersion }} · {{ resourceSummary(request.requestedResources) }}</strong>
+                <span class="work-row__meta">申请于 {{ formatTimestamp(request.createdAt) }} · {{ requestStateText(request) }}</span>
+                <span v-if="request.diagnosticCode" class="work-row__meta work-row__meta--error">
+                  {{ requestDiagnosticText(request) }}
+                </span>
+              </div>
+              <RouterLink
+                class="outlined-button small"
+                :to="requestProgressLink(request)"
+              >
+                {{ request.state === 'reviewing' ? '查看资源申请' : '查看准备进度' }}
+              </RouterLink>
+            </li>
+          </ul>
+          <p class="section-hint">审批通过后平台自动创建 Work，创建完成后会出现在“项目中的 Work”。页面在申请变化期间自动刷新。</p>
+        </template>
+        <template v-if="endedRequests.length > 0">
+          <h3 class="subsection-title">未创建成功</h3>
+          <ul class="work-list" data-testid="ended-list">
+            <li
+              v-for="request in endedRequests"
+              :key="request.id"
+              class="work-row work-row--ended md-card"
+              :data-request-id="request.id"
+              :data-request-state="request.state"
+            >
+              <div class="work-row__main">
+                <strong>模板 v{{ request.target.releaseVersion }} · {{ resourceSummary(request.requestedResources) }}</strong>
+                <span class="work-row__meta">申请于 {{ formatTimestamp(request.createdAt) }} · {{ requestStateText(request) }}</span>
+                <span v-if="request.diagnosticCode" class="work-row__meta work-row__meta--error">
+                  {{ requestDiagnosticText(request) }}
+                </span>
+              </div>
+              <div class="work-row__actions">
+                <RouterLink
+                  class="text-button small"
+                  :to="{ path: '/researcher/resources', query: { projectId } }"
+                >
+                  查看资源申请
+                </RouterLink>
+                <RouterLink
+                  class="outlined-button small"
+                  :to="{ path: '/researcher/resources', query: { projectId, releaseId: request.target.releaseId, releaseVersion: String(request.target.releaseVersion) } }"
+                >
+                  用同一模板重新申请
+                </RouterLink>
+              </div>
+            </li>
+          </ul>
+          <p class="section-hint">这些申请已结束且没有创建 Work，不会再自动继续。需要 Work 时重新提交申请；重新申请会生成新的申请，旧申请保留在资源申请记录中。</p>
+        </template>
       </section>
 
       <section class="work-section md-card create-card" aria-labelledby="create-heading">
@@ -143,20 +182,20 @@
                 下一步：选择资源与时长
               </RouterLink>
               <button v-else type="button" class="filled-button" disabled>下一步：选择资源与时长</button>
-              <span class="section-hint">申请提交后由管理员审批；页面会显示估价、审批状态和创建进度。</span>
+              <span class="section-hint">申请提交后由管理员审批；这个页面会显示审批状态和创建进度。</span>
             </div>
           </template>
           <template #empty>
             <div class="templates-empty" data-testid="templates-empty">
               <SvgIcon name="inventory_2" size="lg" aria-hidden="true" />
               <p><strong>当前项目还没有可用的 Work 模板。</strong></p>
-              <p>请联系课程教师或管理员发布模板；模板发布后即可在这里手工选择并创建 Work。</p>
+              <p>目前 Work 模板只能通过 Agent 生成、审核并发布；从平台镜像直接发布手工模板需要后端支持，当前版本还不能使用。模板发布后即可在这里手工选择并创建 Work。</p>
               <p v-if="agent.state.kind === 'available'" class="section-hint">
-                也可以使用项目 AI 设置中的模型生成 Work 模板。
+                当前项目已配置模型，可以生成 Work 模板。
                 <RouterLink :to="{ path: '/researcher/software', query: { projectId } }">生成 Work 模板</RouterLink>
               </p>
               <p v-else class="section-hint">
-                目前平台只能通过 Agent 生成新的 Work 模板，当前项目没有可用的模型。
+                当前项目没有可用的模型，不能生成模板：请项目负责人在项目 AI 设置中配置模型，或联系课程教师发布已有模板。
               </p>
             </div>
           </template>
@@ -237,23 +276,27 @@ const requestsDiagnostic = computed(() => {
   return state.kind === 'success' || state.kind === 'empty' || state.kind === 'idle' || state.kind === 'loading' ? null : state.diagnostic
 })
 
+/** Request states after which the server never creates the Work. */
+const ENDED_REQUEST_STATES: Partial<Record<ResourceRequestSchema['state'], true>> = { expired: true, rejected: true, cancelled: true }
+
 /**
- * Work requests that have not produced an environment yet. Once the
- * environment exists it is listed above with its own lifecycle state. An
- * active request is only called "being created" when the Work list was read
- * and does not contain its environment.
+ * Work requests whose environment is not in the Work list. A request that
+ * already holds resources (`active`, `expiring`) is only reported as missing
+ * its environment when the Work list was actually read.
  */
-const preparingRequests = computed<EnvironmentRequest[]>(() => {
+const requestsWithoutWork = computed<EnvironmentRequest[]>(() => {
   if (resources.requests.kind !== 'success') return []
   const list = workEnvironments.environments
   const listKnown = list.kind === 'success' || list.kind === 'empty'
   const created = new Set(list.kind === 'success' ? list.data.map((environment) => environment.id) : [])
   return resources.requests.data.filter((request): request is EnvironmentRequest => (
     request.target.kind === 'environment'
-    && (request.state === 'reviewing' || request.state === 'allocating' || (request.state === 'active' && listKnown))
     && !created.has(request.target.environmentId)
+    && (listKnown || request.state === 'reviewing' || request.state === 'allocating')
   ))
 })
+const preparingRequests = computed(() => requestsWithoutWork.value.filter((request) => !ENDED_REQUEST_STATES[request.state]))
+const endedRequests = computed(() => requestsWithoutWork.value.filter((request) => ENDED_REQUEST_STATES[request.state]))
 
 // Resource requests are re-read while they are still moving. Each new reading
 // taken while Work is being prepared may mean an environment now exists, so the
@@ -264,10 +307,28 @@ watch(() => resources.requests, () => {
   preparingBeforeRead = preparingRequests.value.length > 0
 })
 
-function preparingStateText(request: EnvironmentRequest): string {
-  if (request.state === 'reviewing') return '等待管理员审批'
-  if (request.state === 'allocating') return '已批准，正在分配资源'
-  return '资源已分配，正在创建环境'
+function requestStateText(request: EnvironmentRequest): string {
+  switch (request.state) {
+    case 'reviewing': return '等待管理员审批'
+    case 'allocating': return '已批准，正在分配资源'
+    case 'active': return '资源已分配，正在创建环境'
+    case 'expiring': return '资源即将到期，环境尚未创建'
+    case 'expired': return '申请已到期，没有创建 Work'
+    case 'rejected': return '管理员已拒绝申请'
+    case 'cancelled': return '申请已取消'
+  }
+}
+
+function requestDiagnosticText(request: EnvironmentRequest): string {
+  const reason = resourceAllocationFailureMessage(request.diagnosticCode)
+  return reason ? `${reason}（${request.diagnosticCode}）` : `平台返回诊断码 ${request.diagnosticCode}。`
+}
+
+/** Before approval the request is the only thing to look at; afterwards the environment page shows provisioning. */
+function requestProgressLink(request: EnvironmentRequest) {
+  return request.state === 'reviewing'
+    ? { path: '/researcher/resources', query: { projectId: projectId.value } }
+    : { path: '/researcher/environments', query: { projectId: projectId.value, environmentId: request.target.environmentId } }
 }
 
 const environmentIdInput = ref('')
@@ -305,6 +366,10 @@ function openById() {
 .work-row__main strong { overflow-wrap: anywhere; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
 .work-row__meta { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .work-row__meta--error { color: var(--md-sys-color-error); }
+.work-row--ended { grid-template-columns: minmax(0, 1fr) auto; }
+.work-row__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.subsection-title { margin: 4px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-large); }
+.text-button { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border-radius: var(--md-sys-shape-full); color: var(--md-sys-color-primary); font: var(--md-sys-label-large); text-decoration: none; }
 .create-card { padding: 20px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-large); }
 .create-steps { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0; padding: 0; list-style: none; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-large); }
 .create-steps [aria-current='step'] { color: var(--md-sys-color-primary); }

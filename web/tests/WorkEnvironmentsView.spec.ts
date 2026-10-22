@@ -182,6 +182,7 @@ describe('WorkEnvironmentsView', () => {
     const empty = wrapper.get('[data-testid="templates-empty"]')
     expect(empty.text()).toContain('当前项目还没有可用的 Work 模板')
     expect(empty.text()).toContain('只能通过 Agent 生成')
+    expect(empty.text()).toContain('手工模板需要后端支持')
     expect(empty.find('a[href*="/researcher/software"]').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -228,25 +229,90 @@ describe('WorkEnvironmentsView', () => {
         workRequest('env-reviewing', 'reviewing'),
         workRequest('env-allocating', 'allocating', { diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }),
         workRequest('env-creating', 'active'),
+        workRequest('env-expiring', 'expiring'),
         // Already listed as Work: shown only in the Work list.
         workRequest('env-work-1', 'active'),
-        workRequest('env-rejected', 'rejected'),
         { ...workRequest('task', 'reviewing'), target: { kind: 'task', taskRunId: 'task-1' } },
       ],
       error: undefined,
     } as never)
     const { wrapper } = await mountAt()
-    const preparing = wrapper.get('[data-testid="preparing-work"]')
+    const preparing = wrapper.get('[data-testid="preparing-list"]')
     expect(preparing.findAll('[data-request-id]').map((row) => row.attributes('data-request-id'))).toEqual([
       'request-env-reviewing',
       'request-env-allocating',
       'request-env-creating',
+      'request-env-expiring',
     ])
     expect(preparing.get('[data-request-id="request-env-reviewing"]').text()).toContain('等待管理员审批')
-    expect(preparing.get('[data-request-id="request-env-allocating"]').text()).toContain('分配失败，请回收后重新申请。')
+    expect(preparing.get('[data-request-id="request-env-reviewing"] a').attributes('href')).toContain('/researcher/resources')
+    const failed = preparing.get('[data-request-id="request-env-allocating"]').text()
+    expect(failed).toContain('分配失败，请回收后重新申请。')
+    expect(failed).toContain('LW_RESOURCE_WORK_ALLOCATION_BLOCKED')
     expect(preparing.get('[data-request-id="request-env-creating"]').text()).toContain('资源已分配，正在创建环境')
     expect(preparing.get('[data-request-id="request-env-creating"] a').attributes('href')).toContain('environmentId=env-creating')
+    expect(preparing.get('[data-request-id="request-env-expiring"]').text()).toContain('资源即将到期，环境尚未创建')
+    expect(wrapper.find('[data-testid="ended-list"]').exists()).toBe(false)
     wrapper.unmount()
+  })
+
+  it('keeps ended requests without Work visible with their reason and a way to apply again', async () => {
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [
+        workRequest('env-rejected', 'rejected'),
+        workRequest('env-cancelled', 'cancelled'),
+        workRequest('env-expired', 'expired', { diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }),
+      ],
+      error: undefined,
+    } as never)
+    const { wrapper } = await mountAt()
+    const ended = wrapper.get('[data-testid="ended-list"]')
+    expect(ended.get('[data-request-id="request-env-rejected"]').text()).toContain('管理员已拒绝申请')
+    expect(ended.get('[data-request-id="request-env-cancelled"]').text()).toContain('申请已取消')
+    const expired = ended.get('[data-request-id="request-env-expired"]')
+    expect(expired.text()).toContain('申请已到期，没有创建 Work')
+    expect(expired.text()).toContain('分配失败，请回收后重新申请。')
+    const links = expired.findAll('a')
+    expect(links.map((link) => link.text())).toEqual(['查看资源申请', '用同一模板重新申请'])
+    expect(links[1].attributes('href')).toContain('releaseId=release-container')
+    expect(links[1].attributes('href')).toContain('releaseVersion=3')
+    expect(wrapper.find('[data-testid="preparing-list"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('moves an expiring request to the ended list once the server reports it expired', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-late', 'expiring')], error: undefined } as never)
+      const { wrapper } = await mountAt()
+      expect(wrapper.get('[data-testid="preparing-list"]').find('[data-request-id="request-env-late"]').exists()).toBe(true)
+
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-late', 'expired')], error: undefined } as never)
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="preparing-list"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="ended-list"]').get('[data-request-id="request-env-late"]').text()).toContain('申请已到期')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('restores submitted Work from the server after the page is reloaded', async () => {
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [workRequest('env-allocating', 'allocating'), workRequest('env-rejected', 'rejected')],
+      error: undefined,
+    } as never)
+    const first = await mountAt()
+    expect(first.wrapper.find('[data-request-id="request-env-allocating"]').exists()).toBe(true)
+    first.wrapper.unmount()
+
+    const second = await mountAt()
+    expect(second.wrapper.get('[data-testid="preparing-list"]').text()).toContain('已批准，正在分配资源')
+    expect(second.wrapper.get('[data-testid="ended-list"]').text()).toContain('管理员已拒绝申请')
+    expect(listProjectResourceRequests).toHaveBeenLastCalledWith({ path: { projectId: 'project-1' } })
+    second.wrapper.unmount()
   })
 
   it('does not claim an active request is still being created when the Work list could not be read', async () => {
@@ -261,7 +327,7 @@ describe('WorkEnvironmentsView', () => {
     vi.mocked(listProjectResourceRequests).mockResolvedValue(problem(503, 'LW_RESOURCE_UNAVAILABLE') as never)
     const { wrapper } = await mountAt()
     const preparing = wrapper.get('[data-testid="preparing-work"]')
-    expect(preparing.text()).toContain('无法读取准备中的 Work')
+    expect(preparing.text()).toContain('无法读取 Work 申请')
     expect(preparing.text()).toContain('LW_RESOURCE_UNAVAILABLE')
     wrapper.unmount()
   })

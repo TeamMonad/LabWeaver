@@ -387,8 +387,15 @@
                   :instance="data"
                   :endpoints="access.endpoints"
                   :grant="access.grant"
+                  :console-capability="consoleCapability.availability"
                   :instance-block-reason="accessGrantBlockReason(data)"
-                  @open-console="activeTab = 'terminal'"
+                  :now="connection.now.value"
+                  :auto-checking="connection.autoChecking.value"
+                  :checking="connectionRechecking"
+                  :issuing="access.creating"
+                  @open-console="openConsoleTab"
+                  @recheck="recheckConnection"
+                  @issue-grant="issueAccessGrant"
                 />
 
                 <div class="access-section">
@@ -506,7 +513,7 @@
                           </div>
 
                           <div
-                            v-if="g.state === 'active'"
+                            v-if="grantUsable"
                             class="runtime-access"
                           >
                             <div
@@ -615,7 +622,7 @@
                   </button>
                 </div>
                 <div
-                  v-else-if="access.grant.kind === 'success' && access.grant.data.state === 'active'"
+                  v-else-if="grantUsable && access.grant.kind === 'success'"
                   class="console-wrapper"
                 >
                   <div
@@ -637,16 +644,8 @@
                     </button>
                   </div>
                   <ConsolePanel
-                    v-if="data.runtimeKind === 'container'"
-                    :key="`console-${consoleSessionKey}`"
-                    kind="xterm"
-                    :grant="access.grant.data"
-                    :environment="data"
-                  />
-                  <ConsolePanel
-                    v-else-if="data.runtimeKind === 'virtual_machine'"
-                    :key="`console-${consoleSessionKey}`"
-                    kind="novnc"
+                    :key="`console-${consoleSessionKey}-${consolePanelKind}`"
+                    :kind="consolePanelKind"
                     :grant="access.grant.data"
                     :environment="data"
                   />
@@ -1080,6 +1079,9 @@ import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
+import { useConnectionWatch } from '@/composables/useConnectionWatch'
+import { useConsoleCapability } from '@/composables/useConsoleCapability'
+import { grantIsUsable } from '@/utils/environmentConnection'
 import { useProjects } from '@/composables/useProjects'
 import { freezeSubmission, getFrozenSubmission, retryEnvironment } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -1098,6 +1100,7 @@ import { environmentStateLabel, endpointHealthLabel, accessGrantStateLabel, envi
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
+  ConsoleKind,
   EnvironmentInstanceSchema,
   EnvironmentOperationSnapshotSchema,
   EnvironmentTemplateReleaseViewSchema,
@@ -1206,6 +1209,44 @@ const access = useEnvironmentAccess(
   projectId,
   courseId,
 )
+
+const connectionInstance = computed(() => env.instance.kind === 'success' ? env.instance.data : null)
+const connection = useConnectionWatch(connectionInstance, access)
+const connectionRechecking = ref(false)
+async function recheckConnection() {
+  connectionRechecking.value = true
+  try {
+    await connection.recheck()
+  } finally {
+    connectionRechecking.value = false
+  }
+}
+/** A grant past its own expiry no longer opens anything, even before the server is read again. */
+const grantUsable = computed(() => grantIsUsable(access.grant, connection.now.value))
+const consoleCapability = useConsoleCapability(computed(() => (
+  grantUsable.value && access.grant.kind === 'success' ? access.grant.data.id : undefined
+)))
+watch(
+  () => grantUsable.value && access.grant.kind === 'success' ? `${access.grant.data.id}:${access.grant.data.revision}` : null,
+  (identity) => {
+    if (identity) void consoleCapability.load()
+    else consoleCapability.availability = { kind: 'idle' }
+  },
+  { immediate: true },
+)
+const requestedConsoleKind = ref<ConsoleKind | null>(null)
+/** The console the user asked for, else the first one the grant permits; the panel itself rejects kinds the grant does not permit. */
+const consolePanelKind = computed<ConsoleKind>(() => {
+  if (requestedConsoleKind.value) return requestedConsoleKind.value
+  if (consoleCapability.availability.kind === 'success' && consoleCapability.availability.data.kinds.length > 0) {
+    return consoleCapability.availability.data.kinds[0]
+  }
+  return env.instance.kind === 'success' && env.instance.data.runtimeKind === 'virtual_machine' ? 'novnc' : 'xterm'
+})
+function openConsoleTab(kind: ConsoleKind) {
+  requestedConsoleKind.value = kind
+  activeTab.value = 'terminal'
+}
 const operations = useEnvironmentOperations(selectedEnvironmentId)
 
 const freezeState = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
@@ -2043,14 +2084,14 @@ async function issueAccessGrant() {
 
 async function reconnectConsole() {
   createGrantDiagnostic.value = null
-  if (access.grant.kind === 'success' && access.grant.data.state === 'active') {
+  if (grantIsUsable(access.grant, Date.now())) {
     consoleSessionKey.value += 1
     consoleReconnectRequired.value = false
     return
   }
   if (!accessGrantRequestEnvironment()) return
   await issueAccessGrant()
-  if (access.grant.kind === 'success' && access.grant.data.state === 'active') {
+  if (grantIsUsable(access.grant, Date.now())) {
     consoleSessionKey.value += 1
     consoleReconnectRequired.value = false
   }
