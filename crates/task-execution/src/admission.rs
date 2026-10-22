@@ -178,6 +178,7 @@ mod tests {
                 gpu_allocation: None,
                 state: CapacityClaimState::HandedOff,
                 revision,
+                updated_at: None,
             },
             lease: ResourceLease {
                 id: lease_id,

@@ -427,6 +427,7 @@ async fn approve(
             gpu_allocation: None,
             state: CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: None,
         },
         lease_id: LeaseId::new(),
     };
@@ -543,12 +544,19 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
         pending_cleanup.request.diagnostic_code.as_deref(),
         Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
     );
-    let (claim_db_updated_at, lease_db_updated_at, contract_updated_at): (
+    let (
+        claim_db_updated_at,
+        claim_contract_updated_at,
+        lease_db_updated_at,
+        lease_contract_updated_at,
+    ): (
+        time::OffsetDateTime,
         time::OffsetDateTime,
         time::OffsetDateTime,
         time::OffsetDateTime,
     ) = sqlx::query_as(
-        "SELECT c.updated_at,l.updated_at,(l.contract->>'updatedAt')::timestamptz
+        "SELECT c.updated_at,(c.contract->>'updatedAt')::timestamptz,
+                l.updated_at,(l.contract->>'updatedAt')::timestamptz
          FROM resource.capacity_claims c
          JOIN resource.resource_leases l ON l.claim_id=c.claim_id
          WHERE l.lease_id=$1",
@@ -557,8 +565,9 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(pending_cleanup.lease.updated_at.get(), lease_db_updated_at);
+    assert_eq!(claim_db_updated_at, claim_contract_updated_at);
     assert_eq!(claim_db_updated_at, lease_db_updated_at);
-    assert_eq!(lease_db_updated_at, contract_updated_at);
+    assert_eq!(lease_db_updated_at, lease_contract_updated_at);
     assert_eq!(fixture.event_count().await?, events + 2);
     assert!(fixture.lifecycle.release(&active).await.is_err());
     let released = fixture.lifecycle.release(&pending_cleanup).await?;

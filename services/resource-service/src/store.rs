@@ -476,6 +476,7 @@ impl PgResourceStore {
                         .checked_add(1)
                         .ok_or(ResourceStoreError::RevisionOverflow)?,
                 )?;
+                fenced_claim.updated_at = Some(now);
                 let mut fenced_lease = lease.clone();
                 fenced_lease.revision = Revision::new(
                     lease
@@ -6108,6 +6109,7 @@ mod tests {
             gpu_allocation: None,
             state: CapacityClaimState::Blocked,
             revision: Revision::new(4).expect("fixed revision"),
+            updated_at: None,
         };
         let releasing = transition_claim(&claim, CapacityClaimState::Releasing);
         assert!(releasing.is_ok());

@@ -311,8 +311,10 @@ pub struct CapacityClaim {
     pub gpu_allocation: Option<GpuAllocation>,
     pub state: CapacityClaimState,
     pub revision: Revision,
+    /// Database-authoritative claim update time, present on snapshots written after v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<UtcTimestamp>,
 }
-
 /// Provider-owned capacity-shell lifecycle. Resource remains the authority for every transition.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -182,6 +182,7 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: None,
         },
         lease_id: LeaseId::new(),
     };
@@ -537,6 +538,7 @@ async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: None,
         },
         lease_id: LeaseId::new(),
     };
@@ -733,6 +735,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: None,
         },
         lease_id: LeaseId::new(),
     };
@@ -1015,6 +1018,7 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: None,
         },
         lease_id: LeaseId::new(),
     };
@@ -1413,6 +1417,7 @@ async fn gpu_time_slice_approval_rejects_count_above_one_with_stable_catalog_err
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: None,
         },
         lease_id: LeaseId::new(),
     };
@@ -3408,6 +3413,7 @@ async fn create_active_request(
                     gpu_allocation: None,
                     state: contracts::resource::CapacityClaimState::Reserved,
                     revision: Revision::new(1)?,
+                    updated_at: None,
                 },
                 lease_id,
             },
@@ -4071,6 +4077,7 @@ fn gpu_bundle(
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1).expect("fixed claim revision"),
+            updated_at: None,
         },
         lease_id: LeaseId::new(),
     };

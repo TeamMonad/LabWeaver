@@ -103,6 +103,10 @@
       "minimum": 1,
       "type": "integer"
     },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
     "WorkloadResources": {
       "additionalProperties": false,
       "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
@@ -176,6 +180,17 @@
     },
     "state": {
       "$ref": "#/$defs/CapacityClaimState"
+    },
+    "updatedAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Database-authoritative claim update time, present on snapshots written after v1."
     },
     "workloadResources": {
       "$ref": "#/$defs/WorkloadResources"
