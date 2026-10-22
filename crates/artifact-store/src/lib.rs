@@ -204,7 +204,7 @@ pub trait ImmutableObjectStore: Send + Sync {
         media_type: &str,
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
-        self.presign_upload(key, size_bytes, media_type, now).await
+        Err(ObjectStoreError::ConfigurationInvalid)
     }
 
     /// Reissues exact-length upload authority without extending the session deadline.

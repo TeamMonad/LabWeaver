@@ -3214,6 +3214,15 @@ impl ImmutableObjectStore for FixtureObjects {
                 .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
         })
     }
+    async fn presign_upload_exact(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.presign_upload(key, size, media_type, now).await
+    }
 
     async fn read_verified(
         &self,
@@ -3509,19 +3518,30 @@ async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
             .await?,
     )?;
     service.reconcile_material_uploads(cleanup_now).await?;
-    let cleanup_due_now = UtcTimestamp::from_utc(
-        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
-            .fetch_one(&pool)
-            .await?,
-    )?;
-    assert_eq!(
-        service.cleanup_one_object(cleanup_due_now).await?,
-        control_service::CleanupOutcome::Deleted
-    );
-    assert_eq!(
-        service.cleanup_one_object(cleanup_due_now).await?,
-        control_service::CleanupOutcome::Deleted
-    );
+    let cleanup_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    for index in 0..2 {
+        loop {
+            let poll_now = UtcTimestamp::from_utc(
+                sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+                    .fetch_one(&pool)
+                    .await?,
+            )?;
+            match service.cleanup_one_object(poll_now).await? {
+                control_service::CleanupOutcome::Deleted => break,
+                control_service::CleanupOutcome::Idle
+                    if tokio::time::Instant::now() < cleanup_deadline =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                outcome => {
+                    return Err(format!(
+                        "cleanup item {index} did not reach Deleted: {outcome:?}"
+                    )
+                    .into());
+                }
+            }
+        }
+    }
     for key in cancel_keys {
         assert!(objects.list_key_versions(&key).await?.is_empty());
     }
@@ -3726,6 +3746,15 @@ impl ImmutableObjectStore for RecoveryObjects {
         FixtureObjects { fail_second: false }
             .presign_upload(key, size, media_type, now)
             .await
+    }
+    async fn presign_upload_exact(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.presign_upload(key, size, media_type, now).await
     }
 
     async fn read_verified(
