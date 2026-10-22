@@ -131,8 +131,8 @@ export function parseCudaProbeResult(output) {
   return result
 }
 
-export async function issueAccessGrantAndConnect(page, projectId, environmentId) {
-  await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
+export async function issueAccessGrantAndConnect(page, projectId, environmentId, routePrefix = 'student') {
+  await page.goto(`/${routePrefix}/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
     waitUntil: 'domcontentloaded',
   })
   const environmentIdDetails = page.locator('details.environment-id-details')
@@ -301,8 +301,11 @@ export async function typeTerminalCommand(page, input, frames, command, marker) 
   return output
 }
 
-/** Run the same real Driver API kernel through the owner's product terminal. */
-export async function runTerminalCudaProbe(page, projectId, environmentId) {
+/**
+ * Type one command into the owner's product Web terminal and return the
+ * normalized output after the command's own exit marker.
+ */
+export async function runTerminalCommandByUi(page, { projectId, environmentId, routePrefix = 'student' }, command, marker) {
   const frames = []
   const sockets = new Map()
   const capture = (socket) => {
@@ -314,13 +317,22 @@ export async function runTerminalCudaProbe(page, projectId, environmentId) {
   }
   page.on('websocket', capture)
   try {
-    const terminal = await issueAccessGrantAndConnect(page, projectId, environmentId)
-    const command = cudaProbeTerminalCommand()
-    const output = await typeTerminalCommand(page, terminal.input, frames, command, 'LABWEAVER_CAPACITY_CUDA_DONE')
-    return parseCudaProbeResult(output)
+    const terminal = await issueAccessGrantAndConnect(page, projectId, environmentId, routePrefix)
+    return await typeTerminalCommand(page, terminal.input, frames, command, marker)
   } finally {
     page.off('websocket', capture)
     for (const [socket, receive] of sockets) socket.off('framereceived', receive)
     frames.length = 0
   }
+}
+
+/** Run the same real Driver API kernel through the owner's product terminal. */
+export async function runTerminalCudaProbe(page, projectId, environmentId, routePrefix = 'student') {
+  const output = await runTerminalCommandByUi(
+    page,
+    { projectId, environmentId, routePrefix },
+    cudaProbeTerminalCommand(),
+    'LABWEAVER_CAPACITY_CUDA_DONE',
+  )
+  return parseCudaProbeResult(output)
 }

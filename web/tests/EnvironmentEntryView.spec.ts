@@ -24,6 +24,8 @@ import {
   stopEnvironment,
   freezeSubmission,
   getFrozenSubmission,
+  listConsoleCapabilities,
+  createAccessGrant,
 } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
@@ -48,6 +50,8 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     restartEnvironment: vi.fn(),
     deleteEnvironment: vi.fn(),
     retryEnvironment: vi.fn(),
+    listConsoleCapabilities: vi.fn(),
+    createAccessGrant: vi.fn(),
   }
 })
 
@@ -170,6 +174,35 @@ function mockEnvironmentInstance(overrides: Record<string, unknown> = {}) {
   vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never })
 }
 
+function activeGrant(expiresAt: string) {
+  return {
+    id: 'grant-1',
+    actorId: 'student-1',
+    environmentId: 'env-1',
+    environmentRevision: 11,
+    projectId: 'project-1',
+    state: 'active',
+    revision: 1,
+    endpointGrants: [],
+    issuedAt: '2026-07-11T10:00:00.000Z',
+    expiresAt,
+  }
+}
+
+function consoleAvailability(kinds: Array<'xterm' | 'novnc'>) {
+  return {
+    accessGrantId: 'grant-1',
+    accessGrantRevision: 1,
+    environmentClass: 'experiment',
+    environmentId: 'env-1',
+    environmentRevision: 11,
+    expiresAt: '2026-07-12T10:00:00.000Z',
+    kinds,
+    leaseFence: null,
+    projectId: 'project-1',
+  }
+}
+
 async function mountAt(
   query: Record<string, string> = {},
   withProjectSelector = false,
@@ -214,12 +247,14 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined as never })
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['xterm']), error: undefined as never } as never)
     window.localStorage.clear()
   })
 
   afterEach(() => {
     mountedWrappers.splice(0).forEach((wrapper) => wrapper.unmount())
     vi.unstubAllEnvs()
+    vi.useRealTimers()
   })
 
   it('shows blocked diagnostic when no project context is available', async () => {
@@ -280,7 +315,8 @@ describe('EnvironmentEntryView', () => {
     expect(router.currentRoute.value.query.projectId).toBe('project-1')
   })
 
-  it('offers the project Work environment list before the advanced ID input', async () => {
+  it('sends Work back to the Work list instead of offering a second creation path', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [mockRelease] }, error: undefined as never } as never)
     const { wrapper } = await mountAt(
       { projectId: 'project-1' },
       false,
@@ -288,9 +324,13 @@ describe('EnvironmentEntryView', () => {
       '/researcher/environments',
     )
 
-    await vi.waitFor(() => expect(wrapper.text()).toContain('选择已有 Work 环境'))
-    const listLink = wrapper.get('a[href="/researcher/workspaces?projectId=project-1"]')
-    expect(listLink.text()).toContain('选择已有 Work 环境')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('返回 Work 列表'))
+    const listLink = wrapper.get('a[href="/researcher/environments?projectId=project-1"]')
+    expect(listLink.text()).toContain('返回 Work 列表')
+    expect(wrapper.text()).toContain('请在 Work 列表中选择已有 Work，或选择模板新建 Work。')
+    // Work is created through a resource request; the console never creates it directly.
+    expect(wrapper.text()).not.toContain('已发布环境模板')
+    expect(wrapper.findAll('button').some((button) => button.text() === '创建环境')).toBe(false)
     expect(wrapper.get('.environment-id-input-details').attributes('open')).toBeUndefined()
     expect(wrapper.get('.environment-id-input-details summary').text()).toContain('高级')
   })
@@ -855,6 +895,7 @@ describe('EnvironmentEntryView', () => {
       error: undefined as never,
     } as never)
     const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    vi.useFakeTimers({ shouldAdvanceTime: true, now: Date.parse('2026-07-11T12:00:00.000Z') })
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
 
     await vi.waitFor(() => expect(wrapper.find('.runtime-access').exists()).toBe(true))
@@ -864,6 +905,7 @@ describe('EnvironmentEntryView', () => {
     await openButton!.trigger('click')
     expect(open).toHaveBeenCalledWith('/connect/endpoint-grant-http/', '_blank', 'noopener,noreferrer')
     open.mockRestore()
+    vi.useRealTimers()
   })
 
   it.each([
@@ -1317,6 +1359,227 @@ describe('EnvironmentEntryView', () => {
       expect(description).toContain('提交停止不代表已停止计量')
       expect(description).toContain('GPU 容量是否保留取决于环境类型和项目资源配置')
       expect(description).not.toMatch(/GPU 预留(会|已)?释放|资源租约会保留|不再计量|存储费率/)
+    })
+  })
+
+  describe('connection readiness', () => {
+    const NOW = Date.parse('2026-07-11T12:00:00.000Z')
+    const healthyEndpoint = { id: 'endpoint-1', protocol: 'https', health: 'healthy', revision: 1, observedAt: '2026-07-11T10:00:00.000Z' }
+    const sshEndpoint = { ...healthyEndpoint, id: 'endpoint-ssh', protocol: 'ssh' }
+
+    function readiness(wrapper: Awaited<ReturnType<typeof mountAt>>['wrapper']) {
+      return wrapper.get('[data-testid="connection-summary"]').attributes('data-readiness')
+    }
+
+    function methodIds(wrapper: Awaited<ReturnType<typeof mountAt>>['wrapper']) {
+      return wrapper.get('[data-testid="connection-summary"]').findAll('[data-method]').map((item) => item.attributes('data-method'))
+    }
+
+    function mockActiveGrant(expiresAt: string) {
+      vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [{ id: 'grant-1' }] }, error: undefined as never } as never)
+      vi.mocked(getAccessGrant).mockResolvedValue({ data: activeGrant(expiresAt), error: undefined as never } as never)
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true, now: NOW })
+    })
+
+    it('separates a running instance from a connection that still needs an access grant', async () => {
+      mockEnvironmentInstance({ class: 'work', courseId: null })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [healthyEndpoint] }, error: undefined as never } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('needs-grant'))
+      const summary = wrapper.get('[data-testid="connection-summary"]')
+      expect(summary.get('[data-testid="instance-state"]').text()).toBe('运行中')
+      expect(summary.get('[data-testid="connection-state"]').text()).toBe('待授权')
+      expect(summary.text()).toContain('签发访问授权后即可连接')
+      expect(summary.findAll('button').some((button) => button.text() === '签发授权并连接')).toBe(true)
+      // Browser consoles are listed only from the grant's console capability.
+      expect(methodIds(wrapper)).toEqual(['app'])
+      expect(listConsoleCapabilities).not.toHaveBeenCalled()
+      expect(wrapper.get('.env-meta-grid').text()).toContain('固定使用 v1')
+    })
+
+    it('does not call a stopped instance connectable', async () => {
+      mockEnvironmentInstance({ desiredState: 'stopped', observedState: 'stopped' })
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('instance-not-ready'))
+      const summary = wrapper.get('[data-testid="connection-summary"]')
+      expect(summary.get('[data-testid="instance-state"]').text()).toBe('已停止')
+      expect(summary.text()).toContain('环境已停止，启动后才能签发访问授权。')
+      expect(summary.findAll('button').some((button) => button.text() === '打开 Web 终端')).toBe(false)
+    })
+
+    it('re-reads endpoints while they are being checked and reports the connection once they turn healthy', async () => {
+      mockEnvironmentInstance({ runtimeKind: 'virtual_machine' })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
+        data: { items: [{ ...sshEndpoint, health: 'pending' }] },
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('endpoints-pending'))
+      expect(wrapper.get('[data-testid="connection-state"]').text()).toBe('入口检查中')
+      expect(wrapper.get('[data-testid="connection-summary"]').text()).toContain('页面每隔几秒自动重新检查')
+      const endpointReads = vi.mocked(listEnvironmentEndpoints).mock.calls.length
+
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [sshEndpoint] }, error: undefined as never } as never)
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+
+      expect(vi.mocked(listEnvironmentEndpoints).mock.calls.length).toBeGreaterThan(endpointReads)
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('needs-grant'))
+      // The previous answer stays visible during the background re-read.
+      expect(wrapper.find('[data-testid="connection-summary"]').exists()).toBe(true)
+    })
+
+    it('stops calling an expired grant connectable, closes the console and asks for a new grant', async () => {
+      mockEnvironmentInstance({ class: 'work', courseId: null })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [healthyEndpoint] }, error: undefined as never } as never)
+      mockActiveGrant('2026-07-11T12:00:30.000Z')
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('ready'))
+      await vi.waitFor(() => expect(methodIds(wrapper)).toEqual(['console', 'app']))
+      expect(wrapper.find('.console-wrapper').exists()).toBe(true)
+      expect(wrapper.find('.runtime-access').exists()).toBe(true)
+
+      // The server keeps answering with the same grant; its expiry alone ends it.
+      await vi.advanceTimersByTimeAsync(32_000)
+      await flushPromises()
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('needs-regrant'))
+      expect(wrapper.get('[data-testid="connection-state"]').text()).toBe('待重新授权')
+      expect(wrapper.find('.console-wrapper').exists()).toBe(false)
+      expect(wrapper.find('.runtime-access').exists()).toBe(false)
+      expect(methodIds(wrapper)).toEqual(['app'])
+      expect(wrapper.get('[data-testid="connection-summary"]').findAll('button').some((button) => button.text() === '重新签发并连接')).toBe(true)
+      // The expiry triggered a fresh server read of the current grant.
+      expect(vi.mocked(listEnvironmentAccessGrants).mock.calls.length).toBeGreaterThan(1)
+    })
+
+    it('re-reads when the page becomes visible again and pauses while hidden', async () => {
+      mockEnvironmentInstance()
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [{ ...healthyEndpoint, health: 'unhealthy' }] }, error: undefined as never } as never)
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+      try {
+        const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+        await vi.waitFor(() => expect(readiness(wrapper)).toBe('endpoints-unhealthy'))
+
+        visibility.mockReturnValue('hidden')
+        document.dispatchEvent(new Event('visibilitychange'))
+        const hiddenReads = vi.mocked(listEnvironmentEndpoints).mock.calls.length
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(vi.mocked(listEnvironmentEndpoints).mock.calls.length).toBe(hiddenReads)
+
+        vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [healthyEndpoint] }, error: undefined as never } as never)
+        visibility.mockReturnValue('visible')
+        document.dispatchEvent(new Event('visibilitychange'))
+        await flushPromises()
+
+        await vi.waitFor(() => expect(readiness(wrapper)).toBe('needs-grant'))
+        expect(vi.mocked(listEnvironmentEndpoints).mock.calls.length).toBeGreaterThan(hiddenReads)
+      } finally {
+        visibility.mockRestore()
+      }
+    })
+
+    it('does not run the expiry re-read while hidden, and re-arms it when the page is visible again', async () => {
+      mockEnvironmentInstance({ class: 'work', courseId: null })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [healthyEndpoint] }, error: undefined as never } as never)
+      mockActiveGrant('2026-07-11T12:00:30.000Z')
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+      try {
+        const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+        await vi.waitFor(() => expect(readiness(wrapper)).toBe('ready'))
+
+        visibility.mockReturnValue('hidden')
+        document.dispatchEvent(new Event('visibilitychange'))
+        const hiddenReads = vi.mocked(listEnvironmentAccessGrants).mock.calls.length
+        await vi.advanceTimersByTimeAsync(40_000)
+        expect(vi.mocked(listEnvironmentAccessGrants).mock.calls.length).toBe(hiddenReads)
+
+        visibility.mockReturnValue('visible')
+        document.dispatchEvent(new Event('visibilitychange'))
+        await flushPromises()
+        await vi.waitFor(() => expect(readiness(wrapper)).toBe('needs-regrant'))
+        expect(vi.mocked(listEnvironmentAccessGrants).mock.calls.length).toBeGreaterThan(hiddenReads)
+      } finally {
+        visibility.mockRestore()
+      }
+    })
+
+    it('issues the grant and then opens the first browser console the server permits', async () => {
+      mockEnvironmentInstance({ class: 'work', courseId: null, runtimeKind: 'virtual_machine' })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [sshEndpoint] }, error: undefined as never } as never)
+      vi.mocked(createAccessGrant).mockResolvedValue({ data: activeGrant('2026-07-12T10:00:00.000Z'), error: undefined as never } as never)
+      vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['novnc']), error: undefined as never } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('needs-grant'))
+      await wrapper.get('[data-testid="connection-summary"]').findAll('button').find((button) => button.text() === '签发授权并连接')!.trigger('click')
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('ready'))
+      await vi.waitFor(() => expect(wrapper.get('.detail-tab--active').text()).toContain('Web 控制台'))
+      const panel = wrapper.findComponent({ name: 'ConsolePanel' })
+      expect(panel.exists()).toBe(true)
+      expect(panel.props('kind')).toBe('novnc')
+      expect(createAccessGrant).toHaveBeenCalledTimes(1)
+    })
+
+    it('stays on the overview after issuing when the server permits no browser console', async () => {
+      mockEnvironmentInstance({ class: 'work', courseId: null, runtimeKind: 'virtual_machine' })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [sshEndpoint] }, error: undefined as never } as never)
+      vi.mocked(createAccessGrant).mockResolvedValue({ data: activeGrant('2026-07-12T10:00:00.000Z'), error: undefined as never } as never)
+      vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability([]), error: undefined as never } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('needs-grant'))
+      await wrapper.get('[data-testid="connection-summary"]').findAll('button').find((button) => button.text() === '签发授权并连接')!.trigger('click')
+
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="console-capability-hint"]').text()).toContain('没有浏览器终端或桌面'))
+      expect(wrapper.get('.detail-tab--active').text()).toContain('概览与访问')
+      expect(methodIds(wrapper)).toEqual(['ssh'])
+    })
+
+    it('lists only SSH for a VM whose grant permits no desktop', async () => {
+      mockEnvironmentInstance({ runtimeKind: 'virtual_machine' })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [sshEndpoint] }, error: undefined as never } as never)
+      mockActiveGrant('2026-07-12T10:00:00.000Z')
+      vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability([]), error: undefined as never } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+
+      await vi.waitFor(() => expect(readiness(wrapper)).toBe('ready'))
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="console-capability-hint"]').text()).toContain('没有浏览器终端或桌面'))
+      expect(methodIds(wrapper)).toEqual(['ssh'])
+      expect(wrapper.text()).not.toContain('打开桌面')
+    })
+
+    it('offers the desktop for a VM whose grant permits noVNC', async () => {
+      mockEnvironmentInstance({ runtimeKind: 'virtual_machine' })
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [sshEndpoint] }, error: undefined as never } as never)
+      mockActiveGrant('2026-07-12T10:00:00.000Z')
+      vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['novnc']), error: undefined as never } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+
+      await vi.waitFor(() => expect(methodIds(wrapper)).toEqual(['desktop', 'ssh']))
+      const openDesktop = wrapper.get('[data-testid="connection-summary"]').findAll('button').find((button) => button.text() === '打开桌面')!
+      expect((openDesktop.element as HTMLButtonElement).disabled).toBe(false)
+      expect(listConsoleCapabilities).toHaveBeenCalledWith({ path: { grantId: 'grant-1' } })
+    })
+
+    it('omits the web terminal for a container whose grant permits no xterm', async () => {
+      mockEnvironmentInstance()
+      vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [healthyEndpoint] }, error: undefined as never } as never)
+      mockActiveGrant('2026-07-12T10:00:00.000Z')
+      vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability([]), error: undefined as never } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="console-capability-hint"]').text()).toContain('没有浏览器终端或桌面'))
+      expect(methodIds(wrapper)).toEqual(['app'])
+      expect(wrapper.text()).not.toContain('打开 Web 终端')
     })
   })
 })

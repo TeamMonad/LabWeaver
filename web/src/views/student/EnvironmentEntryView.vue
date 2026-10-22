@@ -16,7 +16,7 @@
     />
 
     <section
-      v-if="!isEnvironmentLoaded || environmentToolsOpen"
+      v-if="!isWorkRoute && (!isEnvironmentLoaded || environmentToolsOpen)"
       aria-labelledby="releases-heading"
     >
       <h3
@@ -195,7 +195,7 @@
                   size="sm"
                   aria-hidden="true"
                 />
-                <span>{{ environmentToolsOpen ? '收起创建与切换' : '创建或切换环境' }}</span>
+                <span>{{ environmentToolsLabel }}</span>
               </button>
             </div>
           </div>
@@ -370,6 +370,10 @@
                       <span class="meta-item__label">材料保留至</span>
                       <span class="meta-item__value">{{ environmentMaterialDeadlineLabel(data.eligibilityExpiresAt) }}</span>
                     </div>
+                    <div class="meta-item">
+                      <span class="meta-item__label">模板版本</span>
+                      <span class="meta-item__value">固定使用 v{{ data.releaseVersion }}</span>
+                    </div>
                   </div>
                   <details class="environment-id-details">
                     <summary>查看高级详情</summary>
@@ -378,6 +382,21 @@
                     <span>内部修订版本：rev-{{ data.revision }}</span>
                   </details>
                 </div>
+
+                <EnvironmentConnectionSummary
+                  :instance="data"
+                  :endpoints="access.endpoints"
+                  :grant="access.grant"
+                  :console-capability="consoleCapability.availability"
+                  :instance-block-reason="accessGrantBlockReason(data)"
+                  :now="connection.now.value"
+                  :auto-checking="connection.autoChecking.value"
+                  :checking="connectionRechecking"
+                  :issuing="access.creating"
+                  @open-console="openConsoleTab"
+                  @recheck="recheckConnection"
+                  @issue-grant="issueGrantAndConnect"
+                />
 
                 <div class="access-section">
                   <h4 class="section-subtitle">
@@ -494,7 +513,7 @@
                           </div>
 
                           <div
-                            v-if="g.state === 'active'"
+                            v-if="grantUsable"
                             class="runtime-access"
                           >
                             <div
@@ -603,7 +622,7 @@
                   </button>
                 </div>
                 <div
-                  v-else-if="access.grant.kind === 'success' && access.grant.data.state === 'active'"
+                  v-else-if="grantUsable && access.grant.kind === 'success'"
                   class="console-wrapper"
                 >
                   <div
@@ -625,16 +644,8 @@
                     </button>
                   </div>
                   <ConsolePanel
-                    v-if="data.runtimeKind === 'container'"
-                    :key="`console-${consoleSessionKey}`"
-                    kind="xterm"
-                    :grant="access.grant.data"
-                    :environment="data"
-                  />
-                  <ConsolePanel
-                    v-else-if="data.runtimeKind === 'virtual_machine'"
-                    :key="`console-${consoleSessionKey}`"
-                    kind="novnc"
+                    :key="`console-${consoleSessionKey}-${consolePanelKind}`"
+                    :kind="consolePanelKind"
                     :grant="access.grant.data"
                     :environment="data"
                   />
@@ -1068,6 +1079,9 @@ import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
+import { useConnectionWatch } from '@/composables/useConnectionWatch'
+import { useConsoleCapability } from '@/composables/useConsoleCapability'
+import { grantIsUsable } from '@/utils/environmentConnection'
 import { useProjects } from '@/composables/useProjects'
 import { freezeSubmission, getFrozenSubmission, retryEnvironment } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -1080,11 +1094,13 @@ import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import GcpActionBar from '@/components/common/GcpActionBar.vue'
+import EnvironmentConnectionSummary from '@/components/environment/EnvironmentConnectionSummary.vue'
 import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 import { environmentStateLabel, endpointHealthLabel, accessGrantStateLabel, environmentOperationKindLabel, environmentOperationStateLabel } from '@/utils/stateLabels'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
+  ConsoleKind,
   EnvironmentInstanceSchema,
   EnvironmentOperationSnapshotSchema,
   EnvironmentTemplateReleaseViewSchema,
@@ -1132,8 +1148,9 @@ const routeProjectId = computed(() => {
   const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || undefined
 })
-const waitForEnvironmentHandoff = computed(() => route.path.startsWith('/researcher/'))
-const handoffProjectId = computed(() => waitForEnvironmentHandoff.value
+/** Work is created through a resource request on the Work list, never from this console. */
+const isWorkRoute = computed(() => route.path.startsWith('/researcher/'))
+const handoffProjectId = computed(() => isWorkRoute.value
   ? routeProjectId.value ?? projects.selectedProjectId ?? undefined
   : undefined)
 const env = useEnvironmentInstance(selectedEnvironmentId, handoffProjectId)
@@ -1157,21 +1174,25 @@ const courseId = computed(() => {
   return selectedProject.value?.courseId ?? undefined
 })
 const isContextMissing = computed(() => !projectId.value)
-const isWorkConnection = computed(() => waitForEnvironmentHandoff.value || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
+const isWorkConnection = computed(() => isWorkRoute.value || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
 const environmentListPath = computed(() => props.teacherMode
   ? '/teacher/environments'
-  : isWorkConnection.value ? '/researcher/workspaces' : '/student/labs')
+  : isWorkConnection.value ? '/researcher/environments' : '/student/labs')
 const environmentListActionLabel = computed(() => props.teacherMode
   ? '查看项目环境'
-  : isWorkConnection.value ? '选择已有 Work 环境' : '选择已有实验环境')
+  : isWorkConnection.value ? '返回 Work 列表' : '选择已有实验环境')
 const environmentEmptyHint = computed(() => props.teacherMode
   ? '请从教师项目环境列表选择已有环境，或从上方创建环境。'
   : isWorkConnection.value
-    ? '请从项目工作空间选择已有 Work 环境，或在资源申请中创建新的 Work 环境。'
+    ? '请在 Work 列表中选择已有 Work，或选择模板新建 Work。'
     : '请从课程实验列表选择已有环境，或从上方已发布模板创建环境。')
 const breadcrumbLabel = computed(() => props.teacherMode
   ? '教师项目环境'
-  : isWorkConnection.value ? 'Work 项目环境' : '课程实验环境')
+  : isWorkConnection.value ? 'Work 环境' : '课程实验环境')
+const environmentToolsLabel = computed(() => {
+  if (isWorkRoute.value) return environmentToolsOpen.value ? '收起切换' : '按环境 ID 切换'
+  return environmentToolsOpen.value ? '收起创建与切换' : '创建或切换环境'
+})
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
 const lifecycle = useEnvironmentLifecycle(projectId, courseId)
 
@@ -1187,6 +1208,66 @@ const access = useEnvironmentAccess(
   computed(() => (env.instance.kind === 'success' ? env.instance.data.revision : undefined)),
   projectId,
   courseId,
+)
+
+const connectionInstance = computed(() => env.instance.kind === 'success' ? env.instance.data : null)
+const connection = useConnectionWatch(connectionInstance, access)
+const connectionRechecking = ref(false)
+async function recheckConnection() {
+  connectionRechecking.value = true
+  try {
+    await connection.recheck()
+  } finally {
+    connectionRechecking.value = false
+  }
+}
+/** A grant past its own expiry no longer opens anything, even before the server is read again. */
+const grantUsable = computed(() => grantIsUsable(access.grant, connection.now.value))
+const consoleCapability = useConsoleCapability(computed(() => (
+  grantUsable.value && access.grant.kind === 'success' ? access.grant.data.id : undefined
+)))
+watch(
+  () => grantUsable.value && access.grant.kind === 'success' ? `${access.grant.data.id}:${access.grant.data.revision}` : null,
+  (identity) => {
+    if (identity) void consoleCapability.load()
+    else consoleCapability.reset()
+  },
+  { immediate: true },
+)
+const requestedConsoleKind = ref<ConsoleKind | null>(null)
+/** The console the user asked for, else the first one the grant permits; the panel itself rejects kinds the grant does not permit. */
+const consolePanelKind = computed<ConsoleKind>(() => {
+  if (requestedConsoleKind.value) return requestedConsoleKind.value
+  if (consoleCapability.availability.kind === 'success' && consoleCapability.availability.data.kinds.length > 0) {
+    return consoleCapability.availability.data.kinds[0]
+  }
+  return env.instance.kind === 'success' && env.instance.data.runtimeKind === 'virtual_machine' ? 'novnc' : 'xterm'
+})
+function openConsoleTab(kind: ConsoleKind) {
+  requestedConsoleKind.value = kind
+  activeTab.value = 'terminal'
+}
+
+/**
+ * "签发授权并连接" from the connection summary: issue the grant, then open the
+ * first browser console the server permits for it. Without a permitted console
+ * the user stays on the overview, where SSH and application entries are listed.
+ */
+const connectAfterGrant = ref<string | null>(null)
+async function issueGrantAndConnect() {
+  const environmentId = selectedEnvironmentId.value ?? null
+  connectAfterGrant.value = environmentId
+  await issueAccessGrant()
+  if (!grantIsUsable(access.grant, Date.now())) connectAfterGrant.value = null
+}
+watch(
+  () => consoleCapability.availability,
+  (state) => {
+    if (!connectAfterGrant.value || connectAfterGrant.value !== selectedEnvironmentId.value) return
+    if (state.kind === 'idle' || state.kind === 'loading') return
+    connectAfterGrant.value = null
+    if (state.kind === 'success' && state.data.kinds.length > 0) openConsoleTab(state.data.kinds[0])
+  },
 )
 const operations = useEnvironmentOperations(selectedEnvironmentId)
 
@@ -2025,14 +2106,14 @@ async function issueAccessGrant() {
 
 async function reconnectConsole() {
   createGrantDiagnostic.value = null
-  if (access.grant.kind === 'success' && access.grant.data.state === 'active') {
+  if (grantIsUsable(access.grant, Date.now())) {
     consoleSessionKey.value += 1
     consoleReconnectRequired.value = false
     return
   }
   if (!accessGrantRequestEnvironment()) return
   await issueAccessGrant()
-  if (access.grant.kind === 'success' && access.grant.data.state === 'active') {
+  if (grantIsUsable(access.grant, Date.now())) {
     consoleSessionKey.value += 1
     consoleReconnectRequired.value = false
   }

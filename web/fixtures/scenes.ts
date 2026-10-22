@@ -43,6 +43,8 @@ export const fixtureScenes: FixtureScene[] = [
   { id: 'platform-images-catalog', label: '平台镜像 · 目录与操作', group: '管理员任务', role: 'admin', path: '/admin/platform-images', description: '展示容器与虚拟机基础镜像、release 影响提示以及注册、重新固定、停用和归档导入入口。' },
   { id: 'gpu-catalog', label: 'GPU 目录 · 目录与新建', group: '管理员任务', role: 'admin', path: '/admin/gpu-catalog', description: '展示 GPU class 目录条目并保留新建目录项表单。' },
   { id: 'workspace-archive', label: '项目与工作 · 归档确认', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '保留项目归属，并检查危险归档确认文案。' },
+  { id: 'work-launcher', label: 'Work 环境 · 无模型手工创建', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '项目没有可用模型：Agent 关闭并说明原因，仍可手工选择模板创建 Work。' },
+  { id: 'work-launcher-empty', label: 'Work 环境 · 没有模板', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '没有已发布模板且没有模型时的下一步说明。' },
   { id: 'workspace-members', label: '项目成员 · 成员管理', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '展示可读成员名称和移除确认入口。' },
   { id: 'resource-reclaim', label: '资源授权 · 回收确认', group: '项目与工作', role: 'student', path: '/researcher/resources', projectId: DEFAULT_PROJECT_ID, description: '已授权 Lease 的回收动作会要求确认。' },
 ]
