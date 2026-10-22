@@ -3534,10 +3534,9 @@ async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
                     tokio::task::yield_now().await;
                 }
                 outcome => {
-                    return Err(format!(
-                        "cleanup item {index} did not reach Deleted: {outcome:?}"
-                    )
-                    .into());
+                    return Err(
+                        format!("cleanup item {index} did not reach Deleted: {outcome:?}").into(),
+                    );
                 }
             }
         }
