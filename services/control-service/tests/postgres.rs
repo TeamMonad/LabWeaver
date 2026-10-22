@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
+use artifact_store_test::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use async_trait::async_trait;
 use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
@@ -40,7 +40,8 @@ use control_service::{
 };
 use persistence_sqlx::{Domain, Sha256Digest};
 use sqlx::{Row, postgres::PgPoolOptions};
-use testcontainers::{ImageExt, runners::AsyncRunner};
+use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
@@ -3289,6 +3290,233 @@ impl ImmutableObjectStore for FixtureObjects {
     async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
         Ok(())
     }
+}
+
+async fn local_minio_image() -> Result<GenericImage, Box<dyn std::error::Error>> {
+    let descriptor = std::env::var("LABWEAVER_TEST_MINIO_IMAGE")
+        .map_err(|_| "LABWEAVER_TEST_MINIO_IMAGE must name a locally prepared image")?;
+    let (name, tag) = descriptor
+        .rsplit_once(':')
+        .filter(|(name, tag)| !name.is_empty() && !tag.is_empty() && !tag.contains('/'))
+        .ok_or("LABWEAVER_TEST_MINIO_IMAGE must be a local name:tag reference")?;
+    let docker = testcontainers::bollard::Docker::connect_with_local_defaults()?;
+    docker.inspect_image(&descriptor).await?;
+    Ok(GenericImage::new(name.to_owned(), tag.to_owned()))
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let minio = local_minio_image()
+        .await?
+        .with_exposed_port(9000.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("API:"))
+        .with_env_var("MINIO_ROOT_USER", "labweaver-test")
+        .with_env_var("MINIO_ROOT_PASSWORD", "labweaver-test-secret")
+        .with_cmd(["server", "/data"])
+        .start()
+        .await?;
+    let endpoint = format!(
+        "http://127.0.0.1:{}",
+        minio.get_host_port_ipv4(9000.tcp()).await?
+    );
+    let objects = S3ImmutableObjectStore::new_for_test(
+        S3StoreConfig {
+            binding: "minio-control-materials-v1".to_owned(),
+            endpoint: endpoint.parse()?,
+            bucket: "issue-197-control-materials".to_owned(),
+            region: "labweaver-test-1".to_owned(),
+            object_prefix: "problem-packages".to_owned(),
+            upload_ttl_seconds: 900,
+            max_object_bytes: 1_048_576,
+            force_path_style: true,
+            ca_bundle_file: None,
+        },
+        S3Credential {
+            access_key_id: "labweaver-test".to_owned(),
+            secret_access_key: "labweaver-test-secret".to_owned(),
+            session_token: None,
+        },
+    )
+    .await?;
+    objects.ensure_bucket_for_test().await?;
+
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let service = ControlService::new(pool.clone(), Arc::new(objects.clone()), control_config()?)?;
+    let course = CourseId::new();
+    let request = upload_request(course)?;
+    let now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    let session = service
+        .create_upload(
+            course,
+            &request,
+            &IdempotencyKey::parse("issue-197-real-create")?,
+            now,
+        )
+        .await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    for target in &session.upload_targets {
+        let bytes = match target.path.as_str() {
+            "statement.md" => b"statement".as_slice(),
+            "starter/main.rs" => b"main.rs".as_slice(),
+            path => return Err(format!("unexpected upload target {path}").into()),
+        };
+        let mut upload = client.put(&target.upload_url);
+        for (name, value) in &target.required_headers {
+            upload = upload.header(name, value);
+        }
+        let response = upload.body(bytes.to_vec()).send().await?;
+        assert!(response.status().is_success(), "PUT failed: {}", response.status());
+    }
+    let first_target = session
+        .upload_targets
+        .first()
+        .ok_or("material upload returned no target")?;
+    let mut overwrite = client.put(&first_target.upload_url);
+    for (name, value) in &first_target.required_headers {
+        overwrite = overwrite.header(name, value);
+    }
+    assert_eq!(
+        overwrite
+            .body(b"statement".to_vec())
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::PRECONDITION_FAILED
+    );
+
+    let package = service
+        .complete_upload(
+            course,
+            session.id,
+            session.revision,
+            &IdempotencyKey::parse("issue-197-real-complete")?,
+            now,
+        )
+        .await?;
+    assert_eq!(package.files.len(), 2);
+    assert_eq!(
+        package.files[0].sha256,
+        Sha256Digest::of_bytes(b"main.rs").to_string()
+    );
+    assert_eq!(
+        package.files[1].sha256,
+        Sha256Digest::of_bytes(b"statement").to_string()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.problem_package_upload_files \
+             WHERE upload_id=$1 AND sha256 IS NOT NULL AND object_version IS NOT NULL",
+        )
+        .bind(session.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    assert_eq!(
+        service
+            .complete_upload(
+                course,
+                session.id,
+                session.revision,
+                &IdempotencyKey::parse("issue-197-real-complete-retry")?,
+                now,
+            )
+            .await?,
+        package
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.problem_packages")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+
+    let cancelled = service
+        .create_upload(
+            course,
+            &request,
+            &IdempotencyKey::parse("issue-197-real-cancel-create")?,
+            now,
+        )
+        .await?;
+    let cancel_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT object_key FROM control.problem_package_upload_files WHERE upload_id=$1 ORDER BY ordinal",
+    )
+    .bind(cancelled.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    for target in &cancelled.upload_targets {
+        let bytes = if target.path == "statement.md" {
+            b"statement".as_slice()
+        } else {
+            b"main.rs".as_slice()
+        };
+        let mut upload = client.put(&target.upload_url);
+        for (name, value) in &target.required_headers {
+            upload = upload.header(name, value);
+        }
+        assert!(upload.body(bytes.to_vec()).send().await?.status().is_success());
+    }
+    let cancelled = service
+        .cancel_project_upload(
+            request.project_id,
+            cancelled.id,
+            cancelled.revision,
+            &IdempotencyKey::parse("issue-197-real-cancel")?,
+            now,
+        )
+        .await?;
+    assert_eq!(cancelled.state, contracts::http::ProblemPackageUploadState::Cancelled);
+    sqlx::query(
+        "UPDATE control.problem_package_upload_sessions \
+         SET expires_at=$2-interval '1 second',cleanup_versions_next_attempt_at=$2-interval '1 second' \
+         WHERE upload_id=$1",
+    )
+    .bind(cancelled.id.as_uuid())
+    .bind(now.get())
+    .execute(&pool)
+    .await?;
+    let cleanup_now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    service.reconcile_material_uploads(cleanup_now).await?;
+    assert_eq!(
+        service.cleanup_one_object(cleanup_now).await?,
+        control_service::CleanupOutcome::Deleted
+    );
+    assert_eq!(
+        service.cleanup_one_object(cleanup_now).await?,
+        control_service::CleanupOutcome::Deleted
+    );
+    for key in cancel_keys {
+        assert!(objects.list_key_versions(&key).await?.is_empty());
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.object_cleanup_ledger WHERE upload_id=$1 AND completed_at IS NOT NULL",
+        )
+        .bind(cancelled.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    Ok(())
 }
 
 #[tokio::test]

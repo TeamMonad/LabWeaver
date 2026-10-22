@@ -361,6 +361,13 @@ impl S3ImmutableObjectStore {
         credential: S3Credential,
     ) -> Result<Self, ObjectStoreError> {
         config.validate()?;
+        Self::build(config, credential).await
+    }
+
+    async fn build(
+        config: S3StoreConfig,
+        credential: S3Credential,
+    ) -> Result<Self, ObjectStoreError> {
         if credential.access_key_id.trim().is_empty() || credential.secret_access_key.is_empty() {
             return Err(ObjectStoreError::ConfigurationInvalid);
         }
@@ -406,9 +413,6 @@ impl S3ImmutableObjectStore {
         let service = S3ConfigBuilder::from(&shared)
             .force_path_style(config.force_path_style)
             .build();
-        // Instrumentation: report the effective native trust store size so a
-        // private CA mismatch is observable at startup instead of surfacing as
-        // an opaque dispatch failure on the first GetObject.
         let native_roots_loaded = rustls_native_certs::load_native_certs()
             .map(|certs| certs.len())
             .map_err(|error| error.to_string());
@@ -422,6 +426,57 @@ impl S3ImmutableObjectStore {
             config,
             client: Client::from_conf(service),
         })
+    }
+
+    /// Builds a local HTTP client for the real MinIO integration fixture.
+    #[cfg(feature = "test-support")]
+    pub async fn new_for_test(
+        config: S3StoreConfig,
+        credential: S3Credential,
+    ) -> Result<Self, ObjectStoreError> {
+        let local = config.endpoint.scheme() == "http"
+            && config
+                .endpoint
+                .host_str()
+                .is_some_and(|host| host == "127.0.0.1" || host == "localhost");
+        if !local {
+            return Err(ObjectStoreError::ConfigurationInvalid);
+        }
+        if config.binding.trim().is_empty()
+            || config.bucket.trim().is_empty()
+            || config.region.trim().is_empty()
+            || config.object_prefix.trim_matches('/').is_empty()
+            || config.upload_ttl_seconds == 0
+            || config.max_object_bytes == 0
+        {
+            return Err(ObjectStoreError::ConfigurationInvalid);
+        }
+        Self::build(config, credential).await
+    }
+
+    /// Creates and versions the dedicated bucket used by the real MinIO fixture.
+    #[cfg(feature = "test-support")]
+    pub async fn ensure_bucket_for_test(&self) -> Result<(), ObjectStoreError> {
+        use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+
+        self.client
+            .create_bucket()
+            .bucket(&self.config.bucket)
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        self.client
+            .put_bucket_versioning()
+            .bucket(&self.config.bucket)
+            .versioning_configuration(
+                VersioningConfiguration::builder()
+                    .status(BucketVersioningStatus::Enabled)
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        Ok(())
     }
 
     /// Returns the exact configured store binding.
