@@ -183,11 +183,11 @@ describe('PlatformImageView', () => {
     expect((disableButton.element as HTMLButtonElement).disabled).toBe(false)
     await disableButton.trigger('click')
 
-    const dialog = document.body.querySelector('dialog')
+    const dialog = document.body.querySelector('[role="alertdialog"]')
     expect(dialog?.textContent).toContain('停用后新创作不再列出该镜像；已有 release 仍按其 digest 运行。当前有 2 个 release 引用该 digest。')
     expect(disablePlatformImage).not.toHaveBeenCalled()
 
-    document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
+    document.body.querySelector<HTMLButtonElement>('[role="alertdialog"] .filled-button')?.click()
     await flushPromises()
 
     expect(vi.mocked(disablePlatformImage).mock.calls[0][0]).toEqual({
@@ -218,10 +218,10 @@ describe('PlatformImageView', () => {
 
     await wrapper.findAll('.row-actions button')[0].trigger('click')
 
-    const dialog = document.body.querySelector('dialog')
+    const dialog = document.body.querySelector('[role="alertdialog"]')
     expect(dialog?.textContent).toContain('将按已存引用重新解析并替换固定 digest；下游只认 digest，不会自动跟随 tag。')
 
-    document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
+    document.body.querySelector<HTMLButtonElement>('[role="alertdialog"] .filled-button')?.click()
     await flushPromises()
 
     expect(vi.mocked(repinPlatformImage).mock.calls[0][0]).toEqual({
@@ -447,7 +447,7 @@ describe('PlatformImageView', () => {
     await operationReasonInput(wrapper).setValue('停用过期镜像')
 
     await wrapper.findAll('.row-actions button')[1].trigger('click')
-    document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
+    document.body.querySelector<HTMLButtonElement>('[role="alertdialog"] .filled-button')?.click()
     await flushPromises()
 
     expect(wrapper.get('.diagnostic-banner').text()).toContain('LW_PLATFORM_IMAGE_STATE_CONFLICT')

@@ -186,16 +186,16 @@ describe('WorkspaceListView', () => {
     await wrapper.get('button.outlined-button.danger-button').trigger('click')
     await flushPromises()
     expect(mocks.archive).not.toHaveBeenCalled()
-    expect(document.body.querySelector('dialog')?.textContent).toContain('课程项目')
-    document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain('课程项目')
+    document.body.querySelector<HTMLButtonElement>('[role="alertdialog"] .filled-button')?.click()
     await flushPromises()
     expect(mocks.archive).toHaveBeenCalledWith(projectOne)
 
     await wrapper.get('.member-row .text-button').trigger('click')
     await flushPromises()
     expect(mocks.remove).not.toHaveBeenCalled()
-    expect(document.body.querySelector('dialog')?.textContent).toContain('学生一')
-    document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain('学生一')
+    document.body.querySelector<HTMLButtonElement>('[role="alertdialog"] .filled-button')?.click()
     await flushPromises()
     expect(mocks.remove).toHaveBeenCalledWith('student-1', expect.objectContaining({ actorId: 'student-1' }))
   })
@@ -293,11 +293,11 @@ describe('WorkspaceListView', () => {
 
     await wrapper.get('button.outlined-button.danger-button').trigger('click')
     await flushPromises()
-    expect(document.body.querySelector('dialog')).not.toBeNull()
+    expect(document.body.querySelector('[role="alertdialog"]')).not.toBeNull()
 
     authState.user.value = { expired: false, profile: { roles: ['student'], actor_id: 'student-1' } }
     await flushPromises()
-    expect(document.body.querySelector('dialog')).toBeNull()
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull()
     expect(mocks.archive).not.toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -320,11 +320,11 @@ describe('WorkspaceListView', () => {
 
     await wrapper.get('button.outlined-button.danger-button').trigger('click')
     await flushPromises()
-    expect(document.body.querySelector('dialog')).not.toBeNull()
+    expect(document.body.querySelector('[role="alertdialog"]')).not.toBeNull()
 
     await wrapper.findAll('.project-item')[1].trigger('click')
     await flushPromises()
-    expect(document.body.querySelector('dialog')).toBeNull()
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull()
     expect(router.currentRoute.value.query.projectId).toBe('project-2')
     expect(projectsState.selectedProjectId).toBe('project-2')
   })

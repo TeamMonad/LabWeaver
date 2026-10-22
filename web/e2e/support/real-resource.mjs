@@ -514,7 +514,7 @@ export async function approveResourceRequestByUi(page, {
     return response.request().method() === 'POST' && /^\/api\/v1\/resource-requests\/[^/]+\/approve$/.test(url.pathname)
   })
   await approveButton.click()
-  const dialog = page.locator('dialog.confirm-dialog[role="alertdialog"]')
+  const dialog = page.locator('.confirm-dialog[role="alertdialog"]')
   await expect(dialog).toBeVisible()
   await dialog.locator('.filled-button').click()
 
@@ -655,7 +655,7 @@ export async function releaseProjectLeaseByUi(page, { projectName, projectId = n
     return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-leases/${matched.leaseId}/revoke`
   })
   await releaseButton.click()
-  const dialog = page.locator('dialog.confirm-dialog[role="alertdialog"]')
+  const dialog = page.locator('.confirm-dialog[role="alertdialog"]')
   await expect(dialog).toBeVisible()
   await dialog.locator('.filled-button').click()
   await expectJson(await responsePromise, 'LW_ACCEPTANCE_RESOURCE_LEASE_RELEASE_FAILED')
@@ -772,7 +772,7 @@ export async function cancelProjectResourceRequestByUi(page, { projectName, proj
     return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-requests/${rendered.requestId}/cancel`
   })
   await cancelButton.click()
-  const dialog = page.locator('dialog.confirm-dialog[role="alertdialog"]')
+  const dialog = page.locator('.confirm-dialog[role="alertdialog"]')
   await expect(dialog).toBeVisible()
   await dialog.locator('.filled-button').click()
   const cancelResponse = await responsePromise
