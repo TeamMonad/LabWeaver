@@ -51,6 +51,7 @@ const REQUEST_CANCELLED_SUBJECT: &str = subjects::RESOURCE_REQUEST_CANCELLED;
 const REQUEST_STATE_CHANGED_SUBJECT: &str = subjects::RESOURCE_REQUEST_STATE_CHANGED;
 const LEASE_ACTIVATED_SUBJECT: &str = subjects::RESOURCE_LEASE_ACTIVATED;
 const LEASE_RENEWED_SUBJECT: &str = subjects::RESOURCE_LEASE_RENEWED;
+const LEASE_FENCED_SUBJECT: &str = subjects::RESOURCE_LEASE_FENCED;
 const LEASE_REVOKED_SUBJECT: &str = subjects::RESOURCE_LEASE_REVOKED;
 const LEASE_EXPIRING_SUBJECT: &str = subjects::RESOURCE_LEASE_EXPIRING;
 const LEASE_EXPIRED_SUBJECT: &str = subjects::RESOURCE_LEASE_EXPIRED;
@@ -483,13 +484,22 @@ impl PgResourceStore {
                         .ok_or(ResourceStoreError::RevisionOverflow)?,
                 )?;
                 fenced_lease.updated_at = now;
-                update_claim(&mut transaction, &claim, &fenced_claim, None, None, None).await?;
+                update_claim_at(
+                    &mut transaction,
+                    &claim,
+                    &fenced_claim,
+                    None,
+                    None,
+                    None,
+                    Some(now),
+                )
+                .await?;
                 update_lease(&mut transaction, &lease, &fenced_lease).await?;
                 enqueue_lease_event(
                     &mut transaction,
                     &fenced_lease,
                     &request,
-                    LEASE_RENEWED_SUBJECT,
+                    LEASE_FENCED_SUBJECT,
                     &trace_id,
                 )
                 .await?;
@@ -2636,6 +2646,14 @@ impl PgResourceStore {
                     .await?;
                 }
                 insert_lease(&mut transaction, &lease).await?;
+                enqueue_lease_event(
+                    &mut transaction,
+                    &lease,
+                    &next,
+                    LEASE_FENCED_SUBJECT,
+                    trace_id,
+                )
+                .await?;
                 update_request(&mut transaction, &request, &next).await?;
                 insert_transition(
                     &mut transaction,
@@ -5189,9 +5207,30 @@ async fn update_claim(
     namespace_uid: Option<&str>,
     quota_uid: Option<&str>,
 ) -> Result<(), ResourceStoreError> {
-    let changed = sqlx::query("UPDATE resource.capacity_claims SET state=$3,revision=$4,namespace_name=COALESCE($5,namespace_name),namespace_uid=COALESCE($6,namespace_uid),quota_uid=COALESCE($7,quota_uid),updated_at=clock_timestamp(),contract=$8 WHERE claim_id=$1 AND revision=$2")
+    update_claim_at(
+        transaction,
+        current,
+        next,
+        namespace,
+        namespace_uid,
+        quota_uid,
+        None,
+    )
+    .await
+}
+
+async fn update_claim_at(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &CapacityClaim,
+    next: &CapacityClaim,
+    namespace: Option<&str>,
+    namespace_uid: Option<&str>,
+    quota_uid: Option<&str>,
+    updated_at: Option<UtcTimestamp>,
+) -> Result<(), ResourceStoreError> {
+    let changed = sqlx::query("UPDATE resource.capacity_claims SET state=$3,revision=$4,namespace_name=COALESCE($5,namespace_name),namespace_uid=COALESCE($6,namespace_uid),quota_uid=COALESCE($7,quota_uid),updated_at=COALESCE($8::timestamptz,clock_timestamp()),contract=$9 WHERE claim_id=$1 AND revision=$2")
         .bind(current.id.as_uuid()).bind(i64::try_from(current.revision.get())?).bind(wire(next.state)?).bind(i64::try_from(next.revision.get())?)
-        .bind(namespace).bind(namespace_uid).bind(quota_uid).bind(serde_json::to_value(next)?)
+        .bind(namespace).bind(namespace_uid).bind(quota_uid).bind(updated_at.map(UtcTimestamp::get)).bind(serde_json::to_value(next)?)
         .execute(&mut **transaction).await?;
     if changed.rows_affected() != 1 {
         return Err(ResourceStoreError::RevisionConflict);

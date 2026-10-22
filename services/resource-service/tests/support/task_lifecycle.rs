@@ -543,16 +543,22 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
         pending_cleanup.request.diagnostic_code.as_deref(),
         Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
     );
-    let (db_updated_at, contract_updated_at): (time::OffsetDateTime, time::OffsetDateTime) =
-        sqlx::query_as(
-            "SELECT updated_at, (contract->>'updatedAt')::timestamptz
-             FROM resource.resource_leases WHERE lease_id=$1",
-        )
-        .bind(pending_cleanup.lease.id.as_uuid())
-        .fetch_one(&fixture.pool)
-        .await?;
-    assert_eq!(pending_cleanup.lease.updated_at.get(), db_updated_at);
-    assert_eq!(db_updated_at, contract_updated_at);
+    let (claim_db_updated_at, lease_db_updated_at, contract_updated_at): (
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+    ) = sqlx::query_as(
+        "SELECT c.updated_at,l.updated_at,(l.contract->>'updatedAt')::timestamptz
+         FROM resource.capacity_claims c
+         JOIN resource.resource_leases l ON l.claim_id=c.claim_id
+         WHERE l.lease_id=$1",
+    )
+    .bind(pending_cleanup.lease.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(pending_cleanup.lease.updated_at.get(), lease_db_updated_at);
+    assert_eq!(claim_db_updated_at, lease_db_updated_at);
+    assert_eq!(lease_db_updated_at, contract_updated_at);
     assert_eq!(fixture.event_count().await?, events + 2);
     assert!(fixture.lifecycle.release(&active).await.is_err());
     let released = fixture.lifecycle.release(&pending_cleanup).await?;
@@ -638,6 +644,10 @@ async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResul
         received.push((aggregate_id, event));
     }
     assert_eq!(received.len(), usize::try_from(expected)?);
+    let expected_aggregate_ids = received
+        .iter()
+        .map(|(aggregate_id, _)| *aggregate_id)
+        .collect::<std::collections::BTreeSet<_>>();
 
     let duplicate = received
         .iter()
@@ -717,6 +727,7 @@ async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResul
                 Some(accept_task_event(&fixture.pool, replay_aggregate_id, &event).await?);
         }
         assert_eq!(final_replay_decision, Some(InboxDecision::Accepted));
+        assert_task_watermark(&fixture.pool, replay_aggregate_id).await?;
         groups.remove(&replay_aggregate_id);
     }
     for (aggregate_id, mut events) in groups {
@@ -747,6 +758,7 @@ async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResul
             last_decision = Some(decision);
         }
         assert_eq!(last_decision, Some(InboxDecision::Accepted));
+        assert_task_watermark(&fixture.pool, aggregate_id).await?;
     }
     let duplicate_aggregate_id: Uuid =
         sqlx::query_scalar("SELECT aggregate_id FROM resource.outbox_events WHERE event_id=$1")
@@ -756,6 +768,18 @@ async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResul
     assert_eq!(
         accept_task_event(&fixture.pool, duplicate_aggregate_id, &duplicate_event).await?,
         InboxDecision::Duplicate
+    );
+    let persisted_aggregate_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT aggregate_id FROM resource.inbox_watermarks
+         WHERE consumer='task-lifecycle-replay-v1' ORDER BY aggregate_id",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        persisted_aggregate_ids
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_aggregate_ids
     );
     let status = fixture.lifecycle.load_status().await?;
     assert!(status.cleanup_confirmed);
@@ -783,6 +807,31 @@ async fn accept_task_event(
     .await?;
     transaction.commit().await?;
     Ok(decision)
+}
+
+async fn assert_task_watermark(pool: &sqlx::PgPool, aggregate_id: Uuid) -> TestResult {
+    let watermark: i64 = sqlx::query_scalar(
+        "SELECT last_sequence FROM resource.inbox_watermarks
+         WHERE consumer='task-lifecycle-replay-v1' AND aggregate_id=$1",
+    )
+    .bind(aggregate_id)
+    .fetch_one(pool)
+    .await?;
+    let request_revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM resource.resource_requests WHERE request_id=$1")
+            .bind(aggregate_id)
+            .fetch_optional(pool)
+            .await?;
+    let lease_revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM resource.resource_leases WHERE lease_id=$1")
+            .bind(aggregate_id)
+            .fetch_optional(pool)
+            .await?;
+    let current_revision = request_revision
+        .or(lease_revision)
+        .ok_or("watermark aggregate is not a Resource request or lease")?;
+    assert_eq!(watermark, current_revision);
+    Ok(())
 }
 
 #[tokio::test]
