@@ -1065,7 +1065,7 @@ onUnmounted(() => {
   border: 2px dashed var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-large);
   background: var(--md-sys-color-surface-container-low);
-  transition: border-color 0.2s, background 0.2s;
+  transition: border-color var(--motion-duration-fast) var(--motion-ease-out), background-color var(--motion-duration-fast) var(--motion-ease-out);
 }
 
 .drop-zone--active {

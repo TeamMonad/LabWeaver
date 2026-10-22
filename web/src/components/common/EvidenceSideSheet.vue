@@ -86,7 +86,7 @@ function onOpenAutoFocus(event: Event) {
   box-shadow: var(--md-sys-elevation-3);
   outline: none;
   transform: translateX(0);
-  transition: transform 0.25s ease;
+  transition: transform var(--motion-duration-slow) var(--motion-ease-drawer);
 }
 
 .evidence-sheet__header {
