@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::*;
+use async_nats::jetstream::consumer::PullConsumer;
 use auth::{ServiceTokenClient, ServiceTokenClientConfig};
 use axum::{
     extract::Request,
@@ -14,11 +15,13 @@ use axum::{
 };
 use contracts::http::TaskResourceStatus;
 use contracts::resource::{CapacityClaimState, ResourceLeaseState};
+use futures_util::StreamExt;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
     service::TowerToHyperService,
 };
+use persistence_sqlx::{Domain, InboxDecision, InboxStore, Sha256Digest};
 use reqwest::Url;
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use task_execution::resource::{
@@ -549,6 +552,172 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
         Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
     );
     Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResult {
+    let fixture = Fixture::start().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    approve(&fixture.faults.store, &request).await?;
+    let claimed = fixture.wait_for_claim().await?;
+    let active = fixture
+        .lifecycle
+        .acknowledge(&claimed, "labweaver-evaluation")
+        .await?;
+    fixture.lifecycle.release(&active).await?;
+
+    let expected: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource.outbox_events WHERE published_at IS NULL",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let nats = GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(4222.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .with_cmd(["-js"])
+        .start()
+        .await?;
+    let client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let context = async_nats::jetstream::new(client.clone());
+    context
+        .create_stream(async_nats::jetstream::stream::Config {
+            name: "TASK_LIFECYCLE_EVENTS".to_owned(),
+            subjects: vec!["labweaver.resource.>".to_owned()],
+            ..Default::default()
+        })
+        .await?
+        .create_consumer(async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some("task-lifecycle-replay-v1".to_owned()),
+            filter_subject: "labweaver.resource.>".to_owned(),
+            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+            ..Default::default()
+        })
+        .await?;
+    let dispatcher = ResourceOutboxDispatcher::new(
+        fixture.pool.clone(),
+        client.clone(),
+        Duration::from_secs(5),
+    )?;
+    while matches!(
+        dispatcher.dispatch_once().await?,
+        ResourceOutboxOutcome::Published { .. }
+    ) {}
+    let stream = context.get_stream("TASK_LIFECYCLE_EVENTS").await?;
+    let consumer: PullConsumer = stream
+        .get_consumer("task-lifecycle-replay-v1")
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut messages = consumer.messages().await?;
+    let mut received = Vec::new();
+    for _ in 0..usize::try_from(expected)? {
+        let message = tokio::time::timeout(Duration::from_secs(5), messages.next())
+            .await?
+            .ok_or("NATS consumer closed before all lifecycle events arrived")??;
+        let event: contracts::events::CloudEvent<Value> = serde_json::from_slice(&message.payload)?;
+        message.ack().await.map_err(|error| error.to_string())?;
+        let aggregate_id: Uuid =
+            sqlx::query_scalar("SELECT aggregate_id FROM resource.outbox_events WHERE event_id=$1")
+                .bind(event.id.as_uuid())
+                .fetch_one(&fixture.pool)
+                .await?;
+        received.push((aggregate_id, event));
+    }
+    assert_eq!(received.len(), usize::try_from(expected)?);
+
+    let duplicate = received
+        .iter()
+        .find(|(_, event)| event.aggregate_sequence.0 == 1)
+        .ok_or("lifecycle emitted no sequence-one event")?
+        .1
+        .clone();
+    context
+        .publish(
+            duplicate.subject.clone(),
+            serde_json::to_vec(&duplicate)?.into(),
+        )
+        .await?
+        .await?;
+    let duplicate_message = tokio::time::timeout(Duration::from_secs(5), messages.next())
+        .await?
+        .ok_or("NATS duplicate delivery missing")??;
+    let duplicate_event: contracts::events::CloudEvent<Value> =
+        serde_json::from_slice(&duplicate_message.payload)?;
+    duplicate_message
+        .ack()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut groups =
+        std::collections::BTreeMap::<Uuid, Vec<contracts::events::CloudEvent<Value>>>::new();
+    for (aggregate_id, event) in received {
+        groups.entry(aggregate_id).or_default().push(event);
+    }
+    for (aggregate_id, mut events) in groups {
+        events.sort_by_key(|event| event.aggregate_sequence.0);
+        if events
+            .first()
+            .is_none_or(|event| event.aggregate_sequence.0 != 1)
+        {
+            continue;
+        }
+        if events.len() > 1 {
+            let out_of_order = events.last().ok_or("missing final lifecycle event")?;
+            assert_eq!(
+                accept_task_event(&fixture.pool, aggregate_id, out_of_order).await?,
+                InboxDecision::Gap
+            );
+        }
+        let mut expected_sequence = 1;
+        for event in &events {
+            let decision = accept_task_event(&fixture.pool, aggregate_id, event).await?;
+            if event.aggregate_sequence.0 == expected_sequence {
+                assert_eq!(decision, InboxDecision::Accepted);
+                expected_sequence += 1;
+            } else {
+                assert_eq!(decision, InboxDecision::Gap);
+            }
+        }
+    }
+    let duplicate_aggregate_id: Uuid =
+        sqlx::query_scalar("SELECT aggregate_id FROM resource.outbox_events WHERE event_id=$1")
+            .bind(duplicate_event.id.as_uuid())
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(
+        accept_task_event(&fixture.pool, duplicate_aggregate_id, &duplicate_event).await?,
+        InboxDecision::Duplicate
+    );
+    let status = fixture.lifecycle.load_status().await?;
+    assert!(status.cleanup_confirmed);
+    assert_eq!(status.request.state, ResourceRequestState::Expired);
+    Ok(())
+}
+
+async fn accept_task_event(
+    pool: &sqlx::PgPool,
+    aggregate_id: Uuid,
+    event: &contracts::events::CloudEvent<Value>,
+) -> TestResult<InboxDecision> {
+    let payload = serde_json::to_value(event)?;
+    let hash = Sha256Digest::of_canonical(&payload)?;
+    let mut transaction = pool.begin().await?;
+    let decision = InboxStore::accept(
+        &mut transaction,
+        Domain::Resource,
+        "task-lifecycle-replay-v1",
+        event.id.as_uuid(),
+        aggregate_id,
+        event.aggregate_sequence.0,
+        hash,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(decision)
 }
 
 #[tokio::test]
