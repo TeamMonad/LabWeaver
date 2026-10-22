@@ -137,7 +137,7 @@ impl FreezeBindingService {
             || instance
                 .eligibility_expires_at
                 .is_some_and(|deadline| deadline <= now)
-            || (instance.class == contracts::authoring::EnvironmentClass::Work
+            || (instance.has_resource_lease()
                 && instance
                     .operation
                     .lease_authorization
@@ -155,7 +155,8 @@ impl FreezeBindingService {
             .resolve(instance.release_id, instance.release_version)
             .await?;
         if release.withdrawn_at.is_some()
-            || release.projection.release.project_id != instance.project_id
+            || (instance.class == contracts::authoring::EnvironmentClass::Work
+                && release.projection.release.project_id != instance.project_id)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
         {
@@ -176,19 +177,38 @@ impl FreezeBindingService {
             },
         };
         let source = match instance.runtime_kind {
-            RuntimeKind::Container => EnvironmentFreezeSourceBinding::Container {
-                namespace: format!("lw-env-{}", instance.id),
-                persistent_volume_claim: "workspace".to_owned(),
-                storage_class_name: self.configuration.container_workspace_storage_class.clone(),
-            },
+            RuntimeKind::Container => {
+                let placement =
+                    crate::ContainerPlacement::load(&self.pool, instance.id, instance.project_id)
+                        .await
+                        .map_err(|_| FreezeBindingError::EnvironmentNotEligible)?;
+                EnvironmentFreezeSourceBinding::Container {
+                    namespace: placement.namespace.clone(),
+                    persistent_volume_claim: placement.resource_name("workspace"),
+                    storage_class_name: self
+                        .configuration
+                        .container_workspace_storage_class
+                        .clone(),
+                }
+            }
             RuntimeKind::VirtualMachine => {
                 self.vm_configuration()?;
                 let public_key = request
                     .collector_public_key_openssh
                     .as_deref()
                     .ok_or(FreezeBindingError::CollectorKeyRequired)?;
-                self.resolve_vm(instance.id, instance.generation, public_key, now)
-                    .await?
+                self.resolve_vm(
+                    instance.id,
+                    instance.generation,
+                    crate::kubevirt_provider::guest_username(
+                        crate::runtime_admission::authorized_uid(&instance, &release.projection)
+                            .map_err(|_| FreezeBindingError::EnvironmentNotEligible)?,
+                        &self.vm_configuration()?.0.username,
+                    ),
+                    public_key,
+                    now,
+                )
+                .await?
             }
         };
         Ok(EnvironmentFreezeBinding {
@@ -346,7 +366,8 @@ impl FreezeBindingService {
             .resolve(instance.release_id, instance.release_version)
             .await?;
         if release.withdrawn_at.is_some()
-            || release.projection.release.project_id != instance.project_id
+            || (instance.class == contracts::authoring::EnvironmentClass::Work
+                && release.projection.release.project_id != instance.project_id)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
         {
@@ -377,6 +398,11 @@ impl FreezeBindingService {
             .resolve_vm_execution(
                 instance.id,
                 instance.generation,
+                crate::kubevirt_provider::guest_username(
+                    crate::runtime_admission::authorized_uid(&instance, &release.projection)
+                        .map_err(|_| FreezeBindingError::EnvironmentNotEligible)?,
+                    &self.vm_configuration()?.0.username,
+                ),
                 &request.public_key_openssh,
                 principal,
                 &purpose_key,
@@ -395,10 +421,12 @@ impl FreezeBindingService {
         Ok(binding)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_vm(
         &self,
         environment_id: EnvironmentId,
         generation: u64,
+        username: &str,
         public_key_openssh: &str,
         now: UtcTimestamp,
     ) -> Result<EnvironmentFreezeSourceBinding, FreezeBindingError> {
@@ -423,6 +451,7 @@ impl FreezeBindingService {
         let source_identity = Sha256Digest::of_canonical(&serde_json::json!({
             "environmentId": environment_id,
             "generation": generation,
+            "username": username,
             "namespace": format!("lw-env-{environment_id}"),
             "vmUid": vm_uid,
             "rootDiskUid": root_disk_uid,
@@ -446,7 +475,7 @@ impl FreezeBindingService {
             namespace: format!("lw-env-{environment_id}"),
             host,
             port: 22,
-            username: vm.username.clone(),
+            username: username.to_owned(),
             workspace_root: vm.workspace_root.clone(),
             expected_host_key_sha256,
             source_identity,
@@ -460,6 +489,7 @@ impl FreezeBindingService {
         &self,
         environment_id: EnvironmentId,
         generation: u64,
+        username: &str,
         public_key_openssh: &str,
         principal: &str,
         purpose_key: &str,
@@ -488,6 +518,7 @@ impl FreezeBindingService {
         let source_identity = Sha256Digest::of_canonical(&serde_json::json!({
             "environmentId": environment_id,
             "generation": generation,
+            "username": username,
             "namespace": format!("lw-env-{environment_id}"),
             "vmUid": vm_uid,
             "rootDiskUid": root_disk_uid,
@@ -513,7 +544,7 @@ impl FreezeBindingService {
             namespace: format!("lw-env-{environment_id}"),
             host,
             port: 22,
-            username: vm.username.clone(),
+            username: username.to_owned(),
             workspace_root: vm.workspace_root.clone(),
             expected_host_key_sha256,
             source_identity,

@@ -23,6 +23,8 @@ pub struct PackageFile {
     pub path: String,
     /// Immutable object reference.
     pub object: ArtifactRef,
+    /// SHA-256 of the actual bytes of this exact immutable object version.
+    pub sha256: String,
 }
 
 /// Immutable, atomically completed teacher material package.
@@ -66,6 +68,16 @@ impl ProblemPackage {
                 ));
             }
             previous = Some(&file.path);
+            if file.sha256.len() != 64
+                || !file
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(AuthoringError::InvalidPackage(
+                    "file SHA-256 is invalid".to_owned(),
+                ));
+            }
             validate_artifact_ref(&file.object)?;
         }
         Ok(())
@@ -512,28 +524,43 @@ pub struct EnvironmentEntrySpec {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentSecuritySpec {
-    pub user_policy: RuntimeUserPolicy,
+    #[serde(default)]
+    /// Null uses the verified platform default (root/UID 0 by default); an explicit UID is retained.
+    pub run_as_user: Option<u32>,
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(default)]
+    pub capabilities: BTreeSet<crate::platform_configuration::LinuxCapability>,
+    #[serde(default)]
+    pub seccomp: RuntimeSeccompProfile,
+    #[serde(default)]
     pub root_filesystem_policy: RootFilesystemPolicy,
+    #[serde(default)]
     pub privilege_escalation_policy: PrivilegeEscalationPolicy,
     pub public_exposure_policy: PublicExposurePolicy,
     pub security_profile_binding: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeUserPolicy {
-    NonRootRequired,
+pub enum RuntimeSeccompProfile {
+    #[default]
+    RuntimeDefault,
+    Unconfined,
 }
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootFilesystemPolicy {
     ReadOnlyRequired,
+    #[default]
     MutableRequired,
 }
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivilegeEscalationPolicy {
+    #[default]
     Deny,
+    Allow,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -703,6 +730,30 @@ impl EnvironmentSpec {
                 "entries and fail-closed security posture are required".to_owned(),
             ));
         }
+        if self.security.run_as_user == Some(u32::MAX) {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "runAsUser cannot use the reserved Linux UID".to_owned(),
+            ));
+        }
+        if (self.security.privileged
+            && (!self.security.capabilities.is_empty()
+                || self.security.privilege_escalation_policy != PrivilegeEscalationPolicy::Allow
+                || self.security.seccomp != RuntimeSeccompProfile::Unconfined))
+            || (!self.security.privileged
+                && self.security.seccomp == RuntimeSeccompProfile::Unconfined)
+        {
+            return Err(AuthoringError::InvalidEnvironmentSpec("privileged requires explicit escalation and unconfined seccomp, grants all capabilities, and cannot use an add list; ordinary containers require runtime-default seccomp".to_owned()));
+        }
+        if self
+            .security
+            .capabilities
+            .contains(&crate::platform_configuration::LinuxCapability::SysAdmin)
+            && self.security.privilege_escalation_policy != PrivilegeEscalationPolicy::Allow
+        {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "SYS_ADMIN requires privilegeEscalationPolicy allow".to_owned(),
+            ));
+        }
         let mut entry_names = BTreeSet::new();
         for entry in &self.entries {
             if entry.name.trim().is_empty()
@@ -730,8 +781,6 @@ impl EnvironmentSpec {
             } => {
                 if provider_binding.trim().is_empty()
                     || *service_port == 0
-                    || self.security.root_filesystem_policy
-                        != RootFilesystemPolicy::ReadOnlyRequired
                     || !self
                         .entries
                         .iter()
@@ -752,6 +801,13 @@ impl EnvironmentSpec {
                 storage_class_binding,
                 ssh_port,
             } => {
+                if self.security.privileged
+                    || !self.security.capabilities.is_empty()
+                    || self.security.seccomp != RuntimeSeccompProfile::RuntimeDefault
+                    || self.security.root_filesystem_policy != RootFilesystemPolicy::MutableRequired
+                {
+                    return Err(AuthoringError::InvalidEnvironmentSpec("VM guests require a mutable system disk; container privileged/capabilities/seccomp settings cannot be applied to a guest".to_owned()));
+                }
                 if matches!(self.network, NetworkPolicySpec::AllowAll) {
                     return Err(AuthoringError::InvalidEnvironmentSpec(
                         "allow_all network policy is supported only by container runtimes"
@@ -912,6 +968,29 @@ pub struct AgentRunHistoryPage {
     pub page: u32,
     pub page_size: u16,
     pub has_more: bool,
+}
+
+/// Agent-owned task read model with the current attempt separate from history.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunTaskProgress {
+    pub run_id: AgentRunId,
+    pub project_id: ProjectId,
+    pub revision: Revision,
+    pub state: AgentRunState,
+    pub current: Vec<AgentTrackTaskProgress>,
+    pub history: Vec<AgentTrackTaskProgress>,
+    pub page: u32,
+    pub page_size: u16,
+    pub has_more: bool,
+}
+
+/// An Agent track's business identity and its actual execution progress.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentTrackTaskProgress {
+    pub track: AgentTrackKind,
+    pub progress: crate::execution::TaskAttemptProgress,
 }
 
 impl AgentRun {
@@ -1259,6 +1338,9 @@ impl CandidateApproval {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthoringApproval {
+    /// Course teacher authority captured in the same Control approval transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teacher_scope: Option<crate::runtime_authorization::CourseTeacherApprovalScope>,
     pub id: ApprovalId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,

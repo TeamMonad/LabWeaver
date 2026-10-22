@@ -1,7 +1,12 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios'
 import { API_AUTH_MODE, API_BASE_URL } from '@/config'
 import { getOidcAccessToken } from '@/composables/useAuth'
+import {
+  isBffWriteBlocked,
+  notifyBffCsrfSessionInvalidation,
+} from '@/api/bffSessionBarrier'
 import type { ProblemDetails } from '@/generated/contracts'
+import type { Auth } from '@/generated/contracts/core/auth.gen'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 
@@ -21,6 +26,7 @@ export interface LabWeaverApiClientOptions {
 export type LabWeaverClientDiagnostic =
   | 'LW_SDK_CONFIGURATION_INVALID'
   | 'LW_SDK_AUTH_TOKEN_UNAVAILABLE'
+  | 'LW_SDK_SESSION_REFRESH_REQUIRED'
   | 'LW_SDK_PROBLEM_INVALID'
   | 'LW_SDK_REQUEST_CANCELLED'
   | 'LW_SDK_REQUEST_TIMEOUT'
@@ -76,12 +82,39 @@ function isUnsafeMethod(method: string | undefined): boolean {
   return !['get', 'head', 'options'].includes((method ?? 'get').toLowerCase())
 }
 
-function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfTokenProvider {
+/** Diagnostics that mean the cached synchronizer token is no longer valid for the current session. */
+const CSRF_CACHE_INVALIDATING_DIAGNOSTICS = new Set([
+  'LW_AUTH_CSRF_REJECTED',
+  'LW_AUTH_CSRF_REQUIRED',
+])
+
+type BffCsrfTokenCache = {
+  getToken: CsrfTokenProvider
+  invalidate: () => void
+}
+
+/**
+ * Caches BFF CSRF tokens by expiry (30s skew) and supports explicit invalidation.
+ * Session cookies are HttpOnly, so cross-tab login/logout cannot be keyed from JS;
+ * callers invalidate when Access returns a CSRF rejection diagnostic.
+ */
+export function createBffCsrfTokenProvider(baseUrl: string, timeout: number): BffCsrfTokenCache {
   let cached: { token: string; expiresAt: number } | undefined
   let inFlight: Promise<string | undefined> | undefined
-  return async () => {
+  // Bumps on invalidate so a fetch that started before a session switch cannot
+  // repopulate the cache after invalidate() clears it.
+  let epoch = 0
+
+  const invalidate = (): void => {
+    epoch += 1
+    cached = undefined
+    inFlight = undefined
+  }
+
+  const getToken: CsrfTokenProvider = async () => {
     if (cached && cached.expiresAt - Date.now() > 30_000) return cached.token
     if (inFlight) return inFlight
+    const fetchEpoch = epoch
     inFlight = axios
       .get('/api/v1/auth/csrf', {
         baseURL: baseUrl,
@@ -95,14 +128,28 @@ function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfToken
         if (typeof body.csrfToken !== 'string' || !body.csrfToken || !Number.isFinite(expiresAt)) {
           throw new LabWeaverApiError('LW_SDK_PROBLEM_INVALID', 'The BFF returned an invalid CSRF response.')
         }
+        if (fetchEpoch !== epoch) {
+          // Session changed while this fetch was in flight; do not cache a stale result.
+          return body.csrfToken
+        }
         cached = { token: body.csrfToken, expiresAt }
         return cached.token
       })
       .finally(() => {
-        inFlight = undefined
+        if (fetchEpoch === epoch) inFlight = undefined
       })
     return inFlight
   }
+
+  return { getToken, invalidate }
+}
+
+function isCsrfCacheInvalidatingError(error: AxiosError): boolean {
+  const status = error.response?.status
+  if (status !== 403 && status !== 401) return false
+  const data = error.response?.data
+  if (!isProblemDetails(data)) return false
+  return CSRF_CACHE_INVALIDATING_DIAGNOSTICS.has(data.diagnosticCode)
 }
 
 /** Strictly decodes the RFC 9457 extension shared by all generated SDK calls. */
@@ -112,11 +159,16 @@ export function decodeProblemDetails(error: unknown): ProblemDetails | undefined
   return isProblemDetails(error.response?.data) ? error.response.data : undefined
 }
 
-function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeaverApiAuthentication): void {
-  const csrfToken =
-    authentication.mode === 'bff'
-      ? (authentication.csrfToken ?? createBffCsrfTokenProvider(instance.defaults.baseURL ?? '', instance.defaults.timeout as number))
-      : undefined
+function attachAuthInterceptor(
+  instance: AxiosInstance,
+  authentication: LabWeaverApiAuthentication,
+): { invalidateCsrf?: () => void } {
+  const csrf: { getToken: CsrfTokenProvider; invalidate?: () => void } | undefined =
+    authentication.mode !== 'bff'
+      ? undefined
+      : authentication.csrfToken
+        ? { getToken: authentication.csrfToken }
+        : createBffCsrfTokenProvider(instance.defaults.baseURL ?? '', instance.defaults.timeout as number)
 
   instance.interceptors.request.use(async (config) => {
     if (authentication.mode === 'bearer') {
@@ -127,7 +179,15 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
         config.headers.Authorization = `Bearer ${token}`
       }
     } else if (isUnsafeMethod(config.method)) {
-      const token = await csrfToken?.()
+      // After a CSRF session rejection, block writes until useAuth (or tests)
+      // acknowledge a refreshed identity — prevents re-submitting a stale form as B.
+      if (isBffWriteBlocked()) {
+        throw new LabWeaverApiError(
+          'LW_SDK_SESSION_REFRESH_REQUIRED',
+          'BFF session changed; refresh the authenticated UI before retrying this write.',
+        )
+      }
+      const token = await csrf?.getToken()
       if (!token) {
         throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
       }
@@ -135,15 +195,24 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
     }
     return config
   })
+
+  return { invalidateCsrf: csrf?.invalidate }
 }
 
-function attachResponseInterceptor(instance: AxiosInstance): void {
+function attachResponseInterceptor(
+  instance: AxiosInstance,
+  options?: { onCsrfRejection?: () => void },
+): void {
   instance.interceptors.response.use(
     (response) => response,
     (error: unknown) => {
       if (error instanceof LabWeaverApiError) return Promise.reject(error)
       if (!axios.isAxiosError(error)) {
         return Promise.reject(new LabWeaverApiError('LW_SDK_TRANSPORT_FAILED', 'The API transport failed.'))
+      }
+      // Invalidate only on known CSRF diagnostics — never auto-replay the failed write.
+      if (options?.onCsrfRejection && isCsrfCacheInvalidatingError(error)) {
+        options.onCsrfRejection()
       }
       if (axios.isCancel(error) || error.code === AxiosError.ERR_CANCELED) {
         return Promise.reject(new LabWeaverApiError('LW_SDK_REQUEST_CANCELLED', 'The API request was cancelled.'))
@@ -156,6 +225,26 @@ function attachResponseInterceptor(instance: AxiosInstance): void {
       return Promise.reject(error)
     },
   )
+}
+
+/**
+ * Shared auth resolver for generated REST/SSE.
+ * Only HTTP bearer schemes receive an OIDC token; cookie/apiKey schemes return
+ * undefined so setAuthParams does not invent a handwritten Cookie header.
+ */
+function resolveBearerAuth(
+  accessToken: AccessTokenProvider,
+): (auth: Auth) => Promise<string | undefined> {
+  return async (auth) => {
+    if (auth.type !== 'http' || auth.scheme !== 'bearer') {
+      return undefined
+    }
+    const token = await accessToken()
+    if (!token) {
+      throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+    }
+    return token
+  }
 }
 
 /** The only supported Public SDK initialization path for browser consumers. */
@@ -173,14 +262,34 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
     headers: { Accept: 'application/json, application/problem+json' },
   })
 
-  attachAuthInterceptor(instance, options.authentication)
-  attachResponseInterceptor(instance)
+  const { invalidateCsrf } = attachAuthInterceptor(instance, options.authentication)
+  attachResponseInterceptor(instance, {
+    onCsrfRejection: invalidateCsrf
+      ? () => {
+          invalidateCsrf()
+          notifyBffCsrfSessionInvalidation()
+        }
+      : undefined,
+  })
+
+  // Axios interceptors cover REST; generated SSE uses fetch via createSseClient
+  // and only picks up Authorization through the generated `auth` resolver.
+  // That resolver must reject like the Axios interceptor — returning undefined
+  // lets generated SSE issue an unauthenticated fetch.
+  const authentication = options.authentication
+  const auth =
+    authentication.mode === 'bearer'
+      ? resolveBearerAuth(authentication.accessToken)
+      : undefined
 
   return createClient({
     axios: instance,
     baseURL: baseUrl,
     timeout,
-  })
+    auth,
+    // BFF SSE (fetch) must send the session cookie; REST already uses axios withCredentials.
+    ...(authentication.mode === 'bff' ? { credentials: 'include' } : {}),
+  } as Parameters<typeof createClient>[0])
 }
 
 export const apiClient = createLabWeaverApiClient({
@@ -202,13 +311,20 @@ const sdkTransport: AxiosInstance = axios.create({
   headers: { Accept: 'application/json, application/problem+json' },
 })
 
-attachAuthInterceptor(
+const { invalidateCsrf: invalidateSdkCsrf } = attachAuthInterceptor(
   sdkTransport,
   API_AUTH_MODE === 'bff'
     ? { mode: 'bff' }
     : { mode: 'bearer', accessToken: getOidcAccessToken },
 )
-attachResponseInterceptor(sdkTransport)
+attachResponseInterceptor(sdkTransport, {
+  onCsrfRejection: invalidateSdkCsrf
+    ? () => {
+        invalidateSdkCsrf()
+        notifyBffCsrfSessionInvalidation()
+      }
+    : undefined,
+})
 
 /** Initialize the generated SDK client transport before the Vue app mounts. */
 export async function initializeSdkClient(): Promise<void> {
@@ -218,9 +334,7 @@ export async function initializeSdkClient(): Promise<void> {
     baseURL: '',
     auth:
       API_AUTH_MODE === 'bearer'
-        ? async () => {
-            return getOidcAccessToken()
-          }
+        ? resolveBearerAuth(getOidcAccessToken)
         : // BFF mode relies on the session cookie; same-origin fetch sends it.
           undefined,
   })

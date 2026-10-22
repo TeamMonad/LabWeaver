@@ -46,23 +46,50 @@ domains:
       - id: 13
         file: control/0013_platform_image_multipart_uploads.sql
         sha256: b81fd23d1a129375bca4856db443afdc7a3b634b54959e6511ab1a29e21dc5b9
+      - id: 14
+        file: control/0014_material_upload_identity.sql
+        sha256: 4298b208ad1ec4f3a482e4444a42354d248e8db5c54870f3bc5c2becee796e82
+      - id: 15
+        file: control/0015_platform_configuration.sql
+        sha256: 72e5b99f01936eb48931e34c349cd4f4aea1afe95320050dce1c206ebb8fd4c7
+      - id: 16
+        file: control/0016_object_authorization.sql
+        sha256: 0190e9995d4a31cdd7b2c13f62d09f98d99133cdf0adf8835c1f94483740b301
+      - id: 17
+        file: control/0017_membership_governance.sql
+        sha256: 372889f419e80a01ef634d0175474ded486dd630e1cf0b150c11b461a8715218
+      - id: 18
+        file: control/0018_platform_configuration_bundles.sql
+        sha256: 8a303e68bb54033d4477561b87e900ca545cf0a14d0a630e5b98228a8fcdfde8
+      - id: 19
+        file: control/0019_runtime_authorization_reads.sql
+        sha256: 9d8a06ba7f3baf03b41b1317688b423c68cdf5a9362b0a8405258024fdf918d3
   - name: access
     migrations:
       - id: 1
         file: access/0001_platform_baseline.sql
-        sha256: c14b59b9c628e4b8fc3b48bc6592b59fb1d52fef875b6b893df3865189e16bf5
+        sha256: 3910f4e149f9287f472323e903b4e5ed52e775c695f7fe93c4592e942462304a
       - id: 2
         file: access/0002_console_capabilities_and_sessions.sql
         sha256: 68588d75fa6a183bb1cdd62c4e8683ba450140809f22a5713ff684a1a3648ff9
       - id: 3
         file: access/0003_independent_project_memberships.sql
-        sha256: 25e05e7390c6a8859889ce5f778ba153e2b8cee2a806dddf41a50f3aa1bbfa6b
+        sha256: 9c44c24a51be157e3892ca1adc90186f1e25900dbc5b304086ed39ed8363f296
       - id: 4
         file: access/0004_actor_identity_metadata.sql
         sha256: 0c3b55c0426b48457075665f7fe4ffc19a13adbfdf1d0bfd5c8c6c1088009b6e
       - id: 5
         file: access/0005_gateway_service_client_identity.sql
         sha256: de4db24883b329d64ccced38655e18f8a0106dc4824fea9a343156e729a3005a
+      - id: 6
+        file: access/0006_authorization_session_view.sql
+        sha256: faf2d5c3d75cd41eb700a29822395a5c756ee62c77537c6f0258c4ecc1be3ca4
+      - id: 7
+        file: access/0007_membership_actor_reads.sql
+        sha256: b30f1387516f16b5991573b9f6e8a61c78380db128f0a5f83f08b7da652744f4
+      - id: 8
+        file: access/0008_funded_experiment_console_fence.sql
+        sha256: 487108d32859120d34f33cf1689730c5b175226d8f89a960e8029cf2d4f8923d
   - name: environment
     migrations:
       - id: 1
@@ -148,6 +175,9 @@ domains:
       - id: 20
         file: agent/0020_unified_usage_payload_target.sql
         sha256: 8621e4c4ace464ed258103eb2bab16452b295667726f67e6cb43fe3e4cfa6329
+      - id: 21
+        file: agent/0021_resource_build_authority_read.sql
+        sha256: d0a2ed8ede540f6df2620df505b9c594895e0d2945d48a1de536cc7e4a9a829a
   - name: evaluation
     migrations:
       - id: 1
@@ -224,3 +254,21 @@ domains:
       - id: 14
         file: resource/0014_environment_resource_reservation_lifecycle.sql
         sha256: 703cda466c331b5751b90c671dd74c4d04e324d9a3510acf48b6150e3c8796e5
+      - id: 15
+        file: resource/0015_task_approval_deadline.sql
+        sha256: feacc78df78997cbf7c1602ced3693dfd316860829fdac8c552c4a2c5125750f
+      - id: 16
+        file: resource/0016_project_credits.sql
+        sha256: a08012d2e5a69f898f617d758432f55fba327bb22a898c7b6acdedcd39e9e758
+      - id: 17
+        file: resource/0017_cost_estimates.sql
+        sha256: 3b75defcbf48f5cfb58ae9bb88231ad83d39304a228977a31d32f61d751e215c
+      - id: 18
+        file: resource/0018_unknown_usage_deadline.sql
+        sha256: d68bca4b08afd1d1fb3d5ce07a7f72221a290eab4988f30ed261b8759d4bccd0
+      - id: 19
+        file: resource/0019_build_metering.sql
+        sha256: 3429e29240d69fae733faf7a7e87810039a421145b8d8f357efab85939410012
+      - id: 20
+        file: resource/0020_environment_funding.sql
+        sha256: 3889f72ee93635cfc8b030d55840625a799124e2307519352862d9b9102fdf3d

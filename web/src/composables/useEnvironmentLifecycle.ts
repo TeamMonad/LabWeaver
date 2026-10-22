@@ -9,10 +9,19 @@ import {
 import type { CreateEnvironmentRequestSchema, EnvironmentOperationAcceptedSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
+import { EXPERIMENT_CREATE_UNSUPPORTED } from '@/utils/runtimePermissions'
 
 export type LifecycleAction = 'start' | 'stop' | 'restart' | 'delete'
 
-type CreateEnvironmentInput = Pick<CreateEnvironmentRequestSchema, 'releaseId' | 'releaseVersion'> &
+/**
+ * Create requires the original Resource request whose approval selects the
+ * Environment target. Callers must not invent IDs; Experiment create without a
+ * real handoff is surfaced as LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED.
+ */
+export type CreateEnvironmentInput = Pick<
+  CreateEnvironmentRequestSchema,
+  'releaseId' | 'releaseVersion' | 'resourceRequestId'
+> &
   Partial<Pick<CreateEnvironmentRequestSchema, 'courseId' | 'displayLabel'>>
 
 export type LifecycleMutationResult =
@@ -44,14 +53,32 @@ export function useEnvironmentLifecycle(
         diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法创建环境。', false),
       }
     }
+    const resourceRequestId = request.resourceRequestId?.trim()
+    if (!resourceRequestId) {
+      return {
+        ok: false,
+        diagnostic: makeDiagnostic(
+          EXPERIMENT_CREATE_UNSUPPORTED.code,
+          EXPERIMENT_CREATE_UNSUPPORTED.message,
+          EXPERIMENT_CREATE_UNSUPPORTED.retryable,
+        ),
+      }
+    }
     let result
     try {
       result = await createEnvironment({
         headers: { 'Idempotency-Key': intentKey ?? idempotencyKey() },
         body: {
-          ...request,
+          releaseId: request.releaseId,
+          releaseVersion: request.releaseVersion,
+          resourceRequestId,
           projectId: id,
-          ...(courseId.value ? { courseId: courseId.value } : {}),
+          ...(request.displayLabel !== undefined ? { displayLabel: request.displayLabel } : {}),
+          ...(request.courseId !== undefined
+            ? { courseId: request.courseId }
+            : courseId.value
+              ? { courseId: courseId.value }
+              : {}),
         },
       })
     } catch (error) {

@@ -1044,6 +1044,8 @@ import { onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
+import { EXPERIMENT_CREATE_UNSUPPORTED } from '@/utils/runtimePermissions'
+import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
 import { useProjects } from '@/composables/useProjects'
@@ -1152,6 +1154,7 @@ const breadcrumbLabel = computed(() => props.teacherMode
   : isWorkConnection.value ? 'Work 项目环境' : '课程实验环境')
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
 const lifecycle = useEnvironmentLifecycle(projectId, courseId)
+const availableActions = useProjectAvailableActions(projectId)
 
 interface LifecycleTarget {
   environmentId: string
@@ -1270,12 +1273,10 @@ function freezeManifestText(data: EnvironmentInstanceSchema): string {
   return manifest ? JSON.stringify(manifest, null, 2) : ''
 }
 
-// One Idempotency-Key per logical intent, kept across retries until the intent
+// One Idempotency-Key per freeze intent, kept across retries until the intent
 // reaches a terminal outcome, so a network timeout + retry cannot mint a
-// duplicate frozen submission or a duplicate environment.
+// duplicate frozen submission.
 const freezeIntentKey = ref<string | null>(null)
-const createIntentKey = ref<string | null>(null)
-const createIntentReleaseId = ref<string | null>(null)
 
 watch(
   () => route.query.environmentId,
@@ -1809,7 +1810,8 @@ function isTerminalEnvironment(data: EnvironmentInstanceSchema): boolean {
 }
 
 function canStart(data: EnvironmentInstanceSchema) {
-  return !isTerminalEnvironment(data)
+  return availableActions.canStart.value
+    && !isTerminalEnvironment(data)
     && !hasActiveLifecycleOperation(data)
     && data.desiredState !== 'deleted'
     && data.desiredState !== 'running'
@@ -1818,7 +1820,8 @@ function canStart(data: EnvironmentInstanceSchema) {
 }
 
 function canStop(data: EnvironmentInstanceSchema) {
-  return !isTerminalEnvironment(data)
+  return availableActions.canStop.value
+    && !isTerminalEnvironment(data)
     && !hasActiveLifecycleOperation(data)
     && data.desiredState !== 'deleted'
     && data.desiredState !== 'stopped'
@@ -1827,7 +1830,9 @@ function canStop(data: EnvironmentInstanceSchema) {
 }
 
 function canRestart(data: EnvironmentInstanceSchema) {
-  return !isTerminalEnvironment(data)
+  return availableActions.canStart.value
+    && availableActions.canStop.value
+    && !isTerminalEnvironment(data)
     && !hasActiveLifecycleOperation(data)
     && data.desiredState !== 'deleted'
     && (data.observedState === 'ready' || data.observedState === 'stopped' || data.observedState === 'failed')
@@ -1881,36 +1886,14 @@ function applyEnvironmentId() {
 }
 
 async function createFromRelease(release: EnvironmentTemplateReleaseViewSchema) {
-  createDiagnostic.value = null
+  // Experiment / template create without an original ResourceRequest id is not
+  // wired yet (#258 required resourceRequestId). Do not invent IDs or call create.
   pendingRelease.value = release
-  // Keep one idempotency key per create intent (release + user) so a retry
-  // after a timeout replays the same create instead of minting a duplicate.
-  if (createIntentReleaseId.value !== release.id || !createIntentKey.value) {
-    createIntentKey.value = idempotencyKey()
-    createIntentReleaseId.value = release.id
-  }
-  const intentKey = createIntentKey.value
-  lifecycle.operating.add(`create:${release.id}`)
-  try {
-    const result = await lifecycle.create(
-      {
-        releaseId: release.id,
-        releaseVersion: release.version,
-      },
-      intentKey,
-    )
-    if (!result.ok) {
-      createDiagnostic.value = result.diagnostic
-    } else {
-      createIntentKey.value = null
-      createIntentReleaseId.value = null
-      if (result.accepted?.environmentId) {
-        router.replace({ query: { ...route.query, environmentId: result.accepted.environmentId } })
-      }
-    }
-  } finally {
-    lifecycle.operating.delete(`create:${release.id}`)
-  }
+  createDiagnostic.value = makeDiagnostic(
+    EXPERIMENT_CREATE_UNSUPPORTED.code,
+    EXPERIMENT_CREATE_UNSUPPORTED.message,
+    EXPERIMENT_CREATE_UNSUPPORTED.retryable,
+  )
 }
 
 function retryCreate() {

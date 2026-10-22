@@ -7,33 +7,35 @@ mod directory;
 mod grants;
 #[path = "../../http_transport.rs"]
 mod http_transport;
+mod membership_governance;
+mod object_authorization;
+mod oidc_login;
 mod proxy;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
 use auth::{
     AccessAuthFile, AuthConfig, AuthorizationContext, BffSession, EnvironmentOwnerResolverClient,
-    KeyRing, OidcProvider, OidcTransaction, RoleMappings, ServiceAuthConfig, ServiceAuthError,
-    ServiceIdentity, ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenVerifier,
-    TransportSecurityMode, authorize, build_backchannel_logout_authorizer, build_bearer_authorizer,
-    cleanup_expired_auth_state, consume_backchannel_logout, consume_oidc_transaction,
-    create_bff_session, extract_platform_roles, load_bff_session, load_logout_hint,
-    load_membership_snapshot, no_redirect_http_client, revoke_bff_session,
-    upsert_actor_with_metadata,
+    KeyRing, OidcProvider, RoleMappings, ServiceAuthConfig, ServiceAuthError, ServiceIdentity,
+    ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenVerifier, TransportSecurityMode,
+    authorize, build_backchannel_logout_authorizer, build_bearer_authorizer,
+    cleanup_expired_auth_state, consume_backchannel_logout, extract_platform_roles,
+    load_bff_session, load_logout_hint, load_membership_snapshot, no_redirect_http_client,
+    revoke_bff_session, upsert_actor_with_metadata,
 };
 use axum::{
     Json, Router,
     extract::{Form, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use contracts::http::PageQuery;
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    AuthorizationScope, CsrfTokenResponse, LogoutBrowserSessionResponse, OperationScopeKind,
-    OrganizationUserPage, Revision, UtcTimestamp, environment::EnvironmentOwnerResolutionRequest,
-    operation_contract,
+    AuthorizationScope, CsrfTokenResponse, DiagnosticCode, LogoutBrowserSessionResponse,
+    OperationScopeKind, OrganizationUserPage, ProblemDetails, Revision, UtcTimestamp,
+    environment::EnvironmentOwnerResolutionRequest, operation_contract,
 };
 use persistence_sqlx::Sha256Digest;
 
@@ -124,8 +126,8 @@ fn browser_router(state: Arc<AppState>) -> Router {
 )]
 fn browser_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/auth/login", get(login))
-        .route("/auth/callback", get(callback))
+        .route("/auth/login", get(oidc_login::login))
+        .route("/auth/callback", get(oidc_login::callback))
         .route("/auth/backchannel-logout", post(backchannel_logout))
         .route("/auth/logout", post(logout))
         .route("/api/v1/auth/session", get(session))
@@ -178,6 +180,14 @@ fn browser_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/projects/{project_id}/me/evaluation-results/{run_id}",
+            get(proxy::forward_evaluation),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/me/evaluation-tasks/{run_id}",
+            get(proxy::forward_evaluation),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/me/evaluation-tasks/submissions/{submission_id}",
             get(proxy::forward_evaluation),
         )
         .merge(control_browser_router())
@@ -272,6 +282,34 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
             get(proxy::forward_resource).post(proxy::forward_resource),
         )
         .route(
+            "/api/v1/projects/{project_id}/resource-cost-estimate",
+            post(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/build-cost-estimate",
+            post(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/build-costs/{build_request_id}/attempts/{attempt}",
+            get(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/credits/holds",
+            get(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/credits",
+            get(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/credits/ledger",
+            get(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/resource/credits/operations",
+            post(proxy::forward_resource),
+        )
+        .route(
             "/api/v1/resource/rates",
             get(proxy::forward_resource).post(proxy::forward_resource),
         )
@@ -309,6 +347,26 @@ fn control_browser_router() -> Router<Arc<AppState>> {
 fn admin_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/api/v1/admin/platform-configuration",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/versions/{revision}",
+            get(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+            get(proxy::forward_control).post(proxy::forward_control_bundle),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/applies",
+            post(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/applies/{apply_id}",
+            get(proxy::forward_control),
+        )
+        .route(
             "/api/v1/admin/images",
             axum::routing::any(proxy::forward_control),
         )
@@ -345,6 +403,26 @@ fn admin_browser_router() -> Router<Arc<AppState>> {
 fn project_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/api/v1/projects/{project_id}/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}/accept",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}/revoke",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects",
             axum::routing::any(proxy::forward_control),
         )
@@ -354,6 +432,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/projects/{project_id}/archive",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/available-actions",
             axum::routing::any(proxy::forward_control),
         )
         .route(
@@ -373,6 +455,14 @@ fn project_browser_router() -> Router<Arc<AppState>> {
             axum::routing::any(proxy::forward_control),
         )
         .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads/{upload_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads/{upload_id}/cancel",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects/{project_id}/problem-packages/{package_id}",
             axum::routing::any(proxy::forward_control),
         )
@@ -383,6 +473,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/projects/{project_id}/llm-egress-policies/active",
             axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/llm-egress-policies/active/rubric-rules",
+            get(proxy::forward_rubric_rules).post(proxy::forward_rubric_rules),
         )
         .route(
             "/api/v1/projects/{project_id}/llm-egress-policy-options",
@@ -403,6 +497,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}",
             axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/task-progress",
+            get(proxy::forward_control),
         )
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/work-configuration/approve",
@@ -472,6 +570,18 @@ fn project_browser_router() -> Router<Arc<AppState>> {
 
 fn course_browser_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route(
+            "/api/v1/courses/{course_id}/members",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/members/{actor_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
         .route(
             "/api/v1/courses/{course_id}/problem-package-uploads",
             axum::routing::any(proxy::forward_control),
@@ -889,118 +999,6 @@ fn resolver_secret(deployment: &AccessAuthFile, locator: &str) -> Result<Vec<u8>
     Ok(std::fs::read(path)?)
 }
 
-async fn login(State(state): State<Arc<AppState>>) -> Result<Redirect, ApiError> {
-    let transaction = OidcTransaction::generate()
-        .map_err(|_| ApiError::unavailable("LW_AUTH_OIDC_RANDOMNESS_UNAVAILABLE"))?;
-    let transaction_id = Uuid::now_v7();
-    let encrypted = state
-        .key_ring
-        .encrypt(
-            &serde_json::to_vec(&transaction)
-                .map_err(|_| ApiError::internal("LW_AUTH_OIDC_STATE_REJECTED"))?,
-            transaction_id.as_bytes(),
-        )
-        .map_err(|_| ApiError::internal("LW_AUTH_KEYRING_ENCRYPTION_FAILED"))?;
-    let state_hash = Sha256Digest::of_bytes(transaction.state.as_bytes()).to_string();
-    sqlx::query("INSERT INTO access.oidc_transactions (transaction_id, state_sha256, encrypted_payload, encryption_key_id, expires_at) VALUES ($1,$2,$3,$4,$5)")
-        .bind(transaction_id)
-        .bind(state_hash)
-        .bind(encrypted.payload)
-        .bind(encrypted.key_id)
-        .bind(
-            OffsetDateTime::now_utc()
-                + deployment_duration(state.deployment.browser.oidc_transaction_ttl_seconds)?,
-        )
-        .execute(&state.pool)
-        .await
-        .map_err(|_| ApiError::unavailable("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?;
-    let url = state
-        .provider
-        .authorization_url(&transaction)
-        .map_err(ApiError::from)?;
-    metrics::counter!("labweaver_auth_oidc_transactions", "result" => "created").increment(1);
-    Ok(Redirect::temporary(url.as_str()))
-}
-
-#[derive(Deserialize)]
-struct CallbackQuery {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
-}
-
-async fn callback(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<CallbackQuery>,
-) -> Result<Response, ApiError> {
-    if query.error.is_some() {
-        return Err(ApiError::unauthorized("LW_AUTH_TOKEN_INVALID"));
-    }
-    let code = query
-        .code
-        .ok_or_else(|| ApiError::unauthorized("LW_AUTH_OIDC_STATE_REQUIRED"))?;
-    let returned_state = query
-        .state
-        .ok_or_else(|| ApiError::unauthorized("LW_AUTH_OIDC_STATE_REQUIRED"))?;
-    let now = OffsetDateTime::now_utc();
-    let transaction = consume_oidc_transaction(&state.pool, &state.key_ring, &returned_state, now)
-        .await
-        .map_err(ApiError::from)?;
-    let identity = state
-        .provider
-        .exchange_code(code, &transaction, &state.oidc_http)
-        .await
-        .map_err(ApiError::from)?;
-    identity.validate_expiry_at(now).map_err(ApiError::from)?;
-    let roles = extract_platform_roles(
-        &identity.claims,
-        &state.deployment.oidc.role_claim_path,
-        &state.role_mappings,
-    )
-    .map_err(ApiError::from)?
-    .into_iter()
-    .collect::<Vec<_>>();
-    let metadata = identity_metadata(&identity.claims);
-    let actor = upsert_actor_with_metadata(
-        &state.pool,
-        state.config.issuer.as_str(),
-        &identity.subject,
-        metadata.username.as_deref(),
-        metadata.display_name.as_deref(),
-    )
-    .await
-    .map_err(ApiError::from)?;
-    let expires_at = auth::configured_session_expiry(
-        now,
-        deployment_duration(state.config.session_ttl_seconds)?,
-    )
-    .map_err(ApiError::from)?;
-    let session = create_bff_session(
-        &state.pool,
-        &state.key_ring,
-        auth::CreateBffSession {
-            actor_id: actor.actor_id,
-            roles,
-            authorization_revision: 1,
-            expires_at,
-            idle_ttl: deployment_duration(state.deployment.browser.session_idle_ttl_seconds)?,
-            oidc_sid: identity.sid,
-            logout_hint: identity.logout_hint,
-        },
-        now,
-    )
-    .await
-    .map_err(ApiError::from)?;
-    let mut response =
-        Redirect::temporary(state.config.post_logout_redirect_uri.as_str()).into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        session_cookie(&state, session.session_id, session.expires_at)?,
-    );
-    metrics::counter!("labweaver_auth_callbacks", "result" => "success").increment(1);
-    Ok(response)
-}
-
 #[derive(Deserialize)]
 struct BackchannelLogoutForm {
     logout_token: String,
@@ -1082,7 +1080,7 @@ async fn authorization_decision(
         .await
         .map_err(ApiError::from)?;
     let requested_scope = request.scope.clone();
-    let mut decision = authorize(
+    let mut decision = auth::object_authorization::authorize_operation(
         &AuthorizationContext {
             actor,
             course_memberships: memberships.course_memberships,
@@ -1090,11 +1088,7 @@ async fn authorization_decision(
             now,
         },
         requested_scope,
-        &policy
-            .allowed_roles
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>(),
+        policy,
     )
     .map_err(ApiError::from)?;
     resolve_environment_owner(&state, &mut decision, now).await?;
@@ -1107,6 +1101,7 @@ async fn authorization_decision(
         duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         actor_id = %decision.actor.actor_id,
         operation = policy.operation_id,
+        scope = ?decision.scope,
         diagnostic_code = "LW_AUTH_DECISION_PERMIT",
         retryable = false,
     );
@@ -1321,7 +1316,6 @@ fn effective_session_scopes(
     for membership in memberships.course_memberships {
         if membership.actor_id == actor.actor_id
             && membership.state == contracts::MembershipState::Active
-            && actor.roles.contains(&membership.role)
             && membership.expires_at.is_none_or(|value| value.get() > now)
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
@@ -1339,7 +1333,10 @@ fn effective_session_scopes(
     for membership in memberships.project_memberships {
         if membership.actor_id == actor.actor_id
             && membership.state == contracts::MembershipState::Active
-            && actor.roles.contains(&membership.role)
+            && membership
+                .object_role
+                .actions()
+                .contains(&contracts::object_authorization::ObjectAction::Browse)
             && membership.expires_at.is_none_or(|value| value.get() > now)
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
@@ -1568,13 +1565,23 @@ fn utc_timestamp(value: OffsetDateTime) -> Result<UtcTimestamp, ApiError> {
 }
 
 fn cookie_session_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
-    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
-    cookie.split(';').find_map(|part| {
-        let (name, value) = part.trim().split_once('=')?;
-        (name == state.deployment.browser.session_cookie_name)
-            .then(|| Uuid::parse_str(value).ok())
-            .flatten()
-    })
+    let mut session_id = None;
+    // HTTP/2 can split cookie pairs across fields. Never choose a principal
+    // from only the first field or from ambiguous duplicate session cookies.
+    for cookie in headers.get_all(header::COOKIE) {
+        for part in cookie.to_str().ok()?.split(';') {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if name == state.deployment.browser.session_cookie_name {
+                if session_id.is_some() {
+                    return None;
+                }
+                session_id = Some(Uuid::parse_str(value).ok()?);
+            }
+        }
+    }
+    session_id
 }
 
 fn session_cookie(
@@ -1801,10 +1808,35 @@ impl IntoResponse for ApiError {
             "status" => self.status.as_u16().to_string()
         )
         .increment(1);
-        let body = self
-            .body
-            .unwrap_or_else(|| serde_json::json!({"diagnosticCode": self.diagnostic}));
-        (self.status, Json(body)).into_response()
+        // Gateway heartbeat/close has an existing strict revision-conflict body.
+        // Keep explicitly supplied domain responses intact.
+        if let Some(body) = self.body {
+            return (self.status, Json(body)).into_response();
+        }
+        let context = telemetry::current_request_context()
+            .unwrap_or_else(telemetry::RequestContext::generate);
+        let request_id = context.request_id().to_owned();
+        let body = ProblemDetails {
+            problem_type: format!(
+                "urn:labweaver:problem:{}",
+                self.diagnostic.to_ascii_lowercase()
+            ),
+            title: "Access request blocked".to_owned(),
+            status: self.status.as_u16(),
+            detail: "The request was rejected by an access boundary.".to_owned(),
+            instance: format!("urn:labweaver:request:{request_id}"),
+            diagnostic_code: DiagnosticCode::registered(self.diagnostic),
+            request_id,
+            trace_id: Some(context.trace_id().to_owned()),
+            retryable,
+            violations: Vec::new(),
+        };
+        (
+            self.status,
+            [(header::CONTENT_TYPE, "application/problem+json")],
+            Json(body),
+        )
+            .into_response()
     }
 }
 
@@ -1855,9 +1887,16 @@ impl From<auth::OidcProviderError> for ApiError {
 impl From<auth::RepositoryError> for ApiError {
     fn from(error: auth::RepositoryError) -> Self {
         match error {
-            auth::RepositoryError::StateRejected
-            | auth::RepositoryError::SessionRejected
-            | auth::RepositoryError::ActorDisabled => {
+            auth::RepositoryError::StateRejected | auth::RepositoryError::Serialization(_) => {
+                Self::unauthorized("LW_AUTH_OIDC_STATE_REJECTED")
+            }
+            auth::RepositoryError::Transaction(error) => match error {
+                auth::OidcTransactionError::BrowserBindingMismatch => {
+                    Self::unauthorized("LW_AUTH_OIDC_BROWSER_REJECTED")
+                }
+                _ => Self::unauthorized("LW_AUTH_OIDC_STATE_REJECTED"),
+            },
+            auth::RepositoryError::SessionRejected | auth::RepositoryError::ActorDisabled => {
                 Self::unauthorized("LW_AUTH_SESSION_REJECTED")
             }
             auth::RepositoryError::ServiceIdentityDenied => {
@@ -1983,6 +2022,43 @@ mod tests {
         let _router = browser_routes();
     }
 
+    #[tokio::test]
+    async fn api_errors_preserve_status_diagnostics_and_retry_semantics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{body::to_bytes, http::header, response::IntoResponse};
+
+        for error in [
+            ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"),
+            ApiError::unauthorized("LW_AUTH_SESSION_REJECTED"),
+            ApiError::forbidden("LW_AUTH_CSRF_REJECTED"),
+            ApiError::not_found("LW_ACCESS_KEY_NOT_FOUND"),
+            ApiError::conflict("LW_ACCESS_KEY_CONFLICT"),
+            ApiError::precondition("LW_REVISION_CONFLICT"),
+            ApiError::unprocessable("LW_ACCESS_SSH_KEY_REJECTED"),
+            ApiError::internal("LW_ACCESS_STORE_CORRUPT"),
+            ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"),
+        ] {
+            let status = error.status;
+            let diagnostic = error.diagnostic;
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+            let body = to_bytes(response.into_body(), 16_384).await?;
+            let problem: contracts::ProblemDetails = serde_json::from_slice(&body)?;
+            assert_eq!(problem.status, status.as_u16());
+            assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
+            assert_eq!(
+                problem.retryable,
+                status == axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert!(!problem.request_id.is_empty());
+        }
+        Ok(())
+    }
+
     #[test]
     fn callback_session_expiry_uses_configured_lifetime_after_token_verification()
     -> Result<(), String> {
@@ -2011,5 +2087,42 @@ mod tests {
         let exchange = ApiError::from(auth::OidcProviderError::TokenExchange);
         assert_eq!(exchange.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(exchange.diagnostic, "LW_AUTH_OIDC_TOKEN_EXCHANGE_FAILED");
+    }
+    #[test]
+    fn session_project_scopes_follow_object_membership_without_a_role_switch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor_id = contracts::ActorId::new();
+        let project_id = contracts::ProjectId::new();
+        let expiry: contracts::UtcTimestamp = "2026-10-13T00:00:00.000Z".parse()?;
+        let actor = contracts::AuthenticatedActor {
+            actor_id,
+            roles: vec![contracts::PlatformRole::Student],
+            expires_at: expiry,
+        };
+        let members = auth::MembershipSnapshot {
+            course_memberships: vec![],
+            project_memberships: vec![contracts::ProjectMembership {
+                course_id: None,
+                project_id,
+                actor_id,
+                username: None,
+                display_name: None,
+                role: contracts::PlatformRole::Teacher,
+                object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
+                state: contracts::MembershipState::Active,
+                revision: contracts::Revision::new(3)?,
+                expires_at: None,
+            }],
+        };
+        let (scopes, _, _) = super::effective_session_scopes(
+            &actor,
+            members,
+            contracts::Revision::new(1)?,
+            expiry,
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .map_err(|e| std::io::Error::other(e.diagnostic))?;
+        assert!(scopes.contains(&contracts::AuthorizationScope::Project { project_id }));
+        Ok(())
     }
 }

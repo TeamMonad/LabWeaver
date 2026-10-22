@@ -47,7 +47,7 @@ describe('HomeView project navigation', () => {
     listProjects.mockReturnValue(new Promise((resolve) => { resolveProjects = resolve }))
 
     const { wrapper, router } = await createWrapper()
-    const financeCard = wrapper.findAll('.task-card').find((card) => card.get('.card-title').text() === '预算与费用')
+    const financeCard = wrapper.findAll('.task-card').find((card) => card.get('.card-title').text() === 'Credits、预算与费用')
     expect(financeCard).toBeDefined()
     expect(financeCard!.attributes('href')).toBe(`/admin/resource-finance?projectId=${persistedProjectId}`)
 

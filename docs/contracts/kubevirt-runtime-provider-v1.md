@@ -25,8 +25,8 @@ One VM operation is admitted only when all of these identities agree:
   immutable OCI source digest, disk SHA-256, capacity and disk format match the
   approved spec and reviewed deployment lock;
 - the release is not withdrawn and uses the active approval trust revision;
-- security requires a non-root guest, mutable VM root disk, denied privilege
-  escalation and denied public exposure.
+- security binds the declared guest UID (default 0/root), mutable VM root disk
+  and denied public exposure; guest root does not enable launcher/host privileged mode.
 
 `Stop` and namespace cleanup remain available after withdrawal so access and
 resources can fail closed. Provision, observe, start, restart, reset, retry and
@@ -122,7 +122,7 @@ exactly one of each owned runtime object unless noted:
 | Namespace | Deterministic name, Environment/course labels and controlled cleanup finalizer. |
 | ResourceQuota | The intent retains guest resources, compute-limit headroom and CDI budgets. Applied quota additionally covers KVM launcher overhead and native console resources, physical root-plus-scratch storage, at most two PVCs and two transient/runtime pods. |
 | NetworkPolicy | Default-deny ingress and egress; one additional SSH ingress rule from the exact Gateway, freeze collector, and (when configured) Evaluation runner namespace and pod selectors; optional reviewed restricted-egress rule. |
-| Secret | Fixed base64 `data.userdata` cloud-init with public user CA only; locked non-root user; no password, root login, forwarding, tunnel, X11, private key or `authorized_keys`. |
+| Secret | Fixed base64 `data.userdata` cloud-init with public user CA only; password-locked approved UID; root uses certificate-only login; no password, forwarding, tunnel, X11, private key or `authorized_keys`. |
 | DataVolume | Exact configured CDI `DataSource` and `StorageClass`, RWO Filesystem root disk with the approved logical storage request, immutable release/object/hash annotations. |
 | VirtualMachine | `runStrategy: Always`, explicit amd64 architecture, hardware-KVM node selector, graphics and serial console, virtio root PVC and cloud-init disk, pod network and SSH access. |
 | Service | ClusterIP only, port 22, deterministic selector and access-controlled annotation. |
@@ -220,3 +220,17 @@ They do not prove KubeVirt, CDI, guest boot, SSH or network enforcement.
 Cluster integration tests must exercise CDI import, VM/guest/SSH readiness, disk persistence
 across start-stop-start, duplicate request handling, denied non-Gateway network access,
 failure/cancel/recovery/delete cleanup and rejected connections after grant revocation.
+
+
+The VM bootstrap and freeze/execution bindings use the same guest account: UID 0
+selects `root`; an explicit nonzero UID selects the configured base guest account.
+Bootstrap verifies the actual account UID before starting SSH and rejects an
+unavailable or conflicting UID instead of substituting another identity. Its
+workspace root is the same configured absolute path used by collectors. Existing
+accounts require explicit UID verification because cloud-init ignores most user
+creation fields for existing accounts ([cloud-init users and groups](https://docs.cloud-init.io/en/latest/reference/modules.html#users-and-groups)).
+
+Evaluation's Ansible probe target currently rejects `root`; its owner must consume
+the Environment-issued root binding before that probe path supports guest root.
+Manifest and synthetic binding tests do not establish real guest SSH or probe
+operation. Launcher security and the Evaluation/Agent sandbox remain independent.

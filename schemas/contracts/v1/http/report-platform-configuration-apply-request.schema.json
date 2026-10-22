@@ -1,0 +1,170 @@
+{
+  "$defs": {
+    "ControlConfigurationDeploymentObservation": {
+      "additionalProperties": false,
+      "description": "An authorized executor's current Deployment roster and actual per-process readbacks.",
+      "properties": {
+        "deploymentGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deploymentUid": {
+          "type": "string"
+        },
+        "expectedReplicas": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "releaseName": {
+          "type": "string"
+        },
+        "replicas": {
+          "items": {
+            "$ref": "#/$defs/ControlConfigurationReplicaObservation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "deploymentUid",
+        "deploymentGeneration",
+        "expectedReplicas",
+        "namespace",
+        "releaseName",
+        "replicas"
+      ],
+      "type": "object"
+    },
+    "ControlConfigurationReplicaObservation": {
+      "additionalProperties": false,
+      "description": "Facts returned by a running Control process, rather than a reread of mounted files.",
+      "properties": {
+        "configurationSha256": {
+          "type": "string"
+        },
+        "desiredRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "encryptedBundleSha256": {
+          "type": "string"
+        },
+        "instanceId": {
+          "description": "Changes on process restart even if Kubernetes reuses the same Pod UID.",
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "podName": {
+          "type": "string"
+        },
+        "podUid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "podName",
+        "podUid",
+        "namespace",
+        "instanceId",
+        "desiredRevision",
+        "configurationSha256",
+        "encryptedBundleSha256",
+        "observedAt"
+      ],
+      "type": "object"
+    },
+    "PlatformConfigurationApplyStage": {
+      "enum": [
+        "requested",
+        "validating",
+        "applying",
+        "verifying",
+        "succeeded",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "PlatformConfigurationFailureReason": {
+      "description": "Bounded failure categories. Executor log content is never an API payload.",
+      "enum": [
+        "configuration_invalid",
+        "dependency_unavailable",
+        "execution_failed",
+        "verification_failed",
+        "external_result_unknown",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Only a permission-checked deployment identity can submit execution facts.",
+  "properties": {
+    "controlReplicaObservations": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControlConfigurationDeploymentObservation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "One bounded, fresh observation of all Control replicas. No replica lifecycle is stored."
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "failureReason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformConfigurationFailureReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observedConfigurationSha256": {
+      "description": "Required only on success and must match the immutable desired snapshot.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "observedEncryptedBundleSha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stage": {
+      "$ref": "#/$defs/PlatformConfigurationApplyStage"
+    }
+  },
+  "required": [
+    "expectedRevision",
+    "stage"
+  ],
+  "title": "ReportPlatformConfigurationApplyRequest",
+  "type": "object"
+}

@@ -61,6 +61,295 @@ impl PgFreezeStore {
         Self { pool }
     }
 
+    /// Reads current task scope, cancellation and lease facts without changing attempt state.
+    pub(crate) async fn model_input_task_is_active(
+        &self,
+        lease: &crate::EvaluationStepLease,
+    ) -> Result<bool, FreezeStoreError> {
+        let attempt =
+            i32::try_from(lease.attempt).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let revision =
+            i64::try_from(lease.revision.get()).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM evaluation.evaluation_runs r \
+             JOIN evaluation.evaluation_step_runs s ON s.run_id=r.run_id \
+             JOIN evaluation.evaluation_step_attempts a ON a.step_run_id=s.step_run_id \
+             WHERE r.run_id=$1 AND r.project_id=$2 AND r.course_id IS NOT DISTINCT FROM $3 \
+               AND r.state='running' AND NOT r.cancellation_requested \
+               AND s.step_run_id=$4 AND s.step_id=$5 AND s.state='running' \
+               AND s.revision=$6 AND s.current_attempt=$7 AND a.attempt=$7 \
+               AND a.task_run_id=$8 AND a.state='running' AND a.worker_id=$9 \
+               AND a.lease_token=$10 AND a.lease_expires_at>clock_timestamp())",
+        )
+        .bind(lease.run_id.as_uuid())
+        .bind(lease.project_id.as_uuid())
+        .bind(lease.course_id.map(CourseId::as_uuid))
+        .bind(lease.step_run_id.as_uuid())
+        .bind(&lease.step_id)
+        .bind(revision)
+        .bind(attempt)
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Validates current parent admission and returns its fixed deadline without contents.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one read binds the complete parent scope and immutable checkpoint metadata"
+    )]
+    pub(crate) async fn model_input_task_deadline(
+        &self,
+        submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        owner_id: contracts::ActorId,
+        release_id: contracts::EvaluationReleaseId,
+        release_revision: Revision,
+        task_id: contracts::TaskRunId,
+        parent_lease_sha256: &str,
+    ) -> Result<UtcTimestamp, FreezeStoreError> {
+        if parent_lease_sha256.len() != 64
+            || !parent_lease_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(FreezeStoreError::ContractInvalid);
+        }
+        let revision =
+            i64::try_from(release_revision.get()).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        // Extract only identity/deadline from the request; never materialize its contents.
+        let row=sqlx::query(
+            "SELECT a.lease_token,date_trunc('milliseconds',a.created_at) AS created_at,clock_timestamp() AS authority_now, \
+                    r.run_id,s.step_run_id,s.step_id,e.contract AS release, \
+                    a.execution_resources IS NOT NULL AS has_intent, \
+                    jsonb_build_object('kind',a.execution_resources->'kind', \
+                    'runId',a.execution_resources->'runId','stepRunId',a.execution_resources->'stepRunId', \
+                    'taskRunId',a.execution_resources->'taskRunId','requestTaskRunId',a.execution_resources#>'{request,taskRunId}', \
+                    'projectId',a.execution_resources#>'{request,projectId}','courseId',a.execution_resources#>'{request,courseId}', \
+                    'frozenSubmissionId',a.execution_resources#>'{request,frozenSubmissionId}', \
+                    'deadlineAt',a.execution_resources#>'{request,deadlineAt}', \
+                    'parentLeaseSha256',a.execution_resources#>'{request,inputAuthorization,source,parentLeaseSha256}') AS intent \
+             FROM evaluation.evaluation_runs r JOIN evaluation.evaluation_step_runs s ON s.run_id=r.run_id \
+             JOIN evaluation.evaluation_step_attempts a ON a.step_run_id=s.step_run_id \
+             JOIN evaluation.evaluation_releases e ON e.release_id=r.release_id AND e.project_id=r.project_id \
+               AND e.course_id IS NOT DISTINCT FROM r.course_id AND e.revision=r.release_revision AND e.state='active' \
+             WHERE r.frozen_submission_id=$1 AND r.project_id=$2 AND r.course_id IS NOT DISTINCT FROM $3 \
+               AND r.actor_id=$4 AND r.release_id=$5 AND r.release_revision=$6 \
+               AND r.state='running' AND NOT r.cancellation_requested \
+               AND s.role='advisory' AND s.state='running' AND s.current_attempt=a.attempt \
+               AND a.task_run_id=$7 AND a.state='running' AND a.lease_expires_at>clock_timestamp() \
+               AND r.contract->>'state'='running' AND r.contract->>'cancellationRequested'='false' \
+               AND s.contract->>'state'='running' \
+               AND s.contract->'revision'=to_jsonb(s.revision) \
+               AND s.contract->'currentAttempt'=to_jsonb(a.attempt)",
+        ).bind(submission_id.as_uuid()).bind(project_id.as_uuid()).bind(course_id.map(CourseId::as_uuid))
+        .bind(owner_id.as_uuid()).bind(release_id.as_uuid()).bind(revision).bind(task_id.as_uuid())
+        .fetch_optional(&self.pool).await?.ok_or(FreezeStoreError::NotFound)?;
+        let token: Uuid = row.try_get("lease_token")?;
+        if contracts::http::model_input_parent_lease_sha256(token) != parent_lease_sha256 {
+            return Err(FreezeStoreError::NotFound);
+        }
+        let release: contracts::evaluation::EvaluationRelease =
+            serde_json::from_value(row.try_get("release")?)
+                .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        release
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let step_id: String = row.try_get("step_id")?;
+        if release.id != release_id
+            || release.revision != release_revision
+            || release.project_id != project_id
+            || release.course_id != course_id
+            || !release
+                .evaluation_spec
+                .body()
+                .steps()
+                .iter()
+                .any(|s| s.id() == step_id && s.advisory_runner().is_some())
+        {
+            return Err(FreezeStoreError::ContractInvalid);
+        }
+        let deadline = if row.try_get::<bool, _>("has_intent")? {
+            let intent: Value = row.try_get("intent")?;
+            if intent["kind"] != "llm_review"
+                || intent["runId"] != serde_json::json!(row.try_get::<Uuid, _>("run_id")?)
+                || intent["stepRunId"] != serde_json::json!(row.try_get::<Uuid, _>("step_run_id")?)
+                || intent["taskRunId"] != serde_json::json!(task_id)
+                || intent["requestTaskRunId"] != serde_json::json!(task_id)
+                || intent["projectId"] != serde_json::json!(project_id)
+                || intent["courseId"] != serde_json::json!(course_id)
+                || intent["frozenSubmissionId"] != serde_json::json!(submission_id)
+                || intent["parentLeaseSha256"] != parent_lease_sha256
+            {
+                return Err(FreezeStoreError::ContractInvalid);
+            }
+            serde_json::from_value::<UtcTimestamp>(intent["deadlineAt"].clone())
+                .map_err(|_| FreezeStoreError::ContractInvalid)?
+        } else {
+            // First content preparation has no full request yet. Immutable attempt creation,
+            // not each recheck's clock, fixes the existing five-minute window.
+            UtcTimestamp::from_utc(
+                row.try_get::<OffsetDateTime, _>("created_at")? + time::Duration::minutes(5),
+            )
+            .map_err(|_| FreezeStoreError::ClockInvalid)?
+        };
+        if deadline.get() <= row.try_get::<OffsetDateTime, _>("authority_now")? {
+            return Err(FreezeStoreError::NotFound);
+        }
+        Ok(deadline)
+    }
+
+    /// Returns the unchanged frozen projection after current parent task admission succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an inactive, expired or differently scoped parent lease, an expired fixed
+    /// deadline, inconsistent ledger identities, and database failures.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "bind the task, owner and exact release before exposing metadata"
+    )]
+    pub async fn model_input_facts_for_task(
+        &self,
+        submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        owner_id: contracts::ActorId,
+        release_id: contracts::EvaluationReleaseId,
+        release_revision: Revision,
+        task_id: contracts::TaskRunId,
+        parent_lease_sha256: &str,
+    ) -> Result<Value, FreezeStoreError> {
+        self.model_input_task_deadline(
+            submission_id,
+            project_id,
+            course_id,
+            owner_id,
+            release_id,
+            release_revision,
+            task_id,
+            parent_lease_sha256,
+        )
+        .await?;
+        self.model_input_facts(
+            submission_id,
+            project_id,
+            course_id,
+            owner_id,
+            release_id,
+            release_revision,
+        )
+        .await
+    }
+
+    /// Reads ledger metadata for Control's model-input authorization without reading objects.
+    ///
+    /// The owner selector is distinct from the requesting user's authorization. The projection
+    /// grants no visibility or egress permission. Legacy commands return a null original session.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incomplete or differently scoped facts and any inconsistent ledger identity.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one read binds the exact owner, freeze and release without independent mutable lookups"
+    )]
+    pub async fn model_input_facts(
+        &self,
+        submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        owner_id: contracts::ActorId,
+        release_id: contracts::EvaluationReleaseId,
+        release_revision: Revision,
+    ) -> Result<Value, FreezeStoreError> {
+        let release_revision_db =
+            i64::try_from(release_revision.get()).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let row = sqlx::query(
+            "SELECT (f.contract || jsonb_build_object('systemFacts','{}'::jsonb)) AS frozen, \
+                    (c.contract - 'workerDispatch') AS command, \
+                    f.manifest_sha256 AS frozen_manifest_sha256, c.manifest_sha256 AS command_manifest_sha256, \
+                    f.content_sha256, f.object_version, f.environment_id, r.contract AS release \
+             FROM evaluation.frozen_submissions f \
+             JOIN evaluation.submission_freeze_commands c ON c.frozen_submission_id=f.frozen_submission_id \
+               AND c.project_id=f.project_id AND c.course_id IS NOT DISTINCT FROM f.course_id \
+               AND c.environment_id=f.environment_id AND c.actor_id=$4 \
+             JOIN evaluation.submission_freeze_requests q ON q.frozen_submission_id=f.frozen_submission_id \
+               AND q.project_id=f.project_id AND q.course_id IS NOT DISTINCT FROM f.course_id \
+               AND q.environment_id=f.environment_id AND q.state='completed' \
+               AND (q.contract || jsonb_build_object('systemFacts','{}'::jsonb)) = (f.contract || jsonb_build_object('systemFacts','{}'::jsonb)) \
+             JOIN evaluation.evaluation_releases r ON r.release_id=$5 AND r.project_id=f.project_id \
+               AND r.course_id IS NOT DISTINCT FROM f.course_id AND r.revision=$6 AND r.state='active' \
+             WHERE f.frozen_submission_id=$1 AND f.project_id=$2 AND f.course_id IS NOT DISTINCT FROM $3 \
+               AND f.contract->>'actorId'=$7",
+        )
+        .bind(submission_id.as_uuid()).bind(project_id.as_uuid())
+        .bind(course_id.map(CourseId::as_uuid)).bind(owner_id.as_uuid())
+        .bind(release_id.as_uuid()).bind(release_revision_db)
+        .bind(owner_id.to_string()).fetch_optional(&self.pool).await?
+        .ok_or(FreezeStoreError::NotFound)?;
+        let frozen: FrozenSubmission = serde_json::from_value(row.try_get("frozen")?)
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let command: crate::SubmissionFreezeCommand =
+            serde_json::from_value(row.try_get("command")?)
+                .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let release: contracts::evaluation::EvaluationRelease =
+            serde_json::from_value(row.try_get("release")?)
+                .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        frozen
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        command
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        release
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let manifest_sha256 = Sha256Digest::of_canonical(&command.manifest)
+            .map_err(|_| FreezeStoreError::ContractInvalid)?
+            .to_string();
+        if frozen.id != submission_id
+            || frozen.project_id != project_id
+            || frozen.course_id != course_id
+            || frozen.actor_id != owner_id
+            || command.frozen_submission_id != frozen.id
+            || command.project_id != project_id
+            || command.course_id != course_id
+            || command.actor_id != owner_id
+            || command.environment_id != frozen.environment.environment_id
+            || frozen.environment.environment_id.as_uuid()
+                != row.try_get::<Uuid, _>("environment_id")?
+            || command.environment_revision != frozen.environment.environment_revision
+            || command.manifest_revision != frozen.manifest_revision
+            || manifest_sha256 != row.try_get::<String, _>("frozen_manifest_sha256")?
+            || manifest_sha256 != row.try_get::<String, _>("command_manifest_sha256")?
+            || frozen.content_sha256 != row.try_get::<String, _>("content_sha256")?
+            || frozen.object.object_version != row.try_get::<String, _>("object_version")?
+            || release.id != release_id
+            || release.revision != release_revision
+            || release.project_id != project_id
+            || release.course_id != course_id
+            || release.state != contracts::evaluation::EvaluationReleaseState::Active
+        {
+            return Err(FreezeStoreError::ContractInvalid);
+        }
+        Ok(serde_json::json!({
+            "frozenSubmissionId": frozen.id, "projectId": frozen.project_id,
+            "courseId": frozen.course_id, "ownerActorId": frozen.actor_id,
+            "manifestRevision": frozen.manifest_revision, "manifestSha256": manifest_sha256,
+            "manifest": command.manifest, "archive": frozen.object,
+            "contentSha256": frozen.content_sha256, "files": frozen.files,
+            "environment": frozen.environment,
+            "evaluationRelease": {"id": release.id, "revision": release.revision, "state": release.state},
+            "inputAuthorizationContext": command.input_authorization_context,
+        }))
+    }
+
     /// Reads the database authority clock.
     ///
     /// # Errors

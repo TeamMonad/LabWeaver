@@ -281,6 +281,80 @@ impl PgEnvironmentStore {
             .await
     }
 
+    /// Binds a browser create intent to the aggregate already accepted by the original Resource
+    /// handoff. It never creates another environment, operation, lease, claim or credit hold.
+    pub async fn bind_funded_api_create(
+        &self,
+        idempotency_key: &str,
+        request: &CreateEnvironmentRequest,
+        actor_id: ActorId,
+        environment_id: EnvironmentId,
+    ) -> Result<EnvironmentOperationAccepted, EnvironmentStoreError> {
+        let hash = create_api_request_hash(request, actor_id)?;
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT contract FROM environment.environment_instances WHERE environment_id=$1 FOR UPDATE")
+            .bind(environment_id.as_uuid()).fetch_optional(&mut *tx).await?
+            .ok_or(EnvironmentStoreError::AllocationPending)?;
+        let mut instance = decode_contract(row.try_get("contract")?)?;
+        let lease = instance
+            .operation
+            .lease_authorization
+            .as_ref()
+            .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
+        if !instance.has_resource_lease()
+            || instance.owner_id != actor_id
+            || instance.project_id != request.project_id
+            || instance.course_id != request.course_id
+            || instance.release_id != request.release_id
+            || instance.release_version != request.release_version
+            || lease.resource_request_id != request.resource_request_id
+            || request
+                .display_label
+                .as_ref()
+                .is_some_and(|label| label != &instance.display_label)
+        {
+            return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
+        }
+        match IdempotencyStore::reserve(
+            &mut tx,
+            Domain::Environment,
+            "create",
+            idempotency_key,
+            hash,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => {
+                let accepted = serde_json::from_value(value)?;
+                tx.commit().await?;
+                return Ok(accepted);
+            }
+            IdempotencyDecision::Reserved => {}
+            IdempotencyDecision::Conflict => {
+                return Err(EnvironmentStoreError::IdempotencyConflict);
+            }
+            IdempotencyDecision::InProgress => {
+                return Err(EnvironmentStoreError::IdempotencyInProgress);
+            }
+        }
+        let operation: serde_json::Value = sqlx::query_scalar(
+            "SELECT contract FROM environment.environment_operations WHERE environment_id=$1 AND operation_kind='create' ORDER BY expected_revision,operation_id LIMIT 1")
+            .bind(environment_id.as_uuid()).fetch_one(&mut *tx).await?;
+        instance.operation = serde_json::from_value(operation)?;
+        instance.revision = instance.operation.accepted_revision;
+        let accepted = accepted_response(&instance);
+        IdempotencyStore::complete(
+            &mut tx,
+            Domain::Environment,
+            "create",
+            idempotency_key,
+            &serde_json::to_value(&accepted)?,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(accepted)
+    }
+
     async fn lookup_completed_api_command(
         &self,
         idempotency_key: &str,
@@ -388,6 +462,7 @@ impl PgEnvironmentStore {
             "SELECT contract FROM environment.environment_instances \
              WHERE contract->>'class'='experiment' \
                AND contract->>'observedState'='deleted' \
+               AND (contract->>'leaseId') IS NULL \
                AND COALESCE((contract->>'resourceReservationReleased')::boolean, false)=false \
              ORDER BY updated_at, environment_id LIMIT $1",
         )
@@ -410,6 +485,7 @@ impl PgEnvironmentStore {
              WHERE environment_id=$1 \
                AND contract->>'class'='experiment' \
                AND contract->>'observedState'='deleted' \
+               AND (contract->>'leaseId') IS NULL \
                AND COALESCE((contract->>'resourceReservationReleased')::boolean, false)=false",
         )
         .bind(environment_id.as_uuid())
@@ -626,7 +702,7 @@ impl PgEnvironmentStore {
             .lease_authorization
             .as_ref()
             .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
-        if current.class != contracts::authoring::EnvironmentClass::Work
+        if !current.has_resource_lease()
             || current.desired_state == DesiredEnvironmentState::Deleted
             || matches!(
                 current.operation.kind,
@@ -1090,8 +1166,7 @@ async fn create_in_transaction(
         || instance.operation.retry_from_phase.is_some()
         || instance.operation.reset_target.is_some()
         || instance.operation.preserve_mutable_disk
-        || (instance.class == contracts::authoring::EnvironmentClass::Work
-            && instance.operation.lease_authorization.is_none())
+        || (instance.has_resource_lease() && instance.operation.lease_authorization.is_none())
         || !instance.endpoints.is_empty()
         || instance.last_diagnostic_code.is_some()
         || instance.failed_phase.is_some()
@@ -1170,6 +1245,10 @@ async fn create_in_transaction(
     Ok(accepted)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "create invariants and complete durable contract initialization stay in one audited decision"
+)]
 fn build_create_instance(
     command: &LifecycleCommand,
     spec: &EnvironmentCreateSpec,
@@ -1199,35 +1278,26 @@ fn build_create_instance(
     {
         return Err(EnvironmentStoreError::InvalidCreateAggregate);
     }
-    let eligibility_expires_at = match spec.class {
-        contracts::authoring::EnvironmentClass::Experiment => {
-            if spec.lease_id.is_some()
-                || spec.capacity_binding.is_some()
-                || lease_authorization.is_some()
-            {
-                return Err(EnvironmentStoreError::InvalidCreateAggregate);
-            }
-            spec.eligibility_expires_at
+    if let Some(authorization) = &lease_authorization {
+        if Some(authorization.lease_id) != spec.lease_id
+            || authorization.environment_id != command.environment_id
+            || authorization.project_id != spec.project_id
+            || authorization.course_id != spec.course_id
+            || authorization.owner_actor_id != spec.owner_actor_id
+            || Some(authorization.capacity_binding.as_str()) != spec.capacity_binding.as_deref()
+            || authorization.active_from > authority_now
+            || authorization.expires_at <= authority_now
+        {
+            return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
         }
-        contracts::authoring::EnvironmentClass::Work => {
-            let authorization = lease_authorization
-                .as_ref()
-                .ok_or(EnvironmentStoreError::LeaseAuthorizationRequired)?;
-            if Some(authorization.lease_id) != spec.lease_id
-                || authorization.environment_id != command.environment_id
-                || authorization.project_id != spec.project_id
-                || authorization.course_id != spec.course_id
-                || authorization.owner_actor_id != spec.owner_actor_id
-                || Some(authorization.capacity_binding.as_str()) != spec.capacity_binding.as_deref()
-                || authorization.active_from > authority_now
-                || authorization.expires_at <= authority_now
-            {
-                return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
-            }
-            authorization.validate()?;
-            spec.eligibility_expires_at
-        }
-    };
+        authorization.validate()?;
+    } else if spec.class == contracts::authoring::EnvironmentClass::Work
+        || spec.lease_id.is_some()
+        || spec.capacity_binding.is_some()
+    {
+        return Err(EnvironmentStoreError::LeaseAuthorizationRequired);
+    }
+    let eligibility_expires_at = spec.eligibility_expires_at;
     let instance = EnvironmentInstance {
         id: command.environment_id,
         display_label: spec.display_label.clone(),
@@ -1244,6 +1314,7 @@ fn build_create_instance(
         gpu_allocation: spec.gpu_allocation.clone(),
         resource_reservation_released: false,
         provider_binding: spec.provider_binding.clone(),
+        runtime_authorization: spec.runtime_authorization.clone(),
         desired_state: DesiredEnvironmentState::Running,
         observed_state: ObservedEnvironmentState::Requested,
         revision: command.expected_revision,
@@ -1445,7 +1516,7 @@ fn decode_contract(value: Value) -> Result<EnvironmentInstance, EnvironmentStore
 fn cleanup_status_from_instance(
     instance: &EnvironmentInstance,
 ) -> Result<ResourceWorkCleanupStatus, EnvironmentStoreError> {
-    if instance.class != contracts::authoring::EnvironmentClass::Work {
+    if !instance.has_resource_lease() {
         return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
     }
     let authorization = instance
@@ -2126,6 +2197,7 @@ fn create_api_request_hash(
     actor_id: ActorId,
 ) -> Result<Sha256Digest, EnvironmentStoreError> {
     canonical_hash(&json!({
+        "resourceRequestId": request.resource_request_id,
         "projectId": request.project_id,
         "courseId": request.course_id,
         "ownerId": actor_id,
@@ -2233,6 +2305,8 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnvironmentStoreError {
+    #[error("LW_ENVIRONMENT_ALLOCATION_PENDING")]
+    AllocationPending,
     #[error("LW_ENVIRONMENT_NOT_FOUND")]
     EnvironmentNotFound,
     #[error("LW_ENVIRONMENT_OPERATION_NOT_FOUND")]
@@ -2304,7 +2378,8 @@ impl EnvironmentStoreError {
     pub const fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::IdempotencyInProgress
+            Self::AllocationPending
+                | Self::IdempotencyInProgress
                 | Self::Database(_)
                 | Self::Persistence(PersistenceError::Database(_))
         )
@@ -2386,6 +2461,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let actor_id = ActorId::new();
         let request = CreateEnvironmentRequest {
+            resource_request_id: contracts::ResourceRequestId::new(),
             project_id: ProjectId::new(),
             course_id: Some(CourseId::new()),
             release_id: ReleaseId::new(),
@@ -2393,6 +2469,12 @@ mod tests {
             display_label: Some("demo".to_owned()),
         };
         let create_hash = create_api_request_hash(&request, actor_id)?;
+        let mut changed_request = request.clone();
+        changed_request.resource_request_id = contracts::ResourceRequestId::new();
+        assert_ne!(
+            create_hash,
+            create_api_request_hash(&changed_request, actor_id)?
+        );
         let mut changed_label = request.clone();
         changed_label.display_label = Some("other".to_owned());
         assert_ne!(

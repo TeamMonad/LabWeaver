@@ -35,6 +35,8 @@ const RUNNER_SCRIPT: &[u8] = include_bytes!("../../work-configuration-runner.sh"
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContainerWorkExecutionTarget {
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_uid: Option<Uuid>,
     pub pod_name: String,
     pub pod_uid: String,
     pub container: String,
@@ -1264,11 +1266,13 @@ fn deadline_epoch_seconds(deadline: UtcTimestamp) -> Result<u64, WorkExecutionEr
 #[derive(Clone)]
 pub struct KubernetesWorkExecutionBackend {
     client: Client,
+    pool: PgPool,
 }
 
 impl KubernetesWorkExecutionBackend {
-    pub async fn from_default() -> Result<Self, WorkExecutionError> {
+    pub async fn from_default(pool: PgPool) -> Result<Self, WorkExecutionError> {
         Ok(Self {
+            pool,
             client: Client::try_default().await.map_err(|error| {
                 tracing::error!(
                     event = "environment.work_execution.kubernetes_client_init_failed",
@@ -1288,6 +1292,21 @@ impl KubernetesWorkExecutionBackend {
         &self,
         target: &ContainerWorkExecutionTarget,
     ) -> Result<(), WorkExecutionError> {
+        if let Some(uid) = target.namespace_uid {
+            let namespaces: Api<k8s_openapi::api::core::v1::Namespace> =
+                Api::all(self.client.clone());
+            let value = namespaces
+                .get(&target.namespace)
+                .await
+                .map_err(|_| WorkExecutionError::TargetIdentityChanged)?;
+            crate::runtime_executor::verify_existing_namespace(
+                &serde_json::to_value(value)
+                    .map_err(|_| WorkExecutionError::TargetIdentityChanged)?,
+                &target.namespace,
+                uid,
+            )
+            .map_err(|_| WorkExecutionError::TargetIdentityChanged)?;
+        }
         let pod = self
             .pods(target)
             .get(&target.pod_name)
@@ -1522,10 +1541,16 @@ impl ContainerWorkExecutionBackend for KubernetesWorkExecutionBackend {
         &self,
         request: &ContainerWorkExecutionRequest,
     ) -> Result<ContainerWorkExecutionTarget, WorkExecutionError> {
-        let namespace = format!("lw-env-{}", request.environment_id);
+        let placement =
+            crate::ContainerPlacement::load(&self.pool, request.environment_id, request.project_id)
+                .await
+                .map_err(|_| WorkExecutionError::TargetIdentityChanged)?;
+        let namespace = placement.namespace.clone();
         let mut selector = format!(
-            "app=runtime,labweaver.io/environment-id={},labweaver.io/project-id={}",
-            request.environment_id, request.project_id
+            "app={},labweaver.io/environment-id={},labweaver.io/project-id={}",
+            placement.resource_name("runtime"),
+            request.environment_id,
+            request.project_id
         );
         if let Some(course_id) = request.course_id {
             let _ = write!(selector, ",labweaver.io/course-id={course_id}");
@@ -1560,6 +1585,7 @@ impl ContainerWorkExecutionBackend for KubernetesWorkExecutionBackend {
             .ok_or(WorkExecutionError::TargetUnavailable)?;
         Ok(ContainerWorkExecutionTarget {
             namespace,
+            namespace_uid: placement.namespace_uid,
             pod_name,
             pod_uid,
             container: RUNTIME_CONTAINER.to_owned(),

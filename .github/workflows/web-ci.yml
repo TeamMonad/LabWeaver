@@ -91,3 +91,8 @@ jobs:
         if: steps.changes.outputs.web_changed == 'true'
         working-directory: ./web
         run: pnpm build
+
+      - name: Build fixture preview
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm build:fixtures

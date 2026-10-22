@@ -57,6 +57,26 @@ pnpm --dir web test
 
 按改动替换 Rust 包名。修改公共契约后重新生成 Schema、OpenAPI 和 Web SDK，不手改生成文件。契约、权限、持久化与计量变更扩大本地集成检查；遇到构建锁等待，不启动另一套竞争构建。
 
+### Agent 镜像导入测试超时
+
+本地需要 Docker。测试为每个 fixture 启动独立 PostgreSQL，只替换外部对象存储和镜像仓库。
+
+1. 记录失败的 PR head、CI checkout SHA、run 和 job。其他提交的通过不能消除该失败。
+2. 运行受影响测试，保留失败输出。
+
+   ```sh
+   cargo test -p agent-service --test platform_image_import_postgres --locked -- --nocapture
+   cargo test -p agent-service --test platform_image_jobs_postgres --locked
+   ```
+
+3. 从 `case` 找到失败子例。用 `upload_id` 关联 worker 事件，再用 `claimed` 的 `artifact_id` 关联阶段事件。
+4. 检查 `admission`、`object_read`、`oci_verify`、`disk_verify`、`disk_wrap` 和 `registry_publish` 的耗时。`scope_closed` 只表示阶段观察结束，不表示成功或后台阻塞任务已停止。
+5. 超时后检查 `worker_finished` 和 `job_facts`。数据库快照依次为状态、revision、租约存在、数据库时钟判断的有效性、剩余毫秒和最近更新距今毫秒。`last` 是最近 HTTP 观察，可能早于快照。无法读取时标记 `unavailable`。
+
+fixture 使用现有安全 JSON 日志格式，只输出固定阶段、身份、稳定诊断码和耗时。不要输出私有请求、对象键、路径、凭据或租约 token。保留原 15 秒终态等待、串行导入锁和 worker 的 abort/join。每次 helper 启动新 worker，立即处理一个已入队任务。60 秒轮询间隔避免它在退出前发起额外空闲 claim，不改变终态期限。专用 worker 测试继续覆盖轮询恢复、续期和取消。
+
+慢文件回归使用 3 秒租约和 4 秒同步文件写入，检查同一次 claim 达到失败终态且没有发布。`FakeObjects` 在阻塞线程创建文件，状态查询和续期仍由异步 runtime 执行。该回归证明 fixture 行为，不能替代原始 CI 根因证据。生产排空与租约接管问题归 #229 协调。
+
 ## 本地运行
 
 本地业务使用真实六服务、数据库、NATS、对象存储和身份服务。模型及 Kubernetes 等外部执行边界允许替换，前端不能再维护另一套环境、审批或评测状态机。

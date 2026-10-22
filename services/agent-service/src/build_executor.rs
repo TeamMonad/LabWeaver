@@ -1208,6 +1208,39 @@ struct HarborTokenResponse {
 
 #[async_trait]
 impl BuildExecutorBackend for ProductionBuildExecutor {
+    async fn query_build_usage(
+        &self,
+        context: &BuildProviderRequestContext,
+        request: &BuildExecutorRequest,
+    ) -> contracts::resource::build_costing::BuildUsageMeasurement {
+        use contracts::resource::build_costing::BuildUsageMeasurement;
+        let BuildExecutorRequest::Build { command, identity } = request else {
+            return BuildUsageMeasurement::Unknown {
+                reason: "original BuildKit request required for history lookup".into(),
+            };
+        };
+        let tagged = format!(
+            "{}:{}",
+            command.request.output_repository,
+            candidate_tag(*identity)
+        );
+        let Ok(endpoint) = self.buildkit_endpoint() else {
+            return BuildUsageMeasurement::Unknown {
+                reason: "builder history endpoint unavailable".into(),
+            };
+        };
+        let lookup = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            buildkit_history_once(endpoint, &tagged, context),
+        )
+        .await;
+        let Ok(Ok(Some(record))) = lookup else {
+            return BuildUsageMeasurement::Unknown {
+                reason: "no unique authoritative terminal build history".into(),
+            };
+        };
+        history_usage(&record)
+    }
     async fn execute(
         &self,
         context: &BuildProviderRequestContext,
@@ -1393,6 +1426,96 @@ async fn buildkit_terminal_history(
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+async fn buildkit_history_once(
+    endpoint: Endpoint,
+    tagged: &str,
+    context: &BuildProviderRequestContext,
+) -> Result<
+    Option<bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord>,
+    BuildProviderFailure,
+> {
+    let channel = endpoint.connect().await.map_err(|_| execution_unknown())?;
+    let mut client =
+        bollard_buildkit_proto::moby::buildkit::v1::control_client::ControlClient::new(channel);
+    let request = bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRequest {
+        active_only: false,
+        r#ref: String::new(),
+        early_exit: true,
+        filter: Vec::new(),
+        limit: 200,
+    };
+    let mut stream = client
+        .listen_build_history(request)
+        .await
+        .map_err(|_| execution_unknown())?
+        .into_inner();
+    let mut found = None;
+    while let Some(event) = stream.message().await.map_err(|_| execution_unknown())? {
+        let Some(mut record) = event.record else {
+            continue;
+        };
+        if !history_identity_matches(&record, context, tagged) {
+            continue;
+        }
+        if found.is_some() {
+            return Err(execution_unknown());
+        }
+        if event.r#type
+            != bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryEventType::Complete as i32
+            || record.completed_at.is_none()
+        {
+            // Preserve observed partial history; it cannot establish a terminal interval.
+            record.completed_at = None;
+        }
+        found = Some(record);
+    }
+    Ok(found)
+}
+fn history_usage(
+    record: &bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
+) -> contracts::resource::build_costing::BuildUsageMeasurement {
+    use contracts::resource::build_costing::BuildUsageMeasurement;
+    let bounds = record
+        .created_at
+        .as_ref()
+        .zip(record.completed_at.as_ref())
+        .and_then(|(start, finish)| {
+            let stamp = |seconds: i64, nanos: i32| {
+                if !(0..1_000_000_000).contains(&nanos) {
+                    return None;
+                }
+                let time = time::OffsetDateTime::from_unix_timestamp(seconds)
+                    .ok()?
+                    .checked_add(time::Duration::nanoseconds(i64::from(nanos)))?;
+                let time = time
+                    .replace_nanosecond((time.nanosecond() / 1_000_000) * 1_000_000)
+                    .ok()?;
+                contracts::UtcTimestamp::from_utc(time).ok()
+            };
+            Some((
+                stamp(start.seconds, start.nanos)?,
+                stamp(finish.seconds, finish.nanos)?,
+            ))
+        });
+    if let Some((started_at, finished_at)) = bounds
+        && finished_at > started_at
+        && !record.r#ref.is_empty()
+    {
+        BuildUsageMeasurement::Known {
+            history_ref: record.r#ref.clone(),
+            started_at,
+            finished_at,
+        }
+    } else {
+        BuildUsageMeasurement::Unknown {
+            reason: format!(
+                "history {} lacks valid millisecond start/end bounds; observed start={:?}, finish={:?}",
+                record.r#ref, record.created_at, record.completed_at
+            ),
+        }
     }
 }
 
@@ -2748,5 +2871,46 @@ mod tests {
             shutdown.cancel();
             server.await.expect("server join").expect("server stop");
         }
+    }
+    #[test]
+    fn observed_history_time_keeps_fractional_milliseconds_and_missing_bounds_visible()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use bollard_buildkit_proto::google::protobuf::Timestamp;
+        use contracts::resource::build_costing::BuildUsageMeasurement;
+        let (_, _, mut record) = history_fixture();
+        record.created_at = Some(Timestamp {
+            seconds: 100,
+            nanos: 250_000_000,
+        });
+        record.completed_at = Some(Timestamp {
+            seconds: 101,
+            nanos: 750_000_000,
+        });
+        let BuildUsageMeasurement::Known {
+            started_at,
+            finished_at,
+            ..
+        } = history_usage(&record)
+        else {
+            return Err("known exact bounds".into());
+        };
+        assert_eq!(
+            (finished_at.get() - started_at.get()).whole_milliseconds(),
+            1500
+        );
+        record.completed_at = None;
+        let BuildUsageMeasurement::Unknown { reason } = history_usage(&record) else {
+            return Err("missing completion stays unknown".into());
+        };
+        assert!(reason.contains("250000000"));
+        record.completed_at = Some(Timestamp {
+            seconds: 100,
+            nanos: 250_000_001,
+        });
+        let BuildUsageMeasurement::Unknown { reason } = history_usage(&record) else {
+            return Err("submillisecond bounds retained without invented zero charge".into());
+        };
+        assert!(reason.contains("250000001"));
+        Ok(())
     }
 }

@@ -6,6 +6,8 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use contracts::{
     ActorId, ProjectId,
+    access::ConsoleLeaseFence,
+    authoring::EnvironmentClass,
     environment::{
         EnvironmentAccessSubjectKind, EnvironmentEndpointEligibilityRequest,
         EnvironmentOwnerResolutionRequest, ObservedEnvironmentState,
@@ -15,7 +17,135 @@ use environment_service::{
     OwnerResolverError, authorize_endpoint_eligibility, authorize_owner_resolution,
 };
 
-use support::{ready_instance, revision, timestamp};
+use support::{funded_ready_instance, ready_instance, revision, timestamp};
+
+#[test]
+fn funded_owner_and_endpoint_projections_preserve_the_original_lease()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = timestamp("2026-07-14T02:00:00.000Z");
+    for class in [EnvironmentClass::Experiment, EnvironmentClass::Work] {
+        let instance = funded_ready_instance(class);
+        instance.validate()?;
+        let authorization = instance
+            .operation
+            .lease_authorization
+            .as_ref()
+            .ok_or("lease")?;
+        let expected = Some(ConsoleLeaseFence {
+            lease_id: authorization.lease_id,
+            lease_revision: authorization.lease_revision,
+            expires_at: authorization.expires_at,
+        });
+        let owner = EnvironmentOwnerResolutionRequest {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            expected_revision: instance.revision,
+        };
+        let endpoint = EnvironmentEndpointEligibilityRequest {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            actor_id: instance.owner_id,
+            subject_kind: EnvironmentAccessSubjectKind::Owner,
+            expected_revision: instance.revision,
+            endpoint_ids: vec![instance.endpoints[0].id],
+        };
+        assert_eq!(
+            authorize_owner_resolution(&instance, &owner, now)?.lease_fence,
+            expected
+        );
+        assert_eq!(
+            authorize_endpoint_eligibility(&instance, &endpoint, now)?.lease_fence,
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn funded_owner_and_endpoint_projections_reject_expired_lease() {
+    let now = timestamp("2026-07-14T02:00:00.000Z");
+    for class in [EnvironmentClass::Experiment, EnvironmentClass::Work] {
+        let mut instance = funded_ready_instance(class);
+        if let Some(authorization) = &mut instance.operation.lease_authorization {
+            authorization.expires_at = now;
+        }
+        let owner = EnvironmentOwnerResolutionRequest {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            expected_revision: instance.revision,
+        };
+        let endpoint = EnvironmentEndpointEligibilityRequest {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            actor_id: instance.owner_id,
+            subject_kind: EnvironmentAccessSubjectKind::Owner,
+            expected_revision: instance.revision,
+            endpoint_ids: vec![instance.endpoints[0].id],
+        };
+        assert!(matches!(
+            authorize_owner_resolution(&instance, &owner, now),
+            Err(OwnerResolverError::EnvironmentUnavailable)
+        ));
+        assert!(matches!(
+            authorize_endpoint_eligibility(&instance, &endpoint, now),
+            Err(OwnerResolverError::EnvironmentUnavailable)
+        ));
+    }
+}
+
+#[test]
+fn funded_owner_and_endpoint_projections_reject_missing_future_and_wrong_scope_leases() {
+    let now = timestamp("2026-07-14T02:00:00.000Z");
+    for class in [EnvironmentClass::Experiment, EnvironmentClass::Work] {
+        let original = funded_ready_instance(class);
+        let owner = EnvironmentOwnerResolutionRequest {
+            environment_id: original.id,
+            project_id: original.project_id,
+            course_id: original.course_id,
+            owner_actor_id: original.owner_id,
+            expected_revision: original.revision,
+        };
+        let endpoint = EnvironmentEndpointEligibilityRequest {
+            environment_id: original.id,
+            project_id: original.project_id,
+            course_id: original.course_id,
+            actor_id: original.owner_id,
+            subject_kind: EnvironmentAccessSubjectKind::Owner,
+            expected_revision: original.revision,
+            endpoint_ids: vec![original.endpoints[0].id],
+        };
+        for mutation in 0..8 {
+            let mut instance = original.clone();
+            if mutation == 0 {
+                instance.operation.lease_authorization = None;
+            } else if let Some(auth) = &mut instance.operation.lease_authorization {
+                match mutation {
+                    1 => auth.active_from = timestamp("2026-07-14T03:00:00.000Z"),
+                    2 => auth.lease_id = contracts::LeaseId::new(),
+                    3 => auth.environment_id = contracts::EnvironmentId::new(),
+                    4 => auth.project_id = ProjectId::new(),
+                    5 => auth.course_id = None,
+                    6 => auth.owner_actor_id = ActorId::new(),
+                    _ => auth.capacity_binding = "wrong-capacity".to_owned(),
+                }
+            }
+            assert!(matches!(
+                authorize_owner_resolution(&instance, &owner, now),
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+            assert!(matches!(
+                authorize_endpoint_eligibility(&instance, &endpoint, now),
+                Err(OwnerResolverError::EnvironmentUnavailable)
+            ));
+        }
+    }
+}
 
 #[test]
 fn exact_authoritative_tuple_resolves_without_endpoint_or_credential_data()

@@ -48,6 +48,34 @@ fn vm_import_gate() -> Arc<Semaphore> {
         .clone()
 }
 
+// Only closed phase names, artifact identity and elapsed time enter these events. In particular,
+// the request, archive path and registry credentials must never be formatted here.
+struct ImportPhase {
+    artifact_id: contracts::ArtifactId,
+    phase: &'static str,
+    started: std::time::Instant,
+}
+
+impl ImportPhase {
+    fn start(request: &InternalPlatformImageImportRequest, phase: &'static str) -> Self {
+        tracing::info!(event = "agent.platform_image_import.phase", artifact_id = %request.archive.artifact_id,
+            phase, outcome = "started", duration_ms = 0_u64);
+        Self {
+            artifact_id: request.archive.artifact_id,
+            phase,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for ImportPhase {
+    fn drop(&mut self) {
+        tracing::info!(event = "agent.platform_image_import.phase", artifact_id = %self.artifact_id,
+            phase = self.phase, outcome = "scope_closed",
+            duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX));
+    }
+}
+
 /// Administrator archive import failure.
 #[derive(Debug, Error)]
 pub enum PlatformImageImportError {
@@ -118,15 +146,19 @@ pub async fn publish_platform_image_with_cancellation(
     if cancellation.is_cancelled() {
         return Err(PlatformImageImportError::Cancelled);
     }
+    let phase = ImportPhase::start(request, "admission");
     let permit = tokio::select! {
         result = vm_import_gate().acquire_owned() => result
             .map_err(|_| PlatformImageImportError::ObjectStore(ObjectStoreError::ObjectUnavailable))?,
         () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),
     };
+    drop(phase);
+    let phase = ImportPhase::start(request, "object_read");
     let object = tokio::select! {
         result = objects.read_verified_file(&request.archive_object_key, &request.archive) => result?,
         () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),
     };
+    drop(phase);
     if cancellation.is_cancelled() {
         return Err(PlatformImageImportError::Cancelled);
     }
@@ -149,6 +181,7 @@ async fn publish_oci_layout_file(
     cancellation: &CancellationToken,
 ) -> Result<PublishedPlatformImage, PlatformImageImportError> {
     let archive_path = archive.path().to_owned();
+    let phase = ImportPhase::start(request, "oci_verify");
     let (image, _permit) = tokio::task::spawn_blocking(move || {
         let result = parse_oci_layout_file(&archive_path, OciLimits::default());
         drop(archive);
@@ -156,9 +189,11 @@ async fn publish_oci_layout_file(
     })
     .await
     .map_err(|_| PlatformImageImportError::Layout(OciImportError::Invalid))??;
+    drop(phase);
     if cancellation.is_cancelled() {
         return Err(PlatformImageImportError::Cancelled);
     }
+    let _phase = ImportPhase::start(request, "registry_publish");
     let digest = tokio::select! {
         result = registry.publish_file(&request.target_reference, &image) => result?,
         () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),
@@ -201,6 +236,7 @@ async fn publish_vm_disk_file(
         .ok_or(PlatformImageImportError::Disk)?;
     let archive_path = archive.path().to_owned();
     let disk_path_owned = disk_path.to_owned();
+    let phase = ImportPhase::start(request, "disk_verify");
     let (disk, permit) = tokio::task::spawn_blocking(move || {
         let result = read_declared_disk_file(&archive_path, &disk_path_owned, capacity_bytes);
         drop(archive);
@@ -208,6 +244,7 @@ async fn publish_vm_disk_file(
     })
     .await
     .map_err(|_| PlatformImageImportError::Disk)??;
+    drop(phase);
     if cancellation.is_cancelled() {
         return Err(PlatformImageImportError::Cancelled);
     }
@@ -216,15 +253,18 @@ async fn publish_vm_disk_file(
         sha256: disk_sha256,
     } = disk;
     let disk_path_owned = disk_path.to_owned();
+    let phase = ImportPhase::start(request, "disk_wrap");
     let (image, _permit) = tokio::task::spawn_blocking(move || {
         let result = wrap_containerdisk_file(disk_path_file.as_ref(), &disk_path_owned);
         result.map(|image| (image, permit))
     })
     .await
     .map_err(|_| PlatformImageImportError::Disk)??;
+    drop(phase);
     if cancellation.is_cancelled() {
         return Err(PlatformImageImportError::Cancelled);
     }
+    let _phase = ImportPhase::start(request, "registry_publish");
     let digest = tokio::select! {
         result = registry.publish_file(&request.target_reference, &image) => result?,
         () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),

@@ -44,6 +44,11 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+artifact-store = { path = "../../crates/artifact-store" }
+async-trait.workspace = true
+control-service = { path = "../control-service" }
+tempfile.workspace = true
+scraper.workspace = true
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }
 testcontainers = { version = "=0.25.0", features = ["blocking", "properties-config"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }

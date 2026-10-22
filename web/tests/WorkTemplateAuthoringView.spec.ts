@@ -17,7 +17,28 @@ const packageData = {
   projectId: 'project-1',
   courseId: 'course-1',
   revision: 4,
-  files: [],
+  files: [
+    {
+      path: 'README.md',
+      object: {
+        artifactId: 'artifact-readme',
+        mediaType: 'text/markdown',
+        objectVersion: 'v1',
+        sizeBytes: 128,
+        storeBinding: 'materials',
+      },
+    },
+    {
+      path: 'src/main.py',
+      object: {
+        artifactId: 'artifact-main',
+        mediaType: 'text/x-python',
+        objectVersion: 'v1',
+        sizeBytes: 256,
+        storeBinding: 'materials',
+      },
+    },
+  ],
   retention: {},
   completedAt: '2026-09-08T00:00:00.000Z',
 }
@@ -91,7 +112,7 @@ const spec = {
     publicExposurePolicy: 'deny',
     rootFilesystemPolicy: 'read_only',
     securityProfileBinding: 'default',
-    userPolicy: 'non_root',
+    runAsUser: 65534,
   },
 }
 
@@ -158,7 +179,28 @@ const packageUploadMock = vi.hoisted(() => ({
     projectId: 'project-1',
     courseId: 'course-1',
     revision: 4,
-    files: [],
+    files: [
+    {
+      path: 'README.md',
+      object: {
+        artifactId: 'artifact-readme',
+        mediaType: 'text/markdown',
+        objectVersion: 'v1',
+        sizeBytes: 128,
+        storeBinding: 'materials',
+      },
+    },
+    {
+      path: 'src/main.py',
+      object: {
+        artifactId: 'artifact-main',
+        mediaType: 'text/x-python',
+        objectVersion: 'v1',
+        sizeBytes: 256,
+        storeBinding: 'materials',
+      },
+    },
+  ],
     retention: {},
     completedAt: '2026-09-08T00:00:00.000Z',
   },
@@ -202,12 +244,20 @@ describe('WorkTemplateAuthoringView', () => {
     vi.mocked(withdrawEnvironmentTemplateRelease).mockResolvedValue({ data: undefined as never, error: undefined as never })
   })
 
+  async function selectModelInputPath(wrapper: ReturnType<typeof mount>, path = 'README.md') {
+    const checkbox = wrapper.get(`[data-testid="model-input-path-${path}"]`)
+    await checkbox.setValue(true)
+  }
+
   async function mountView() {
     const wrapper = mount(WorkTemplateAuthoringView, {
       props: { projectId: 'project-1', courseId: 'course-1' },
       global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
     })
-    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="model-input-path-picker"]').exists()).toBe(true))
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
+    expect((runButton.element as HTMLButtonElement).disabled).toBe(true)
+    await selectModelInputPath(wrapper)
     await vi.waitFor(() => expect((runButton.element as HTMLButtonElement).disabled).toBe(false))
     await runButton.trigger('click')
     await vi.waitFor(() => expect(getProjectEnvironmentCandidate).toHaveBeenCalledWith({ path: { projectId: 'project-1', candidateId: 'candidate-1' } }))
@@ -223,16 +273,31 @@ describe('WorkTemplateAuthoringView', () => {
         projectId: 'project-1',
         packageId: 'package-1',
         environmentClass: 'work',
+        selectedPaths: ['README.md'],
       }),
     }))
     expect(createProjectAgentRun.mock.calls[0][0].body).not.toHaveProperty('environmentId')
+    expect(createProjectAgentRun.mock.calls[0][0].body.selectedPaths).not.toEqual(
+      packageData.files.map((file: { path: string }) => file.path),
+    )
     wrapper.unmount()
   })
+  it('blocks start until at least one material path is explicitly selected', async () => {
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="model-input-path-picker"]').exists()).toBe(true))
+    expect((wrapper.get('[data-testid="work-template-start-run"]').element as HTMLButtonElement).disabled).toBe(true)
+    expect(createProjectAgentRun).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
 
   it('prevents a second start for the same archived package', async () => {
     const wrapper = await mountView()
 
-    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
     expect((runButton.element as HTMLButtonElement).disabled).toBe(true)
     expect(createProjectAgentRun).toHaveBeenCalledTimes(1)
     wrapper.unmount()
@@ -274,7 +339,9 @@ describe('WorkTemplateAuthoringView', () => {
       props: { projectId: 'project-1', courseId: 'course-1' },
       global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
     })
-    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="model-input-path-picker"]').exists()).toBe(true))
+    await selectModelInputPath(wrapper)
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
     await vi.waitFor(() => expect((runButton.element as HTMLButtonElement).disabled).toBe(false))
     await runButton.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('资源申请未及时获批，请查看申请状态或联系资源管理员；确认失败后可重试原任务。'))
@@ -374,6 +441,17 @@ describe('WorkTemplateAuthoringView', () => {
     expect((releaseButton.element as HTMLButtonElement).disabled).toBe(true)
     await wrapper.get('[data-testid="work-template-candidate-confirmation"]').setValue(true)
     expect((releaseButton.element as HTMLButtonElement).disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows readable runtime permissions before the raw spec', async () => {
+    const wrapper = await mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="runtime-permissions"]').exists()).toBe(true))
+    const candidate = wrapper.get('[data-testid="work-template-candidate"]')
+    expect(candidate.get('[data-testid="runtime-permissions"]').text()).toContain('运行身份与文件系统')
+    expect(candidate.get('[data-testid="runtime-permissions"]').text()).toContain('特权模式')
+    expect(candidate.get('[data-testid="permission-gap"]').text()).toContain('管理员策略允许的能力上限')
+    expect(candidate.get('details.candidate-details').attributes('open')).toBeUndefined()
     wrapper.unmount()
   })
 

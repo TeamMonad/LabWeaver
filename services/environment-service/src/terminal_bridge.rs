@@ -15,7 +15,7 @@ use axum::{
 use contracts::{
     AccessGrantId, ConsoleSessionId, EnvironmentId, LeaseId, ProjectId, ReleaseId, Revision,
     access::{ConsoleClientControl, ConsoleKind},
-    authoring::{EnvironmentClass, EnvironmentRuntimeSpec, RuntimeKind},
+    authoring::{EnvironmentRuntimeSpec, RuntimeKind},
     environment::{DesiredEnvironmentState, ObservedEnvironmentState},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -169,30 +169,7 @@ async fn upgrade(
             EnvironmentStoreError::EnvironmentNotFound => TerminalBridgeError::ScopeDenied,
             _ => TerminalBridgeError::AuthorityUnavailable,
         })?;
-    if instance.revision != identity.environment_revision
-        || instance.runtime_kind
-            != match kind {
-                ConsoleKind::Xterm => RuntimeKind::Container,
-                ConsoleKind::Novnc => RuntimeKind::VirtualMachine,
-            }
-        || instance.desired_state != DesiredEnvironmentState::Running
-        || instance.observed_state != ObservedEnvironmentState::Ready
-        || instance
-            .eligibility_expires_at
-            .is_some_and(|deadline| deadline <= now)
-    {
-        return Err(TerminalBridgeError::ScopeDenied);
-    }
-    match (
-        instance.class,
-        &instance.operation.lease_authorization,
-        identity.lease,
-    ) {
-        (EnvironmentClass::Experiment, None, None) => {}
-        (EnvironmentClass::Work, Some(auth), Some((id, revision)))
-            if auth.lease_id == id && auth.lease_revision == revision && auth.expires_at > now => {}
-        _ => return Err(TerminalBridgeError::ScopeDenied),
-    }
+    authorize_console_connection(&instance, kind, &identity, now)?;
     let release = state
         .authority
         .releases
@@ -200,9 +177,10 @@ async fn upgrade(
         .await
         .map_err(|_| TerminalBridgeError::AuthorityUnavailable)?;
     if release.withdrawn_at.is_some()
-        || release.projection.release.project_id != instance.project_id
+        || !crate::resolver::console_release_project_matches(&instance, &release.projection)
         || release.projection.release.course_id != instance.course_id
         || release.projection.release.runtime_kind != instance.runtime_kind
+        || release.projection.environment_spec.class != instance.class
     {
         return Err(TerminalBridgeError::ScopeDenied);
     }
@@ -234,6 +212,35 @@ async fn upgrade(
         };
         if let Err(code) = bridge(state.gateway, request, browser).await { tracing::warn!(event="environment.console.closed", diagnostic=code, console_kind=?kind, console_session_id=%identity.session_id, access_grant_id=%identity.grant_id, access_grant_revision=identity.grant_revision.get(), environment_id=%environment_id); }
     }))
+}
+
+fn authorize_console_connection(
+    instance: &contracts::environment::EnvironmentInstance,
+    kind: ConsoleKind,
+    identity: &Identity,
+    now: contracts::UtcTimestamp,
+) -> Result<(), TerminalBridgeError> {
+    if instance.revision != identity.environment_revision
+        || instance.runtime_kind
+            != match kind {
+                ConsoleKind::Xterm => RuntimeKind::Container,
+                ConsoleKind::Novnc => RuntimeKind::VirtualMachine,
+            }
+        || instance.desired_state != DesiredEnvironmentState::Running
+        || instance.observed_state != ObservedEnvironmentState::Ready
+        || instance.observed_generation != instance.generation
+        || instance
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= now)
+    {
+        return Err(TerminalBridgeError::ScopeDenied);
+    }
+    let fence = crate::resolver::resource_lease_fence(instance, now)
+        .map_err(|_| TerminalBridgeError::ScopeDenied)?;
+    if fence.map(|fence| (fence.lease_id, fence.lease_revision)) != identity.lease {
+        return Err(TerminalBridgeError::ScopeDenied);
+    }
+    Ok(())
 }
 
 async fn bridge(
@@ -413,3 +420,7 @@ impl IntoResponse for TerminalBridgeError {
         (status, self.to_string()).into_response()
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_bridge_tests.rs"]
+mod tests;

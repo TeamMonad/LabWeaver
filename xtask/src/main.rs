@@ -7,6 +7,7 @@ use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+mod bundle_configuration;
 mod integration;
 mod platform_images;
 
@@ -47,6 +48,15 @@ enum Command {
     /// Prepare the deterministic, offline image build inputs without building images.
     PackagePrepare,
     PackageValidate(PackageValidateArgs),
+    /// Validate one Control-owned configuration version from stdin. Output contains no secrets.
+    BundleConfiguration {
+        /// Validate an unsaved first-install update request, with expected revision zero.
+        #[arg(long, conflicts_with = "defaults")]
+        initial: bool,
+        /// Emit the same initial template as Control, without inventing version history.
+        #[arg(long)]
+        defaults: bool,
+    },
     #[command(subcommand)]
     Contracts(ContractsCommand),
 }
@@ -155,6 +165,9 @@ enum ContractsCommand {
 
 #[derive(Debug)]
 enum AppError {
+    BundleConfiguration {
+        code: &'static str,
+    },
     ExternalCommand {
         role: &'static str,
         code: Option<i32>,
@@ -194,6 +207,7 @@ enum AppError {
 impl AppError {
     const fn diagnostic_code(&self) -> &'static str {
         match self {
+            Self::BundleConfiguration { code } => code,
             Self::ExternalCommand { .. } => "XTASK_EXTERNAL_COMMAND_FAILED",
             Self::InfrastructureRequired { .. } => "XTASK_INFRASTRUCTURE_REQUIRED",
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
@@ -211,6 +225,7 @@ impl AppError {
 impl Display for AppError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::BundleConfiguration { code } => formatter.write_str(code),
             Self::ExternalCommand { role, code, detail } => {
                 write!(
                     formatter,
@@ -268,6 +283,9 @@ fn main() -> ExitCode {
 )]
 fn run(cli: Cli) -> Result<(), AppError> {
     match cli.command {
+        Command::BundleConfiguration { initial, defaults } => {
+            bundle_configuration::run(initial, defaults)
+        }
         Command::Format => run_cargo("format", ["fmt", "--all", "--", "--check"]),
         Command::Lint => run_cargo(
             "lint",
@@ -672,7 +690,7 @@ fn infrastructure_path(path: &std::path::Path) -> String {
 #[cfg(target_os = "linux")]
 struct InfrastructureInputs {
     inventory: String,
-    vault_password: String,
+    vault_password: Option<String>,
     playbook: String,
     ansible_config: String,
     collections_path: String,
@@ -703,16 +721,36 @@ impl InfrastructureInputs {
             |path| [source_ansible_root.as_path(), path],
         );
 
-        let inventory = resolve_infrastructure_file(
-            "infrastructure deployment input",
-            dependency_roots,
-            &format!("inventories/{environment}/hosts.yml"),
-        )?;
-        let vault_password = resolve_infrastructure_file(
-            "infrastructure deployment input",
-            dependency_roots,
-            &format!("inventories/{environment}/.vault-password"),
-        )?;
+        let (inventory, vault_password) = if let Some(bundle_root) =
+            std::env::var_os("LW_BUNDLE_ROOT")
+        {
+            let rendered =
+                required_environment_value("LW_BUNDLE_RENDERED_ROOT", "Bundle rendered directory")?;
+            let inventory = required_environment_value(
+                "LABWEAVER_BUNDLE_INVENTORY_FILE",
+                "Bundle infrastructure inventory",
+            )?;
+            let vault = std::env::var_os("LABWEAVER_BUNDLE_VAULT_PASSWORD_FILE").map(PathBuf::from);
+            bundle_infrastructure_inputs(
+                Path::new(&bundle_root),
+                Path::new(&rendered),
+                Path::new(&inventory),
+                vault.as_deref(),
+            )?
+        } else {
+            (
+                resolve_infrastructure_file(
+                    "infrastructure deployment input",
+                    dependency_roots,
+                    &format!("inventories/{environment}/hosts.yml"),
+                )?,
+                Some(resolve_infrastructure_file(
+                    "infrastructure deployment input",
+                    dependency_roots,
+                    &format!("inventories/{environment}/.vault-password"),
+                )?),
+            )
+        };
         let playbook = resolve_infrastructure_file(
             "infrastructure playbook",
             source_roots,
@@ -733,7 +771,7 @@ impl InfrastructureInputs {
 
         Ok(Self {
             inventory: infrastructure_path(&inventory),
-            vault_password: infrastructure_path(&vault_password),
+            vault_password: vault_password.as_deref().map(infrastructure_path),
             playbook: infrastructure_path(&playbook),
             ansible_config: infrastructure_path(&ansible_config),
             collections_path: infrastructure_path(&collections_path),
@@ -741,6 +779,46 @@ impl InfrastructureInputs {
             identity_secret_locator,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn bundle_infrastructure_inputs(
+    root: &Path,
+    rendered: &Path,
+    inventory: &Path,
+    vault: Option<&Path>,
+) -> Result<(PathBuf, Option<PathBuf>), AppError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let invalid = || AppError::InvalidArgument {
+        role: "private Bundle infrastructure input",
+    };
+    let private_file = |path: &Path, directory: &Path| -> Result<PathBuf, AppError> {
+        let parent = std::fs::symlink_metadata(directory).map_err(|_| invalid())?;
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| invalid())?;
+        let canonical = path.canonicalize().map_err(|_| invalid())?;
+        if !directory.is_absolute()
+            || !path.is_absolute()
+            || !parent.is_dir()
+            || parent.permissions().mode() & 0o077 != 0
+            || !metadata.is_file()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.uid() != parent.uid()
+            || canonical != path
+            || directory.canonicalize().map_err(|_| invalid())? != directory
+            || !path.starts_with(directory)
+        {
+            return Err(invalid());
+        }
+        Ok(canonical)
+    };
+    if inventory != rendered.join("infrastructure/inventory.yaml") {
+        return Err(invalid());
+    }
+    let inventory = private_file(inventory, rendered)?;
+    let vault = vault
+        .map(|path| private_file(path, &root.join("secrets")))
+        .transpose()?;
+    Ok((inventory, vault))
 }
 
 #[cfg(target_os = "linux")]
@@ -916,7 +994,6 @@ fn run_infrastructure_with_package(
         .add_env("ANSIBLE_ROLES_PATH", roles_path)
         .add_env("ANSIBLE_AUTO_INSTALL", "false")
         .add_env("ANSIBLE_NOCOWS", "1")
-        .add_env("ANSIBLE_VAULT_PASSWORD_FILE", vault_password)
         .add_env("LABWEAVER_RUN_ID", &run_id)
         .add_env(
             "LABWEAVER_PACKAGE_MANIFEST",
@@ -924,6 +1001,17 @@ fn run_infrastructure_with_package(
         )
         .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);
+    if let Some(vault_password) = vault_password {
+        runner.add_env("ANSIBLE_VAULT_PASSWORD_FILE", vault_password);
+    }
+    if std::env::var_os("LW_BUNDLE_ROOT").is_some() {
+        let rendered =
+            required_environment_value("LW_BUNDLE_RENDERED_ROOT", "Bundle rendered directory")?;
+        runner.add_env(
+            "ANSIBLE_LOCAL_TEMP",
+            infrastructure_path(&Path::new(&rendered).join("infrastructure/ansible-local-tmp")),
+        );
+    }
     for (name, value) in extra_environment {
         runner.add_env(*name, value);
     }
@@ -1030,6 +1118,60 @@ mod tests {
         if resolved != controller_file {
             return Err("controlled controller input was not selected".into());
         }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundle_inventory_uses_no_unrelated_vault_and_rejects_external_or_public_inputs()
+    -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temporary.path().join("bundle");
+        let secrets = root.join("secrets");
+        let rendered = temporary.path().join("rendered");
+        let inventory = rendered.join("infrastructure/inventory.yaml");
+        std::fs::create_dir_all(&secrets).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(inventory.parent().ok_or("inventory parent")?)
+            .map_err(|error| error.to_string())?;
+        for path in [&secrets, &rendered] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+        }
+        std::fs::write(
+            &inventory,
+            "all: {hosts: {localhost: {ansible_connection: local}}}",
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&inventory, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        let (_, vault) = super::bundle_infrastructure_inputs(&root, &rendered, &inventory, None)
+            .map_err(|error| error.to_string())?;
+        assert!(vault.is_none());
+        let password = secrets.join("vault-password");
+        std::fs::write(&password, "synthetic-only").map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            super::bundle_infrastructure_inputs(&root, &rendered, &inventory, Some(&password))
+                .is_ok()
+        );
+        assert!(
+            super::bundle_infrastructure_inputs(&root, &rendered, &inventory, Some(&inventory))
+                .is_err()
+        );
+        let linked = secrets.join("external");
+        std::os::unix::fs::symlink(&inventory, &linked).map_err(|error| error.to_string())?;
+        assert!(
+            super::bundle_infrastructure_inputs(&root, &rendered, &inventory, Some(&linked))
+                .is_err()
+        );
+        std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            super::bundle_infrastructure_inputs(&root, &rendered, &inventory, Some(&password))
+                .is_err()
+        );
         Ok(())
     }
 

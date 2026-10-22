@@ -603,7 +603,7 @@ fn freeze_reobserves_endpoints_without_changing_generation()
 }
 
 #[test]
-fn work_requires_a_resource_lease_and_experiment_rejects_one() {
+fn work_and_funded_experiment_require_matching_original_lease_authority() {
     let mut work = ready_instance();
     work.class = EnvironmentClass::Work;
     assert!(matches!(
@@ -615,7 +615,7 @@ fn work_requires_a_resource_lease_and_experiment_rejects_one() {
     experiment.lease_id = Some(LeaseId::new());
     assert!(matches!(
         experiment.validate(),
-        Err(contracts::environment::EnvironmentError::InvalidAggregate)
+        Err(contracts::environment::EnvironmentError::LeaseAuthorizationRequired)
     ));
 }
 
@@ -631,6 +631,7 @@ fn work_commands_require_active_exact_lease_and_unexpired_eligibility()
     work.endpoints.clear();
     let authority_now = timestamp("2026-07-14T02:00:00.000Z");
     let authorization = lease_authorization(&work, "2026-07-15T00:00:00.000Z");
+    work.operation.lease_authorization = Some(authorization.clone());
     let start = command(&work, EnvironmentOperationKind::Start);
     let started = plan_command_authorized(
         &work,
@@ -732,6 +733,7 @@ fn reset_persists_class_specific_authorized_target() -> Result<(), Box<dyn std::
     work.lease_id = Some(LeaseId::new());
     work.capacity_binding = Some("cpu-standard-v1".to_owned());
     let authorization = lease_authorization(&work, "2026-07-15T00:00:00.000Z");
+    work.operation.lease_authorization = Some(authorization.clone());
     let target = EnvironmentResetTarget::WorkConfiguration {
         configuration_revision: revision(12),
         authorization_revision: revision(19),

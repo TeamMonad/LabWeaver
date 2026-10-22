@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 describe('BFF browser session', () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllGlobals()
     vi.unstubAllEnvs()
     vi.resetModules()
+    const { resetBffSessionBarrierForTests } = await import('@/api/bffSessionBarrier')
+    resetBffSessionBarrierForTests()
   })
 
   it('loads the safe actor, role, and course context without browser OIDC configuration', async () => {
@@ -147,5 +149,224 @@ describe('BFF browser session', () => {
 
     expect(navigate).not.toHaveBeenCalled()
     expect(auth.error.value?.message).toBe('登录已失效，请重新登录')
+  })
+
+  it('on CSRF session invalidation: clears stale actor, reloads session, lifts write gate, bumps sessionEpoch', async () => {
+    vi.stubEnv('VITE_API_AUTH_MODE', 'bff')
+    const actorA = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000aa',
+        roles: ['teacher'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 1,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+    const actorB = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000bb',
+        roles: ['student'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 2,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(actorA), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(actorB), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+    vi.stubGlobal('fetch', fetch)
+
+    const { notifyBffCsrfSessionInvalidation, isBffWriteBlocked } = await import('@/api/bffSessionBarrier')
+    const { useAuth } = await import('@/composables/useAuth')
+    const auth = useAuth()
+    await auth.loadUser()
+    expect(auth.user.value?.profile.actor_id).toBe('01900000-0000-7000-8000-0000000000aa')
+    expect(auth.sessionEpoch.value).toBe(0)
+
+    notifyBffCsrfSessionInvalidation()
+    expect(isBffWriteBlocked()).toBe(true)
+    // Wait for the async reload started by the listener.
+    await vi.waitFor(() => {
+      expect(auth.user.value?.profile.actor_id).toBe('01900000-0000-7000-8000-0000000000bb')
+    })
+    expect(auth.sessionEpoch.value).toBe(1)
+    expect(isBffWriteBlocked()).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch.mock.calls[1][0]).toBe('/api/v1/auth/session')
+  })
+
+  it('does not acknowledge the write gate when session refresh fails', async () => {
+    vi.stubEnv('VITE_API_AUTH_MODE', 'bff')
+    const actorA = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000aa',
+        roles: ['teacher'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 1,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(actorA), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response('upstream unavailable', { status: 503 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const { notifyBffCsrfSessionInvalidation, isBffWriteBlocked } = await import('@/api/bffSessionBarrier')
+    const { useAuth } = await import('@/composables/useAuth')
+    const auth = useAuth()
+    await auth.loadUser()
+    expect(auth.user.value?.profile.actor_id).toBe('01900000-0000-7000-8000-0000000000aa')
+
+    notifyBffCsrfSessionInvalidation()
+    expect(isBffWriteBlocked()).toBe(true)
+    await vi.waitFor(() => {
+      expect(auth.error.value?.message).toMatch(/BFF session lookup failed/)
+    })
+    expect(auth.user.value).toBeNull()
+    expect(auth.sessionEpoch.value).toBe(1)
+    expect(isBffWriteBlocked()).toBe(true)
+  })
+
+  it('ignores an older refresh so it cannot reopen writes while a newer identity refresh is pending', async () => {
+    vi.stubEnv('VITE_API_AUTH_MODE', 'bff')
+    const actorA = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000aa',
+        roles: ['teacher'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 1,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+    const actorB = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000bb',
+        roles: ['student'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 2,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+    const actorStale = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000cc',
+        roles: ['teacher'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 3,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+
+    let resolveOlder!: (response: Response) => void
+    const olderRefresh = new Promise<Response>((resolve) => { resolveOlder = resolve })
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(actorA), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockReturnValueOnce(olderRefresh)
+      .mockResolvedValueOnce(new Response(JSON.stringify(actorB), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+    vi.stubGlobal('fetch', fetch)
+
+    const { notifyBffCsrfSessionInvalidation, isBffWriteBlocked } = await import('@/api/bffSessionBarrier')
+    const { useAuth } = await import('@/composables/useAuth')
+    const auth = useAuth()
+    await auth.loadUser()
+
+    notifyBffCsrfSessionInvalidation()
+    expect(isBffWriteBlocked()).toBe(true)
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+
+    // A second invalidation starts a newer refresh while the older one is still in flight.
+    notifyBffCsrfSessionInvalidation()
+    await vi.waitFor(() => {
+      expect(auth.user.value?.profile.actor_id).toBe('01900000-0000-7000-8000-0000000000bb')
+    })
+    expect(auth.sessionEpoch.value).toBe(2)
+    expect(isBffWriteBlocked()).toBe(false)
+
+    // Older refresh completes later with a different identity — must not clobber B or the gate.
+    resolveOlder(new Response(JSON.stringify(actorStale), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(auth.user.value?.profile.actor_id).toBe('01900000-0000-7000-8000-0000000000bb')
+    expect(isBffWriteBlocked()).toBe(false)
+  })
+
+  it('keeps writes blocked when a newer refresh fails after an older in-flight refresh', async () => {
+    vi.stubEnv('VITE_API_AUTH_MODE', 'bff')
+    const actorA = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000aa',
+        roles: ['teacher'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 1,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+    const actorOlder = {
+      actor: {
+        actorId: '01900000-0000-7000-8000-0000000000cc',
+        roles: ['teacher'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      authorizationRevision: 3,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      scopes: [{ kind: 'global' }],
+    }
+
+    let resolveOlder!: (response: Response) => void
+    const olderRefresh = new Promise<Response>((resolve) => { resolveOlder = resolve })
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(actorA), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockReturnValueOnce(olderRefresh)
+      .mockResolvedValueOnce(new Response('refresh failed', { status: 503 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const { notifyBffCsrfSessionInvalidation, isBffWriteBlocked } = await import('@/api/bffSessionBarrier')
+    const { useAuth } = await import('@/composables/useAuth')
+    const auth = useAuth()
+    await auth.loadUser()
+
+    notifyBffCsrfSessionInvalidation()
+    notifyBffCsrfSessionInvalidation()
+    await vi.waitFor(() => {
+      expect(auth.error.value?.message).toMatch(/BFF session lookup failed/)
+    })
+    expect(isBffWriteBlocked()).toBe(true)
+
+    resolveOlder(new Response(JSON.stringify(actorOlder), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(isBffWriteBlocked()).toBe(true)
+    expect(auth.user.value).toBeNull()
   })
 })

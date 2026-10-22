@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "First authenticated request context, persisted before immutable input artifacts exist.\nThis is decision evidence, not a permission grant or a task deadline. Consumers must\nrecheck the original session and current object permissions before reading or sending input.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "operationId": {
+      "type": "string"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "sessionSha256": {
+      "type": "string"
+    },
+    "validUntil": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "sessionSha256",
+    "actorId",
+    "projectId",
+    "operationId",
+    "validUntil"
+  ],
+  "title": "ModelInputAuthorizationContext",
+  "type": "object"
+}

@@ -27,7 +27,7 @@ pub struct OperationAccepted {
     pub status_url: String,
 }
 
-/// Access-owned membership grant for one Project actor.
+/// Control-owned membership grant for one Project actor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddProjectMembershipRequest {
@@ -36,6 +36,8 @@ pub struct AddProjectMembershipRequest {
     /// browser request.
     pub username: String,
     pub role: PlatformRole,
+    #[serde(default)]
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 
@@ -47,6 +49,8 @@ pub struct AddProjectMembershipRequest {
 pub struct ResolvedProjectMembershipRequest {
     pub actor_id: ActorId,
     pub role: PlatformRole,
+    #[serde(default)]
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 
@@ -106,6 +110,10 @@ pub struct InternalCreateTaskResourceRequest {
     pub request_key: String,
     pub resources: crate::resource::WorkloadResources,
     pub duration_seconds: u64,
+    /// Approval wait captured once by Resource using its database clock.
+    /// Same-attempt recovery keeps the original deadline.
+    #[schemars(range(min = 1, max = 3_600_000))]
+    pub approval_timeout_milliseconds: u64,
 }
 
 /// PostgreSQL-authoritative one-shot task resource state returned to Evaluation.
@@ -168,6 +176,8 @@ pub struct CreateResourceRateRequest {
     pub unit_price: crate::resource::Money,
     pub effective_from: UtcTimestamp,
     pub effective_until: Option<UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_binding: Option<String>,
 }
 
 /// Closes one open immutable rate version at a future timestamp.
@@ -282,6 +292,26 @@ pub struct ProblemPackageUploadSession {
     pub files: Vec<ProblemPackageUploadFile>,
     pub upload_targets: Vec<ProblemPackageUploadTarget>,
     pub expires_at: UtcTimestamp,
+    pub state: ProblemPackageUploadState,
+    /// Paths whose objects exist with the declared size and media type. Completion hashes bytes.
+    pub uploaded_paths: Vec<String>,
+    pub completed_package: Option<crate::authoring::ProblemPackage>,
+    pub terminal_diagnostic: Option<String>,
+    /// Original completion intent. Reuse both values when recovering a completing upload.
+    pub completion_idempotency_key: Option<String>,
+    pub completion_expected_revision: Option<Revision>,
+}
+
+/// Durable material upload lifecycle. Terminal states issue no upload authorities.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemPackageUploadState {
+    Pending,
+    Completing,
+    Completed,
+    Failed,
+    Cancelled,
+    Expired,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -719,6 +749,8 @@ pub struct CompleteAuthoringApprovalRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAgentRunRequest {
+    /// Explicit material paths. Missing or empty selection is rejected; never defaults to all files.
+    pub selected_paths: Option<Vec<String>>,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub package_id: ProblemPackageId,
@@ -732,6 +764,8 @@ pub struct CreateAgentRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateWorkConfigurationRunRequest {
+    /// Explicit material paths. Missing or empty selection is rejected.
+    pub selected_paths: Option<Vec<String>>,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub package_id: ProblemPackageId,
@@ -926,6 +960,332 @@ pub struct WithdrawEnvironmentTemplateReleaseRequest {
     pub reason_code: String,
 }
 
+/// First authenticated request context, persisted before immutable input artifacts exist.
+/// This is decision evidence, not a permission grant or a task deadline. Consumers must
+/// recheck the original session and current object permissions before reading or sending input.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationContext {
+    pub session_sha256: String,
+    pub actor_id: ActorId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub operation_id: String,
+    pub valid_until: UtcTimestamp,
+}
+
+impl ModelInputAuthorizationContext {
+    /// Checks transport identity only. No operation is authorized by this method.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if !is_sha256(&self.session_sha256)
+            || self.actor_id.as_uuid().is_nil()
+            || self.project_id.as_uuid().is_nil()
+            || self.course_id.is_some_and(|id| id.as_uuid().is_nil())
+            || self.operation_id.is_empty()
+            || self.operation_id.len() > 128
+            || !self
+                .operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// Control-derived asynchronous recheck input, never accepted from a public create request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputRubricIdentity {
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub path: String,
+    pub artifact: ArtifactRef,
+    pub sha256: String,
+}
+
+impl ModelInputRubricIdentity {
+    /// Structural identity validation is not an external-model permission.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_artifact_ref(&self.artifact)?;
+        validate_review_path_and_hash(&self.path, &self.sha256)
+    }
+}
+
+/// References Control's current material-project policy and the approving instructor fact.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputRubricPermissionRef {
+    pub authoring_project_id: ProjectId,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub approved_by: ActorId,
+    pub approver_course_membership_revision: Revision,
+}
+
+/// Course-controlled rubric visibility, separate from model-use approval.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RubricModelInputVisibility {
+    CoursePublic,
+    Hidden,
+}
+
+/// One verified instructor's model-use approval for an exact rubric version.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RubricModelInputApproval {
+    pub approved_by: ActorId,
+    pub approver_course_membership_revision: Revision,
+    pub runtime_binding: String,
+    pub model: String,
+}
+
+/// Control-owned rule stored with the current material-project policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RubricModelInputRule {
+    pub course_id: CourseId,
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub rubric: ModelInputRubricIdentity,
+    pub visibility: RubricModelInputVisibility,
+    pub approval: Option<RubricModelInputApproval>,
+}
+
+/// Visibility declaration does not implicitly approve model disclosure.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum RubricModelInputRuleAction {
+    SetVisibility {
+        visibility: RubricModelInputVisibility,
+    },
+    ApproveModelUse {
+        runtime_binding: String,
+        model: String,
+    },
+    RevokeModelUse,
+}
+
+/// Teacher maintenance input; the caller cannot supply the approving actor or role evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaintainRubricModelInputRuleRequest {
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub rubric: ModelInputRubricIdentity,
+    pub action: RubricModelInputRuleAction,
+}
+
+/// Teacher-only projection of current authority; no object contents or storage locators.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectRubricModelInputRules {
+    pub project_id: ProjectId,
+    pub course_id: CourseId,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub rules: Vec<RubricModelInputRule>,
+}
+
+/// Immutable freeze identities; Evaluation and Environment releases are distinct.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FrozenModelInputSource {
+    pub task_run_id: TaskRunId,
+    /// SHA of the original Evaluation worker lease; never refreshed on recovery.
+    pub parent_lease_sha256: String,
+    pub frozen_submission_id: FrozenSubmissionId,
+    pub manifest_revision: Revision,
+    pub manifest_sha256: String,
+    pub archive: ArtifactRef,
+    pub content_sha256: String,
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub environment: crate::submission::FrozenEnvironmentIdentity,
+    pub rubric: ModelInputRubricIdentity,
+    /// Missing permission is representable for a refusal, never for model egress.
+    pub rubric_permission: Option<ModelInputRubricPermissionRef>,
+}
+
+/// A freeze identifier cannot be interpreted as a material package identifier.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ModelInputAuthorizationSource {
+    ProblemPackage {
+        package_id: ProblemPackageId,
+        package_revision: Revision,
+    },
+    FrozenSubmission(Box<FrozenModelInputSource>),
+}
+
+/// Control-derived asynchronous recheck input, never accepted from a public create request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationBinding {
+    pub session_sha256: String,
+    pub actor_id: ActorId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub operation_id: String,
+    pub valid_until: UtcTimestamp,
+    pub source: ModelInputAuthorizationSource,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub policy_sha256: String,
+    pub selection_sha256: String,
+}
+
+impl ModelInputAuthorizationBinding {
+    /// Checks identities only; current permissions must be obtained from Control.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.context().validate()?;
+        if !is_sha256(&self.selection_sha256) || !is_sha256(&self.policy_sha256) {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        if let ModelInputAuthorizationSource::FrozenSubmission(source) = &self.source {
+            if !is_sha256(&source.parent_lease_sha256)
+                || !is_sha256(&source.manifest_sha256)
+                || !is_sha256(&source.content_sha256)
+                || source.environment.release_version == 0
+            {
+                return Err(HttpContractError::InvalidInternalIdentity);
+            }
+            validate_artifact_ref(&source.archive)?;
+            validate_artifact_ref(&source.rubric.artifact)?;
+            validate_review_path_and_hash(&source.rubric.path, &source.rubric.sha256)?;
+        }
+        Ok(())
+    }
+
+    /// Preserves first-request evidence without deriving it from artifact ownership.
+    #[must_use]
+    pub fn context(&self) -> ModelInputAuthorizationContext {
+        ModelInputAuthorizationContext {
+            session_sha256: self.session_sha256.clone(),
+            actor_id: self.actor_id,
+            project_id: self.project_id,
+            course_id: self.course_id,
+            operation_id: self.operation_id.clone(),
+            valid_until: self.valid_until,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationResolveRequest {
+    pub binding: ModelInputAuthorizationBinding,
+    pub selected_paths: Vec<String>,
+}
+
+/// Evaluation requests binding only after a real freeze exists; Control derives object facts.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateFrozenModelInputAuthorizationRequest {
+    pub input_authorization_context: ModelInputAuthorizationContext,
+    pub task_run_id: TaskRunId,
+    /// Derived by Evaluation from its actual fenced worker lease, not from user input.
+    pub parent_lease_sha256: String,
+    pub frozen_submission_id: FrozenSubmissionId,
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub selected_paths: Vec<String>,
+}
+
+impl CreateFrozenModelInputAuthorizationRequest {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.input_authorization_context.validate()?;
+        if !is_sha256(&self.parent_lease_sha256) {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// Binds an Evaluation worker generation without transmitting the raw lease token.
+#[must_use]
+pub fn model_input_parent_lease_sha256(lease_token: uuid::Uuid) -> String {
+    use sha2::Digest;
+    format!(
+        "{:x}",
+        sha2::Sha256::digest(lease_token.to_string().as_bytes())
+    )
+}
+
+/// Digest of the exact frozen inputs and separate rubric/permission identities.
+pub fn frozen_model_input_selection_sha256(
+    source: &FrozenModelInputSource,
+    files: &[(String, String)],
+) -> Result<String, HttpContractError> {
+    use sha2::Digest;
+    let mut files = files.to_vec();
+    files.sort();
+    if files.is_empty() || files.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(HttpContractError::InvalidAgentLlmReview);
+    }
+    for (path, sha) in &files {
+        validate_review_path_and_hash(path, sha)?;
+    }
+    let value = serde_json::to_value((source, files))
+        .map_err(|_| HttpContractError::InvalidAgentLlmReview)?;
+    let bytes = serde_json::to_vec(&value).map_err(|_| HttpContractError::InvalidAgentLlmReview)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationResolution {
+    pub binding: ModelInputAuthorizationBinding,
+}
+
+pub fn model_input_selection_sha256(paths: &[String]) -> Result<String, HttpContractError> {
+    use sha2::Digest;
+    let bytes =
+        serde_json::to_vec(paths).map_err(|_| HttpContractError::InvalidModelInputSelection)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+/// Binds model identity, DLP and budget values as well as the immutable policy identifiers.
+pub fn model_input_policy_sha256(
+    policy: &crate::authoring::ProjectLlmEgressPolicy,
+) -> Result<String, HttpContractError> {
+    use sha2::Digest;
+    let value =
+        serde_json::to_value(policy).map_err(|_| HttpContractError::InvalidInternalIdentity)?;
+    let bytes =
+        serde_json::to_vec(&value).map_err(|_| HttpContractError::InvalidInternalIdentity)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+/// Validates an explicit selection against an immutable package without guessing hidden filenames.
+pub fn validate_model_input_selection(
+    package: &crate::authoring::ProblemPackage,
+    selected: Option<&[String]>,
+) -> Result<Vec<String>, HttpContractError> {
+    let paths = selected.ok_or(HttpContractError::InvalidModelInputSelection)?;
+    let mut seen = BTreeSet::new();
+    if paths.is_empty()
+        || paths.iter().any(|path| {
+            !seen.insert(path.clone()) || !package.files.iter().any(|file| &file.path == path)
+        })
+    {
+        return Err(HttpContractError::InvalidModelInputSelection);
+    }
+    Ok(seen.into_iter().collect())
+}
+
 /// Control-to-Agent command carried only over an allowlisted mTLS service identity.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(
@@ -943,6 +1303,7 @@ pub enum InternalAgentRunRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalCreateAgentRunRequest {
+    pub input_authorization: ModelInputAuthorizationBinding,
     /// Authoritative Project ownership and optional teaching association.
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
@@ -1043,6 +1404,41 @@ impl InternalCreateAgentRunRequest {
         {
             return Err(HttpContractError::InvalidInternalIdentity);
         }
+        let (selection, revision, operation_matches) = match &self.request {
+            InternalAgentRunRequest::Authoring(request) => (
+                request.selected_paths.as_deref(),
+                request.package_revision,
+                matches!(
+                    self.input_authorization.operation_id.as_str(),
+                    "createProjectAgentRun" | "createAgentRun"
+                ),
+            ),
+            InternalAgentRunRequest::WorkConfiguration(request) => (
+                request.selected_paths.as_deref(),
+                request.package_revision,
+                self.input_authorization.operation_id == "createProjectWorkConfigurationRun",
+            ),
+        };
+        let paths = validate_model_input_selection(&self.package, selection)?;
+        let binding = &self.input_authorization;
+        binding.validate()?;
+        if !operation_matches
+            || binding.actor_id != self.actor_id
+            || binding.project_id != self.project_id
+            || binding.course_id != self.course_id
+            || binding.source
+                != (ModelInputAuthorizationSource::ProblemPackage {
+                    package_id: self.package.id,
+                    package_revision: self.package.revision,
+                })
+            || revision != self.package.revision
+            || binding.policy_id != self.policy.id
+            || binding.policy_revision != self.policy.revision
+            || binding.policy_sha256 != model_input_policy_sha256(&self.policy)?
+            || model_input_selection_sha256(&paths)? != binding.selection_sha256
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
         self.package
             .validate()
             .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
@@ -1089,6 +1485,7 @@ pub struct AgentLlmReviewRubric {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalAgentLlmReviewRequest {
+    pub input_authorization: ModelInputAuthorizationBinding,
     pub task_run_id: TaskRunId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
@@ -1109,6 +1506,37 @@ impl InternalAgentLlmReviewRequest {
     /// Validates transport-safe paths, bounded input, immutable artifact metadata, and policy
     /// ownership. Agent separately hashes the supplied UTF-8 bytes before any provider egress.
     pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.input_authorization.validate()?;
+        let ModelInputAuthorizationSource::FrozenSubmission(source) =
+            &self.input_authorization.source
+        else {
+            return Err(HttpContractError::InvalidAgentLlmReview);
+        };
+        if source.rubric_permission.is_none()
+            || source.task_run_id != self.task_run_id
+            || source.frozen_submission_id != self.frozen_submission_id
+            || source.archive != self.submission_artifact
+            || source.rubric.artifact != self.rubric.artifact
+            || source.rubric.path != self.rubric.path
+            || source.rubric.sha256 != self.rubric.sha256
+            || self.input_authorization.operation_id != "freezeSubmission"
+            || self.input_authorization.project_id != self.project_id
+            || self.input_authorization.course_id != self.course_id
+            || self.input_authorization.policy_id != self.policy.id
+            || self.input_authorization.policy_revision != self.policy.revision
+            || self.input_authorization.policy_sha256 != model_input_policy_sha256(&self.policy)?
+            || self.input_authorization.selection_sha256
+                != frozen_model_input_selection_sha256(
+                    source,
+                    &self
+                        .files
+                        .iter()
+                        .map(|file| (file.path.clone(), file.sha256.clone()))
+                        .collect::<Vec<_>>(),
+                )?
+        {
+            return Err(HttpContractError::InvalidAgentLlmReview);
+        }
         if self.files.is_empty() || self.files.len() > Self::MAX_FILES {
             return Err(HttpContractError::InvalidAgentLlmReview);
         }
@@ -1784,6 +2212,8 @@ impl InternalCompleteEvaluationStepRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironmentRequest {
+    /// Existing Resource request whose original approval selects the Environment target identity.
+    pub resource_request_id: ResourceRequestId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub release_id: ReleaseId,
@@ -2291,6 +2721,286 @@ macro_rules! op {
 }
 
 pub const OPERATIONS: &[OperationContract] = &[
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+        "registerPlatformConfigurationBundle",
+        "platform_configuration:write",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+        "getPlatformConfigurationBundle",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/resource-requests/{requestId}/runtime-authorization",
+        "getResourceRuntimeAuthorization",
+        "runtime_authorization:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/member-invitations",
+        "listProjectMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/member-invitations",
+        "listCourseMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/member-invitations",
+        "createProjectMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/member-invitations",
+        "createCourseMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/members",
+        "listCourseMemberships",
+        "course_membership:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Delete,
+        "/api/v1/courses/{courseId}/members/{actorId}",
+        "removeCourseMembership",
+        "course_membership:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/member-invitations",
+        "listIncomingMembershipInvitations",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/member-invitations/{invitationId}",
+        "getMembershipInvitation",
+        "membership_invitation:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/member-invitations/{invitationId}/accept",
+        "acceptMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/member-invitations/{invitationId}/revoke",
+        "revokeMembershipInvitation",
+        "membership_invitation:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration",
+        "getPlatformConfiguration",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Patch,
+        "/api/v1/admin/platform-configuration",
+        "updatePlatformConfiguration",
+        "platform_configuration:write",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration/versions/{revision}",
+        "getPlatformConfigurationVersion",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/platform-configuration/applies",
+        "applyPlatformConfiguration",
+        "platform_configuration:apply",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/platform-configuration/applies/{applyId}",
+        "getPlatformConfigurationApply",
+        "platform_configuration:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        GatewayInternal,
+        Put,
+        "/internal/v1/platform-configuration/applies/{applyId}",
+        "reportPlatformConfigurationApply",
+        "control.platform_configuration.apply",
+        ServiceJwt,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/platform-configuration/loaded",
+        "getLoadedPlatformConfiguration",
+        "control.platform_configuration.apply",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
     // Project is the cross-domain ownership root. The list and create operations
     // are actor-scoped by Access even though they do not carry a project path.
     op!(
@@ -2334,6 +3044,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         ALL_ROLES,
         Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/available-actions",
+        "getProjectAvailableActions",
+        "project:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
     ),
     op!(
         Public,
@@ -2435,6 +3159,34 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Get,
+        "/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}",
+        "getProjectProblemPackageUpload",
+        "problem_package:write",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}/cancel",
+        "cancelProjectProblemPackageUpload",
+        "problem_package:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
         Post,
         "/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}/complete",
         "completeProjectProblemPackageUpload",
@@ -2473,6 +3225,34 @@ pub const OPERATIONS: &[OperationContract] = &[
         false,
         true,
         ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules",
+        "maintainProjectRubricModelInputRule",
+        "llm_policy:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        &[PlatformRole::Teacher],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules",
+        "getProjectRubricModelInputRules",
+        "llm_policy:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Teacher],
         Project
     ),
     op!(
@@ -2592,6 +3372,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/projects/{projectId}/agent-runs/{runId}",
         "getProjectAgentRun",
+        "agent_run:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/agent-runs/{runId}/task-progress",
+        "getProjectAgentTaskProgress",
         "agent_run:read",
         Oidc,
         None,
@@ -3065,6 +3859,216 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Post,
+        "/api/v1/projects/{projectId}/resource-cost-estimate",
+        "estimateProjectResourceCost",
+        "credits:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/build-cost-estimate",
+        "estimateProjectBuildCost",
+        "credits:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/build-costs/{buildRequestId}/attempts/{attempt}",
+        "getProjectBuildCost",
+        "credits:read",
+        BffSession,
+        None,
+        200,
+        false,
+        false,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/environment-credit-grants/{leaseId}",
+        "getEnvironmentCreditGrant",
+        "resource.environment.resolve",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        false,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/build-cost-admissions",
+        "admitBuildCost",
+        "resource.credits.hold",
+        ServiceJwt,
+        IdempotentCreate,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/build-costs/{buildRequestId}/attempts/{attempt}",
+        "getBuildCost",
+        "resource.credits.hold",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        false,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/build-cost-reconciliations",
+        "claimBuildCostReconciliations",
+        "resource.credits.hold",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/build-cost-observations",
+        "observeBuildCost",
+        "resource.usage.record",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/credits/estimated-holds",
+        "createEstimatedCreditHold",
+        "resource.credits.hold",
+        ServiceJwt,
+        IdempotentCreate,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/credits/holds",
+        "listProjectCreditHolds",
+        "credits:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/credits",
+        "getProjectCredits",
+        "credits:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/credits/ledger",
+        "listProjectCreditLedger",
+        "credits:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource/credits/operations",
+        "createCreditAdminOperation",
+        "credits:admin",
+        BffSession,
+        IdempotentCreate,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/credits/holds",
+        "createCreditHold",
+        "resource.credits.hold",
+        ServiceJwt,
+        IdempotentCreate,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/credits/holds/{holdId}/resolve",
+        "resolveCreditHold",
+        "resource.credits.resolve",
+        ServiceJwt,
+        IdempotentCreate,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        Public,
         Get,
         "/api/v1/projects/{projectId}/resource-budget",
         "getProjectResourceBudget",
@@ -3236,6 +4240,34 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/projects/{projectId}/me/evaluation-results/{runId}",
         "getOwnProjectEvaluationResult",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Student],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/me/evaluation-tasks/submissions/{submissionId}",
+        "getOwnProjectEvaluationTaskForSubmission",
+        "evaluation_result:read_own",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Student],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/me/evaluation-tasks/{runId}",
+        "getOwnProjectEvaluationTaskProgress",
         "evaluation_result:read_own",
         Oidc,
         None,
@@ -3822,6 +4854,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         GatewayInternal,
         Get,
+        "/internal/v1/agent-runs/{runId}/task-progress",
+        "getInternalAgentTaskProgress",
+        "agent.control.invoke",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
         "/internal/v1/authoring-publications/{approvalId}/admission",
         "getInternalAuthoringPublicationAdmission",
         "control.authoring.read",
@@ -4165,6 +5211,8 @@ pub struct EventStreamQuery {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpContractError {
+    #[error("explicit model input selection is missing or invalid")]
+    InvalidModelInputSelection,
     #[error("invalid Idempotency-Key")]
     InvalidIdempotencyKey,
     #[error("weak ETag is not accepted")]

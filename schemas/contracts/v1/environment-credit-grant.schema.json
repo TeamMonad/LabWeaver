@@ -1,0 +1,411 @@
+{
+  "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "CapacityClaimId": {
+      "description": "Strongly typed UUIDv7 identifier for `CapacityClaimId`.",
+      "type": "string"
+    },
+    "CreditHold": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "buildAttempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "businessKey": {
+          "type": "string"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "expiredUnknownAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "measurementUnknown": {
+          "type": "boolean"
+        },
+        "ownerClientId": {
+          "type": "string"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reconciliationDueAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remaining": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/CreditHoldState"
+        },
+        "unknownSince": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "businessKey",
+        "ownerClientId",
+        "amount",
+        "remaining",
+        "state",
+        "measurementUnknown",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "CreditHoldState": {
+      "enum": [
+        "pending",
+        "unknown",
+        "settled",
+        "released"
+      ],
+      "type": "string"
+    },
+    "FixedDecimal": {
+      "description": "Canonical signed decimal with exactly six fractional digits.\n\nDecimal values cross the API as strings so JavaScript clients and SQL\ndrivers cannot round monetary values through binary floating point. The\ninternal scaled representation is available to Resource arithmetic without\nintroducing a database-specific decimal dependency into the contracts crate.",
+      "format": "fixed-decimal-6",
+      "pattern": "^-?(0|[1-9][0-9]*)[.][0-9]{6}$",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "A fixed-precision amount with an explicit ISO-4217-like currency code.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RateId": {
+      "description": "Strongly typed UUIDv7 identifier for `RateId`.",
+      "type": "string"
+    },
+    "ResourceApprovalId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceApprovalId`.",
+      "type": "string"
+    },
+    "ResourceBillingUnit": {
+      "description": "Resource dimension used by a versioned rate card.",
+      "enum": [
+        "cpu_millicore_second",
+        "memory_byte_second",
+        "storage_byte_second",
+        "gpu_unit_second",
+        "build_second"
+      ],
+      "type": "string"
+    },
+    "ResourceChargeLine": {
+      "additionalProperties": false,
+      "description": "One immutable line in a calculated charge.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/Money"
+        },
+        "quantity": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quantityDivisor": {
+          "default": 1,
+          "enum": [
+            1,
+            1000
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "unit": {
+          "$ref": "#/$defs/ResourceBillingUnit"
+        },
+        "unitPrice": {
+          "$ref": "#/$defs/Money"
+        },
+        "unitQuantity": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rateId",
+        "rateRevision",
+        "unit",
+        "quantity",
+        "unitQuantity",
+        "unitPrice",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "ResourceCostEstimate": {
+      "additionalProperties": false,
+      "description": "Calculated lines retain the exact rate IDs, revisions, prices and quantity divisors.",
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/ResourceCostEstimateRequest"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/ResourceChargeLine"
+          },
+          "type": "array"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "total": {
+          "$ref": "#/$defs/Money"
+        }
+      },
+      "required": [
+        "projectId",
+        "input",
+        "lines",
+        "total"
+      ],
+      "type": "object"
+    },
+    "ResourceCostEstimateRequest": {
+      "additionalProperties": false,
+      "description": "Half-open compute and storage intervals are independent, even when they overlap.",
+      "properties": {
+        "computeFrom": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "computeUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "resources": {
+          "$ref": "#/$defs/WorkloadResources"
+        },
+        "storageFrom": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "storageUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "resources",
+        "computeFrom",
+        "computeUntil",
+        "storageFrom",
+        "storageUntil"
+      ],
+      "type": "object"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Financial facts for the configured Environment owner; this is not a second runtime grant.",
+  "properties": {
+    "approvalId": {
+      "$ref": "#/$defs/ResourceApprovalId"
+    },
+    "canAuthorizeExecution": {
+      "description": "Only a current active lease and known, unexpired original funds authorize new execution.",
+      "type": "boolean"
+    },
+    "claimId": {
+      "$ref": "#/$defs/CapacityClaimId"
+    },
+    "coveredFrom": {
+      "$ref": "#/$defs/UtcTimestamp",
+      "description": "Start of the continuous total coverage, unchanged by renewals."
+    },
+    "coveredUntil": {
+      "$ref": "#/$defs/UtcTimestamp",
+      "description": "End of the continuous total coverage after the latest funded renewal."
+    },
+    "estimate": {
+      "$ref": "#/$defs/ResourceCostEstimate",
+      "description": "The most recently funded initial or additional interval, with original rate versions."
+    },
+    "hold": {
+      "$ref": "#/$defs/CreditHold"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "leaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "requestId": {
+      "$ref": "#/$defs/ResourceRequestId"
+    }
+  },
+  "required": [
+    "requestId",
+    "leaseId",
+    "leaseRevision",
+    "claimId",
+    "approvalId",
+    "coveredFrom",
+    "coveredUntil",
+    "hold",
+    "estimate",
+    "canAuthorizeExecution"
+  ],
+  "title": "EnvironmentCreditGrant",
+  "type": "object"
+}

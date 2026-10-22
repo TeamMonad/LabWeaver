@@ -1,6 +1,7 @@
 <template>
   <AppShell>
-    <RouterView />
+    <!-- sessionEpoch remounts the tree after CSRF session invalidation so pending forms cannot survive a cross-tab actor switch. -->
+    <RouterView :key="auth.sessionEpoch.value" />
   </AppShell>
 </template>
 

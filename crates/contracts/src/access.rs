@@ -188,7 +188,7 @@ impl ConsoleCapabilityAvailability {
             return Err(AccessError::InvalidConsoleCapability);
         }
         match (&self.lease_fence, work) {
-            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (Some(fence), _) if self.expires_at <= fence.expires_at => Ok(()),
             (None, false) => Ok(()),
             _ => Err(AccessError::InvalidConsoleCapability),
         }
@@ -227,7 +227,7 @@ impl ConsoleCapability {
             return Err(AccessError::InvalidConsoleCapability);
         }
         match (&self.lease_fence, work) {
-            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (Some(fence), _) if self.expires_at <= fence.expires_at => Ok(()),
             (None, false) => Ok(()),
             _ => Err(AccessError::InvalidConsoleCapability),
         }
@@ -1106,12 +1106,9 @@ mod tests {
             Err(AccessError::InvalidConsoleCapability)
         );
 
-        let mut invalid_experiment = capability.clone();
-        invalid_experiment.lease_fence = Some(fence.clone());
-        assert_eq!(
-            invalid_experiment.validate(),
-            Err(AccessError::InvalidConsoleCapability)
-        );
+        let mut funded_experiment = capability.clone();
+        funded_experiment.lease_fence = Some(fence.clone());
+        assert!(funded_experiment.validate().is_ok());
 
         let lease_limited_availability = ConsoleCapabilityAvailability {
             environment_class: EnvironmentClass::Work,

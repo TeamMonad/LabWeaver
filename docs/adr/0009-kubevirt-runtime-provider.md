@@ -89,8 +89,9 @@ start, apply, observe or restart results.
 ## Security and data implications
 
 The only credential material in the resource plan is a public SSH user-CA key.
-The guest account is non-root and password-locked; root login, interactive
-passwords, forwarding, tunnelling and X11 are disabled. SSH is reachable only
+The guest account is password-locked and follows the approved runtime UID.
+UID 0 selects root with CA user-certificate authentication; interactive passwords,
+forwarding, tunnelling and X11 are disabled. SSH is reachable only
 through the configured Access Gateway pod selector and namespace. Raw guest
 content, private keys, tokens, Kubernetes objects and executor credentials are
 not stored in Environment state or logs.

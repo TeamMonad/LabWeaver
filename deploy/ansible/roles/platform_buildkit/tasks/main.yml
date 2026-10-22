@@ -2,7 +2,7 @@
 - name: Load immutable Sprint 2 BuildKit identity
   ansible.builtin.set_fact:
     platform_buildkit_lock: >-
-      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
+      {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml }}
 
 - name: Validate Sprint 2 BuildKit inputs
   ansible.builtin.assert:
@@ -235,7 +235,7 @@
 
 - name: Inspect the generated BuildKit operator client inputs
   ansible.builtin.stat:
-    path: "{{ platform_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+    path: "{{ platform_buildkit_client_files[item] }}"
   loop: [ca.crt, tls.crt, tls.key]
   register: platform_buildkit_operator_client_inputs
   delegate_to: localhost
@@ -260,7 +260,7 @@
 
 - name: Install the current BuildKit operator mTLS client
   ansible.builtin.copy:
-    src: "{{ platform_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+    src: "{{ platform_buildkit_client_files[item] }}"
     dest: "{{ platform_buildkit_operator_client_path }}/{{ item }}"
     owner: "{{ platform_buildkit_operator_user }}"
     group: "{{ platform_buildkit_operator_group }}"
@@ -387,7 +387,7 @@
 
 - name: Install the router-owned BuildKit package identity
   ansible.builtin.copy:
-    src: "{{ platform_buildkit_bundle | dirname }}/build-executor-client/{{ item }}"
+    src: "{{ platform_buildkit_client_files[item] }}"
     dest: "{{ platform_buildkit_controller_client_path }}/{{ item }}"
     owner: rocky
     group: rocky

@@ -25,11 +25,14 @@ dependencies = [
 name = "access-service"
 version = "0.1.0"
 dependencies = [
+ "artifact-store",
  "async-nats",
+ "async-trait",
  "auth",
  "axum 0.8.9",
  "base64 0.22.1",
  "contracts",
+ "control-service",
  "futures-util",
  "hyper 1.10.1",
  "hyper-util",
@@ -42,6 +45,7 @@ dependencies = [
  "reqwest",
  "rustls 0.23.42",
  "rustls-pemfile 2.2.0",
+ "scraper",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -49,6 +53,7 @@ dependencies = [
  "sqlx",
  "subtle",
  "telemetry",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.18",
@@ -132,6 +137,8 @@ dependencies = [
  "flate2",
  "futures",
  "futures-util",
+ "h2 0.4.15",
+ "http 1.4.2",
  "http-auth",
  "hyper-util",
  "jsonschema",
@@ -141,6 +148,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest",
+ "resource-service",
  "russh",
  "russh-sftp",
  "rustls 0.23.42",
@@ -1423,6 +1431,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "ssh-key 0.6.7",
  "thiserror 2.0.18",
  "time",
@@ -1434,6 +1443,7 @@ dependencies = [
 name = "control-service"
 version = "0.1.0"
 dependencies = [
+ "agent-service",
  "artifact-store",
  "async-nats",
  "async-trait",
@@ -1441,11 +1451,14 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "contracts",
+ "environment-service",
  "futures-util",
  "hyper-util",
+ "jsonwebtoken",
  "persistence-sqlx",
  "rcgen",
  "reqwest",
+ "resource-service",
  "rustls 0.23.42",
  "rustls-pemfile 2.2.0",
  "serde",
@@ -2180,6 +2193,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "reqwest",
+ "resource-service",
  "russh",
  "rustls 0.23.42",
  "rustls-pemfile 2.2.0",
@@ -2245,6 +2259,7 @@ dependencies = [
 name = "evaluation-service"
 version = "0.1.0"
 dependencies = [
+ "agent-service",
  "artifact-store",
  "async-nats",
  "async-trait",
@@ -2254,6 +2269,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "contracts",
+ "control-service",
  "futures-util",
  "hyper-util",
  "landlock",
@@ -5133,11 +5149,14 @@ dependencies = [
 name = "resource-service"
 version = "0.1.0"
 dependencies = [
+ "artifact-store",
  "async-nats",
+ "async-trait",
  "auth",
  "axum 0.8.9",
  "base64 0.22.1",
  "contracts",
+ "control-service",
  "futures-util",
  "hyper-util",
  "jsonwebtoken",
@@ -5152,13 +5171,16 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "sqlx",
+ "task-execution",
  "telemetry",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.18",
  "time",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tower",
  "tracing",
  "url",
@@ -6302,8 +6324,6 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
 dependencies = [
  "atoi",
  "base64 0.22.1",

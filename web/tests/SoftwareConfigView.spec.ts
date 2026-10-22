@@ -33,12 +33,34 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
 })
 
 const packageUploadMock = vi.hoisted(() => {
+  const packageFiles = [
+    {
+      path: 'README.md',
+      object: {
+        artifactId: 'artifact-readme',
+        mediaType: 'text/markdown',
+        objectVersion: 'v1',
+        sizeBytes: 128,
+        storeBinding: 'materials',
+      },
+    },
+    {
+      path: 'src/main.py',
+      object: {
+        artifactId: 'artifact-main',
+        mediaType: 'text/x-python',
+        objectVersion: 'v1',
+        sizeBytes: 256,
+        storeBinding: 'materials',
+      },
+    },
+  ]
   const packageView = (id: string) => ({
     id,
     projectId: 'project-1',
     courseId: null,
     revision: 1,
-    files: [],
+    files: packageFiles,
     retention: {},
     completedAt: '2026-09-08T00:00:00.000Z',
   })
@@ -64,7 +86,9 @@ const packageUploadMock = vi.hoisted(() => {
 
 vi.mock('@/composables/useProjectProblemPackageUpload', async () => {
   const { reactive } = await import('vue')
-  return { useProjectProblemPackageUpload: () => reactive(packageUploadMock) }
+  // One shared reactive proxy so test mutations on packageUploadMock (proxy target) + component reads stay in sync.
+  const shared = reactive(packageUploadMock)
+  return { useProjectProblemPackageUpload: () => shared }
 })
 
 const project = {
@@ -203,11 +227,33 @@ describe('SoftwareConfigView', () => {
       kind: 'done',
       package: {
         id: 'package-1', projectId: 'project-1', courseId: null, revision: 1,
-        files: [], retention: {}, completedAt: '2026-09-08T00:00:00.000Z',
+        files: [
+          {
+            path: 'README.md',
+            object: {
+              artifactId: 'artifact-readme',
+              mediaType: 'text/markdown',
+              objectVersion: 'v1',
+              sizeBytes: 128,
+              storeBinding: 'materials',
+            },
+          },
+          {
+            path: 'src/main.py',
+            object: {
+              artifactId: 'artifact-main',
+              mediaType: 'text/x-python',
+              objectVersion: 'v1',
+              sizeBytes: 256,
+              storeBinding: 'materials',
+            },
+          },
+        ],
+        retention: {}, completedAt: '2026-09-08T00:00:00.000Z',
       },
     }
-    vi.mocked(packageUploadMock.loadPackage).mockImplementation(async (id: string) => {
-      packageUploadMock.setPackage(id)
+    vi.mocked(packageUploadMock.loadPackage).mockImplementation(async function (this: typeof packageUploadMock, id: string) {
+      this.setPackage(id)
       return true
     })
     vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
@@ -226,6 +272,35 @@ describe('SoftwareConfigView', () => {
     vi.useRealTimers()
   })
 
+  async function acknowledgeImpact(wrapper: ReturnType<typeof mount>) {
+    const impact = wrapper.find('.authorization-field input[type="checkbox"]')
+    await impact.setValue(true)
+  }
+
+  async function selectModelInputPath(wrapper: ReturnType<typeof mount>, path = 'README.md') {
+    await vi.waitFor(() => expect(wrapper.find(`[data-testid="model-input-path-${path}"]`).exists()).toBe(true))
+    await wrapper.get(`[data-testid="model-input-path-${path}"]`).setValue(true)
+  }
+
+  async function prepareConfigurationSubmit(wrapper: ReturnType<typeof mount>) {
+    await wrapper.find('select[required]').setValue('environment-1')
+    await selectModelInputPath(wrapper)
+    await acknowledgeImpact(wrapper)
+  }
+
+  it('blocks Work configuration submit until selectedPaths is non-empty', async () => {
+    const wrapper = mount(SoftwareConfigView, {
+      global: { stubs: { RouterLink: true } },
+    })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Research Work'))
+    await wrapper.find('select[required]').setValue('environment-1')
+    await acknowledgeImpact(wrapper)
+    expect((wrapper.get('form.config-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
+    await wrapper.find('form.config-form').trigger('submit')
+    expect(createProjectWorkConfigurationRun).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('submits an existing Work target and defaults approval to fifteen minutes ahead', async () => {
     const wrapper = mount(SoftwareConfigView, {
       global: { stubs: { RouterLink: true } },
@@ -233,8 +308,7 @@ describe('SoftwareConfigView', () => {
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('Research Work'))
     expect(wrapper.get('.project-summary .state-chip').text()).toBe('可用')
-    await wrapper.find('select[required]').setValue('environment-1')
-    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await prepareConfigurationSubmit(wrapper)
     await wrapper.find('form.config-form').trigger('submit')
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('Work 配置计划审核'))
@@ -245,6 +319,7 @@ describe('SoftwareConfigView', () => {
         environmentId: 'environment-1',
         environmentRevision: 4,
         packageId: 'package-1',
+        selectedPaths: ['README.md'],
       }),
     }))
 
@@ -261,7 +336,7 @@ describe('SoftwareConfigView', () => {
   })
 
   it('restores a route-selected material package without exposing an ID form field', async () => {
-    packageUploadMock.state = { kind: 'idle' }
+    packageUploadMock.state = { kind: 'idle' } as typeof packageUploadMock.state
     const wrapper = mount(SoftwareConfigView, {
       global: {
         stubs: { RouterLink: true },
@@ -273,9 +348,10 @@ describe('SoftwareConfigView', () => {
     })
 
     await vi.waitFor(() => expect(packageUploadMock.loadPackage).toHaveBeenCalledWith('published-package'))
-    expect(wrapper.text()).toContain('材料包已准备')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('材料包已准备'))
     expect(wrapper.text()).toContain('材料包版本：1')
     expect(wrapper.find('input[aria-label="材料包 ID"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="model-input-path-picker"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -297,7 +373,8 @@ describe('SoftwareConfigView', () => {
     await configurationButton.trigger('click')
 
     await vi.waitFor(() => expect(packageUploadMock.loadPackage).toHaveBeenCalledWith('published-package'))
-    expect(wrapper.text()).toContain('材料包已准备')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('材料包已准备'))
+    expect(wrapper.find('[data-testid="model-input-path-picker"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -310,8 +387,7 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('select[required]').setValue('environment-1')
-    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await prepareConfigurationSubmit(wrapper)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(wrapper.text()).toContain('Work 配置计划审核'))
 
@@ -357,8 +433,7 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('select[required]').setValue('environment-1')
-    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await prepareConfigurationSubmit(wrapper)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(wrapper.text()).toContain('重试 Work 配置'))
     await wrapper.findAll('button.text-button').find((button) => button.text() === '重试 Work 配置')!.trigger('click')
@@ -386,8 +461,7 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('select[required]').setValue('environment-1')
-    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await prepareConfigurationSubmit(wrapper)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(wrapper.text()).toContain('重试 Work 配置'))
 
@@ -408,8 +482,7 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('select[required]').setValue('environment-1')
-    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await prepareConfigurationSubmit(wrapper)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(wrapper.text()).toContain('开始新的 Work 配置任务'))
     expect(wrapper.text()).not.toContain('重试 Work 配置')
@@ -417,12 +490,11 @@ describe('SoftwareConfigView', () => {
 
     expect(packageUploadMock.clear).toHaveBeenCalled()
     expect((wrapper.find('select[required]').element as HTMLSelectElement).value).toBe('')
-    expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false)
+    expect((wrapper.find('.authorization-field input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false)
 
     ;(wrapper.vm as unknown as { packageUpload: typeof packageUploadMock }).packageUpload.setPackage('package-2')
     await wrapper.vm.$nextTick()
-    await wrapper.find('select[required]').setValue('environment-1')
-    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await prepareConfigurationSubmit(wrapper)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(createProjectWorkConfigurationRun).toHaveBeenCalledTimes(2))
   })
@@ -459,8 +531,7 @@ describe('SoftwareConfigView', () => {
       },
     })
 
-    await wrapper.find('select[required]').setValue('environment-1')
-    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await prepareConfigurationSubmit(wrapper)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(wrapper.text()).toContain('Work 配置计划审核'))
 
