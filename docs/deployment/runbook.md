@@ -147,6 +147,10 @@ Resource 任务协议要求资源迁移 `0015_task_approval_deadline.sql`。迁�
 
 `migrations/catalog.yaml` 是迁移目录唯一真源。每个业务 schema 的在线 migration ledger 必须是该目录的有序前缀，新增迁移只能追加。部署失败时先读取服务诊断和 ledger，不能删表、清空 schema 或手工改 migration 状态来绕过校验。数据库迁移前向执行；需要数据恢复时使用经批准的数据库恢复方案，不把 Helm 回滚当作数据库回滚。
 
+Resource 的项目 Credits 使用 `resource/0016_project_credits.sql`。部署前确认 `migrations/catalog.yaml` 中该文件的 SHA-256 与工作树一致，并确认 Resource migration ledger 已包含前置的 `resource/0015_task_approval_deadline.sql`；0016 只能作为下一条追加迁移执行。该迁移创建零余额账户、预占和不可变账目表，不会为历史费用生成扣款、发放初始余额或清空现有数据。
+
+应用升级后先检查 Resource 的 migration ledger、Credits 表和服务健康状态，再开放新的 Credits 预占入口。迁移失败时停止 Resource 应用升级并保留数据库现场，按前向修复流程处理；不要删除 Credits 表、手工修改 ledger，或用 Helm 回滚恢复数据库。
+
 ## 4. 增量部署和回滚
 
 ### 4.1 Platform profile
