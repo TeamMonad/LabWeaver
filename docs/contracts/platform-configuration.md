@@ -143,7 +143,7 @@ Applying 或 verifying 阶段失败后，applied 保留最后验证版本，同�
 
 ## 持久化与部署顺序
 
-`control/0015_platform_configuration.sql` 创建管理配置表，其文件与摘要保持原样。`0018_platform_configuration_bundles.sql` 追加不可变登记表和版本查询索引。0014属于#197，0016和已发表的0017属于#199。部署前由父协调组合 catalog，再按统一递增顺序执行。不要在仍需补齐旧编号的环境中先执行后续迁移。
+`control/0015_platform_configuration.sql` 创建管理配置表，其文件与摘要保持原样。`0016_platform_configuration_bundles.sql` 追加不可变登记表和版本查询索引。本 PR 已将 Bundle 迁移从临时编号0018改为0016，以保持 control domain 连续；0014属于#197，后续#199使用0017、0018、0019。部署前由父协调组合 catalog，再按统一递增顺序执行。不要在仍需补齐旧编号的环境中先执行后续迁移。
 
 本 PR 没有在远端执行迁移。故障时先查看实际 migration ledger 和目录，不在服务启动时修补未知 schema，也不删除配置历史。
 
