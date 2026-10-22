@@ -226,10 +226,15 @@ pub(super) fn actual_loaded_bundle_replicas(
             format!("LW_BUNDLE_TEST_PRODUCER_SPAWN_FAILED command={command} error={error}")
         })?;
     if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        eprintln!(
+            "LW_BUNDLE_TEST_PRODUCER_FAILED command={command} exit_code={:?}\nstderr:\n{stderr}",
+            result.status.code()
+        );
         return Err(format!(
-            "LW_BUNDLE_TEST_PRODUCER_FAILED\ncommand={command}\nexit_code={:?}\nstderr:\n{}",
+            "LW_BUNDLE_TEST_PRODUCER_FAILED command={command} exit_code={:?} stderr={}",
             result.status.code(),
-            String::from_utf8_lossy(&result.stderr).trim()
+            stderr.trim()
         )
         .into());
     }
