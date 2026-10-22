@@ -50,6 +50,7 @@ const REQUEST_REJECTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_REJECTED;
 const REQUEST_CANCELLED_SUBJECT: &str = subjects::RESOURCE_REQUEST_CANCELLED;
 const REQUEST_STATE_CHANGED_SUBJECT: &str = subjects::RESOURCE_REQUEST_STATE_CHANGED;
 const LEASE_ACTIVATED_SUBJECT: &str = subjects::RESOURCE_LEASE_ACTIVATED;
+const LEASE_CREATED_SUBJECT: &str = subjects::RESOURCE_LEASE_CREATED;
 const LEASE_RENEWED_SUBJECT: &str = subjects::RESOURCE_LEASE_RENEWED;
 const LEASE_FENCED_SUBJECT: &str = subjects::RESOURCE_LEASE_FENCED;
 const LEASE_REVOKED_SUBJECT: &str = subjects::RESOURCE_LEASE_REVOKED;
@@ -2650,7 +2651,7 @@ impl PgResourceStore {
                     &mut transaction,
                     &lease,
                     &next,
-                    LEASE_FENCED_SUBJECT,
+                    LEASE_CREATED_SUBJECT,
                     trace_id,
                 )
                 .await?;

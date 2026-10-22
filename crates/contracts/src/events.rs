@@ -69,6 +69,7 @@ pub mod subjects {
     pub const RESOURCE_REQUEST_REJECTED: &str = "labweaver.resource.request.rejected.v1";
     pub const RESOURCE_REQUEST_CANCELLED: &str = "labweaver.resource.request.cancelled.v1";
     pub const RESOURCE_REQUEST_STATE_CHANGED: &str = "labweaver.resource.request.state_changed.v1";
+    pub const RESOURCE_LEASE_CREATED: &str = "labweaver.resource.lease.created.v1";
     pub const RESOURCE_LEASE_ACTIVATED: &str = "labweaver.resource.lease.activated.v1";
     pub const RESOURCE_LEASE_RENEWED: &str = "labweaver.resource.lease.renewed.v1";
     pub const RESOURCE_LEASE_FENCED: &str = "labweaver.resource.lease.fenced.v1";
@@ -192,6 +193,11 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         subject: subjects::RESOURCE_REQUEST_STATE_CHANGED,
         event_type: subjects::RESOURCE_REQUEST_STATE_CHANGED,
         schema_name: "resource-request-state-changed",
+    },
+    EventContract {
+        subject: subjects::RESOURCE_LEASE_CREATED,
+        event_type: subjects::RESOURCE_LEASE_CREATED,
+        schema_name: "resource-lease-created",
     },
     EventContract {
         subject: subjects::RESOURCE_LEASE_ACTIVATED,

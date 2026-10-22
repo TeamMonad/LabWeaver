@@ -857,7 +857,7 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::ResourceRequestChanged>
     );
     document!(
-        "schemas/contracts/v1/events/resource-lease-activated.schema.json",
+        "schemas/contracts/v1/events/resource-lease-created.schema.json",
         CloudEvent<events::ResourceLeaseChanged>
     );
     document!(
