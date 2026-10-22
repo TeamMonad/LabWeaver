@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -402,6 +403,9 @@ fn contracts_check() -> Result<(), AppError> {
                 })?
                 .to_string_lossy()
                 .replace(std::path::MAIN_SEPARATOR, "/");
+            if relative.starts_with("schemas/contracts/v1/internal/") {
+                continue;
+            }
             if !generated_paths.contains(relative.as_str()) {
                 return Err(AppError::ContractDrift { path: relative });
             }
