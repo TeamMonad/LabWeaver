@@ -199,10 +199,10 @@ pub trait ImmutableObjectStore: Send + Sync {
     /// together with their bounded uploader-side check.
     async fn presign_upload_exact(
         &self,
-        key: &str,
-        size_bytes: u64,
-        media_type: &str,
-        now: UtcTimestamp,
+        _key: &str,
+        _size_bytes: u64,
+        _media_type: &str,
+        _now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
         Err(ObjectStoreError::ConfigurationInvalid)
     }
