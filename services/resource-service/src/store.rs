@@ -3145,7 +3145,7 @@ impl PgResourceStore {
             && lease.state == ResourceLeaseState::Revoked
             && matches!(
                 lease.revoke_reason_code.as_deref(),
-                Some("task_owner_release") | Some("task_lease_expired")
+                Some("task_owner_release" | "task_lease_expired")
             )
             && expected_request_revision.get().checked_add(2) == Some(request.revision.get())
             && expected_claim_revision.get().checked_add(2) == Some(claim.revision.get())
