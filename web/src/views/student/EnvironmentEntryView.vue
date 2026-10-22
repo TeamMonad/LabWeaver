@@ -395,7 +395,7 @@
                   :issuing="access.creating"
                   @open-console="openConsoleTab"
                   @recheck="recheckConnection"
-                  @issue-grant="issueAccessGrant"
+                  @issue-grant="issueGrantAndConnect"
                 />
 
                 <div class="access-section">
@@ -1230,7 +1230,7 @@ watch(
   () => grantUsable.value && access.grant.kind === 'success' ? `${access.grant.data.id}:${access.grant.data.revision}` : null,
   (identity) => {
     if (identity) void consoleCapability.load()
-    else consoleCapability.availability = { kind: 'idle' }
+    else consoleCapability.reset()
   },
   { immediate: true },
 )
@@ -1247,6 +1247,28 @@ function openConsoleTab(kind: ConsoleKind) {
   requestedConsoleKind.value = kind
   activeTab.value = 'terminal'
 }
+
+/**
+ * "签发授权并连接" from the connection summary: issue the grant, then open the
+ * first browser console the server permits for it. Without a permitted console
+ * the user stays on the overview, where SSH and application entries are listed.
+ */
+const connectAfterGrant = ref<string | null>(null)
+async function issueGrantAndConnect() {
+  const environmentId = selectedEnvironmentId.value ?? null
+  connectAfterGrant.value = environmentId
+  await issueAccessGrant()
+  if (!grantIsUsable(access.grant, Date.now())) connectAfterGrant.value = null
+}
+watch(
+  () => consoleCapability.availability,
+  (state) => {
+    if (!connectAfterGrant.value || connectAfterGrant.value !== selectedEnvironmentId.value) return
+    if (state.kind === 'idle' || state.kind === 'loading') return
+    connectAfterGrant.value = null
+    if (state.kind === 'success' && state.data.kinds.length > 0) openConsoleTab(state.data.kinds[0])
+  },
+)
 const operations = useEnvironmentOperations(selectedEnvironmentId)
 
 const freezeState = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })

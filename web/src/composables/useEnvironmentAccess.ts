@@ -27,17 +27,24 @@ export function useEnvironmentAccess(
   const endpoints = ref<AsyncState<EnvironmentEndpointSchema[]>>({ kind: 'idle' })
   const grant = ref<AsyncState<AccessGrantSchema>>({ kind: 'idle' })
   const creating = ref(false)
+  // Every read or write of `endpoints` / `grant` takes a new generation; an
+  // answer may only be written while its generation is still the latest, so a
+  // slow, older read can never overwrite a newer one (for example an earlier
+  // "active" arriving after a later "revoked").
+  let endpointsGeneration = 0
+  let grantGeneration = 0
 
   /** `silent` re-reads keep the current answer on screen until the new one arrives. */
   async function loadEndpoints(silent = false) {
     const id = environmentId.value
+    const generation = ++endpointsGeneration
     if (!id) {
       endpoints.value = { kind: 'idle' }
       return
     }
     if (!silent) endpoints.value = { kind: 'loading', message: '加载环境入口…' }
     const result = await listEnvironmentEndpoints({ path: { environmentId: id } })
-    if (id !== environmentId.value) return
+    if (generation !== endpointsGeneration || id !== environmentId.value) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
       endpoints.value = {
@@ -73,6 +80,7 @@ export function useEnvironmentAccess(
         diagnostic: makeDiagnostic('ACCESS_GRANT_NO_ENDPOINT', '没有可用的环境入口，无法签发访问授权。', false),
       }
     }
+    const generation = ++grantGeneration
     creating.value = true
     try {
       const result = await createAccessGrant({
@@ -87,6 +95,7 @@ export function useEnvironmentAccess(
           ...(cid ? { courseId: cid } : {}),
         },
       })
+      if (generation !== grantGeneration) return { ok: false }
       if (result.error) {
         const problem = extractProblemDetails(result.error)
         grant.value = {
@@ -101,7 +110,7 @@ export function useEnvironmentAccess(
         return { ok: false }
       }
       grant.value = { kind: 'success', data: result.data }
-      return await waitForActivation(result.data)
+      return await waitForActivation(result.data, generation)
     } finally {
       creating.value = false
     }
@@ -109,6 +118,8 @@ export function useEnvironmentAccess(
 
   async function loadCurrentGrant(silent = false) {
     const id = environmentId.value
+    const generation = ++grantGeneration
+    const stale = () => generation !== grantGeneration || id !== environmentId.value
     if (!id) {
       grant.value = { kind: 'idle' }
       return { ok: true }
@@ -118,7 +129,7 @@ export function useEnvironmentAccess(
       path: { environmentId: id },
       query: { state: 'active', includeTerminal: false, limit: 2 },
     })
-    if (id !== environmentId.value) return { ok: false }
+    if (stale()) return { ok: false }
     if (result.error) {
       const problem = extractProblemDetails(result.error)
       const diagnostic = makeDiagnostic(
@@ -145,7 +156,7 @@ export function useEnvironmentAccess(
       return { ok: false, diagnostic }
     }
     const loaded = await getAccessGrant({ path: { grantId: items[0].id } })
-    if (id !== environmentId.value) return { ok: false }
+    if (stale()) return { ok: false }
     if (loaded.error) {
       const problem = extractProblemDetails(loaded.error)
       const diagnostic = makeDiagnostic(
@@ -170,12 +181,14 @@ export function useEnvironmentAccess(
     return { ok: true }
   }
 
-  async function waitForActivation(initial: AccessGrantSchema) {
+  async function waitForActivation(initial: AccessGrantSchema, generation: number) {
     let current = initial
     const deadline = Date.now() + ACTIVATION_TIMEOUT_MS
     while (current.state === 'requested' && Date.now() < deadline) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, ACTIVATION_POLL_MS))
+      if (generation !== grantGeneration) return { ok: false }
       const result = await getAccessGrant({ path: { grantId: current.id } })
+      if (generation !== grantGeneration) return { ok: false }
       if (result.error) {
         const problem = extractProblemDetails(result.error)
         const diagnostic = makeDiagnostic(
@@ -220,6 +233,8 @@ export function useEnvironmentAccess(
         ),
       }
     }
+    // A confirmed revocation is newer than every read still in flight.
+    grantGeneration += 1
     grant.value = {
       kind: 'revoked',
       diagnostic: makeDiagnostic('ACCESS_GRANT_REVOKED', '访问授权已撤销。', false),
@@ -228,6 +243,7 @@ export function useEnvironmentAccess(
   }
 
   function resetGrant() {
+    grantGeneration += 1
     grant.value = { kind: 'idle' }
   }
 

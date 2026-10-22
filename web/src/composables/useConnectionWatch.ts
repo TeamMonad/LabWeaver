@@ -44,6 +44,10 @@ export function useConnectionWatch(
   let recheckTimer: ReturnType<typeof setTimeout> | undefined
   let expiryTimer: ReturnType<typeof setTimeout> | undefined
   let windowStartedAt: number | null = null
+  // Automatic re-checks, the expiry re-read and the user's "重新检查" all run
+  // `refresh`; only the latest one may reschedule. `access` itself drops any
+  // answer older than its newest read, so state never moves backwards.
+  let refreshGeneration = 0
 
   const readinessKind = computed(() => instance.value
     ? connectionReadiness(instance.value, access.endpoints, access.grant, '', now.value).kind
@@ -51,14 +55,18 @@ export function useConnectionWatch(
 
   const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
 
-  async function refresh() {
+  /** Resolves to whether this refresh is still the latest one. */
+  async function refresh(): Promise<boolean> {
+    const generation = ++refreshGeneration
     now.value = Date.now()
     // An access grant that is being issued is followed by its own activation reads.
     await Promise.all([
       access.loadEndpoints(true),
       access.creating ? Promise.resolve() : access.loadCurrentGrant(true),
     ])
+    if (generation !== refreshGeneration) return false
     now.value = Date.now()
+    return true
   }
 
   function scheduleRecheck() {
@@ -80,8 +88,7 @@ export function useConnectionWatch(
     }
     autoChecking.value = true
     recheckTimer = setTimeout(async () => {
-      await refresh()
-      scheduleRecheck()
+      if (await refresh()) scheduleRecheck()
     }, RECHECK_INTERVAL_MS)
   }
 
@@ -89,37 +96,43 @@ export function useConnectionWatch(
   async function recheck() {
     windowStartedAt = null
     clearTimeout(recheckTimer)
-    await refresh()
-    scheduleRecheck()
+    if (await refresh()) scheduleRecheck()
   }
 
   watch(readinessKind, scheduleRecheck, { immediate: true })
 
-  watch(
-    () => access.grant.kind === 'success' && access.grant.data.state === 'active' ? access.grant.data.expiresAt : null,
-    (expiresAt) => {
-      clearTimeout(expiryTimer)
-      if (!expiresAt) return
-      const delay = Math.min(Math.max(Date.parse(expiresAt) - Date.now() + EXPIRY_SKEW_MS, 0), MAX_TIMER_DELAY_MS)
-      expiryTimer = setTimeout(() => {
-        void refresh().then(scheduleRecheck)
-      }, delay)
-    },
-    { immediate: true },
-  )
+  const activeGrantExpiry = computed(() => (
+    access.grant.kind === 'success' && access.grant.data.state === 'active' ? access.grant.data.expiresAt : null
+  ))
+
+  /** Re-read the grant just after it expires; only while the page is visible. */
+  function armExpiryTimer() {
+    clearTimeout(expiryTimer)
+    const expiresAt = activeGrantExpiry.value
+    if (!expiresAt || !pageVisible()) return
+    const delay = Math.min(Math.max(Date.parse(expiresAt) - Date.now() + EXPIRY_SKEW_MS, 0), MAX_TIMER_DELAY_MS)
+    expiryTimer = setTimeout(async () => {
+      if (await refresh()) scheduleRecheck()
+    }, delay)
+  }
+
+  watch(activeGrantExpiry, armExpiryTimer, { immediate: true })
 
   function onVisibilityChange() {
     if (!pageVisible()) {
       clearTimeout(recheckTimer)
+      clearTimeout(expiryTimer)
       autoChecking.value = false
       return
     }
+    armExpiryTimer()
     if (instance.value) void recheck()
   }
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange)
 
   if (getCurrentScope()) {
     onScopeDispose(() => {
+      refreshGeneration += 1
       clearTimeout(recheckTimer)
       clearTimeout(expiryTimer)
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)

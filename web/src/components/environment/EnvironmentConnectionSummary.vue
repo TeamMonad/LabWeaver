@@ -52,7 +52,7 @@
         :disabled="issuing"
         @click="emit('issue-grant')"
       >
-        {{ issuing ? '签发中…' : readiness.kind === 'needs-regrant' ? '重新签发访问授权' : '签发授权并连接' }}
+        {{ issuing ? '签发中…' : readiness.kind === 'needs-regrant' ? '重新签发并连接' : '签发授权并连接' }}
       </button>
     </div>
     <ul

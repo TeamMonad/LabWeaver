@@ -17,20 +17,29 @@ function errorDiagnostic(err: unknown, fallbackCode: string, fallbackDetail: str
 export function useConsoleCapability(grantId: Ref<string | undefined>) {
   const availability = ref<AsyncState<ConsoleCapabilityAvailabilitySchema>>({ kind: 'idle' })
   const issuing = ref(false)
+  // Only the latest read may write `availability`; a slow answer for an older grant is dropped.
+  let generation = 0
 
   async function load() {
     const id = grantId.value
+    const current = ++generation
     if (!id) {
       availability.value = { kind: 'idle' }
       return
     }
     availability.value = { kind: 'loading', message: '加载控制台能力…' }
     const result = await listConsoleCapabilities({ path: { grantId: id } })
+    if (current !== generation || id !== grantId.value) return
     if (result.error) {
       availability.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'CONSOLE_CAPABILITY_LIST_FAILED', '加载控制台能力失败') }
       return
     }
     availability.value = { kind: 'success', data: result.data }
+  }
+
+  function reset() {
+    generation += 1
+    availability.value = { kind: 'idle' }
   }
 
   async function issue(
@@ -65,5 +74,5 @@ export function useConsoleCapability(grantId: Ref<string | undefined>) {
     }
   }
 
-  return reactive({ availability, issuing, load, issue })
+  return reactive({ availability, issuing, load, reset, issue })
 }
