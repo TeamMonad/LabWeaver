@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "BuildUsageMeasurement": {
+      "description": "A provider history observation. Missing bounds remain unknown.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "finishedAt": {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "historyRef": {
+              "type": "string"
+            },
+            "startedAt": {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "state": {
+              "const": "known",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "historyRef",
+            "startedAt",
+            "finishedAt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The fenced executor rejected the stage before calling BuildKit.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "not_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "buildRequestId": {
+      "$ref": "#/$defs/BuildRequestId"
+    },
+    "leaseToken": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "measurement": {
+      "$ref": "#/$defs/BuildUsageMeasurement"
+    }
+  },
+  "required": [
+    "buildRequestId",
+    "attempt",
+    "leaseToken",
+    "measurement"
+  ],
+  "title": "ObserveBuildCostRequest",
+  "type": "object"
+}

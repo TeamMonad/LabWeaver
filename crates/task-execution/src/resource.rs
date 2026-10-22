@@ -354,6 +354,124 @@ impl ResourceClient {
         Ok(record)
     }
 
+    /// Preauthorizes the real build attempt. An uncertain reply is queried with the same identity.
+    pub async fn admit_build_cost(
+        &self,
+        input: &contracts::resource::build_costing::BuildCostAdmissionRequest,
+    ) -> Result<contracts::resource::build_costing::BuildCostRecord, ResourceClientError> {
+        let key = format!(
+            "build-{}-{}-{}",
+            input.build_request_id, input.attempt, input.authorize_execution
+        );
+        let response = self
+            .execute(
+                Method::POST,
+                "internal/v1/build-cost-admissions",
+                Some(self.encode_request(input)?),
+                Some(&key),
+                NotFound::Request,
+            )
+            .await;
+        let bytes = match response {
+            Ok(bytes) => bytes,
+            Err(ResourceClientError::Transport) => {
+                let Some(record) = self
+                    .get_build_cost(input.build_request_id, input.attempt, input.lease_token)
+                    .await?
+                else {
+                    return Err(ResourceClientError::Transport);
+                };
+                if record.hold.state != contracts::resource::credits::CreditHoldState::Pending
+                    || record.hold.measurement_unknown
+                    || record.hold.expired_unknown_at.is_some()
+                    || record.hold.remaining.scaled() < record.estimate.total.amount.scaled()
+                    || record.execution_deadline != Some(input.execution_deadline)
+                    || record.stage_request_id.as_deref() != Some(input.stage_request_id.as_str())
+                    || (input.authorize_execution && !record.execution_authorized)
+                {
+                    return Err(ResourceClientError::Transport);
+                }
+                return Ok(record);
+            }
+            Err(error) => return Err(error),
+        };
+        let record: contracts::resource::build_costing::BuildCostRecord = decode_response(&bytes)?;
+        if record.build_request_id != input.build_request_id
+            || record.attempt != input.attempt
+            || record.execution_deadline != Some(input.execution_deadline)
+            || record.stage_request_id.as_deref() != Some(input.stage_request_id.as_str())
+            || (input.authorize_execution && !record.execution_authorized)
+        {
+            return Err(ResourceClientError::ResponseInvalid);
+        }
+        Ok(record)
+    }
+    /// Reads the original preauthorization; absence does not prove a transmitted build never ran.
+    pub async fn get_build_cost(
+        &self,
+        build: contracts::BuildRequestId,
+        attempt: u32,
+        lease_token: uuid::Uuid,
+    ) -> Result<Option<contracts::resource::build_costing::BuildCostRecord>, ResourceClientError>
+    {
+        let path =
+            format!("internal/v1/build-costs/{build}/attempts/{attempt}?leaseToken={lease_token}");
+        let bytes = match self
+            .execute(Method::GET, &path, None, None, NotFound::Request)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(ResourceClientError::RequestMissing) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let record: contracts::resource::build_costing::BuildCostRecord = decode_response(&bytes)?;
+        if record.build_request_id != build || record.attempt != attempt {
+            return Err(ResourceClientError::ResponseInvalid);
+        }
+        Ok(Some(record))
+    }
+    /// Reports a confirmed history interval or an explicit unknown result without replaying a build.
+    pub async fn observe_build_cost(
+        &self,
+        input: &contracts::resource::build_costing::ObserveBuildCostRequest,
+    ) -> Result<contracts::resource::build_costing::BuildCostRecord, ResourceClientError> {
+        let key = format!(
+            "build-observation-{}-{}",
+            input.build_request_id, input.attempt
+        );
+        let bytes = self
+            .execute(
+                Method::POST,
+                "internal/v1/build-cost-observations",
+                Some(self.encode_request(input)?),
+                Some(&key),
+                NotFound::Request,
+            )
+            .await?;
+        let record: contracts::resource::build_costing::BuildCostRecord = decode_response(&bytes)?;
+        if record.build_request_id != input.build_request_id || record.attempt != input.attempt {
+            return Err(ResourceClientError::ResponseInvalid);
+        }
+        Ok(record)
+    }
+
+    /// Claims at most 25 due original grants; the server persists bounded query pacing.
+    pub async fn claim_build_cost_reconciliations(
+        &self,
+    ) -> Result<Vec<contracts::resource::build_costing::BuildCostReconciliation>, ResourceClientError>
+    {
+        let bytes = self
+            .execute(
+                Method::GET,
+                "internal/v1/build-cost-reconciliations",
+                None,
+                None,
+                NotFound::Request,
+            )
+            .await?;
+        decode_response(&bytes)
+    }
+
     fn encode_request<T: Serialize>(&self, request: &T) -> Result<Vec<u8>, ResourceClientError> {
         let body = serde_json::to_vec(request).map_err(|_| ResourceClientError::RequestInvalid)?;
         if body.len() > self.max_request_bytes {
@@ -433,9 +551,11 @@ enum NotFound {
 }
 
 fn validate_scopes(scopes: &BTreeSet<String>) -> Result<(), ResourceClientError> {
-    if REQUIRED_SCOPES
+    let tasks = REQUIRED_SCOPES.iter().all(|scope| scopes.contains(*scope));
+    let builds = ["resource.credits.hold", "resource.usage.record"]
         .iter()
-        .any(|required| !scopes.contains(*required))
+        .all(|scope| scopes.contains(*scope));
+    if (!tasks && !builds)
         || scopes.iter().any(|scope| {
             scope.is_empty()
                 || scope.len() > 128

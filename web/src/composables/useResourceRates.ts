@@ -34,6 +34,7 @@ function resourceRateLabel(rate: ResourceRateSchema | undefined): string {
     cpu_millicore_second: 'CPU 费率',
     memory_byte_second: '内存费率',
     storage_byte_second: '存储费率',
+    build_second: '构建秒费率',
   } as Record<string, string>)[rate.unit] ?? '资源费率'
 }
 

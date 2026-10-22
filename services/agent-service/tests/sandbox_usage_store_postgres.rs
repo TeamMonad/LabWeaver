@@ -77,6 +77,7 @@ fn usage(intent: &SandboxAttemptIntent) -> Result<serde_json::Value, Box<dyn std
         measured_until: time_at(160)?,
         measurement: UsageMeasurement::Known {
             quantities: ResourceUsageQuantities {
+                quantity_divisor: 1,
                 cpu_millicore_seconds: 60_000,
                 memory_byte_seconds: 60 * 1024 * 1024,
                 storage_byte_seconds: 0,

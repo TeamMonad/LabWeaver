@@ -36,3 +36,12 @@ executor:
   projectStorageQuotaBytes: 10737418240
   robotSubject: "platform-build-executor"
   serviceImage: "harbor.example.invalid/labweaver-system/evaluation-service@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+
+# Real Resource endpoint; no fee or balance defaults are created here.
+resource:
+  baseUri: "https://resource-service:9448/"
+  caFile: "/etc/labweaver/secrets/mtls-ca.pem"
+  timeoutMilliseconds: 5000
+  maxRequestBytes: 1048576
+  maxResponseBytes: 8388608
+  audience: "labweaver-resource"

@@ -2,17 +2,17 @@
   <div class="finance-page">
     <header class="page-header">
       <div>
-        <h2>费率、预算与费用</h2>
+        <h2>费率、Credits、预算与费用</h2>
         <p class="page-subtitle">
-          全局费率无需选择项目；项目预算和费用须有相应权限。金额用于核算，不代表支付。
+          全局费率无需选择项目；项目 Credits 账户、资源估价、预算和费用须有相应权限。Credits 用于准入扣收，预算仅提醒；估价金额取服务端返回值。金额用于核算，不代表支付。
         </p>
       </div>
       <button
         type="button"
         class="icon-button"
-        aria-label="刷新预算与费用"
+        aria-label="刷新 Credits、预算与费用"
         :disabled="finance.acting !== null"
-        @click="finance.load"
+        @click="refreshFinance"
       >
         <SvgIcon
           name="refresh"
@@ -210,6 +210,7 @@
             <option value="cpu_millicore_second">CPU 核心小时</option>
             <option value="memory_byte_second">内存 GiB 小时</option>
             <option value="storage_byte_second">存储 GiB 小时</option>
+            <option value="build_second">构建秒</option>
           </select>
         </label>
         <label v-if="rateUnit === 'gpu_unit_second'">
@@ -325,7 +326,7 @@
       v-if="!selectedProjectId"
       class="page-subtitle"
     >
-      项目财务未加载。选择已授权项目后查看预算、费用和调整；全局列表中的项目不代表你拥有该项目权限。
+      项目财务未加载。选择已授权项目后查看 Credits、估价、预算、费用和调整；全局列表中的项目不代表你拥有该项目权限。
     </p>
     <div
       v-if="selectedProjectId"
@@ -437,6 +438,17 @@
           </template>
         </AsyncStateView>
       </section>
+      <ProjectCreditsPanel
+        v-if="selectedProjectId"
+        ref="creditsPanel"
+        :project-id="selectedProjectId"
+      />
+      <ProjectResourceCostEstimatePanel
+        v-if="selectedProjectId"
+        ref="estimatePanel"
+        :project-id="selectedProjectId"
+      />
+
       <section
         class="budget-card md-card"
         aria-labelledby="budget-heading"
@@ -691,6 +703,8 @@ import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import ProjectCreditsPanel from '@/components/console/ProjectCreditsPanel.vue'
+import ProjectResourceCostEstimatePanel from '@/components/console/ProjectResourceCostEstimatePanel.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResourceFinance, type ResourceCharge } from '@/composables/useProjectResourceFinance'
@@ -737,6 +751,15 @@ const selectedProjectId = computed<string | null>({
 })
 const selectedProject = computed(() => projectOptions.value.find((project) => project.id === selectedProjectId.value) ?? null)
 const finance = useProjectResourceFinance(selectedProjectId)
+const creditsPanel = ref<{ reload: () => Promise<void> | void } | null>(null)
+const estimatePanel = ref<{ reload: () => Promise<void> | void } | null>(null)
+async function refreshFinance() {
+  await Promise.all([
+    finance.load(),
+    creditsPanel.value?.reload(),
+    estimatePanel.value?.reload(),
+  ])
+}
 const budgetCurrency = ref('USD')
 const limitAmount = ref('0.000000')
 const warningAmount = ref('0.000000')
@@ -1012,6 +1035,7 @@ function billingUnitLabel(value: ResourceCharge['lines'][number]['unit']) {
     memory_byte_second: '内存',
     storage_byte_second: '存储',
     gpu_unit_second: 'GPU',
+    build_second: '构建',
   } as Record<ResourceCharge['lines'][number]['unit'], string>)[value] ?? value
 }
 
