@@ -79,7 +79,7 @@ async function load() {
   const current = ++generation
   history.value = { kind: 'loading' }
   const [runs, releases] = await Promise.all([
-    listProjectAgentRuns({ path: { projectId: id }, query: { page: 1, pageSize: PAGE_SIZE } }),
+    listProjectAgentRuns({ path: { projectId: id }, query: { limit: PAGE_SIZE } }),
     fetchEnvironmentTemplateReleases(id),
   ])
   if (current !== generation) return
@@ -96,7 +96,7 @@ async function load() {
     items: runs.data.items.filter((item) => item.projectId === id && isExperimentAuthoringRun(item)),
     releasesByRun: releaseError ? new Map() : activeReleasesByRun(releases.items.filter((release) => release.projectId === id)),
     releaseError,
-    hasMore: runs.data.hasMore,
+    hasMore: Boolean(runs.data.nextCursor),
   }
   history.value = { kind: 'success', data: snapshot }
   emit('loaded', snapshot)

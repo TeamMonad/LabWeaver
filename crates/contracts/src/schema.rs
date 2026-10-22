@@ -130,6 +130,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::execution::TaskAttemptProgress
     );
     document!(
+        "schemas/contracts/v1/resource-request-page.schema.json",
+        crate::http::ResourceRequestPage
+    );
+    document!(
         "schemas/contracts/v1/environment-candidate.schema.json",
         crate::authoring::EnvironmentCandidate
     );
@@ -1208,10 +1212,14 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         ) {
             parameters.push(json!({"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}));
         }
-        if matches!(
-            operation.operation_id,
-            "listProjectResourceRequests" | "listProjectResourceLeases"
-        ) {
+        if operation.operation_id == "listProjectResourceRequests" {
+            parameters.extend([
+                json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
+                json!({"name":"state","in":"query","required":false,"style":"form","explode":true,"schema":{"type":"array","items":{"type":"string","enum":["reviewing","allocating","active","expired","rejected","cancelled"]}}}),
+                json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
+                json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}),
+            ]);
+        } else if operation.operation_id == "listProjectResourceLeases" {
             parameters.push(json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}));
         }
         if operation.operation_id == "listOrganizationUsers" {
@@ -1221,10 +1229,16 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
             ]);
         }
+        if operation.operation_id == "listProjectAgentRuns" {
+            parameters.extend([
+                json!({"name":"state","in":"query","required":false,"style":"form","explode":true,"schema":{"type":"array","items":{"type":"string","enum":["requested","running","partially_succeeded","succeeded","awaiting_approval","failed","cancelling","cancelled"]}}}),
+                json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
+                json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}),
+            ]);
+        }
         if matches!(
             operation.operation_id,
-            "listProjectAgentRuns"
-                | "listProjectResourceUsage"
+            "listProjectResourceUsage"
                 | "getProjectAgentTaskProgress"
                 | "getOwnProjectEvaluationTaskProgress"
                 | "getOwnProjectEvaluationTaskForSubmission"
@@ -1381,6 +1395,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.operation_id == "listProjectAgentRuns" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
+                "LW_AGENT_RUN_HISTORY_CURSOR_INVALID",
                 "LW_ACCESS_DENIED",
                 "LW_AGENT_PERSISTENCE_FAILED",
             ]);
@@ -1404,6 +1419,13 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 crate::object_authorization::project_operation_action(operation.operation_id)
         {
             operation_json["x-labweaver-object-action"] = json!(action);
+        }
+        if operation.operation_id == "listProjectResourceRequests" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_RESOURCE_REQUEST_CURSOR_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_RESOURCE_PERSISTENCE_FAILED",
+            ]);
         }
         if matches!(
             operation.operation_id,
@@ -2085,9 +2107,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "cancelTaskResource"
         | "createTaskResourceRequest"
         | "getTaskResourceRequest" => contract_ref("resource-request"),
-        "listResourceRequests" | "listProjectResourceRequests" => {
+        "listResourceRequests" => {
             json!({"type":"array","items":contract_ref("resource-request")})
         }
+        "listProjectResourceRequests" => contract_ref("resource-request-page"),
         "listResourceGpuCatalog" => {
             json!({"type":"array","items":contract_ref("gpu-catalog-entry")})
         }

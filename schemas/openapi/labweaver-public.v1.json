@@ -7387,21 +7387,45 @@
             }
           },
           {
+            "explode": true,
             "in": "query",
-            "name": "page",
+            "name": "state",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "items": {
+                "enum": [
+                  "requested",
+                  "running",
+                  "partially_succeeded",
+                  "succeeded",
+                  "awaiting_approval",
+                  "failed",
+                  "cancelling",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "style": "form"
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 512,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -7477,6 +7501,7 @@
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
+          "LW_AGENT_RUN_HISTORY_CURSOR_INVALID",
           "LW_ACCESS_DENIED",
           "LW_AGENT_PERSISTENCE_FAILED"
         ],
@@ -13134,6 +13159,49 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "explode": true,
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "items": {
+                "enum": [
+                  "reviewing",
+                  "allocating",
+                  "active",
+                  "expired",
+                  "rejected",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "style": "form"
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 512,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -13141,10 +13209,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/resource-request.schema.json"
-                  },
-                  "type": "array"
+                  "$ref": "../contracts/v1/resource-request-page.schema.json"
                 }
               }
             },
@@ -13205,10 +13270,9 @@
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_RESOURCE_REQUEST_CURSOR_INVALID",
           "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_RESOURCE_PERSISTENCE_FAILED"
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-object-action": "browse",

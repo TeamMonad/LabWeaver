@@ -122,17 +122,17 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         "project",
     );
     assert_eq!(
-        list_request["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
-        "../contracts/v1/resource-request.schema.json"
+        list_request["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/resource-request-page.schema.json"
     );
     assert_eq!(
         list_request["parameters"]
             .as_array()
             .and_then(|parameters| parameters
                 .iter()
-                .find(|parameter| parameter["name"] == "courseId"))
-            .and_then(|parameter| parameter["schema"]["format"].as_str()),
-        Some("uuid")
+                .find(|parameter| parameter["name"] == "state"))
+            .and_then(|parameter| parameter["schema"]["type"].as_str()),
+        Some("array")
     );
     let list_lease = assert_operation(
         "/api/v1/projects/{projectId}/resource-leases",

@@ -60,7 +60,7 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
   async function loadAgentRuns(id: string, current: number) {
     agentRuns.value = { kind: 'loading', message: '加载未完成的任务…' }
     agentRunsTruncated.value = false
-    const result = await listProjectAgentRuns({ path: { projectId: id }, query: { page: 1, pageSize: 50 } })
+    const result = await listProjectAgentRuns({ path: { projectId: id }, query: { limit: 50 } })
     if (current !== generation) return
     if (result.error) {
       agentRuns.value = denied(result.error)
@@ -68,7 +68,7 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
         : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_AGENT_RUNS_LOAD_FAILED', '加载未完成的任务失败。') }
       return
     }
-    agentRunsTruncated.value = result.data.hasMore
+    agentRunsTruncated.value = Boolean(result.data.nextCursor)
     const items = result.data.items.filter((item) => item.projectId === id && isOpenAgentRun(item))
     agentRuns.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
@@ -83,7 +83,8 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
         : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_RESOURCE_REQUESTS_LOAD_FAILED', '加载资源申请失败。') }
       return
     }
-    const items = result.data.filter((item) => item.projectId === id && isOpenResourceRequest(item))
+    const resourceItems = Array.isArray(result.data) ? result.data : result.data.items
+    const items = resourceItems.filter((item) => item.projectId === id && isOpenResourceRequest(item))
     resourceRequests.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 

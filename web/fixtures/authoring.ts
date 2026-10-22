@@ -21,9 +21,7 @@ export function authoringScene(): boolean {
 }
 
 export const agentRunHistory: AgentRunHistoryPageSchema = {
-  page: 1,
-  pageSize: 20,
-  hasMore: false,
+  nextCursor: null,
   items: [
     { id: reviewRunId, projectId: fixtureProjectId, courseId: 'course-physics-2026', purpose: { kind: 'authoring', environmentClass: 'experiment' }, state: 'awaiting_approval', createdAt: '2026-10-11T02:10:00.000Z', updatedAt: '2026-10-11T03:42:00.000Z' },
     { id: 'run-authoring-failed', projectId: fixtureProjectId, courseId: 'course-physics-2026', purpose: { kind: 'authoring', environmentClass: 'experiment' }, state: 'failed', createdAt: '2026-10-10T08:00:00.000Z', updatedAt: '2026-10-10T08:20:00.000Z' },

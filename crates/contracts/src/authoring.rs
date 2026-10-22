@@ -921,9 +921,7 @@ pub struct AgentRunHistoryItem {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRunHistoryPage {
     pub items: Vec<AgentRunHistoryItem>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }
 
 /// Agent-owned task read model with the current attempt separate from history.

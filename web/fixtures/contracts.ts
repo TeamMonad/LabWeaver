@@ -25,6 +25,7 @@ import type {
   ResourceLeaseSchema,
   ResourceLeaseState,
   ResourceRateSchema,
+  ResourceRequestPageSchema,
   ResourceRequestSchema,
   ResourceRequestState,
   SshPublicKeySchema,
@@ -504,10 +505,10 @@ export async function listOrganizationUsers(_options?: FixtureOptions): Promise<
 }
 
 export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<FixtureResult<AgentRunHistoryPageSchema>> {
-  if (activeScene.value.id === 'teacher-review-empty') return fixtureResponse({ page: 1, pageSize: 20, hasMore: false, items: [] })
+  if (activeScene.value.id === 'teacher-review-empty') return fixtureResponse({ items: [], nextCursor: null })
   if (authoringScene()) return fixtureResponse(agentRunHistory)
   if (activeScene.value.id !== 'home-in-progress') {
-    return fixtureResponse({ items: [], page: 1, pageSize: 50, hasMore: false })
+    return fixtureResponse({ items: [], nextCursor: null })
   }
   return fixtureResponse({
     items: [
@@ -515,9 +516,7 @@ export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<F
       { id: 'agent-run-work-config-02', projectId: fixtureProjectId, courseId: 'course-physics-2026', purpose: { kind: 'work_configuration', actorId: 'fixture-teacher', environmentId: 'env-workbench', environmentRevision: 3, runtimeKind: 'container' }, state: 'running', createdAt: now, updatedAt: now },
       { id: 'agent-run-materials-03', projectId: fixtureProjectId, courseId: 'course-physics-2026', purpose: { kind: 'authoring', environmentClass: 'experiment' }, state: 'succeeded', createdAt: now, updatedAt: now },
     ],
-    page: 1,
-    pageSize: 50,
-    hasMore: false,
+    nextCursor: null,
   })
 }
 
@@ -685,10 +684,10 @@ export async function listEnvironmentOperations(options?: FixtureOptions): Promi
   }] : []
   return fixtureResponse({ items, nextCursor: null, snapshotAt: now, snapshotSequence: 'fixture-42' })
 }
-export async function listProjectResourceRequests(options?: FixtureOptions): Promise<FixtureResult<ResourceRequestSchema[]>> {
+export async function listProjectResourceRequests(options?: FixtureOptions): Promise<FixtureResult<ResourceRequestPageSchema>> {
   const projectId = options?.path?.projectId
   if (projectId && projectId !== fixtureProjectId) return notFoundResponse('读取项目资源申请', projectId)
-  return fixtureResponse(projectRequests())
+  return fixtureResponse({ items: projectRequests(), nextCursor: null })
 }
 export async function listProjectResourceLeases(options?: FixtureOptions): Promise<FixtureResult<ResourceLeaseSchema[]>> {
   const projectId = options?.path?.projectId

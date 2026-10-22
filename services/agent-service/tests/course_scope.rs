@@ -4,7 +4,7 @@ use agent_service::run_store::{AgentRunStoreError, PostgresAgentRunStore};
 use contracts::authoring::{
     AgentRun, AgentRunPurpose, AgentRunState, AgentTrack, AgentTrackKind, EnvironmentClass,
 };
-use contracts::http::IdempotencyKey;
+use contracts::http::{AgentRunListQuery, IdempotencyKey};
 use contracts::{
     AgentRunId, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision, UtcTimestamp,
 };
@@ -86,6 +86,7 @@ async fn revisioned_mutation_rejects_cross_course_before_writing_state()
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn std::error::Error>>
 {
     let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
@@ -133,24 +134,77 @@ async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn 
             runs.push(run.id);
         }
     }
-    let store = PostgresAgentRunStore::new(pool);
-    let first = store.list_project_runs(project, 1, 2, 0).await?;
-    assert_eq!(first.page, 1);
-    assert_eq!(first.page_size, 2);
-    assert!(first.has_more);
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let first = store
+        .list_project_runs_filtered(
+            project,
+            &AgentRunListQuery {
+                state: Some(vec![AgentRunState::Requested]),
+                cursor: None,
+                limit: Some(2),
+            },
+        )
+        .await?;
     assert_eq!(first.items.len(), 2);
-    assert_eq!(first.items[0].id, runs[0]);
-    assert_eq!(first.items[1].id, runs[1]);
-    assert!(first.items.iter().all(|item| item.course_id.is_some()));
-
-    let second = store.list_project_runs(project, 2, 2, 2).await?;
-    assert!(!second.has_more);
+    assert!(first.next_cursor.is_some());
+    let second = store
+        .list_project_runs_filtered(
+            project,
+            &AgentRunListQuery {
+                state: Some(vec![AgentRunState::Requested]),
+                cursor: first.next_cursor.clone(),
+                limit: Some(2),
+            },
+        )
+        .await?;
     assert_eq!(second.items.len(), 1);
-    assert_eq!(second.items[0].id, runs[2]);
+    assert!(
+        first
+            .items
+            .iter()
+            .all(|item| !second.items.iter().any(|other| other.id == item.id))
+    );
 
-    let empty = store.list_project_runs(ProjectId::new(), 1, 25, 0).await?;
+    let inserted = requested_run()?;
+    let inserted_contract = serde_json::to_value(&inserted)?;
+    sqlx::query(
+        "INSERT INTO agent.agent_runs \
+         (run_id,project_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256, \
+          policy_revision,purpose,contract) VALUES ($1,$2,$3,$4,1,'requested',$5,$6,1,$7,$8)",
+    )
+    .bind(inserted.id.as_uuid())
+    .bind(project.as_uuid())
+    .bind(inserted.course_id.map(CourseId::as_uuid))
+    .bind(inserted.package_id.as_uuid())
+    .bind("claude-code-v1")
+    .bind(Sha256Digest::of_bytes(inserted.id.to_string().as_bytes()).to_string())
+    .bind(serde_json::to_value(inserted.purpose)?)
+    .bind(inserted_contract)
+    .execute(&pool)
+    .await?;
+    let second_again = store
+        .list_project_runs_filtered(
+            project,
+            &AgentRunListQuery {
+                state: Some(vec![AgentRunState::Requested]),
+                cursor: first.next_cursor,
+                limit: Some(2),
+            },
+        )
+        .await?;
+    assert_eq!(second_again.items, second.items);
+
+    let empty = store
+        .list_project_runs_filtered(
+            ProjectId::new(),
+            &AgentRunListQuery {
+                state: None,
+                cursor: None,
+                limit: Some(25),
+            },
+        )
+        .await?;
     assert!(empty.items.is_empty());
-    assert!(!empty.has_more);
     Ok(())
 }
 

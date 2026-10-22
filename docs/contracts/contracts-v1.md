@@ -40,3 +40,17 @@ Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；�
 
 材料上传的查询、取消、恢复和限额见[材料上传与内容身份](material-uploads.md)。学生冻结提交继续使用[Collector 契约](submission-collector-v1.md)。
 项目 Credits 账户、预占与不可变账目接口见 [项目 Credits](project-credits.md)。Rust 真源位于 `resource::credits`，Schema/OpenAPI 与 Web SDK 从此真源生成。
+
+## 项目进行中列表
+
+`GET /api/v1/projects/{projectId}/agent-runs` 和
+`GET /api/v1/projects/{projectId}/resource-requests` 保留各领域服务的权威状态，不做跨服务聚合。
+两者均支持重复的 `state` 查询参数、`limit`（1–100，默认 50）和不透明的 HMAC 签名 `cursor`；响应统一为
+`{items, nextCursor}`。游标签名覆盖项目范围、状态过滤、快照上界以及排序键
+（`createdAt DESC, id DESC`），下一页不得复用其他过滤条件的游标；首次查询的快照上界由数据库
+查询开始时的 `clock_timestamp()` 捕获。
+
+AgentRun 游标绑定项目和状态过滤；ResourceRequest 游标另外绑定可选课程和 actor 范围。非管理员资源申请列表
+只返回当前会话 actor 自己提交的申请，管理员才可读取项目内全部申请。非法、篡改或跨范围游标返回
+`LW_AGENT_RUN_HISTORY_CURSOR_INVALID` 或 `LW_RESOURCE_REQUEST_CURSOR_INVALID`；项目权限失败仍返回
+`LW_ACCESS_DENIED`。

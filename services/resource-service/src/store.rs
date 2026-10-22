@@ -4,6 +4,7 @@
     clippy::doc_markdown,
     reason = "SQL identifiers and protocol terms are intentionally preserved in persistence docs"
 )]
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
@@ -14,7 +15,8 @@ use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ResourceLeaseChanged, ResourceRequestChanged, subjects,
 };
 use contracts::http::{
-    CreateResourceRateRequest, EndResourceRateRequest, IdempotencyKey, RecordResourceUsageRequest,
+    CreateResourceRateRequest, EndResourceRateRequest, IdempotencyKey, MAX_CURSOR_LENGTH,
+    MAX_PAGE_LIMIT, RecordResourceUsageRequest, ResourceRequestListQuery, ResourceRequestPage,
     TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
@@ -224,6 +226,76 @@ struct UsageAuthority<'a> {
     caller: &'a auth::ServiceIdentity,
     environment_service_client_id: &'a str,
     task_service_client_ids: &'a BTreeSet<String>,
+}
+
+const RESOURCE_REQUEST_CURSOR_VERSION: u8 = 1;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResourceRequestCursor {
+    version: u8,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
+    actor_id: Option<contracts::ActorId>,
+    states: Vec<String>,
+    snapshot_at: time::OffsetDateTime,
+    created_at: time::OffsetDateTime,
+    request_id: ResourceRequestId,
+}
+
+fn request_state_wire(state: ResourceRequestState) -> Result<String, ResourceStoreError> {
+    serde_json::to_value(state)
+        .map_err(|_| ResourceStoreError::InvalidCursor)?
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or(ResourceStoreError::InvalidCursor)
+}
+
+fn request_states(
+    states: Option<&Vec<ResourceRequestState>>,
+) -> Result<Vec<String>, ResourceStoreError> {
+    states.map_or_else(
+        || Ok(Vec::new()),
+        |values| values.iter().copied().map(request_state_wire).collect(),
+    )
+}
+
+fn encode_request_cursor(cursor: &ResourceRequestCursor) -> Result<String, ResourceStoreError> {
+    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor)?);
+    if encoded.len() > MAX_CURSOR_LENGTH {
+        return Err(ResourceStoreError::InvalidCursor);
+    }
+    Ok(encoded)
+}
+
+fn decode_request_cursor(
+    value: &str,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
+    actor_id: Option<contracts::ActorId>,
+    states: &[String],
+) -> Result<ResourceRequestCursor, ResourceStoreError> {
+    if value.is_empty() || value.len() > MAX_CURSOR_LENGTH {
+        return Err(ResourceStoreError::InvalidCursor);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| ResourceStoreError::InvalidCursor)?;
+    if URL_SAFE_NO_PAD.encode(&bytes) != value {
+        return Err(ResourceStoreError::InvalidCursor);
+    }
+    let cursor: ResourceRequestCursor =
+        serde_json::from_slice(&bytes).map_err(|_| ResourceStoreError::InvalidCursor)?;
+    if serde_json::to_vec(&cursor).map_err(|_| ResourceStoreError::InvalidCursor)? != bytes
+        || cursor.version != RESOURCE_REQUEST_CURSOR_VERSION
+        || cursor.project_id != project_id
+        || cursor.course_id != course_id
+        || cursor.actor_id != actor_id
+        || cursor.states != states
+    {
+        return Err(ResourceStoreError::InvalidCursor);
+    }
+    Ok(cursor)
 }
 
 impl PgResourceStore {
@@ -648,6 +720,95 @@ impl PgResourceStore {
             .collect()
     }
 
+    /// Lists project requests using an authorization predicate and stable keyset pagination.
+    pub async fn list_project_requests_page(
+        &self,
+        project_id: ProjectId,
+        actor_id: Option<contracts::ActorId>,
+        query: &ResourceRequestListQuery,
+    ) -> Result<ResourceRequestPage, ResourceStoreError> {
+        let states = request_states(query.state.as_ref())?;
+        let cursor = query
+            .cursor
+            .as_deref()
+            .map(|value| {
+                decode_request_cursor(value, project_id, query.course_id, actor_id, &states)
+            })
+            .transpose()?;
+        let limit = query.limit.unwrap_or(50);
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+            return Err(ResourceStoreError::InvalidCursor);
+        }
+        let rows = sqlx::query(
+            "SELECT request_id, created_at, contract \
+             FROM resource.resource_requests \
+             WHERE project_id=$1 \
+               AND ($2::uuid IS NULL OR course_id=$2) \
+               AND ($3::uuid IS NULL OR requester_id=$3) \
+               AND ($4::text[] IS NULL OR state=ANY($4::text[])) \
+               AND ($5::timestamptz IS NULL OR created_at <= $5) \
+               AND ($6::timestamptz IS NULL OR (created_at,request_id) < ($6,$7)) \
+             ORDER BY created_at DESC, request_id DESC LIMIT $8",
+        )
+        .bind(project_id.as_uuid())
+        .bind(query.course_id.map(contracts::CourseId::as_uuid))
+        .bind(actor_id.map(contracts::ActorId::as_uuid))
+        .bind((!states.is_empty()).then_some(states.clone()))
+        .bind(cursor.as_ref().map(|value| value.snapshot_at))
+        .bind(cursor.as_ref().map(|value| value.created_at))
+        .bind(cursor.as_ref().map(|value| value.request_id.as_uuid()))
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        let has_more = rows.len() > usize::from(limit);
+        let mut decoded = rows
+            .into_iter()
+            .take(usize::from(limit))
+            .map(|row| {
+                let request_id = row
+                    .try_get::<uuid::Uuid, _>("request_id")
+                    .map_err(|_| ResourceStoreError::InvalidCursor)?;
+                let created_at = row
+                    .try_get::<time::OffsetDateTime, _>("created_at")
+                    .map_err(|_| ResourceStoreError::InvalidCursor)?;
+                let request = decode_request(row.try_get("contract")?)?;
+                if request.project_id != project_id
+                    || request.id.as_uuid() != request_id
+                    || query
+                        .course_id
+                        .is_some_and(|course| request.course_id != Some(course))
+                    || actor_id.is_some_and(|actor| request.requester_id != actor)
+                    || (!states.is_empty() && !states.contains(&request_state_wire(request.state)?))
+                {
+                    return Err(ResourceStoreError::InvalidCursor);
+                }
+                Ok((request, created_at))
+            })
+            .collect::<Result<Vec<_>, ResourceStoreError>>()?;
+        let next_cursor = if has_more {
+            let snapshot_at = decoded
+                .first()
+                .map(|(_, created_at)| *created_at)
+                .ok_or(ResourceStoreError::InvalidCursor)?;
+            let (last, created_at) = decoded.last().ok_or(ResourceStoreError::InvalidCursor)?;
+            Some(encode_request_cursor(&ResourceRequestCursor {
+                version: RESOURCE_REQUEST_CURSOR_VERSION,
+                project_id,
+                course_id: query.course_id,
+                actor_id,
+                states,
+                snapshot_at,
+                created_at: *created_at,
+                request_id: last.id,
+            })?)
+        } else {
+            None
+        };
+        let items = decoded.drain(..).map(|(request, _)| request).collect();
+        Ok(ResourceRequestPage { items, next_cursor })
+    }
+
+    /// Lists only requests owned by the authenticated actor. The database predicate is part of
     /// Lists only requests owned by the authenticated actor. The database predicate is part of
     /// the authority boundary; callers cannot fetch another actor's projections by filtering the
     /// returned JSON in memory.
@@ -5985,6 +6146,8 @@ pub enum ResourceStoreError {
     RuntimeBinding(#[from] crate::runtime_authorization::RuntimeBindingError),
     #[error("LW_RESOURCE_NOT_FOUND")]
     NotFound,
+    #[error("LW_RESOURCE_REQUEST_CURSOR_INVALID")]
+    InvalidCursor,
     #[error("LW_RESOURCE_CREATE_STATE_INVALID")]
     InvalidCreateState,
     #[error("LW_IDEMPOTENCY_KEY_INVALID")]

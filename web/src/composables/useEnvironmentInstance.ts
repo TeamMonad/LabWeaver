@@ -48,14 +48,17 @@ async function readHandoffResourceState(projectId: string, environmentId: string
       diagnostic: resourceReadDiagnostic(leaseResult.value.error, 'ENVIRONMENT_RESOURCE_LEASES_READ_FAILED', '无法核对资源授权状态，请返回资源申请页检查。'),
     }
   }
-  if (!Array.isArray(requestResult.value.data) || !Array.isArray(leaseResult.value.data)) {
+  const requestItems = Array.isArray(requestResult.value.data)
+    ? requestResult.value.data
+    : requestResult.value.data?.items
+  if (!Array.isArray(requestItems) || !Array.isArray(leaseResult.value.data)) {
     return {
       kind: 'error',
       diagnostic: makeDiagnostic('ENVIRONMENT_RESOURCE_CONTEXT_INVALID', '资源申请状态返回了无法识别的响应，请返回资源申请页检查。', false),
     }
   }
 
-  const matchingRequests = requestResult.value.data.filter((request) => (
+  const matchingRequests = requestItems.filter((request) => (
     request.projectId === projectId
     && request.target?.kind === 'environment'
     && request.target.environmentId === environmentId
