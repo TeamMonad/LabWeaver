@@ -482,8 +482,17 @@ impl PgResourceStore {
                         .checked_add(1)
                         .ok_or(ResourceStoreError::RevisionOverflow)?,
                 )?;
+                fenced_lease.updated_at = now;
                 update_claim(&mut transaction, &claim, &fenced_claim, None, None, None).await?;
                 update_lease(&mut transaction, &lease, &fenced_lease).await?;
+                enqueue_lease_event(
+                    &mut transaction,
+                    &fenced_lease,
+                    &request,
+                    LEASE_RENEWED_SUBJECT,
+                    &trace_id,
+                )
+                .await?;
                 let mut next = request.clone();
                 next.revision = Revision::new(
                     request
@@ -5411,6 +5420,21 @@ async fn release_task_locked(
         expired_request.revision.get(),
         Some(request.state),
         None,
+        trace_id,
+    )
+    .await?;
+    enqueue_lease_event(
+        transaction,
+        &expiring_lease,
+        &expiring_request,
+        LEASE_EXPIRING_SUBJECT,
+        trace_id,
+    )
+    .await?;
+    enqueue_request_event(
+        transaction,
+        &expiring_request,
+        REQUEST_STATE_CHANGED_SUBJECT,
         trace_id,
     )
     .await?;

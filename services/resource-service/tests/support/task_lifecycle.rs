@@ -536,14 +536,24 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
             .is_err(),
         "an earlier Active snapshot cannot admit an expired lease"
     );
-    assert_eq!(fixture.event_count().await?, events + 1);
+    assert_eq!(fixture.event_count().await?, events + 2);
     let pending_cleanup = fixture.lifecycle.load_status().await?;
     assert!(!pending_cleanup.cleanup_confirmed);
     assert_eq!(
         pending_cleanup.request.diagnostic_code.as_deref(),
         Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
     );
-    assert_eq!(fixture.event_count().await?, events + 1);
+    let (db_updated_at, contract_updated_at): (time::OffsetDateTime, time::OffsetDateTime) =
+        sqlx::query_as(
+            "SELECT updated_at, (contract->>'updatedAt')::timestamptz
+             FROM resource.resource_leases WHERE lease_id=$1",
+        )
+        .bind(pending_cleanup.lease.id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?;
+    assert_eq!(pending_cleanup.lease.updated_at.get(), db_updated_at);
+    assert_eq!(db_updated_at, contract_updated_at);
+    assert_eq!(fixture.event_count().await?, events + 2);
     assert!(fixture.lifecycle.release(&active).await.is_err());
     let released = fixture.lifecycle.release(&pending_cleanup).await?;
     assert!(released.cleanup_confirmed);
@@ -657,6 +667,58 @@ async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResul
     for (aggregate_id, event) in received {
         groups.entry(aggregate_id).or_default().push(event);
     }
+    let replay_group = groups
+        .iter()
+        .find(|(_, events)| events.iter().any(|event| event.aggregate_sequence.0 == 1))
+        .and_then(|(aggregate_id, events)| {
+            (events.len() > 1).then(|| (*aggregate_id, events.clone()))
+        });
+    if let Some((replay_aggregate_id, mut replay_events)) = replay_group {
+        replay_events.sort_by_key(|event| event.aggregate_sequence.0);
+        for event in replay_events.iter().rev() {
+            context
+                .publish(
+                    "labweaver.resource.replay.v1",
+                    serde_json::to_vec(event)?.into(),
+                )
+                .await?
+                .await?;
+        }
+        let mut first_replay_decision = None;
+        for _ in &replay_events {
+            let message = tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await?
+                .ok_or("NATS reverse replay delivery missing")??;
+            let event: contracts::events::CloudEvent<Value> =
+                serde_json::from_slice(&message.payload)?;
+            message.ack().await.map_err(|error| error.to_string())?;
+            let decision = accept_task_event(&fixture.pool, replay_aggregate_id, &event).await?;
+            first_replay_decision.get_or_insert(decision);
+        }
+        assert_eq!(first_replay_decision, Some(InboxDecision::Gap));
+        for event in &replay_events {
+            context
+                .publish(
+                    "labweaver.resource.replay.v1",
+                    serde_json::to_vec(event)?.into(),
+                )
+                .await?
+                .await?;
+        }
+        let mut final_replay_decision = None;
+        for _ in &replay_events {
+            let message = tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await?
+                .ok_or("NATS ordered replay delivery missing")??;
+            let event: contracts::events::CloudEvent<Value> =
+                serde_json::from_slice(&message.payload)?;
+            message.ack().await.map_err(|error| error.to_string())?;
+            final_replay_decision =
+                Some(accept_task_event(&fixture.pool, replay_aggregate_id, &event).await?);
+        }
+        assert_eq!(final_replay_decision, Some(InboxDecision::Accepted));
+        groups.remove(&replay_aggregate_id);
+    }
     for (aggregate_id, mut events) in groups {
         events.sort_by_key(|event| event.aggregate_sequence.0);
         if events
@@ -672,6 +734,7 @@ async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResul
                 InboxDecision::Gap
             );
         }
+        let mut last_decision = None;
         let mut expected_sequence = 1;
         for event in &events {
             let decision = accept_task_event(&fixture.pool, aggregate_id, event).await?;
@@ -681,7 +744,9 @@ async fn task_lifecycle_nats_replay_keeps_pg_authority_consistent() -> TestResul
             } else {
                 assert_eq!(decision, InboxDecision::Gap);
             }
+            last_decision = Some(decision);
         }
+        assert_eq!(last_decision, Some(InboxDecision::Accepted));
     }
     let duplicate_aggregate_id: Uuid =
         sqlx::query_scalar("SELECT aggregate_id FROM resource.outbox_events WHERE event_id=$1")
