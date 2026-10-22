@@ -548,6 +548,7 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
         released.request.diagnostic_code.as_deref(),
         Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
     );
+    Ok(())
 }
 
 #[tokio::test]

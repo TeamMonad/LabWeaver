@@ -482,15 +482,7 @@ impl PgResourceStore {
                         .checked_add(1)
                         .ok_or(ResourceStoreError::RevisionOverflow)?,
                 )?;
-                update_claim(
-                    &mut transaction,
-                    &claim,
-                    &fenced_claim,
-                    None,
-                    None,
-                    None,
-                )
-                .await?;
+                update_claim(&mut transaction, &claim, &fenced_claim, None, None, None).await?;
                 update_lease(&mut transaction, &lease, &fenced_lease).await?;
                 let mut next = request.clone();
                 next.revision = Revision::new(
