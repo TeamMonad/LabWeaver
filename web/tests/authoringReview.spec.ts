@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { activeReleasesByRun, queueGroup, releaseMatchesCandidate, stepSummaries } from '@/utils/authoringReview'
-import { environmentCandidateView, evaluationCandidateView, reviewRunId, reviewRunRelease } from '../fixtures/authoring'
+import { activeReleasesByRun, firstReviewableRun, isExperimentAuthoringRun, queueGroup, releaseMatchesCandidate, stepSummaries } from '@/utils/authoringReview'
+import { agentRunHistory, environmentCandidateView, evaluationCandidateView, reviewRunId, reviewRunRelease } from '../fixtures/authoring'
 
 describe('authoringReview', () => {
   it('groups runs by what the teacher can do next', () => {
@@ -8,9 +8,19 @@ describe('authoringReview', () => {
     expect(queueGroup('succeeded')).toBe('review')
     expect(queueGroup('running')).toBe('generating')
     expect(queueGroup('failed')).toBe('unfinished')
-    // An active release is the server's record that the run was approved and published.
-    expect(queueGroup('succeeded', true)).toBe('published')
-    expect(queueGroup('awaiting_approval', true)).toBe('published')
+    // A release only says the run published something; which revision is checked on the review page.
+    expect(queueGroup('succeeded', true)).toBe('released')
+    expect(queueGroup('awaiting_approval', true)).toBe('released')
+    // A run regenerating or failed after a release still needs that handling first.
+    expect(queueGroup('running', true)).toBe('generating')
+    expect(queueGroup('failed', true)).toBe('unfinished')
+  })
+
+  it('opens the first reviewable run without a release', () => {
+    const items = agentRunHistory.items.filter(isExperimentAuthoringRun)
+    const snapshot = { projectId: 'p', items, releasesByRun: new Map(), releaseError: null, hasMore: false }
+    expect(firstReviewableRun(snapshot)?.id).toBe(reviewRunId)
+    expect(firstReviewableRun({ ...snapshot, releasesByRun: new Map([[reviewRunId, reviewRunRelease]]) })).toBeUndefined()
   })
 
   it('keeps the latest active release per run and ignores withdrawn releases', () => {

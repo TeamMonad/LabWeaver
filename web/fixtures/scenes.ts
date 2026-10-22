@@ -26,7 +26,7 @@ export const fixtureScenes: FixtureScene[] = [
   { id: 'teacher-project-data', label: '教师项目 · 长名称', group: '教师任务', role: 'teacher', path: '/teacher/overview', projectId: DEFAULT_PROJECT_ID, description: '展示课程项目、材料、审批和项目管理入口。' },
   { id: 'teacher-template-empty', label: '已发布模板 · 空状态', group: '教师任务', role: 'teacher', path: '/teacher/labs', projectId: DEFAULT_PROJECT_ID, description: '没有发布版本时引导准备材料。' },
   { id: 'teacher-review', label: '审核与发布 · 待审核版本', group: '教师任务', role: 'teacher', path: '/teacher/approvals', projectId: DEFAULT_PROJECT_ID, description: '从待审核列表打开候选，查看题面材料、环境、运行权限与评分规则。' },
-  { id: 'teacher-review-published', label: '审核与发布 · 已发布', group: '教师任务', role: 'teacher', path: '/teacher/approvals', projectId: DEFAULT_PROJECT_ID, description: '已发布的版本列在“已发布”中，打开后不再提供批准。' },
+  { id: 'teacher-review-published', label: '审核与发布 · 已发布', group: '教师任务', role: 'teacher', path: '/teacher/approvals', projectId: DEFAULT_PROJECT_ID, description: '有发布记录的版本单独列出；打开后发布版本与当前候选一致时不再提供批准。' },
   { id: 'teacher-review-empty', label: '审核与发布 · 没有待审核', group: '教师任务', role: 'teacher', path: '/teacher/approvals', projectId: DEFAULT_PROJECT_ID, description: '没有待审核版本时的下一步说明。' },
   { id: 'teacher-template-data', label: '已发布模板 · 有数据', group: '教师任务', role: 'teacher', path: '/teacher/labs', projectId: DEFAULT_PROJECT_ID, description: '展示容器与虚拟机模板版本。' },
   { id: 'student-env-empty', label: '学生环境 · 空状态', group: '学生环境', role: 'student', path: '/student/environments', projectId: DEFAULT_PROJECT_ID, description: '未选择环境时保留创建和输入环境 ID 的入口。' },

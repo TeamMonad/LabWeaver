@@ -50,6 +50,8 @@ export function useProjectAuthoringApproval(
   const problemPackage = ref<AsyncState<ProblemPackageSchema>>({ kind: 'idle' })
   const approval = ref<AsyncState<AuthoringApprovalSchema>>({ kind: 'idle' })
   const publication = ref<AsyncState<AuthoringApprovalPublicationStatusSchema>>({ kind: 'idle' })
+  /** Set when the URL's approval id belongs to a different version; that record is ignored. */
+  const rejectedApproval = ref<DiagnosticViewModel | null>(null)
   const acting = ref(false)
   let loadGeneration = 0
   let publicationGeneration = 0
@@ -220,6 +222,79 @@ export function useProjectAuthoringApproval(
     publicationPollTimer = setTimeout(() => void loadPublication(data.approval.id, true), 3000)
   }
 
+  /**
+   * Whether an approval record belongs to the version on screen. The URL's
+   * approval id is only a hint: it must bind the loaded run's package and both
+   * candidates at their current revisions, otherwise another version's
+   * publication would hide this version's approval form.
+   */
+  function approvalBinding(record: AuthoringApprovalSchema): 'match' | 'mismatch' | 'pending' | 'unverifiable' {
+    if (run.value.kind !== 'success') return 'pending'
+    const runData = run.value.data
+    const environmentId = runData.tracks.find((track) => track.kind === 'environment')?.candidateId
+    const evaluationId = runData.tracks.find((track) => track.kind === 'evaluation')?.candidateId
+    if (
+      record.packageId !== runData.packageId
+      || record.environmentCandidateId !== environmentId
+      || record.evaluationCandidateId !== evaluationId
+    ) return 'mismatch'
+    const parts = [environmentCandidate.value, evaluationCandidate.value, problemPackage.value]
+    if (parts.some((part) => part.kind !== 'success' && part.kind !== 'loading' && part.kind !== 'idle')) return 'unverifiable'
+    if (
+      environmentCandidate.value.kind !== 'success'
+      || evaluationCandidate.value.kind !== 'success'
+      || problemPackage.value.kind !== 'success'
+    ) return 'pending'
+    if (
+      record.packageRevision !== problemPackage.value.data.revision
+      || record.environmentCandidateRevision !== environmentCandidate.value.data.candidate.revision
+      || record.evaluationCandidateRevision !== evaluationCandidate.value.data.candidate.revision
+    ) return 'mismatch'
+    return 'match'
+  }
+
+  /** Publication read from the server but not yet checked against the loaded version. */
+  let unverifiedPublication: AuthoringApprovalPublicationStatusSchema | null = null
+
+  function applyPublication(data: AuthoringApprovalPublicationStatusSchema) {
+    switch (approvalBinding(data.approval)) {
+      case 'pending':
+        unverifiedPublication = data
+        if (publication.value.kind !== 'success') publication.value = { kind: 'loading', message: '核对批准记录…' }
+        return
+      case 'unverifiable':
+        unverifiedPublication = null
+        publication.value = {
+          kind: 'error',
+          diagnostic: makeDiagnostic('PROJECT_APPROVAL_BINDING_UNVERIFIED', '材料包或候选没有读取成功，无法核对这条批准记录是否属于当前版本。请重试。', true),
+        }
+        return
+      case 'mismatch':
+        unverifiedPublication = null
+        stopPublicationPolling()
+        publication.value = { kind: 'idle' }
+        approval.value = { kind: 'idle' }
+        rejectedApproval.value = makeDiagnostic(
+          'PROJECT_APPROVAL_RUN_MISMATCH',
+          '链接中的批准记录不属于当前版本（材料包或候选不一致），已忽略。请核对当前版本后再决定是否批准。',
+          false,
+        )
+        return
+      case 'match':
+        unverifiedPublication = null
+        publication.value = { kind: 'success', data }
+        approval.value = { kind: 'success', data: data.approval }
+        schedulePublicationPoll(data)
+    }
+  }
+
+  watch(
+    () => [run.value.kind, environmentCandidate.value.kind, evaluationCandidate.value.kind, problemPackage.value.kind],
+    () => {
+      if (unverifiedPublication) applyPublication(unverifiedPublication)
+    },
+  )
+
   async function loadPublication(id = approvalId.value, silent = false) {
     const project = projectId.value
     const publicationId = id?.trim()
@@ -246,9 +321,7 @@ export function useProjectAuthoringApproval(
       stopPublicationPolling()
       return
     }
-    publication.value = { kind: 'success', data: result.data }
-    approval.value = { kind: 'success', data: result.data.approval }
-    schedulePublicationPoll(result.data)
+    applyPublication(result.data)
   }
 
   const imageArtifact = computed<CompleteAuthoringApprovalRequestSchemaImageArtifact | null>(() => {
@@ -278,8 +351,9 @@ export function useProjectAuthoringApproval(
       (!runnerArtifactRequired.value || runnerImageArtifact.value !== null) &&
       // An approval id identifies an already-created immutable approval. Its
       // publication may still be pending, but the same candidate tuple cannot
-      // be approved again. Keep the form closed while that status is rebuilt.
-      !approvalId.value &&
+      // be approved again. Keep the form closed while that status is rebuilt,
+      // unless the record was rejected as belonging to another version.
+      (!approvalId.value || rejectedApproval.value !== null) &&
       approval.value.kind !== 'success' &&
       approval.value.kind !== 'loading' &&
       !acting.value
@@ -294,6 +368,8 @@ export function useProjectAuthoringApproval(
     problemPackage.value = { kind: 'idle' }
     approval.value = { kind: 'idle' }
     publication.value = { kind: 'idle' }
+    rejectedApproval.value = null
+    unverifiedPublication = null
     completionIdempotencyKey = null
     completionFingerprint = null
     stopPublicationPolling()
@@ -436,6 +512,7 @@ export function useProjectAuthoringApproval(
     problemPackage,
     approval,
     publication,
+    rejectedApproval,
     imageArtifact,
     runnerImageArtifact,
     evaluationRunnerImageArtifact: runnerImageArtifact,

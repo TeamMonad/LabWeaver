@@ -17,7 +17,7 @@ export type Row = { label: string; value: string; hint?: string }
 
 // ---- Review queue -----------------------------------------------------------
 
-export type QueueGroup = 'review' | 'generating' | 'unfinished' | 'published'
+export type QueueGroup = 'review' | 'released' | 'generating' | 'unfinished'
 
 /** Only experiment authoring runs produce a package teachers approve here. */
 export function isExperimentAuthoringRun(item: Pick<AgentRunHistoryItem, 'purpose'>): boolean {
@@ -25,22 +25,22 @@ export function isExperimentAuthoringRun(item: Pick<AgentRunHistoryItem, 'purpos
 }
 
 /**
- * Groups a run by what the teacher can do next. A run whose package already
- * has an active (not withdrawn) Environment release is listed as published;
- * the release itself is the server's record of a completed approval.
+ * Groups a run by what the teacher can do next. A reviewable run that already
+ * has an active Environment release is listed separately: the release may
+ * cover an earlier candidate revision, so only the review page, which loads
+ * the current candidate, decides whether this version is already published.
  */
-export function queueGroup(state: RunState, published = false): QueueGroup {
-  if (published) return 'published'
-  if (state === 'awaiting_approval' || state === 'succeeded' || state === 'partially_succeeded') return 'review'
+export function queueGroup(state: RunState, hasRelease = false): QueueGroup {
+  if (state === 'awaiting_approval' || state === 'succeeded' || state === 'partially_succeeded') return hasRelease ? 'released' : 'review'
   if (state === 'failed' || state === 'cancelled') return 'unfinished'
   return 'generating'
 }
 
 export const QUEUE_GROUP_LABEL: Record<QueueGroup, string> = {
   review: '可以审核',
+  released: '已有发布版本，打开核对当前候选',
   generating: '生成中',
   unfinished: '未完成，需回到材料页处理',
-  published: '已发布',
 }
 
 export type ReleaseView = EnvironmentTemplateReleaseViewSchema
@@ -67,11 +67,21 @@ export function releaseMatchesCandidate(release: ReleaseView, candidate: { id: s
 
 /** What the review queue read for one project, shared with the review page. */
 export type ReviewQueueSnapshot = {
+  projectId: string
   items: AgentRunHistoryItem[]
   releasesByRun: Map<string, ReleaseView>
   /** Diagnostic code when releases could not be read; publication state is then unknown. */
   releaseError: string | null
   hasMore: boolean
+}
+
+/**
+ * Version to open when the page is entered without one: the first run that
+ * awaits approval, else the first finished run, never one with a release.
+ */
+export function firstReviewableRun(snapshot: ReviewQueueSnapshot): AgentRunHistoryItem | undefined {
+  const reviewable = snapshot.items.filter((item) => queueGroup(item.state, snapshot.releasesByRun.has(item.id)) === 'review')
+  return reviewable.find((item) => item.state === 'awaiting_approval') ?? reviewable[0]
 }
 
 export function runStateLabel(state: RunState): string {

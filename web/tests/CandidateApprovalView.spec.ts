@@ -40,6 +40,22 @@ vi.mock('@/composables/useProjects', () => ({ useProjects: () => projectsState }
 const ok = (data: unknown) => ({ data, error: undefined }) as never
 const releases = (...items: unknown[]) => ok({ items, nextCursor: null })
 
+/** Approval record bound to the fixture run's package and both candidates at their current revisions. */
+function approvalRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'approval-1',
+    projectId: PROJECT,
+    revision: 1,
+    packageId: reviewPackage.id,
+    packageRevision: reviewPackage.revision,
+    environmentCandidateId: environmentCandidateView.candidate.id,
+    environmentCandidateRevision: environmentCandidateView.candidate.revision,
+    evaluationCandidateId: evaluationCandidateView.candidate.id,
+    evaluationCandidateRevision: evaluationCandidateView.candidate.revision,
+    ...overrides,
+  }
+}
+
 async function mountAt(query: Record<string, string> = { projectId: PROJECT }) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -115,8 +131,8 @@ describe('CandidateApprovalView (审核与发布)', () => {
     await button.trigger('click')
     await flushPromises()
 
-    vi.mocked(completeProjectAuthoringApproval).mockResolvedValueOnce(ok({ id: 'approval-1', projectId: PROJECT, revision: 1 }))
-    vi.mocked(getProjectAuthoringApproval).mockResolvedValue(ok({ approval: { id: 'approval-1', projectId: PROJECT, revision: 1 }, status: 'publishing' }))
+    vi.mocked(completeProjectAuthoringApproval).mockResolvedValueOnce(ok(approvalRecord()))
+    vi.mocked(getProjectAuthoringApproval).mockResolvedValue(ok({ approval: approvalRecord(), status: 'publishing' }))
     await wrapper.get('[data-testid="approve-publish"]').trigger('click')
     await flushPromises()
 
@@ -129,9 +145,9 @@ describe('CandidateApprovalView (审核与发布)', () => {
     expect(wrapper.find('[data-testid="approve-publish"]').exists()).toBe(false)
   })
 
-  it('moves the version to “已发布” once publication is ready', async () => {
-    vi.mocked(completeProjectAuthoringApproval).mockResolvedValueOnce(ok({ id: 'approval-1', projectId: PROJECT, revision: 1 }))
-    vi.mocked(getProjectAuthoringApproval).mockResolvedValue(ok({ approval: { id: 'approval-1', projectId: PROJECT, revision: 1 }, status: 'ready', environmentReleaseId: reviewRunRelease.id }))
+  it('lists the run under “已有发布版本” once publication is ready', async () => {
+    vi.mocked(completeProjectAuthoringApproval).mockResolvedValueOnce(ok(approvalRecord()))
+    vi.mocked(getProjectAuthoringApproval).mockResolvedValue(ok({ approval: approvalRecord(), status: 'ready', environmentReleaseId: reviewRunRelease.id }))
     const { wrapper, router } = await mountAt({ projectId: PROJECT, runId: reviewRun.id })
     expect(listProjectAgentRuns).toHaveBeenCalledTimes(1)
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue(releases(reviewRunRelease))
@@ -143,27 +159,31 @@ describe('CandidateApprovalView (审核与发布)', () => {
     expect(router.currentRoute.value.query.approvalId).toBe('approval-1')
     expect(wrapper.get('[data-testid="publication-status"]').attributes('data-status')).toBe('ready')
     expect(listProjectAgentRuns).toHaveBeenCalledTimes(2)
-    const published = wrapper.get('[data-testid="review-queue"] [data-group="published"]')
-    expect(published.find(`[data-run-id="${reviewRun.id}"]`).exists()).toBe(true)
+    const released = wrapper.get('[data-testid="review-queue"] [data-group="released"]')
+    expect(released.find(`[data-run-id="${reviewRun.id}"]`).exists()).toBe(true)
   })
 
-  it('does not offer a second approval for a version that is already published', async () => {
+  it('does not offer a second approval when the release matches the current candidate', async () => {
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue(releases(reviewRunRelease))
     const { wrapper } = await mountAt({ projectId: PROJECT, runId: reviewRun.id })
     expect(wrapper.get('[data-testid="review-published"]').text()).toContain('这一版已发布为版本 1')
     expect(wrapper.find('[data-testid="approve-publish"]').exists()).toBe(false)
     expect(completeProjectAuthoringApproval).not.toHaveBeenCalled()
     const queue = wrapper.get('[data-testid="review-queue"]')
-    expect(queue.get('[data-group="published"]').text()).toContain('已发布版本 1')
+    expect(queue.get('[data-group="released"]').text()).toContain('已发布版本 1')
     expect(queue.find('[data-group="review"]').exists()).toBe(false)
   })
 
-  it('skips published versions when choosing which version to open', async () => {
-    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue(releases(reviewRunRelease))
+  it('does not auto-open a run with a release, even one for an older candidate revision', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue(releases({ ...reviewRunRelease, candidateRevision: environmentCandidateView.candidate.revision - 1 }))
     const { wrapper, router } = await mountAt()
     expect(router.currentRoute.value.query.runId).toBeUndefined()
     expect(getProjectAgentRun).not.toHaveBeenCalled()
     expect(wrapper.get('[data-testid="review-placeholder"]').text()).toContain('从左侧选择')
+    // The queue only knows the run has a release; it does not claim this version is published.
+    const released = wrapper.get('[data-testid="review-queue"] [data-group="released"]')
+    expect(released.find(`[data-run-id="${reviewRun.id}"]`).exists()).toBe(true)
+    expect(released.find('h4').text()).toBe('已有发布版本，打开核对当前候选')
   })
 
   it('requires a new approval when the candidate changed after an earlier release', async () => {
@@ -175,11 +195,48 @@ describe('CandidateApprovalView (审核与发布)', () => {
     expect(wrapper.get('[data-testid="approve-publish"]').attributes('disabled')).toBeUndefined()
   })
 
-  it('keeps the queue usable but says so when published versions cannot be read', async () => {
+  it('fails closed when published versions cannot be read', async () => {
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: undefined, error: { diagnosticCode: 'LW_ACCESS_DENIED', detail: 'denied', status: 403 } } as never)
     const { wrapper, router } = await mountAt()
-    expect(wrapper.get('[data-testid="queue-release-error"]').text()).toContain('没能读取已发布版本')
+    expect(wrapper.get('[data-testid="queue-release-error"]').text()).toContain('暂时不能批准')
     expect(router.currentRoute.value.query.runId).toBe(reviewRun.id)
+    await fillApprovalForm(wrapper)
+    expect(wrapper.get('[data-testid="approve-publish"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="approve-blocked"]').text()).toContain('请刷新左侧列表后再批准')
+    await wrapper.get('[data-testid="approve-publish"]').trigger('click')
+    await flushPromises()
+    expect(completeProjectAuthoringApproval).not.toHaveBeenCalled()
+  })
+
+  it('ignores an approval id from the link that belongs to another run and keeps this run reviewable', async () => {
+    vi.mocked(getProjectAuthoringApproval).mockResolvedValue(ok({
+      approval: approvalRecord({ id: 'approval-other', environmentCandidateId: 'candidate-env-other', evaluationCandidateId: 'candidate-eval-other', packageId: 'package-other' }),
+      status: 'ready',
+    }))
+    const { wrapper } = await mountAt({ projectId: PROJECT, runId: reviewRun.id, approvalId: 'approval-other' })
+    expect(wrapper.get('[data-testid="approval-mismatch"]').text()).toContain('不属于当前版本')
+    expect(wrapper.find('[data-testid="publication-status"]').exists()).toBe(false)
+    await fillApprovalForm(wrapper)
+    expect(wrapper.get('[data-testid="approve-publish"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('ignores an approval of an earlier candidate revision of the same run', async () => {
+    vi.mocked(getProjectAuthoringApproval).mockResolvedValue(ok({
+      approval: approvalRecord({ environmentCandidateRevision: environmentCandidateView.candidate.revision - 1 }),
+      status: 'ready',
+    }))
+    const { wrapper } = await mountAt({ projectId: PROJECT, runId: reviewRun.id, approvalId: 'approval-1' })
+    expect(wrapper.get('[data-testid="approval-mismatch"]').text()).toContain('不属于当前版本')
+    expect(wrapper.find('[data-testid="publication-status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="approve-publish"]').exists()).toBe(true)
+  })
+
+  it('shows the publication of a linked approval that binds this exact version', async () => {
+    vi.mocked(getProjectAuthoringApproval).mockResolvedValue(ok({ approval: approvalRecord(), status: 'publishing' }))
+    const { wrapper } = await mountAt({ projectId: PROJECT, runId: reviewRun.id, approvalId: 'approval-1' })
+    expect(wrapper.find('[data-testid="approval-mismatch"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="publication-status"]').attributes('data-status')).toBe('publishing')
+    expect(wrapper.find('[data-testid="approve-publish"]').exists()).toBe(false)
   })
 
   it('explains the empty queue instead of asking for an ID', async () => {

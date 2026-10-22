@@ -235,6 +235,14 @@
                 <p v-if="authoring.approval.kind === 'error' && diagnosticAction(authoring.approval.diagnostic.code)" class="diagnostic-action" role="status">
                   建议：{{ diagnosticAction(authoring.approval.diagnostic.code) }}
                 </p>
+                <DiagnosticBanner
+                  v-if="authoring.rejectedApproval"
+                  :code="authoring.rejectedApproval.code"
+                  :message="authoring.rejectedApproval.message"
+                  :retryable="false"
+                  severity="warning"
+                  data-testid="approval-mismatch"
+                />
 
                 <div v-if="publishedRelease && authoring.approval.kind !== 'success'" class="approved" role="status" data-testid="review-published">
                   <SvgIcon name="check_circle" size="md" aria-hidden="true" />
@@ -261,7 +269,7 @@
                     <button type="button" class="filled-button" :disabled="!canSubmit" data-testid="approve-publish" @click="completeApproval">
                       {{ authoring.acting ? '正在提交…' : '批准并发布' }}
                     </button>
-                    <span v-if="!authoring.canApprove" class="pane-note" role="status">{{ blockingReason }}</span>
+                    <span v-if="!approvalAllowed" class="pane-note" role="status" data-testid="approve-blocked">{{ blockingReason }}</span>
                   </div>
                 </template>
 
@@ -316,6 +324,7 @@ import {
   attemptStateLabel,
   buildStateLabel,
   entryLabels,
+  firstReviewableRun,
   permissionRows,
   releaseMatchesCandidate,
   resourceRows,
@@ -348,15 +357,14 @@ watch(
   { immediate: true },
 )
 
-/** Open the first unpublished reviewable version when the page is entered without one. */
+/** Open the first reviewable version without a release when the page is entered without one. */
 const queue = ref<InstanceType<typeof ReviewQueue> | null>(null)
 const queueSnapshot = ref<ReviewQueueSnapshot | null>(null)
 const queueSize = computed(() => queueSnapshot.value?.items.length ?? null)
 function onQueueLoaded(snapshot: ReviewQueueSnapshot) {
   queueSnapshot.value = snapshot
   if (runId.value) return
-  const pending = snapshot.items.filter((item) => !snapshot.releasesByRun.has(item.id))
-  const first = pending.find((item) => item.state === 'awaiting_approval') ?? pending.find((item) => item.state === 'succeeded' || item.state === 'partially_succeeded')
+  const first = firstReviewableRun(snapshot)
   if (first) void router.replace({ query: { ...route.query, projectId: projectId.value ?? undefined, runId: first.id } })
 }
 
@@ -401,8 +409,13 @@ const experimentTitle = computed(() => environment.value?.candidate.spec.name ??
 const evaluationName = computed(() => evaluation.value ? `${evaluation.value.candidate.spec.metadata.name} ${evaluation.value.candidate.spec.metadata.version}` : '')
 const runtimeText = computed(() => environment.value ? runtimeLabel(environment.value.candidate.spec.runtime.kind) : '运行方式待确认')
 
+/** Release list of the current project, or null while it is unknown (not read yet or read failed). */
+const projectReleases = computed(() => {
+  const snapshot = queueSnapshot.value
+  return snapshot && snapshot.projectId === projectId.value && !snapshot.releaseError ? snapshot.releasesByRun : null
+})
 /** Active release of this run, read from the server's release list. */
-const runRelease = computed(() => (runId.value && queueSnapshot.value?.releasesByRun.get(runId.value)) || null)
+const runRelease = computed(() => (runId.value && projectReleases.value?.get(runId.value)) || null)
 /** The release publishes exactly the candidate under review: nothing left to approve. */
 const publishedRelease = computed(() => {
   const release = runRelease.value
@@ -429,13 +442,23 @@ const readiness = computed(() => {
 })
 
 const blockingReason = computed(() => {
+  if (!projectReleases.value) {
+    return queueSnapshot.value?.releaseError
+      ? '没能读取已发布版本，无法确认这一版是否已经发布。请刷新左侧列表后再批准。'
+      : '正在读取已发布版本，读取完成后才能批准。'
+  }
   const missing = readiness.value.slice(0, 3).filter((item) => !item.ready).map((item) => item.label)
-  return missing.length ? `${missing.join('、')}尚未就绪，就绪后才能批准。` : '生成任务尚未完成，暂时不能批准。'
+  if (missing.length) return `${missing.join('、')}尚未就绪，就绪后才能批准。`
+  if (approvalId.value && !authoring.rejectedApproval) return '正在核对链接中的批准记录，核对完成前不能再次批准。'
+  return '生成任务尚未完成，暂时不能批准。'
 })
+
+/** Approval needs a known release state: an unreadable release list fails closed. */
+const approvalAllowed = computed(() => authoring.canApprove && projectReleases.value !== null && !publishedRelease.value)
 
 const canSubmit = computed(() => {
   const length = reason.value.trim().length
-  return ownerConfirmed.value && length >= 1 && length <= 500 && authoring.canApprove && !authoring.acting && !publishedRelease.value
+  return ownerConfirmed.value && length >= 1 && length <= 500 && approvalAllowed.value && !authoring.acting
 })
 
 async function completeApproval() {

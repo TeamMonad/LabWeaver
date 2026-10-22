@@ -71,13 +71,14 @@ export async function expectPublicationStatusByUi(page, status, timeout = REVIEW
 }
 
 /**
- * After publication the run is listed under “已发布” and the page no longer
- * offers a second approval for the same candidate.
+ * After publication the run is listed under “已有发布版本” and, once the
+ * page has matched the release to the current candidate, it no longer offers
+ * a second approval for that candidate.
  */
 export async function expectPublishedReviewByUi(page, projectId, runId) {
   await reopenAuthoringReviewByLink(page, projectId, runId)
-  const published = page.getByTestId('review-queue').locator('section[data-group="published"]')
-  await expect(published.locator(`a[data-run-id="${runId}"]`)).toHaveCount(1, { timeout: REVIEW_TIMEOUT_MS })
+  const released = page.getByTestId('review-queue').locator('section[data-group="released"]')
+  await expect(released.locator(`a[data-run-id="${runId}"]`)).toHaveCount(1, { timeout: REVIEW_TIMEOUT_MS })
   await expect(page.getByTestId('review-published')).toBeVisible({ timeout: REVIEW_TIMEOUT_MS })
   await expect(page.getByTestId('approve-publish')).toHaveCount(0)
 }

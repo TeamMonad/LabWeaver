@@ -374,6 +374,40 @@ describe('useProjectAuthoringApproval', () => {
     approval.stopPublicationPolling()
   })
 
+  it('rejects a linked approval that binds a different run instead of showing its publication', async () => {
+    const status = makePublicationStatus('ready')
+    vi.mocked(getProjectAuthoringApproval).mockResolvedValue({
+      data: { ...status, approval: { ...status.approval, evaluationCandidateId: 'evaluation-candidate-of-another-run' } } as never,
+      error: undefined as never,
+    })
+    const approval = useProjectAuthoringApproval(
+      ref<string | null>('project-1'),
+      ref<string | undefined>('run-1'),
+      ref<string | undefined>('approval-1'),
+    )
+
+    await vi.waitFor(() => expect(approval.rejectedApproval?.code).toBe('PROJECT_APPROVAL_RUN_MISMATCH'))
+    expect(approval.publication.kind).toBe('idle')
+    expect(approval.approval.kind).toBe('idle')
+    await vi.waitFor(() => expect(approval.canApprove).toBe(true))
+  })
+
+  it('rejects a linked approval of an earlier package revision', async () => {
+    const status = makePublicationStatus('ready')
+    vi.mocked(getProjectAuthoringApproval).mockResolvedValue({
+      data: { ...status, approval: { ...status.approval, packageRevision: status.approval.packageRevision + 1 } } as never,
+      error: undefined as never,
+    })
+    const approval = useProjectAuthoringApproval(
+      ref<string | null>('project-1'),
+      ref<string | undefined>('run-1'),
+      ref<string | undefined>('approval-1'),
+    )
+
+    await vi.waitFor(() => expect(approval.rejectedApproval?.code).toBe('PROJECT_APPROVAL_RUN_MISMATCH'))
+    expect(approval.publication.kind).toBe('idle')
+  })
+
   it('polls pending publication until the server reports ready', async () => {
     vi.useFakeTimers()
     try {

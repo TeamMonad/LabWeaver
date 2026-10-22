@@ -13,7 +13,7 @@
           <RouterLink :to="{ path: '/teacher/materials', query: { projectId } }">去上传材料</RouterLink>
         </p>
         <p v-if="data.releaseError" class="queue-note queue-note--warning" role="status" data-testid="queue-release-error">
-          没能读取已发布版本（{{ data.releaseError }}），已发布的任务可能仍列在“可以审核”中。点击右上角刷新重试。
+          没能读取已发布版本（{{ data.releaseError }}），无法判断哪些版本已经发布，暂时不能批准。点击右上角刷新重试。
         </p>
         <section v-for="group in groups" :key="group.key" class="queue-group" :aria-label="group.label" :data-group="group.key">
           <h4>{{ group.label }}</h4>
@@ -92,6 +92,7 @@ async function load() {
     ? extractProblemDetails(releases.error)?.diagnosticCode ?? 'AUTHORING_QUEUE_RELEASES_LOAD_FAILED'
     : null
   const snapshot: ReviewQueueSnapshot = {
+    projectId: id,
     items: runs.data.items.filter((item) => item.projectId === id && isExperimentAuthoringRun(item)),
     releasesByRun: releaseError ? new Map() : activeReleasesByRun(releases.items.filter((release) => release.projectId === id)),
     releaseError,
@@ -101,7 +102,7 @@ async function load() {
   emit('loaded', snapshot)
 }
 
-const ORDER: QueueGroup[] = ['review', 'generating', 'unfinished', 'published']
+const ORDER: QueueGroup[] = ['review', 'released', 'generating', 'unfinished']
 const groups = computed(() => {
   if (history.value.kind !== 'success') return []
   const { items, releasesByRun } = history.value.data
@@ -111,7 +112,8 @@ const groups = computed(() => {
 })
 
 function itemMeta(item: AgentRunHistoryItem): string {
-  const release = history.value.kind === 'success' ? history.value.data.releasesByRun.get(item.id) : undefined
+  const releases = history.value.kind === 'success' ? history.value.data.releasesByRun : undefined
+  const release = releases && queueGroup(item.state, releases.has(item.id)) === 'released' ? releases.get(item.id) : undefined
   if (release) return `已发布版本 ${release.version} · ${formatTimestamp(release.publishedAt)}`
   return `${runStateLabel(item.state)} · 更新于 ${formatTimestamp(item.updatedAt)}`
 }
