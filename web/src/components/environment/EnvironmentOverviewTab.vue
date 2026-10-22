@@ -288,14 +288,14 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
 .env-meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
-  padding: 16px;
+  gap: var(--space-4);
+  padding: var(--space-4);
 }
 
 .meta-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .meta-item__label {
@@ -311,7 +311,7 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
 
 .environment-id-details,
 .environment-id-input-details {
-  margin: 0 16px 16px;
+  margin: 0 var(--space-4) var(--space-4);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
 }
@@ -323,32 +323,32 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
 
 .environment-id-details code {
   display: block;
-  margin-top: 6px;
+  margin-top: var(--space-2);
   overflow-wrap: anywhere;
   color: var(--md-sys-color-on-surface);
 }
 
 .environment-id-details span {
   display: block;
-  margin-top: 6px;
+  margin-top: var(--space-2);
 }
 
 .section-subtitle {
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface);
-  margin: 16px 0 8px;
+  margin: var(--space-4) 0 var(--space-2);
 }
 
 .env-card,
 .grant-card {
-  padding: 16px;
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
 }
 
 .env-state {
-  padding: 4px 12px;
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   font: var(--md-sys-label-large);
   text-transform: capitalize;
@@ -387,71 +387,30 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
   color: var(--md-sys-color-on-error-container);
 }
 
-.filled-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button.small {
-  height: 32px;
-  padding: 0 16px;
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-button {
-  height: 40px;
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.text-button.error {
-  color: var(--md-sys-color-error);
-}
-
-.text-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .access-section {
-  margin-top: 24px;
+  margin-top: var(--space-6);
 }
 
 .grant-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 16px;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
 }
 
 .access-grant-hint {
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }
 
 .grant-result {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .grant-row {
   display: flex;
-  gap: 16px;
-  padding: 8px 0;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -468,11 +427,11 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
 .endpoint-grants {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .tag {
-  padding: 4px 10px;
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
@@ -483,7 +442,7 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
   display: inline-block;
   width: 8px;
   height: 8px;
-  margin-right: 6px;
+  margin-right: var(--space-2);
   border-radius: 50%;
   background: var(--md-sys-color-outline);
 }
@@ -499,12 +458,12 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
 .runtime-access {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  margin-top: 20px;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
 }
 
 .access-card {
-  padding: 16px;
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -513,33 +472,33 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
 .access-card__title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface);
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
 }
 
 .access-card__desc {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .access-card__hint {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-error);
-  margin: 8px 0 0;
+  margin: var(--space-2) 0 0;
 }
 
 .ssh-command {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 
 .ssh-command__text {
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container-highest);
   color: var(--md-sys-color-on-surface);
@@ -550,8 +509,8 @@ const endpointColumns: DataTableColumn<{ protocol: string; health: string; obser
 .ssh-meta {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 12px;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
 }

@@ -280,23 +280,23 @@ const {
 .environment-entry {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: var(--space-6);
 }
 
 /* GCP Resource Header & Breadcrumbs */
 .gcp-resource-view {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .gcp-breadcrumbs {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
-  margin-bottom: 6px;
+  margin-bottom: var(--space-2);
 }
 
 .breadcrumb-link {
@@ -321,14 +321,14 @@ const {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
   flex-wrap: wrap;
 }
 
 .title-with-pill {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .title-with-pill h2 {
@@ -342,7 +342,7 @@ const {
 .gcp-detail-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   overflow-x: auto;
   scrollbar-width: none;
@@ -355,9 +355,9 @@ const {
 .detail-tab {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   height: 42px;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border: none;
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
@@ -391,13 +391,13 @@ const {
 .tab-pane {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 8px 0;
+  gap: var(--space-5);
+  padding: var(--space-2) 0;
 }
 
 .environment-id-details,
 .environment-id-input-details {
-  margin: 0 16px 16px;
+  margin: 0 var(--space-4) var(--space-4);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
 }
@@ -416,23 +416,23 @@ const {
 .page-subtitle {
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
 }
 
 .section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font: var(--md-sys-title-medium);
   color: var(--md-sys-color-on-surface);
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .environment-selector {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 .environment-selector label {
@@ -444,7 +444,7 @@ const {
   flex: 1;
   min-width: 0;
   height: 40px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -461,57 +461,16 @@ const {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 48px 24px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
   text-align: center;
   color: var(--md-sys-color-on-surface-variant);
 }
 
-.filled-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button.small {
-  height: 32px;
-  padding: 0 16px;
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-button {
-  height: 40px;
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.text-button.error {
-  color: var(--md-sys-color-error);
-}
-
-.text-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .console-section {
-  margin-top: 20px;
+  margin-top: var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 </style>

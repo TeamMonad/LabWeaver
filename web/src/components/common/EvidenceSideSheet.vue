@@ -93,9 +93,9 @@ function onOpenAutoFocus(event: Event) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
   height: 64px;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -107,25 +107,7 @@ function onOpenAutoFocus(event: Event) {
 .evidence-sheet__content {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
-}
-
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 48px;
-  height: 48px;
-  padding: 0;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-on-surface-variant);
-  cursor: pointer;
-}
-
-.icon-button:hover {
-  background: var(--md-sys-color-surface-container-highest);
+  padding: var(--space-4);
 }
 
 @media (max-width: 839px) {

@@ -117,7 +117,7 @@ table {
 
 th,
 td {
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   text-align: left;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
@@ -150,15 +150,15 @@ tr:last-child td {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 48px 24px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
   color: var(--md-sys-color-on-surface-variant);
 }
 
 .skeleton-row {
   display: block;
   height: 40px;
-  margin: 8px 16px;
+  margin: var(--space-2) var(--space-4);
   border-radius: var(--md-sys-shape-small);
   background: linear-gradient(
     90deg,

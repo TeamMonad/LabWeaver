@@ -61,8 +61,8 @@ withDefaults(defineProps<Props>(), {
 .event-timeline__item {
   position: relative;
   display: flex;
-  gap: 16px;
-  padding: 12px 0;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
 }
 
 .event-timeline__item:not(:last-child)::before {
@@ -78,7 +78,7 @@ withDefaults(defineProps<Props>(), {
 .event-timeline__dot {
   width: 16px;
   height: 16px;
-  margin-top: 4px;
+  margin-top: var(--space-1);
   border-radius: 50%;
   background: var(--md-sys-color-primary);
   flex-shrink: 0;
@@ -92,7 +92,7 @@ withDefaults(defineProps<Props>(), {
 .event-timeline__header {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
   flex-wrap: wrap;
 }
 
@@ -108,7 +108,7 @@ withDefaults(defineProps<Props>(), {
 }
 
 .event-timeline__description {
-  margin-top: 4px;
+  margin-top: var(--space-1);
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
 }

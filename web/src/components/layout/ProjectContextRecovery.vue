@@ -105,9 +105,9 @@ onMounted(() => {
 .project-recovery {
   display: flex;
   max-width: 720px;
-  gap: 20px;
-  margin: 24px auto;
-  padding: 28px;
+  gap: var(--space-5);
+  margin: var(--space-6) auto;
+  padding: var(--space-8);
 }
 
 .project-recovery__icon {
@@ -124,7 +124,7 @@ onMounted(() => {
 .project-recovery__body {
   display: grid;
   min-width: 0;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .project-recovery h1 {
@@ -146,8 +146,8 @@ onMounted(() => {
 .project-recovery__actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .project-recovery__link {
@@ -163,39 +163,6 @@ onMounted(() => {
   overflow-wrap: anywhere;
 }
 
-.filled-button,
-.outlined-button,
-.text-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 0 20px;
-  border-radius: var(--md-sys-shape-full);
-  font: var(--md-sys-label-large);
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.filled-button {
-  border: none;
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-}
-
-.outlined-button {
-  border: 1px solid var(--md-sys-color-outline);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
-.text-button {
-  border: none;
-  background: transparent;
-  color: var(--md-sys-color-primary);
-}
-
 .filled-button span {
   overflow: hidden;
   max-width: 360px;
@@ -206,7 +173,7 @@ onMounted(() => {
 @media (max-width: 599px) {
   .project-recovery {
     flex-direction: column;
-    padding: 20px;
+    padding: var(--space-5);
   }
 }
 </style>

@@ -151,8 +151,8 @@ const {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 48px 24px;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
   text-align: center;
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -167,8 +167,8 @@ const {
 .console-freeze-notice {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 16px;
+  gap: var(--space-2);
+  padding: var(--space-4);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
@@ -195,7 +195,7 @@ const {
 }
 
 .console-freeze-notice {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
   align-items: flex-start;
 }
 
@@ -204,45 +204,8 @@ const {
   font: var(--md-sys-title-small);
 }
 
-.filled-button {
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: var(--md-sys-shape-full);
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.filled-button.small {
-  height: 32px;
-  padding: 0 16px;
-}
-
-.filled-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.outlined-button {
-  height: 40px;
-  padding: 0 24px;
-  border: 1px solid var(--md-sys-color-outline);
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.outlined-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .access-grant-hint {
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }

@@ -27,7 +27,7 @@ const icon = computed(() => props.state.kind === 'available' ? 'smart_toy' : pro
 </script>
 
 <style scoped>
-.agent-note { display: inline-flex; align-items: flex-start; gap: 8px; max-width: 460px; padding: 8px 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.agent-note { display: inline-flex; align-items: flex-start; gap: var(--space-2); max-width: 460px; padding: var(--space-2) var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .agent-note--available { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .agent-note a { color: var(--md-sys-color-primary); }
 .agent-note code { font: var(--md-sys-label-medium); }

@@ -17,7 +17,7 @@ import { RouterLink } from 'vue-router'
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 64px 32px;
+  padding: var(--space-16) var(--space-8);
   text-align: center;
   min-height: 420px;
 }
@@ -25,19 +25,19 @@ import { RouterLink } from 'vue-router'
 .not-found-code {
   font: 700 96px/1 var(--md-sys-font-family);
   color: var(--md-sys-color-primary);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .not-found-title {
   font: var(--md-sys-headline-small);
   color: var(--md-sys-color-on-surface);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
 }
 
 .not-found-desc {
   font: var(--md-sys-body-large);
   color: var(--md-sys-color-on-surface-variant);
-  margin-bottom: 32px;
+  margin-bottom: var(--space-8);
   max-width: 420px;
 }
 
@@ -46,7 +46,7 @@ import { RouterLink } from 'vue-router'
   align-items: center;
   justify-content: center;
   height: 40px;
-  padding: 0 24px;
+  padding: 0 var(--space-6);
   border-radius: var(--md-sys-shape-full);
   background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);

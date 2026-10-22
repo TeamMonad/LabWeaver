@@ -106,6 +106,7 @@ onScopeDispose(() => window.removeEventListener('resize', updateViewportWidth))
 .navigation-drawer--rail {
   width: var(--nav-drawer-collapsed);
 }
+
 .drawer-scrim {
   position: fixed;
   inset: 0;

@@ -79,7 +79,7 @@ function bannerSeverity(kind: FailureKind): 'error' | 'warning' | 'info' {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
+  gap: var(--space-4);
   min-height: 200px;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);

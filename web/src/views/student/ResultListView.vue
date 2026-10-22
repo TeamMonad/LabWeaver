@@ -107,19 +107,18 @@ function fallbackDiagnostic(state: StudentEvaluationResultSchema['state']) {
 </script>
 
 <style scoped>
-.results-page { display: flex; flex-direction: column; gap: 20px; }
+.results-page { display: flex; flex-direction: column; gap: var(--space-5); }
 h2 { margin: 0; font: var(--md-sys-headline-small); }
-header p { margin: 4px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
-.result-list { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0; }
-.result-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 16px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
-.result-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+header p { margin: var(--space-1) 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
+.result-list { display: grid; gap: var(--space-3); list-style: none; margin: 0; padding: 0; }
+.result-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-4); align-items: center; padding: var(--space-4); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
+.result-main { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .result-link { color: var(--md-sys-color-primary); overflow-wrap: anywhere; }
 .result-time { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .result-score { color: var(--md-sys-color-primary); font: var(--md-sys-headline-small); white-space: nowrap; }
-.state-chip { width: fit-content; padding: 4px 10px; border-radius: var(--md-sys-shape-full); font: var(--md-sys-label-medium); background: var(--md-sys-color-surface-container-highest); }
+.state-chip { width: fit-content; padding: var(--space-1) var(--space-3); border-radius: var(--md-sys-shape-full); font: var(--md-sys-label-medium); background: var(--md-sys-color-surface-container-highest); }
 .state-chip--succeeded { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
 .state-chip--failed { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
-.load-more { margin-top: 16px; }
-.outlined-button { min-height: 40px; padding: 0 24px; border: 1px solid var(--md-sys-color-outline); border-radius: var(--md-sys-shape-full); background: transparent; color: var(--md-sys-color-primary); cursor: pointer; }
+.load-more { margin-top: var(--space-4); }
 @media (max-width: 600px) { .result-card { grid-template-columns: 1fr; } }
 </style>

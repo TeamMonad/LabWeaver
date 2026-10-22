@@ -145,15 +145,15 @@ const {
 .section-subtitle {
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface);
-  margin: 16px 0 8px;
+  margin: var(--space-4) 0 var(--space-2);
 }
 
 .lifecycle-result {
-  margin-top: 16px;
+  margin-top: var(--space-4);
 }
 
 .env-state {
-  padding: 4px 12px;
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--md-sys-shape-small);
   font: var(--md-sys-label-large);
   text-transform: capitalize;
@@ -193,20 +193,20 @@ const {
 }
 
 .operation-current-panel {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .operation-current-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .operation-current-header > div {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .operation-current-label {
@@ -220,7 +220,7 @@ const {
 }
 
 .operation-current-description {
-  margin: 16px 0;
+  margin: var(--space-4) 0;
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -228,14 +228,14 @@ const {
 .operation-current-meta {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px 16px;
+  gap: var(--space-3) var(--space-4);
   margin: 0;
 }
 
 .operation-current-meta div {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .operation-current-meta dt {
@@ -250,36 +250,16 @@ const {
 }
 
 .env-failed-panel {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .env-failed-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.outlined-button {
-  height: 40px;
-  padding: 0 24px;
-  border: 1px solid var(--md-sys-color-outline);
-  border-radius: var(--md-sys-shape-full);
-  background: transparent;
-  color: var(--md-sys-color-primary);
-  font: var(--md-sys-label-large);
-  cursor: pointer;
-}
-
-.outlined-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-button.error {
-  color: var(--md-sys-color-error);
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .timeline-section {
-  margin-top: 24px;
+  margin-top: var(--space-6);
 }
 </style>

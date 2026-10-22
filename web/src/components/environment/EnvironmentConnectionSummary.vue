@@ -136,23 +136,17 @@ const consoleHint = computed(() => {
 </script>
 
 <style scoped>
-.connection-summary { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
-.connection-summary__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.connection-summary { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); }
+.connection-summary__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .connection-summary__title { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
-.connection-summary__states { display: flex; flex-wrap: wrap; gap: 8px 32px; margin: 0; }
+.connection-summary__states { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-8); margin: 0; }
 .connection-summary__states div { display: grid; gap: 2px; }
 .connection-summary__states dt { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .connection-summary__states dd { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
 .connection-summary__detail { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
 .connection-summary__hint { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
-.connection-summary__methods { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.connection-method { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 8px 0; border-top: 1px solid var(--md-sys-color-outline-variant); }
+.connection-summary__methods { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.connection-method { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); padding: var(--space-2) 0; border-top: 1px solid var(--md-sys-color-outline-variant); }
 .connection-method__text { display: grid; gap: 2px; min-width: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
-.outlined-button, .text-button, .filled-button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 0 16px; border-radius: var(--md-sys-shape-full); font: var(--md-sys-label-large); cursor: pointer; }
-.outlined-button { border: 1px solid var(--md-sys-color-outline); background: transparent; color: var(--md-sys-color-primary); }
-.text-button { border: none; background: transparent; color: var(--md-sys-color-primary); }
-.filled-button { border: none; background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); }
-.filled-button:disabled { background: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent); color: color-mix(in srgb, var(--md-sys-color-on-surface) 38%, transparent); cursor: not-allowed; }
-.connection-summary__actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.outlined-button:disabled, .text-button:disabled { color: color-mix(in srgb, var(--md-sys-color-on-surface) 38%, transparent); cursor: not-allowed; }
+.connection-summary__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 </style>

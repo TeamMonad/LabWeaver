@@ -123,12 +123,12 @@ defineExpose({ load })
 </script>
 
 <style scoped>
-.review-queue { display: grid; align-content: start; gap: 12px; padding: 16px; }
+.review-queue { display: grid; align-content: start; gap: var(--space-3); padding: var(--space-4); }
 .queue-head { display: flex; align-items: center; justify-content: space-between; }
 .queue-head h3 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
-.queue-group h4 { margin: 4px 0 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
-.queue-group ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.queue-item { display: grid; gap: 2px; padding: 10px 12px; border-radius: var(--md-sys-shape-small); color: var(--md-sys-color-on-surface); text-decoration: none; }
+.queue-group h4 { margin: var(--space-1) 0 var(--space-2); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.queue-group ul { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+.queue-item { display: grid; gap: 2px; padding: var(--space-3) var(--space-3); border-radius: var(--md-sys-shape-small); color: var(--md-sys-color-on-surface); text-decoration: none; }
 .queue-item:hover { background: var(--md-sys-color-surface-container); }
 .queue-item:focus-visible { outline: 2px solid var(--md-sys-color-primary); outline-offset: 1px; }
 .queue-item--current { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
