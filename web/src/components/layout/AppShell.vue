@@ -25,6 +25,19 @@
         <span class="spinner" aria-hidden="true" />
         <span>正在确认项目…</span>
       </div>
+      <section
+        v-else-if="context.state.value.kind === 'list-error'"
+        class="project-context-error"
+        aria-labelledby="project-context-error-title"
+        data-testid="project-context-list-error"
+      >
+        <h1 id="project-context-error-title">暂时无法确认当前项目</h1>
+        <p>项目列表没有加载成功，为避免显示或操作错误项目的数据，本页暂不打开。</p>
+        <DiagnosticBanner
+          :diagnostic="{ ...context.state.value.diagnostic, retryable: true }"
+          @retry="context.reloadProjects()"
+        />
+      </section>
       <ProjectContextRecovery
         v-else-if="context.state.value.kind === 'unavailable'"
         :key="context.state.value.projectId"
@@ -45,6 +58,7 @@ import { useRoute } from 'vue-router'
 import TopAppBar from './TopAppBar.vue'
 import NavigationDrawer from './NavigationDrawer.vue'
 import ProjectContextRecovery from './ProjectContextRecovery.vue'
+import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { useProjectContextSync } from '@/composables/useProjectContext'
 import { useThemeStore } from '@/stores/theme'
 
@@ -117,6 +131,25 @@ onMounted(() => {
   justify-content: center;
   gap: 12px;
   padding: 48px 16px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
+}
+
+.project-context-error {
+  display: grid;
+  gap: 12px;
+  max-width: 720px;
+  margin: 24px auto;
+}
+
+.project-context-error h1 {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-headline-small);
+}
+
+.project-context-error p {
+  margin: 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
 }

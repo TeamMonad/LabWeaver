@@ -121,4 +121,60 @@ describe('AppShell project context', () => {
     await flushPromises()
     expect(mounts).toBe(2)
   })
+
+  it('fails closed when the project list cannot be loaded and resolves the link only after a successful retry', async () => {
+    localStorage.setItem('labweaver_project_id', 'project-b')
+    listProjects.mockResolvedValue(problem(503, 'LW_HTTP_SERVICE_UNAVAILABLE'))
+    getProject.mockResolvedValue(problem(404, 'LW_PROJECT_NOT_FOUND'))
+    const { wrapper } = await mountShell('/researcher/environments?projectId=project-x')
+
+    expect(wrapper.find('[data-testid="project-context-list-error"]').exists()).toBe(true)
+    expect(wrapper.find('.scoped-page').exists()).toBe(false)
+    expect(mounts).toBe(0)
+    expect(getProject).not.toHaveBeenCalled()
+    expect(document.title).toContain('项目不可用')
+
+    listProjects.mockResolvedValue({ data: [projectA, projectB], error: undefined })
+    await wrapper.get('[data-testid="project-context-list-error"] .diagnostic-banner > button.text-button').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="project-context-list-error"]').exists()).toBe(false)
+    // project-x is still not listed, so the shell shows recovery, never project B's page.
+    expect(wrapper.get('[data-testid="project-context-recovery"]').text()).toContain('项目不存在或你无权访问。')
+    expect(mounts).toBe(0)
+  })
+
+  it('treats a readable project missing from a reloaded list as unavailable instead of pairing it with the old selection', async () => {
+    localStorage.setItem('labweaver_project_id', 'project-b')
+    getProject.mockResolvedValue({ data: { ...projectA, id: 'project-x', name: '项目 X' }, error: undefined })
+    const { wrapper, projects } = await mountShell('/?projectId=project-x')
+    await flushPromises()
+
+    // The list is reloaded before asking the server why the project is missing, and the reloads settle.
+    const listCalls = listProjects.mock.calls.length
+    const probeCalls = getProject.mock.calls.length
+    expect(probeCalls).toBeGreaterThanOrEqual(1)
+    await flushPromises()
+    expect(listProjects.mock.calls.length).toBe(listCalls)
+    expect(getProject.mock.calls.length).toBe(probeCalls)
+    expect(wrapper.find('.scoped-page').exists()).toBe(false)
+    expect(mounts).toBe(0)
+    expect(wrapper.get('[data-testid="project-context-recovery"]').text()).toContain('这个项目不在你的项目列表中')
+    expect(projects.selectedProjectId).toBe('project-b')
+    expect(document.title).toContain('项目不可用')
+  })
+
+  it('asks again after the list changes instead of reusing an earlier denial', async () => {
+    getProject.mockResolvedValue(problem(403, 'LW_ACCESS_FORBIDDEN'))
+    const { wrapper, projects } = await mountShell('/researcher/environments?projectId=project-x')
+    expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(true)
+
+    const projectX = { ...projectA, id: 'project-x', name: '项目 X' }
+    listProjects.mockResolvedValue({ data: [projectA, projectB, projectX], error: undefined })
+    await projects.load()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(false)
+    expect(wrapper.find('.scoped-page').exists()).toBe(true)
+    expect(projects.selectedProjectId).toBe('project-x')
+  })
 })

@@ -143,7 +143,7 @@
             <h2 id="home-requests-heading">待处理事项</h2>
             <span v-if="inProgress.resourceRequests.kind === 'success'" class="count">{{ inProgress.resourceRequests.data.length }}</span>
           </div>
-          <AsyncStateView :state="inProgress.resourceRequests" empty-text="当前项目没有待审批或分配中的资源申请。" @retry="inProgress.load()">
+          <AsyncStateView :state="inProgress.resourceRequests" empty-text="没有找到待审批或分配中的资源申请。" @retry="inProgress.load()">
             <template #success="{ data }">
               <ul class="item-list">
                 <li v-for="request in data" :key="request.id" class="item-row" :class="{ 'item-row--attention': resourceRequestAttention(request) }">
@@ -162,6 +162,14 @@
               </ul>
             </template>
           </AsyncStateView>
+          <p
+            v-if="inProgress.resourceRequests.kind === 'success' || inProgress.resourceRequests.kind === 'empty'"
+            class="section-note"
+            data-home-note="resource-requests-incomplete"
+          >
+            这里的列表可能不完整：平台暂时只返回你能看到的申请，且不分页。
+            <RouterLink :to="{ path: '/researcher/resources', query: { projectId: project.id } }">在资源申请页查看全部</RouterLink>
+          </p>
         </section>
       </div>
     </template>

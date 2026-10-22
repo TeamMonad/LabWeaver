@@ -1,8 +1,8 @@
-import { computed, ref, watch } from 'vue'
+import { computed, shallowRef, toRaw, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { getProject, type ProjectSchema } from '@/generated/contracts'
 import { useProjects } from '@/composables/useProjects'
-import { diagnosticFromError, type DiagnosticViewModel } from '@/types/async'
+import { diagnosticFromError, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 
 /**
  * The browser-wide project context.
@@ -26,7 +26,7 @@ export type ProjectContextState =
   | {
       kind: 'unavailable'
       projectId: string
-      reason: 'checking' | 'not-accessible' | 'archived-or-hidden' | 'error'
+      reason: 'checking' | 'not-accessible' | 'not-listed' | 'archived-or-hidden' | 'error'
       diagnostic: DiagnosticViewModel | null
       fallback: ProjectSchema | null
     }
@@ -34,18 +34,28 @@ export type ProjectContextState =
 /** Query keys that name objects inside one project; they are dropped when the project changes. */
 export const PROJECT_OWNED_QUERY_KEYS = ['environmentId', 'releaseId', 'runId', 'packageId', 'approvalId'] as const
 
-const probe = ref<{ projectId: string; result: 'checking' | { project: ProjectSchema } | { diagnostic: DiagnosticViewModel } } | null>(null)
-let probeGeneration = 0
+type ProjectList = AsyncState<ProjectSchema[]>
+type ProbeResult = 'checking' | { project: ProjectSchema } | { diagnostic: DiagnosticViewModel }
 
-async function probeProject(projectId: string) {
-  if (probe.value?.projectId === projectId) return
+/**
+ * Why a linked project is missing from the account's list. A result is only
+ * valid for the list it was taken against: any list reload (identity,
+ * membership or permission change) discards it and asks again.
+ */
+const probe = shallowRef<{ projectId: string; list: ProjectList; result: ProbeResult } | null>(null)
+let probeGeneration = 0
+/** The linked project for which the list was already reloaded once before probing. */
+let listRefreshedFor: string | null = null
+
+async function probeProject(projectId: string, list: ProjectList) {
+  if (probe.value?.projectId === projectId && probe.value.list === list) return
   const generation = ++probeGeneration
-  probe.value = { projectId, result: 'checking' }
+  probe.value = { projectId, list, result: 'checking' }
   const result = await getProject({ path: { projectId } })
   if (generation !== probeGeneration) return
   probe.value = result.error
-    ? { projectId, result: { diagnostic: diagnosticFromError(result.error, 'PROJECT_CONTEXT_UNAVAILABLE', '无法读取链接中的项目。', false) } }
-    : { projectId, result: { project: result.data } }
+    ? { projectId, list, result: { diagnostic: diagnosticFromError(result.error, 'PROJECT_CONTEXT_UNAVAILABLE', '无法读取链接中的项目。', false) } }
+    : { projectId, list, result: { project: result.data } }
 }
 
 function routeProjectIdOf(value: unknown): string | null {
@@ -88,16 +98,22 @@ export function useProjectContext() {
     }
     const listed = items.find((project) => project.id === requested)
     if (listed) return { kind: 'ready', project: listed }
-    const checked = probe.value?.projectId === requested ? probe.value.result : 'checking'
+    const current = probe.value
+    const checked = current?.projectId === requested && current.list === toRaw(settled) ? current.result : 'checking'
     if (checked === 'checking') {
       return { kind: 'unavailable', projectId: requested, reason: 'checking', diagnostic: null, fallback: fallbackProject.value }
     }
     if ('project' in checked) {
-      // Readable but absent from the account's list: treat the list as the
-      // authority for switching, but do not hide a project the server serves.
-      return checked.project.state === 'active'
-        ? { kind: 'ready', project: checked.project }
-        : { kind: 'unavailable', projectId: requested, reason: 'archived-or-hidden', diagnostic: null, fallback: fallbackProject.value }
+      // Readable but still absent from a freshly reloaded list. Pages, the
+      // selector and requests all follow the list, so the context fails
+      // closed instead of pairing this project with the previous selection.
+      return {
+        kind: 'unavailable',
+        projectId: requested,
+        reason: checked.project.state === 'active' ? 'not-listed' : 'archived-or-hidden',
+        diagnostic: null,
+        fallback: fallbackProject.value,
+      }
     }
     const status = checked.diagnostic.status
     return {
@@ -133,12 +149,18 @@ export function useProjectContextSync() {
       const items = settled.kind === 'success' ? settled.data : []
       if (requested) {
         if (items.some((project) => project.id === requested)) {
+          listRefreshedFor = null
           if (projects.selectedProjectId !== requested) projects.select(requested)
+        } else if (listRefreshedFor !== requested) {
+          // The list may predate a membership change; reload it once before asking why.
+          listRefreshedFor = requested
+          void projects.load()
         } else {
-          void probeProject(requested)
+          void probeProject(requested, toRaw(settled))
         }
         return
       }
+      listRefreshedFor = null
       const selected = projects.selectedProjectId
       if (!selected || !items.some((project) => project.id === selected)) return
       const query: LocationQueryRaw = { ...route.query, projectId: selected }
@@ -152,14 +174,14 @@ export function useProjectContextSync() {
     ([title, projectName, kind]) => {
       if (typeof document === 'undefined') return
       const page = typeof title === 'string' && title ? title : 'LabWeaver'
-      if (kind === 'unavailable') document.title = `项目不可用 · ${page} · LabWeaver`
+      if (kind === 'unavailable' || kind === 'list-error') document.title = `项目不可用 · ${page} · LabWeaver`
       else if (projectName) document.title = `${page} · ${projectName} · LabWeaver`
       else document.title = page === 'LabWeaver' ? page : `${page} · LabWeaver`
     },
     { immediate: true },
   )
 
-  return context
+  return { ...context, reloadProjects: () => projects.load() }
 }
 
 /** Address of the same page in another project, without the previous project's object ids. */

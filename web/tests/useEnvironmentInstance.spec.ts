@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, ref } from 'vue'
 import { flushPromises } from '@vue/test-utils'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
-import { getEnvironment } from '@/generated/contracts'
+import { getEnvironment, listProjectResourceLeases, listProjectResourceRequests } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', () => ({
   getEnvironment: vi.fn(),
@@ -10,10 +10,10 @@ vi.mock('@/generated/contracts', () => ({
   listProjectResourceRequests: vi.fn(),
 }))
 
-function environment(observedState: string, operationState = 'succeeded') {
+function environment(observedState: string, operationState = 'succeeded', id = 'env-1') {
   return {
     data: {
-      id: 'env-1',
+      id,
       projectId: 'project-1',
       observedState,
       desiredState: 'running',
@@ -111,6 +111,60 @@ describe('useEnvironmentInstance polling', () => {
     expect(env.polling).toBe(true)
     await vi.advanceTimersByTimeAsync(3000)
     expect(getEnvironment).toHaveBeenCalledTimes(3)
+    expect(env.polling).toBe(false)
+    scope.stop()
+  })
+
+  it('drops an older read that resolves after a newer one', async () => {
+    vi.mocked(getEnvironment).mockResolvedValueOnce(environment('provisioning', 'running'))
+    const { env, scope } = mount()
+    await flushPromises()
+    expect(env.polling).toBe(true)
+
+    let resolveOlder: (value: unknown) => void = () => undefined
+    vi.mocked(getEnvironment)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOlder = resolve }) as never)
+      .mockResolvedValueOnce(environment('ready'))
+    const older = env.load()
+    await env.load()
+    expect(env.instance.kind === 'success' && env.instance.data.observedState).toBe('ready')
+    expect(env.polling).toBe(false)
+
+    resolveOlder(environment('provisioning', 'running'))
+    await older
+    expect(env.instance.kind === 'success' && env.instance.data.observedState).toBe('ready')
+    expect(env.polling).toBe(false)
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(getEnvironment).toHaveBeenCalledTimes(3)
+    scope.stop()
+  })
+
+  it('drops a handoff read that finishes after the environment changed', async () => {
+    const environmentId = ref<string | undefined>('env-1')
+    const handoff = ref<string | undefined>('project-1')
+    vi.mocked(getEnvironment).mockResolvedValueOnce({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+    } as never)
+    let resolveRequests: (value: unknown) => void = () => undefined
+    vi.mocked(listProjectResourceRequests).mockImplementationOnce(() => new Promise((resolve) => { resolveRequests = resolve }) as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }], error: undefined } as never)
+    const scope = effectScope()
+    const env = scope.run(() => useEnvironmentInstance(environmentId, handoff))!
+    await flushPromises()
+
+    vi.mocked(getEnvironment).mockResolvedValue(environment('ready', 'succeeded', 'env-2'))
+    environmentId.value = 'env-2'
+    await flushPromises()
+    expect(env.instance.kind === 'success' && env.instance.data.id).toBe('env-2')
+
+    // Unguarded, this pending handoff for env-1 would replace env-2 with "环境正在准备" and restart polling.
+    resolveRequests({
+      data: [{ id: 'request-1', projectId: 'project-1', state: 'active', target: { kind: 'environment', environmentId: 'env-1' } }],
+      error: undefined,
+    })
+    await flushPromises()
+    expect(env.instance.kind === 'success' && env.instance.data.id).toBe('env-2')
     expect(env.polling).toBe(false)
     scope.stop()
   })

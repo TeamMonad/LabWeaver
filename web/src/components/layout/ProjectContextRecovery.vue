@@ -72,6 +72,8 @@ const reason = computed(() => {
       // 401/403/404 cannot tell apart "missing" from "not allowed", so the copy
       // never claims the project exists.
       return '项目不存在或你无权访问。'
+    case 'not-listed':
+      return '这个项目不在你的项目列表中，不能在这里打开。'
     case 'archived-or-hidden':
       return '这个项目已归档，不能继续在这里操作。'
     default:
@@ -79,7 +81,7 @@ const reason = computed(() => {
   }
 })
 const nextStep = computed(() => {
-  if (props.state.reason === 'not-accessible') {
+  if (props.state.reason === 'not-accessible' || props.state.reason === 'not-listed') {
     return props.state.fallback
       ? '请切换到你可以访问的项目；如果你认为应该能访问这个项目，请联系项目 Owner 或管理员确认。'
       : '你目前没有可访问的项目。如果你认为应该能访问这个项目，请联系项目 Owner 或管理员确认。'

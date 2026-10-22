@@ -154,6 +154,16 @@ describe('HomeView (current project in progress)', () => {
     expect(section.findAll('li')).toHaveLength(1)
     expect(section.text()).toContain('2 核 CPU')
     expect(section.text()).toContain('等待管理员审批')
+    // The list has no paging or server filter yet, so the home page never presents it as complete.
+    expect(section.get('[data-home-note="resource-requests-incomplete"]').text()).toContain('列表可能不完整')
+  })
+
+  it('does not claim the project has no pending requests when its list is empty', async () => {
+    vi.mocked(listProjectResourceRequests).mockResolvedValue(ok([]))
+    const { wrapper } = await createWrapper()
+    const section = wrapper.get('[data-home-section="resource-requests"]')
+    expect(section.text()).not.toContain('当前项目没有待审批')
+    expect(section.find('[data-home-note="resource-requests-incomplete"]').exists()).toBe(true)
   })
 
   it('reloads when a hidden tab becomes visible instead of polling in the background', async () => {

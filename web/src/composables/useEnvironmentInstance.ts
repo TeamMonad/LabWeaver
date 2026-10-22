@@ -122,30 +122,36 @@ export function useEnvironmentInstance(
   let timer: ReturnType<typeof setTimeout> | null = null
   let pendingEnvironmentId: string | null = null
   let pendingDeadline = 0
+  // Every load gets a generation; only the newest one may write state or re-arm the timer.
+  let loadGeneration = 0
 
   async function load() {
+    const generation = ++loadGeneration
     const id = environmentId.value
+    const handoffProject = handoffProjectId.value
     if (!id) {
       pendingEnvironmentId = null
       pendingDeadline = 0
       instance.value = { kind: 'idle' }
       return
     }
+    // An older or redirected read must not overwrite the current one or restart polling.
+    const superseded = () => generation !== loadGeneration
+      || environmentId.value !== id
+      || handoffProjectId.value !== handoffProject
     if (instance.value.kind !== 'success') {
       instance.value = { kind: 'loading', message: '加载环境状态…' }
     }
     const result = await getEnvironment({ path: { environmentId: id } })
-    // A response for an environment the page has already left must not overwrite the current one.
-    if (environmentId.value !== id) return
+    if (superseded()) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      const handoffPending = handoffProjectId.value
+      const handoffPending = handoffProject
         && result.response?.status === 404
         && problem?.diagnosticCode === 'LW_ENVIRONMENT_NOT_FOUND'
       if (handoffPending) {
-        const resourceState = handoffProjectId.value
-          ? await readHandoffResourceState(handoffProjectId.value, id)
-          : { kind: 'missing' as const }
+        const resourceState = await readHandoffResourceState(handoffProject, id)
+        if (superseded()) return
         if (resourceState.kind === 'error') {
           pendingEnvironmentId = null
           pendingDeadline = 0
@@ -233,6 +239,7 @@ export function useEnvironmentInstance(
 
   function stopPolling() {
     polling.value = false
+    loadGeneration += 1
     clearTimer()
   }
 
@@ -246,6 +253,7 @@ export function useEnvironmentInstance(
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange)
   if (getCurrentScope()) {
     onScopeDispose(() => {
+      loadGeneration += 1
       clearTimer()
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
     })
