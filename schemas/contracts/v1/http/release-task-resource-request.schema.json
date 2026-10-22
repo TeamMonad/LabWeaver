@@ -16,9 +16,14 @@
     },
     "expectedLeaseRevision": {
       "$ref": "#/$defs/Revision"
+    },
+    "expectedRequestRevision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Request revision observed together with the claim and lease revisions."
     }
   },
   "required": [
+    "expectedRequestRevision",
     "expectedClaimRevision",
     "expectedLeaseRevision"
   ],
