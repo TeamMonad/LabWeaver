@@ -1,6 +1,6 @@
 <template>
   <!-- Reka renders a hidden native datetime-local inside forms; listening here makes it two-way. -->
-  <span class="app-datetime-root" @input="onNative" @change="onNative">
+  <span ref="rootRef" class="app-datetime-root" @input="onNative" @change="onNative">
   <DatePickerRoot
     :model-value="dateValue"
     granularity="minute"
@@ -10,7 +10,14 @@
     :required="required"
     @update:model-value="onPick"
   >
-    <DatePickerField v-slot="{ segments }" :class="['app-datetime', $attrs.class]" :aria-label="ariaLabel">
+    <DatePickerField
+      v-slot="{ segments }"
+      :class="['app-datetime', $attrs.class]"
+      data-app-datetime-field
+      :aria-label="ariaLabel"
+      :aria-labelledby="ariaLabelledby"
+      :aria-describedby="ariaDescribedby"
+    >
       <div class="app-datetime__segments">
         <template v-for="item in segments" :key="item.part">
           <DatePickerInput v-if="item.part === 'literal'" :part="item.part" class="app-datetime__literal">
@@ -72,7 +79,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, useAttrs } from 'vue'
+import { computed, onMounted, ref, useAttrs, useId, watchEffect } from 'vue'
 import { CalendarDateTime, parseDateTime, type DateValue } from '@internationalized/date'
 import {
   DatePickerCalendar, DatePickerCell, DatePickerCellTrigger, DatePickerContent, DatePickerField,
@@ -89,10 +96,45 @@ const props = defineProps<{ modelValue?: string | null; disabled?: boolean; requ
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const attrs = useAttrs()
 
+// The visible control is a role=group, which an enclosing <label> does not
+// name; the native mirror is aria-hidden. Forward explicit naming attributes
+// to the group and, when none is given, label it by the caption of the
+// wrapping <label> (its first element child that is not this control).
+const fieldId = computed(() => attrs.id as string | undefined)
 const ariaLabel = computed(() => attrs['aria-label'] as string | undefined)
+const ariaDescribedby = computed(() => attrs['aria-describedby'] as string | undefined)
+const rootRef = ref<HTMLElement | null>(null)
+const captionId = ref<string | undefined>()
+const generatedCaptionId = `app-datetime-caption-${useId()}`
+const ariaLabelledby = computed(() => (attrs['aria-labelledby'] as string | undefined)
+  ?? (ariaLabel.value ? undefined : captionId.value))
+
+onMounted(() => {
+  const root = rootRef.value
+  if (!root) return
+  // Reka consumes `id` for its own hidden input, so the caller's id is set on
+  // the visible group to keep `<label for>` and aria references working.
+  watchEffect(() => {
+    const group = root.querySelector('[data-app-datetime-field]')
+    if (!group) return
+    if (fieldId.value) group.id = fieldId.value
+    else group.removeAttribute('id')
+  })
+  const label = root.closest('label')
+  if (!label) return
+  const caption = Array.from(label.children).find((child) => !child.contains(root) && child.textContent?.trim())
+  if (!caption) return
+  if (!caption.id) caption.id = generatedCaptionId
+  captionId.value = caption.id
+})
+
+// The mirror is aria-hidden, so naming attributes on it have no effect on
+// assistive tech; they stay for form/automation lookups. Only `id` moves to
+// the visible field so ids remain unique.
 const nativeAttrs = computed(() => {
   const rest: Record<string, unknown> = { ...attrs }
   delete rest.class
+  delete rest.id
   return rest
 })
 

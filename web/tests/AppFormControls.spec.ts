@@ -44,6 +44,22 @@ describe('AppSelect', () => {
     expect(native.attributes('aria-hidden')).toBe('true')
     expect(native.attributes('tabindex')).toBe('-1')
   })
+
+  it('takes its accessible name from a wrapping <label> without aria-label', () => {
+    const value = ref<string | number | null | undefined>('')
+    const wrapper = mount(defineComponent({
+      setup: () => () => h('label', null, [
+        h('span', null, '计费单位'),
+        h(AppSelect, { modelValue: value.value }, () => [h('option', { value: '' }, '全部')]),
+      ]),
+    }), { attachTo: document.body })
+    const trigger = wrapper.get('[role="combobox"]')
+    // A <button> is labelable, so the enclosing <label> names it; the mirror stays hidden.
+    expect(trigger.element.tagName).toBe('BUTTON')
+    expect(trigger.element.closest('label')?.textContent).toContain('计费单位')
+    expect(trigger.attributes('aria-hidden')).toBeUndefined()
+    wrapper.unmount()
+  })
 })
 
 describe('AppDateTimePicker', () => {
@@ -60,6 +76,42 @@ describe('AppDateTimePicker', () => {
     expect(wrapper.find('[role="group"][aria-label="生效时间"]').exists() || wrapper.find('[aria-label="生效时间"]').exists()).toBe(true)
     await wrapper.get('input[data-app-datetime]').setValue('2031-02-03T04:05')
     expect(value.value).toBe('2031-02-03T04:05')
+    wrapper.unmount()
+  })
+
+  it('names the visible field from a wrapping <label> caption when aria-label is absent', async () => {
+    const wrapper = mount(defineComponent({
+      setup: () => () => h('label', null, [
+        h('span', null, '生效时间'),
+        h(AppDateTimePicker, { modelValue: '2030-01-01T08:30' }),
+      ]),
+    }), { attachTo: document.body })
+    await nextTick()
+    const group = wrapper.get('[role="group"]')
+    const labelledby = group.attributes('aria-labelledby')
+    expect(labelledby).toBeTruthy()
+    const names = labelledby!.split(' ').map((id) => document.getElementById(id)?.textContent?.trim())
+    expect(names).toEqual(['生效时间'])
+    expect(group.attributes('aria-label')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('forwards id, aria-labelledby and aria-describedby to the visible field', async () => {
+    const wrapper = mount(defineComponent({
+      setup: () => () => h('div', null, [
+        h('span', { id: 'expiry-label' }, '批准有效期'),
+        h('span', { id: 'expiry-hint' }, '到期后需要重新申请'),
+        h(AppDateTimePicker, { id: 'expiry', 'aria-labelledby': 'expiry-label', 'aria-describedby': 'expiry-hint' }),
+      ]),
+    }), { attachTo: document.body })
+    await nextTick()
+    const group = wrapper.get('[role="group"]')
+    expect(group.attributes('id')).toBe('expiry')
+    expect(group.attributes('aria-labelledby')).toBe('expiry-label')
+    expect(group.attributes('aria-describedby')).toBe('expiry-hint')
+    const native = wrapper.get('input[data-app-datetime]')
+    expect(native.attributes('id')).toBeUndefined()
+    expect(native.attributes('aria-hidden')).toBe('true')
     wrapper.unmount()
   })
 })
