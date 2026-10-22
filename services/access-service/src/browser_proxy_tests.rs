@@ -10,12 +10,16 @@ use auth::{CreateBffSession, ServiceTokenClient, ServiceTokenClientConfig, creat
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Form, State},
+    extract::{
+        Form, State,
+        ws::{Message as BrowserMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures_util::StreamExt;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use rcgen::KeyPair;
 use serde_json::{Value, json};
@@ -27,6 +31,7 @@ use tokio::{
     net::TcpListener,
     sync::Mutex,
 };
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use url::Url;
 
 use super::*;
@@ -325,6 +330,18 @@ fn control_request_record(
     })
 }
 
+async fn upstream_console(upgrade: WebSocketUpgrade) -> impl IntoResponse {
+    upgrade
+        .protocols(["labweaver.console.xterm.v1"])
+        .on_upgrade(|mut socket: WebSocket| async move {
+            while let Some(Ok(message)) = socket.recv().await {
+                if matches!(message, BrowserMessage::Close(_)) {
+                    break;
+                }
+            }
+        })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the fixture keeps downstream authorization and response boundaries in one handler"
@@ -576,6 +593,10 @@ async fn state(
         .route("/api/v1/projects/{project_id}", any(control))
         .route("/api/v1/projects/{project_id}/members", any(control))
         .route("/admin/realms/test/users", any(control))
+        .route(
+            "/internal/v1/environments/{environment_id}/console:connect",
+            get(upstream_console),
+        )
         .with_state(authority.clone());
     let control_server_config = Arc::clone(&server_config);
     tasks.0.push(tokio::spawn(async move {
@@ -877,7 +898,14 @@ async fn oidc_wrong_browser_cannot_consume_login_transaction() -> Result<(), Box
         .header(header::COOKIE, format!("{cookie}; {other_cookie}"))
         .send()
         .await?;
-    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        refused
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next()),
+        Some("application/problem+json")
+    );
     let cleared = refused
         .headers()
         .get(header::SET_COOKIE)
@@ -887,6 +915,53 @@ async fn oidc_wrong_browser_cannot_consume_login_transaction() -> Result<(), Box
     assert_eq!(
         refused.headers().get_all(header::SET_COOKIE).iter().count(),
         1
+    );
+    let refused_body = refused.json::<contracts::ProblemDetails>().await?;
+    assert_eq!(refused_body.status, 401);
+    assert_eq!(
+        refused_body.diagnostic_code.as_str(),
+        "LW_AUTH_TOKEN_INVALID"
+    );
+    let exchange_login = client.get(format!("{base}/auth/login")).send().await?;
+    let exchange_location = Url::parse(
+        exchange_login
+            .headers()
+            .get(header::LOCATION)
+            .ok_or("missing exchange redirect")?
+            .to_str()?,
+    )?;
+    let exchange_state = exchange_location
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .ok_or("missing exchange state")?
+        .1
+        .into_owned();
+    let exchange_cookie = exchange_login
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("missing exchange cookie")?
+        .to_str()?
+        .split(';')
+        .next()
+        .ok_or("invalid exchange cookie")?;
+    let exchange = client
+        .get(format!("{base}/auth/callback"))
+        .query(&[("state", exchange_state.as_str()), ("code", "invalid")])
+        .header(header::COOKIE, exchange_cookie)
+        .send()
+        .await?;
+    assert_eq!(exchange.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let exchange_set_cookie = exchange
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("missing exchange cookie cleanup")?
+        .to_str()?;
+    assert!(exchange_set_cookie.contains("Max-Age=0"));
+    let exchange_body = exchange.json::<contracts::ProblemDetails>().await?;
+    assert_eq!(exchange_body.status, 503);
+    assert_eq!(
+        exchange_body.diagnostic_code.as_str(),
+        "LW_AUTH_OIDC_TOKEN_EXCHANGE_FAILED"
     );
     let live: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM access.oidc_transactions WHERE consumed_at IS NULL",
@@ -924,9 +999,141 @@ async fn oidc_wrong_browser_cannot_consume_login_transaction() -> Result<(), Box
         .fetch_one(&state.pool)
         .await?;
     assert_eq!(
-        total, 2,
+        total, 3,
         "invalid return target created an orphan login transaction"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn bff_logout_closes_production_console_websocket() -> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let actor = Uuid::now_v7();
+    let (state, _) = Box::pin(state(pool, actor, &mut tasks)).await?;
+    let browser_session = session(
+        &state.pool,
+        &state.key_ring,
+        actor,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let project_id = contracts::ProjectId::new();
+    let grant_id = contracts::AccessGrantId::new();
+    let environment_id = contracts::EnvironmentId::new();
+    let capability_id = contracts::ConsoleCapabilityId::new();
+    let opaque = "production-console-test";
+    let locator = format!("/connect/console/{opaque}");
+    let secret = [7_u8; 32];
+    let now = OffsetDateTime::now_utc();
+    sqlx::query(
+        "INSERT INTO access.project_memberships (course_id,project_id,actor_id,role,state,revision) VALUES (NULL,$1,$2,'student','active',1)",
+    )
+    .bind(project_id.as_uuid())
+    .bind(actor)
+    .execute(&state.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO access.access_grants (grant_id,actor_id,project_id,course_id,environment_id,environment_revision,revision,state,not_before,expires_at,contract) VALUES ($1,$2,$3,NULL,$4,1,1,'active',$5,$6,$7)",
+    )
+    .bind(grant_id.as_uuid())
+    .bind(actor)
+    .bind(project_id.as_uuid())
+    .bind(environment_id.as_uuid())
+    .bind(now)
+    .bind(now + Duration::minutes(30))
+    .bind(json!({"subjectKind": "owner"}))
+    .execute(&state.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,NULL,$6,'experiment',1,$7,$8,$9,$10,$11,$12,'test-key','actor:test',$13)",
+    )
+    .bind(capability_id.as_uuid())
+    .bind(grant_id.as_uuid())
+    .bind(actor)
+    .bind(browser_session.session_id)
+    .bind(project_id.as_uuid())
+    .bind(environment_id.as_uuid())
+    .bind(now)
+    .bind(now + Duration::seconds(30))
+    .bind(now + Duration::minutes(15))
+    .bind(Sha256Digest::of_bytes(locator.as_bytes()).to_string())
+    .bind(Sha256Digest::of_bytes(&secret).to_string())
+    .bind(vec![9_u8; 32])
+    .bind("d".repeat(64))
+    .execute(&state.pool)
+    .await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let router = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let mut request = format!("ws://{address}/connect/console/{opaque}").into_client_request()?;
+    request.headers_mut().insert("origin", ORIGIN.parse()?);
+    request.headers_mut().insert(
+        "cookie",
+        format!(
+            "{}={}; labweaver_console_handoff={}",
+            state.deployment.browser.session_cookie_name,
+            browser_session.session_id,
+            URL_SAFE_NO_PAD.encode(secret)
+        )
+        .parse()?,
+    );
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        "labweaver.console.xterm.v1".parse()?,
+    );
+    let (mut client, _) = tokio_tungstenite::connect_async(request).await?;
+    for _ in 0..100 {
+        let state_code: String =
+            sqlx::query_scalar("SELECT state FROM access.console_sessions WHERE capability_id=$1")
+                .bind(capability_id.as_uuid())
+                .fetch_one(&state.pool)
+                .await?;
+        if state_code == "active" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    console::terminate_bff_sessions(
+        &state,
+        browser_session.session_id,
+        "LW_AUTH_SESSION_REVOKED",
+    )
+    .await
+    .map_err(|error| std::io::Error::other(error.diagnostic))?;
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+        .await?
+        .ok_or("production console websocket closed without a frame")??;
+    assert!(matches!(
+        message,
+        tokio_tungstenite::tungstenite::Message::Close(Some(frame))
+            if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+    ));
+    let mut state_code = String::new();
+    for _ in 0..100 {
+        state_code =
+            sqlx::query_scalar("SELECT state FROM access.console_sessions WHERE capability_id=$1")
+                .bind(capability_id.as_uuid())
+                .fetch_one(&state.pool)
+                .await?;
+        if state_code == "closed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(state_code, "closed");
     Ok(())
 }
 

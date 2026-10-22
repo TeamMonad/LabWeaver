@@ -14,6 +14,10 @@
 
 项目列表加载失败时，项目页面显示“暂时无法确认当前项目”，不会打开任何项目的数据。点击“重试”，列表加载成功后页面才会打开。
 
+Access 的登录入口是门户顶层导航 `GET /auth/login?return_to=<门户路径>`。每个标签页都有独立的 state、PKCE、nonce 和事务 Cookie；不要把另一个浏览器或标签页的 callback URL 复制过来。非法 `return_to`（外部 URL、`//`、反斜杠或控制字符）返回 `400 / LW_AUTH_OIDC_RETURN_TO_REJECTED`。事务 Cookie 缺少或跨浏览器使用返回 `401 / LW_AUTH_OIDC_BROWSER_REJECTED`；重放或过期返回 `401 / LW_AUTH_OIDC_STATE_REJECTED`。
+
+退出请求必须带当前 `Origin` 和 CSRF token。Access 撤销 BFF 会话、清理会话 Cookie，并终止该 BFF 会话的浏览器 Console 连接；随后按响应中的 `logoutUrl` 顶层导航到 Keycloak。SSH 会话使用独立 AccessGrant，按 grant 到期、显式撤销及成员/环境授权变化的规则收尾，BFF 退出不会错误地声称已撤销独立 SSH grant。
+
 项目负责人在“项目 AI 设置”选择可用模型、确认材料范围并设置调用预算。模型服务地址和凭据由管理员在部署侧配置，普通用户无需填写。材料只应包含本次任务所需且已获授权的文件。
 
 ## 教师准备实验
@@ -88,3 +92,22 @@ tar -czf vm-template.tar.gz disk/disk.qcow2
 先刷新原任务或返回项目任务历史查看状态。明确失败后阅读可处理的错误信息：第一行说明原因，第二行给出下一步。再使用界面提供的恢复、重试或取消操作；传输结果不明时先查询原任务，不要重复提交。若操作显示完成但环境或资源仍在释放中，继续查看原记录；不要创建重复申请。
 
 向管理员反馈时说明角色、项目名称、想完成的操作、最后看到的状态和错误提示。展开错误提示中的“诊断信息”，点击“复制诊断信息”，把诊断码和请求 ID 一起发给管理员（只有平台返回了请求 ID 时才会显示）。不要发送密码、令牌、私钥或无关用户内容。
+
+## 真实身份边界验证
+
+协议和内部服务 JWT 的增量测试不需要生产凭据：
+
+```sh
+cargo test -p auth --test service_auth --locked
+cargo test -p access-service --test postgres oidc_binding_is_checked_before_atomic_consumption_and_expiry --locked
+```
+
+真实浏览器边界需要 Docker、Node、锁定的 Playwright Chromium 和 PostgreSQL：
+
+```sh
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web exec playwright install chromium
+cargo test -p access-service --bin access-service chromium_oidc_navigation_enforces_browser_binding_and_session_lifecycle --locked -- --ignored --nocapture
+```
+
+该用例启动临时真实 Keycloak/HTTPS/PostgreSQL，覆盖双浏览器、多标签、重放、过期、`return_to`、刷新和 provider logout；返回页只用于协议断言，不替代 Vue 门户旅程。测试夹具的自签名证书只由 Chromium 信任；Access 的 OIDC 和服务客户端继续执行严格 TLS。生产 SSH/控制台传输撤销需要 Gateway、sshd、受控服务 JWT/TLS、真实目标端点和 grant 撤销事件，不能用登录夹具或手工 header 代替。

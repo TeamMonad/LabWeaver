@@ -97,6 +97,24 @@ async fn verifier_rejects_missing_forged_expired_wrong_binding_and_permission_to
         verifier.authenticate(&HeaderMap::new()).await,
         Err(ServiceAuthError::CredentialsMissing)
     );
+    assert_eq!(
+        authenticate(&verifier, "not-a-jwt").await,
+        Err(ServiceAuthError::TokenRejected)
+    );
+    let material = authority.state.key.read().await.clone();
+    let not_yet_valid = signed_token_with_nbf(
+        &material,
+        &authority.issuer,
+        CLIENT_ID,
+        AUDIENCE,
+        [REQUIRED_PERMISSION],
+        unix_now() + 300,
+        unix_now() + 60,
+    )?;
+    assert_eq!(
+        authenticate(&verifier, &not_yet_valid).await,
+        Err(ServiceAuthError::TokenRejected)
+    );
 
     let valid = token(
         &authority.state,
@@ -335,6 +353,26 @@ fn signed_token(
     permissions: [&str; 1],
     exp: i64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
+    signed_token_with_nbf(
+        material,
+        issuer,
+        client_id,
+        audience,
+        permissions,
+        exp,
+        unix_now() - 1,
+    )
+}
+
+fn signed_token_with_nbf(
+    material: &SigningMaterial,
+    issuer: &str,
+    client_id: &str,
+    audience: &str,
+    permissions: [&str; 1],
+    exp: i64,
+    nbf: i64,
+) -> Result<String, jsonwebtoken::errors::Error> {
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(material.kid.clone());
     let claims = json!({
@@ -343,7 +381,7 @@ fn signed_token(
         "azp": client_id,
         "aud": audience,
         "exp": exp,
-        "nbf": unix_now() - 1,
+        "nbf": nbf,
         "resource_access": {
             audience: {"roles": permissions}
         }

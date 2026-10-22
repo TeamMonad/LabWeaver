@@ -45,6 +45,19 @@ use super::{
 const HANDOFF_COOKIE: &str = "labweaver_console_handoff";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 
+async fn close_browser_on_cancellation(
+    browser_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    cancellation: CancellationToken,
+) {
+    cancellation.cancelled().await;
+    let _ = browser_tx
+        .send(Message::Close(Some(CloseFrame {
+            code: 1008,
+            reason: "authorization revoked".into(),
+        })))
+        .await;
+}
+
 #[derive(Clone, Default)]
 pub(super) struct ConsoleRegistry {
     sessions: Arc<Mutex<HashMap<Uuid, RegisteredSession>>>,
@@ -950,7 +963,7 @@ async fn bridge_inner(
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            () = cancellation.cancelled() => { let _ = browser_tx.send(Message::Close(Some(CloseFrame { code: 1008, reason: "authorization revoked".into() }))).await; return Err("LW_CONSOLE_AUTHORIZATION_ENDED"); }
+            () = cancellation.cancelled() => { close_browser_on_cancellation(&mut browser_tx, cancellation.clone()).await; return Err("LW_CONSOLE_AUTHORIZATION_ENDED"); }
             () = &mut deadline => { let _ = browser_tx.send(Message::Close(Some(CloseFrame { code: 1008, reason: "authorization expired".into() }))).await; return Err("LW_CONSOLE_AUTHORIZATION_ENDED"); }
             message = browser_rx.next() => {
                 let Some(message) = message else { return Ok(()); };
@@ -1036,9 +1049,46 @@ fn requested_console_kind(headers: &HeaderMap) -> Result<ConsoleKind, ApiError> 
 mod tests {
     use super::*;
     use auth::CsrfToken;
+    use axum::{
+        Extension, Router, extract::ws::WebSocketUpgrade, response::IntoResponse, routing::get,
+    };
     use sqlx::postgres::PgPoolOptions;
     use testcontainers::{ImageExt, runners::AsyncRunner};
     use testcontainers_modules::postgres::Postgres;
+
+    async fn console_cancellation_socket(
+        upgrade: WebSocketUpgrade,
+        Extension(cancellation): Extension<CancellationToken>,
+    ) -> impl IntoResponse {
+        upgrade.on_upgrade(move |socket| async move {
+            let (mut browser_tx, _browser_rx) = socket.split();
+            close_browser_on_cancellation(&mut browser_tx, cancellation).await;
+        })
+    }
+
+    #[tokio::test]
+    async fn revoked_console_websocket_receives_policy_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cancellation = CancellationToken::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let router = Router::new()
+            .route("/", get(console_cancellation_socket))
+            .layer(Extension(cancellation.clone()));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/")).await?;
+        cancellation.cancel();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+            .await?
+            .ok_or("console websocket closed without a frame")??;
+        assert!(matches!(
+            message,
+            tokio_tungstenite::tungstenite::Message::Close(Some(frame))
+                if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+        ));
+        server.abort();
+        Ok(())
+    }
 
     #[test]
     fn handoff_cookie_is_path_scoped_strict_and_never_domain_scoped()
@@ -1076,6 +1126,71 @@ mod tests {
             HeaderValue::from_static("labweaver.console.xterm.v1, labweaver.console.novnc.v1"),
         );
         assert!(requested_console_kind(&headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn console_registry_cancels_sessions_for_grant_environment_bff_and_session() {
+        let registry = ConsoleRegistry::default();
+        let grant_id = AccessGrantId::new();
+        let environment_id = EnvironmentId::new();
+        let bff_session_id = Uuid::now_v7();
+        let targeted_session_id = ConsoleSessionId::new();
+        let grant_token = CancellationToken::new();
+        let environment_token = CancellationToken::new();
+        let bff_token = CancellationToken::new();
+        let session_token = CancellationToken::new();
+        registry.sessions.lock().await.extend([
+            (
+                grant_id.as_uuid(),
+                RegisteredSession {
+                    session_id: grant_id.as_uuid(),
+                    grant_id: grant_id.as_uuid(),
+                    environment_id: Uuid::now_v7(),
+                    bff_session_id: Uuid::now_v7(),
+                    cancellation: grant_token.clone(),
+                },
+            ),
+            (
+                environment_id.as_uuid(),
+                RegisteredSession {
+                    session_id: environment_id.as_uuid(),
+                    grant_id: Uuid::now_v7(),
+                    environment_id: environment_id.as_uuid(),
+                    bff_session_id: Uuid::now_v7(),
+                    cancellation: environment_token.clone(),
+                },
+            ),
+            (
+                bff_session_id,
+                RegisteredSession {
+                    session_id: bff_session_id,
+                    grant_id: Uuid::now_v7(),
+                    environment_id: Uuid::now_v7(),
+                    bff_session_id,
+                    cancellation: bff_token.clone(),
+                },
+            ),
+            (
+                targeted_session_id.as_uuid(),
+                RegisteredSession {
+                    session_id: targeted_session_id.as_uuid(),
+                    grant_id: Uuid::now_v7(),
+                    environment_id: Uuid::now_v7(),
+                    bff_session_id: Uuid::now_v7(),
+                    cancellation: session_token.clone(),
+                },
+            ),
+        ]);
+
+        registry.cancel_grant(grant_id).await;
+        registry.cancel_environment(environment_id).await;
+        registry.cancel_bff(bff_session_id).await;
+        registry.cancel_session(targeted_session_id).await;
+
+        assert!(grant_token.is_cancelled());
+        assert!(environment_token.is_cancelled());
+        assert!(bff_token.is_cancelled());
+        assert!(session_token.is_cancelled());
     }
 
     #[tokio::test]

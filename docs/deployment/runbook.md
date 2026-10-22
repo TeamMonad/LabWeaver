@@ -43,6 +43,14 @@ export ANSIBLE_VAULT_PASSWORD_FILE="$PWD/deploy/ansible/inventories/v1/.vault-pa
 
 Agent 的模型输入在 platform bundle 的 `agent-service-config/anthropic-base-url` 和 `anthropic-model` 中配置。当前候选部署固定使用集群内 Ollama Service 直连和 `qwen3.6:35b`，不经过旧代理，也不回退云模型。修改模型时重新渲染 bundle 并按第 4 节部署，不能只改 Pod 环境变量。
 
+### 1.4 身份与内部服务鉴权检查
+
+部署前确认 Access 的 OIDC callback 是公共入口下的精确 `/auth/callback`，没有查询、片段或用户信息；Keycloak 客户端只注册该精确地址。`LABWEAVER_SERVICE_AUDIENCE`、各目标服务 audience、客户端 ID、角色和 Secret 必须由身份 foundation 的私有输入提供，不把业务权限当作 OAuth scope，也不把凭据写入 URL、镜像参数或日志。
+
+部署完成后从公共 HTTPS 入口执行登录、刷新和带 CSRF 的退出；不要用内部端口或关闭证书校验代替浏览器验证。服务 JWT 的接收方必须拒绝错误 issuer、audience、签名、`exp`/`nbf`、`azp` 或目标 audience 下缺少必需角色的请求。BFF 退出撤销本地会话并终止同一 BFF 会话的 Console；SSH 会话仍按独立 AccessGrant 的到期、显式撤销和成员/环境变化规则收尾。
+
+本地真实边界命令见 [`docs/usage.md`](../usage.md)。该命令使用临时 Keycloak、HTTPS、PostgreSQL 和 Chromium，不能证明生产 SSH/sshd 传输；生产 SSH 撤销须在 Gateway、目标端点、服务 JWT/TLS 和 grant 撤销事件均可用时单独走查。
+
 ## 2. 首次安装和基础层
 
 ### 2.1 预检
