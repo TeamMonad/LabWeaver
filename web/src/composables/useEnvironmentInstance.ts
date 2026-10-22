@@ -1,4 +1,4 @@
-import { reactive, ref, watch, type Ref } from 'vue'
+import { getCurrentScope, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import { getEnvironment, listProjectResourceLeases, listProjectResourceRequests } from '@/generated/contracts'
 import type { EnvironmentInstanceSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
@@ -16,7 +16,7 @@ type HandoffResourceState =
 
 function resourceReadDiagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? false)
+  return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? false, problem)
 }
 
 async function readHandoffResourceState(projectId: string, environmentId: string): Promise<HandoffResourceState> {
@@ -96,42 +96,68 @@ async function readHandoffResourceState(projectId: string, environmentId: string
   return { kind: 'missing' }
 }
 
+const ENVIRONMENT_POLL_INTERVAL_MS = 3000
+const SETTLED_OBSERVED_STATES = new Set<EnvironmentInstanceSchema['observedState']>(['ready', 'stopped', 'failed', 'deleted'])
+const ACTIVE_OPERATION_STATES = new Set<EnvironmentInstanceSchema['operation']['state']>(['accepted', 'running', 'cancelling'])
+
+/** An environment still moving between states; a settled one only changes after a new command. */
+export function environmentIsTransitioning(data: EnvironmentInstanceSchema): boolean {
+  return !SETTLED_OBSERVED_STATES.has(data.observedState) || ACTIVE_OPERATION_STATES.has(data.operation.state)
+}
+
+/**
+ * Reads one environment and keeps reading it only while it is transitioning
+ * or its approved handoff is still pending. Settled environments, errors and
+ * hidden tabs stop the timer; returning to the tab reads once and resumes only
+ * if the environment is still moving. Any later `load()` (for example after a
+ * lifecycle command) re-arms the timer from the fresh server state.
+ */
 export function useEnvironmentInstance(
   environmentId: Ref<string | undefined>,
   handoffProjectId: Ref<string | undefined> = ref(undefined),
 ) {
   const instance = ref<AsyncState<EnvironmentInstanceSchema>>({ kind: 'idle' })
+  /** True while the environment needs watching; the timer itself also pauses on hidden tabs. */
   const polling = ref(false)
   let timer: ReturnType<typeof setTimeout> | null = null
   let pendingEnvironmentId: string | null = null
   let pendingDeadline = 0
+  // Every load gets a generation; only the newest one may write state or re-arm the timer.
+  let loadGeneration = 0
 
   async function load() {
+    const generation = ++loadGeneration
     const id = environmentId.value
+    const handoffProject = handoffProjectId.value
     if (!id) {
       pendingEnvironmentId = null
       pendingDeadline = 0
       instance.value = { kind: 'idle' }
       return
     }
+    // An older or redirected read must not overwrite the current one or restart polling.
+    const superseded = () => generation !== loadGeneration
+      || environmentId.value !== id
+      || handoffProjectId.value !== handoffProject
     if (instance.value.kind !== 'success') {
       instance.value = { kind: 'loading', message: '加载环境状态…' }
     }
     const result = await getEnvironment({ path: { environmentId: id } })
+    if (superseded()) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      const handoffPending = handoffProjectId.value
+      const handoffPending = handoffProject
         && result.response?.status === 404
         && problem?.diagnosticCode === 'LW_ENVIRONMENT_NOT_FOUND'
       if (handoffPending) {
-        const resourceState = handoffProjectId.value
-          ? await readHandoffResourceState(handoffProjectId.value, id)
-          : { kind: 'missing' as const }
+        const resourceState = await readHandoffResourceState(handoffProject, id)
+        if (superseded()) return
         if (resourceState.kind === 'error') {
           pendingEnvironmentId = null
           pendingDeadline = 0
           instance.value = { kind: 'error', diagnostic: resourceState.diagnostic }
           polling.value = false
+          schedule()
           return
         }
         if (resourceState.kind !== 'pending') {
@@ -145,6 +171,7 @@ export function useEnvironmentInstance(
           if (Date.now() < pendingDeadline) {
             polling.value = true
             instance.value = { kind: 'loading', message: '环境正在准备…' }
+            schedule()
             return
           }
           instance.value = {
@@ -156,6 +183,7 @@ export function useEnvironmentInstance(
             ),
           }
           polling.value = false
+          schedule()
           return
         }
       }
@@ -167,39 +195,68 @@ export function useEnvironmentInstance(
           problem?.diagnosticCode ?? 'ENVIRONMENT_LOAD_FAILED',
           problem?.detail ?? '加载环境状态失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       polling.value = false
+      schedule()
       return
     }
     pendingEnvironmentId = null
     pendingDeadline = 0
     instance.value = { kind: 'success', data: result.data }
+    polling.value = environmentIsTransitioning(result.data)
+    schedule()
   }
 
-  async function poll() {
-    const id = environmentId.value
-    if (!id || !polling.value) return
-    await load()
-    if (polling.value) {
-      timer = setTimeout(poll, 3000)
+  function clearTimer() {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
     }
+  }
+
+  function pageHidden(): boolean {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  }
+
+  function schedule() {
+    clearTimer()
+    if (!polling.value || !environmentId.value || pageHidden()) return
+    timer = setTimeout(() => {
+      timer = null
+      void load()
+    }, ENVIRONMENT_POLL_INTERVAL_MS)
   }
 
   function startPolling() {
     polling.value = true
     pendingEnvironmentId = null
     pendingDeadline = 0
-    if (timer) clearTimeout(timer)
-    poll()
+    clearTimer()
+    void load()
   }
 
   function stopPolling() {
     polling.value = false
-    if (timer) {
-      clearTimeout(timer)
-      timer = null
+    loadGeneration += 1
+    clearTimer()
+  }
+
+  function onVisibilityChange() {
+    if (pageHidden()) {
+      clearTimer()
+      return
     }
+    if (polling.value && environmentId.value) void load()
+  }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange)
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      loadGeneration += 1
+      clearTimer()
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
+    })
   }
 
   watch(

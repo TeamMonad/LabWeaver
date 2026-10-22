@@ -4,9 +4,9 @@
     <p v-if="task?.status.cancellationRequested && !terminal">取消已请求，正在停止构建并回收本次临时资源。</p>
     <p v-if="terminal && task?.status.cleanupVerified === false">构建已结束，临时资源仍在回收中；尚未确认回收完成。</p>
     <p v-if="task?.status.cleanupVerified === true">本次构建临时资源已回收。</p>
-    <DiagnosticBanner v-if="diagnostic" :code="diagnostic.code" :message="diagnostic.message"
+    <DiagnosticBanner v-if="diagnostic" :code="diagnostic.code" :request-id="diagnostic.requestId" :next-step="diagnostic.nextStep" :message="diagnostic.message"
       :retryable="diagnostic.retryable" @retry="refresh" />
-    <DiagnosticBanner v-if="cancelDiagnostic" :code="cancelDiagnostic.code" :message="cancelDiagnostic.message" :retryable="false" />
+    <DiagnosticBanner v-if="cancelDiagnostic" :code="cancelDiagnostic.code" :request-id="cancelDiagnostic.requestId" :next-step="cancelDiagnostic.nextStep" :message="cancelDiagnostic.message" :retryable="false" />
     <DiagnosticBanner v-if="task?.status.diagnosticCode" :code="task.status.diagnosticCode"
       :message="`${label}${stateLabel}`" :retryable="false" />
     <button v-if="canCancel" type="button" class="outlined-button danger-button" :disabled="acting"
@@ -67,7 +67,7 @@ async function refresh() {
       cancellation = null
       cancelRetryable.value = false
     }
-    diagnostic.value = result.response?.status === 404 ? null : makeDiagnostic(problem?.diagnosticCode ?? 'CANDIDATE_BUILD_STATUS_FAILED', problem?.detail ?? '读取构建状态失败', true)
+    diagnostic.value = result.response?.status === 404 ? null : makeDiagnostic(problem?.diagnosticCode ?? 'CANDIDATE_BUILD_STATUS_FAILED', problem?.detail ?? '读取构建状态失败', true, problem)
   } else {
     if (result.data.candidateId !== props.candidateId || result.data.target !== props.target || result.data.status.projectId !== props.projectId) {
       task.value = null
@@ -109,7 +109,7 @@ async function cancel() {
     const status = result.response?.status
     cancelRetryable.value = problem?.retryable ?? (status === undefined || status === 408 || status === 429 || status >= 500)
     if (status !== undefined && [400, 401, 403, 404, 409, 410, 422].includes(status)) cancelRetryable.value = false
-    cancelDiagnostic.value = makeDiagnostic(problem?.diagnosticCode ?? 'CANDIDATE_BUILD_CANCEL_FAILED', problem?.detail ?? '取消构建请求失败', cancelRetryable.value)
+    cancelDiagnostic.value = makeDiagnostic(problem?.diagnosticCode ?? 'CANDIDATE_BUILD_CANCEL_FAILED', problem?.detail ?? '取消构建请求失败', cancelRetryable.value, problem)
     if (!cancelRetryable.value) cancellation = null
   } else {
     if (result.data.candidateId !== selected.task.candidateId || result.data.target !== selected.task.target

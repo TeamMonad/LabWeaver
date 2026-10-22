@@ -21,6 +21,8 @@
     <DiagnosticBanner
       v-if="resources.outcome"
       :code="resources.outcome.diagnostic.code"
+      :request-id="resources.outcome.diagnostic.requestId"
+      :next-step="resources.outcome.diagnostic.nextStep"
       :message="resources.outcome.diagnostic.message"
       :retryable="resources.outcome.diagnostic.retryable"
       :severity="resources.outcome.kind === 'error' ? 'error' : 'info'"
@@ -30,6 +32,8 @@
     <DiagnosticBanner
       v-if="options.environments.kind === 'error'"
       :code="options.environments.diagnostic.code"
+      :request-id="options.environments.diagnostic.requestId"
+      :next-step="options.environments.diagnostic.nextStep"
       :message="options.environments.diagnostic.message"
       :retryable="options.environments.diagnostic.retryable"
       severity="error"
@@ -38,6 +42,8 @@
     <DiagnosticBanner
       v-if="options.releases.kind === 'error'"
       :code="options.releases.diagnostic.code"
+      :request-id="options.releases.diagnostic.requestId"
+      :next-step="options.releases.diagnostic.nextStep"
       :message="options.releases.diagnostic.message"
       :retryable="options.releases.diagnostic.retryable"
       severity="error"

@@ -24,6 +24,7 @@ export function useSshPublicKeys() {
           problem?.diagnosticCode ?? 'SSH_KEY_LIST_FAILED',
           problem?.detail ?? '加载 SSH 公钥失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       return
@@ -47,6 +48,7 @@ export function useSshPublicKeys() {
             problem?.diagnosticCode ?? 'SSH_KEY_CREATE_FAILED',
             problem?.detail ?? '添加 SSH 公钥失败',
             problem?.retryable ?? true,
+            problem,
           ),
         }
       }
@@ -72,6 +74,7 @@ export function useSshPublicKeys() {
             problem?.diagnosticCode ?? 'SSH_KEY_DELETE_FAILED',
             problem?.detail ?? '删除 SSH 公钥失败',
             problem?.retryable ?? true,
+            problem,
           ),
         }
       }

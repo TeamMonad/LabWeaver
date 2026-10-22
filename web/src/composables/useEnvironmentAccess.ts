@@ -44,6 +44,7 @@ export function useEnvironmentAccess(
           problem?.diagnosticCode ?? 'ENDPOINT_LIST_FAILED',
           problem?.detail ?? '加载环境入口失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       return
@@ -92,6 +93,7 @@ export function useEnvironmentAccess(
             problem?.diagnosticCode ?? 'ACCESS_GRANT_CREATE_FAILED',
             problem?.detail ?? '签发访问授权失败',
             problem?.retryable ?? true,
+            problem,
           ),
         }
         return { ok: false }
@@ -120,6 +122,7 @@ export function useEnvironmentAccess(
         problem?.diagnosticCode ?? 'ACCESS_GRANT_LIST_FAILED',
         problem?.detail ?? '加载当前访问授权失败。',
         problem?.retryable ?? true,
+        problem,
       )
       grant.value = { kind: 'error', diagnostic }
       return { ok: false, diagnostic }
@@ -145,6 +148,7 @@ export function useEnvironmentAccess(
         problem?.diagnosticCode ?? 'ACCESS_GRANT_READ_FAILED',
         problem?.detail ?? '读取当前访问授权失败。',
         problem?.retryable ?? true,
+        problem,
       )
       grant.value = { kind: 'error', diagnostic }
       return { ok: false, diagnostic }
@@ -174,6 +178,7 @@ export function useEnvironmentAccess(
           problem?.diagnosticCode ?? 'ACCESS_GRANT_ACTIVATION_FAILED',
           problem?.detail ?? '访问授权激活状态读取失败',
           problem?.retryable ?? true,
+          problem,
         )
         grant.value = { kind: 'error', diagnostic }
         return { ok: false, diagnostic }
@@ -207,6 +212,7 @@ export function useEnvironmentAccess(
           problem?.diagnosticCode ?? 'ACCESS_GRANT_REVOKE_FAILED',
           problem?.detail ?? '撤销访问授权失败',
           problem?.retryable ?? true,
+          problem,
         ),
       }
     }

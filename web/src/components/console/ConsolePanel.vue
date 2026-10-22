@@ -37,6 +37,8 @@
           <DiagnosticBanner
             v-if="issueError"
             :code="issueError.code"
+            :request-id="issueError.requestId"
+            :next-step="issueError.nextStep"
             :message="issueError.message"
             :retryable="issueError.retryable"
             severity="error"
@@ -45,6 +47,8 @@
           <DiagnosticBanner
             v-else-if="session.diagnostic"
             :code="session.diagnostic.code"
+            :request-id="session.diagnostic.requestId"
+            :next-step="session.diagnostic.nextStep"
             :message="session.diagnostic.message"
             :retryable="session.diagnostic.retryable"
             severity="error"

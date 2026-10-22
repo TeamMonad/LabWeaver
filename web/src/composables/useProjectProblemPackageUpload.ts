@@ -168,6 +168,7 @@ export function useProjectProblemPackageUpload(
           problem?.diagnosticCode ?? 'UPLOAD_PACKAGE_LOAD_FAILED',
           problem?.detail ?? '读取已归档材料包失败。请重新加载或从材料上传开始。',
           problem?.retryable ?? true,
+          problem,
         ),
       }
       return false
@@ -218,7 +219,7 @@ export function useProjectProblemPackageUpload(
     if (generation !== loadGeneration || projectId.value !== id) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      state.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'UPLOAD_SESSION_FAILED', problem?.detail ?? '创建上传会话失败', problem?.retryable ?? true) }
+      state.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'UPLOAD_SESSION_FAILED', problem?.detail ?? '创建上传会话失败', problem?.retryable ?? true, problem) }
       return
     }
     session.value = result.data
@@ -280,7 +281,7 @@ export function useProjectProblemPackageUpload(
     if (generation !== loadGeneration || projectId.value !== id) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
-      state.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'UPLOAD_COMPLETE_FAILED', problem?.detail ?? '完成材料包上传失败', problem?.retryable ?? true) }
+      state.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'UPLOAD_COMPLETE_FAILED', problem?.detail ?? '完成材料包上传失败', problem?.retryable ?? true, problem) }
       return
     }
     state.value = { kind: 'done', package: result.data }

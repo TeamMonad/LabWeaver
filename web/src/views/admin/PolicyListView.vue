@@ -151,6 +151,8 @@
               <DiagnosticBanner
                 v-if="saveDiagnostic"
                 :code="saveDiagnostic.code"
+                :request-id="saveDiagnostic.requestId"
+                :next-step="saveDiagnostic.nextStep"
                 :message="saveDiagnostic.message"
                 :retryable="saveDiagnostic.retryable"
                 :severity="saveDiagnostic.code === 'LW_AUTH_SCOPE_DENIED' || saveDiagnostic.code === 'LW_ACCESS_DENIED' ? 'warning' : 'error'"
@@ -298,7 +300,7 @@ function diagnostic(error: unknown, fallbackCode: string, fallbackMessage: strin
   if (code === 'LW_REVISION_CONFLICT' || code === 'LW_IF_MATCH_REQUIRED') {
     return makeDiagnostic(code, '项目 AI 设置已被其他人更新，请刷新后重新检查，再保存你的修改。', false)
   }
-  return makeDiagnostic(code, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
+  return makeDiagnostic(code, problem?.detail ?? fallbackMessage, problem?.retryable ?? true, problem)
 }
 
 function syncForm(options: ProjectLlmPolicyOptionsSchema, policy: ProjectLlmEgressPolicySchema | null) {

@@ -147,6 +147,19 @@ async function loadHistory(page = historyPage.value) {
         problem?.diagnosticCode ?? 'PROJECT_AGENT_RUN_HISTORY_LOAD_FAILED',
         problem?.detail ?? '加载项目任务历史失败',
         problem?.retryable ?? true,
+        problem,
+      ),
+    }
+    return
+  }
+  // A page that names another project is never shown under this project.
+  if (result.data.items.some((item) => item.projectId !== projectId)) {
+    history.value = {
+      kind: 'error',
+      diagnostic: makeDiagnostic(
+        'PROJECT_AGENT_RUN_HISTORY_SCOPE_MISMATCH',
+        '任务历史包含其他项目的记录，已停止显示。请刷新页面；如果仍出现，请联系管理员。',
+        true,
       ),
     }
     return

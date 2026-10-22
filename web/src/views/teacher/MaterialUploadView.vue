@@ -18,6 +18,8 @@
     <DiagnosticBanner
       v-if="restoreDiagnostic"
       :code="restoreDiagnostic.code"
+      :request-id="restoreDiagnostic.requestId"
+      :next-step="restoreDiagnostic.nextStep"
       :message="restoreDiagnostic.message"
       :retryable="restoreDiagnostic.retryable"
       severity="warning"
@@ -237,6 +239,8 @@
       >
         <DiagnosticBanner
           :code="upload.state.diagnostic.code"
+          :request-id="upload.state.diagnostic.requestId"
+          :next-step="upload.state.diagnostic.nextStep"
           :message="upload.state.diagnostic.message"
           :retryable="upload.state.diagnostic.retryable"
           severity="error"
@@ -404,9 +408,9 @@
             <details class="technical-details run-technical-details">
               <summary>查看生成任务详情</summary>
               <dl class="technical-meta">
-                <dt>AgentRun ID</dt>
+                <dt>生成任务 ID</dt>
                 <dd><code>{{ data.id }}</code></dd>
-                <dt>Revision</dt>
+                <dt>版本</dt>
                 <dd><code>rev-{{ data.revision }}</code></dd>
                 <dt>材料包 ID</dt>
                 <dd><code>{{ data.packageId }}</code></dd>
@@ -496,6 +500,8 @@
       <DiagnosticBanner
         v-if="agent.outcome"
         :code="agent.outcome.code"
+        :request-id="agent.outcome.requestId"
+        :next-step="agent.outcome.nextStep"
         :message="agent.outcome.message"
         :retryable="agent.outcome.retryable"
         severity="info"

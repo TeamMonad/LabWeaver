@@ -22,6 +22,7 @@ import {
 } from '../support/real-work.mjs'
 import { issueEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
 import { hasTerminalLine, issueAccessGrantAndConnect, typeTerminalCommand } from '../support/real-gpu.mjs'
+import { confirmEnvironmentLifecycleByUi } from '../support/environment-lifecycle.mjs'
 
 const RECOVERY_ENABLED = process.env.LABWEAVER_E2E_WORK_RECOVERY === '1'
 const RESUME_ACCEPTED = process.env.LABWEAVER_E2E_WORK_RECOVERY_RESUME_ACCEPTED === '1'
@@ -508,6 +509,7 @@ async function restartEnvironmentByUi(page, projectId, environmentId) {
       && url.pathname === `/api/v1/environments/${environmentId}/restart`
   })
   await restartButton.click()
+  await confirmEnvironmentLifecycleByUi(page, 'restart')
   const accepted = await expectJson(await responsePromise, 'LW_WORK_RECOVERY_ENVIRONMENT_RESTART_FAILED')
   expect(accepted).toMatchObject({ environmentId, operationId: expect.any(String), statusUrl: expect.stringContaining('/operations/') })
   const operation = await pollJson(

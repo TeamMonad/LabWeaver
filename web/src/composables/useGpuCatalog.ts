@@ -51,6 +51,7 @@ export function useGpuCatalog() {
         problem?.diagnosticCode ?? fallbackCode,
         problem?.detail ?? fallbackMessage,
         problem?.retryable ?? true,
+        problem,
       ),
     }
   }

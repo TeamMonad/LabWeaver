@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
@@ -175,6 +175,39 @@ describe('GCP Console Components', () => {
       expect(wrapper.find('.selector-menu').text()).toContain('已归档')
       expect(wrapper.find('.selector-menu').text()).not.toContain('运行中')
       expect(wrapper.find('.selector-menu').text()).not.toContain('project-cs101')
+    })
+
+    it('supports keyboard selection and returns focus to the trigger on Escape', async () => {
+      const wrapper = mount(GcpProjectSelector, { attachTo: document.body })
+      await wrapper.find('.selector-trigger').trigger('click')
+      await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+      const input = wrapper.get('.search-input')
+      await input.trigger('keydown', { key: 'ArrowDown' })
+      expect(wrapper.findAll('.project-item')[1].classes()).toContain('project-item--active')
+      expect(input.attributes('aria-activedescendant')).toBe(wrapper.findAll('.project-item')[1].attributes('id'))
+      await input.trigger('keydown', { key: 'Enter' })
+      expect(wrapper.find('.trigger-primary').text()).toBe('AI201 Model Engineering')
+      expect(wrapper.find('.selector-menu').exists()).toBe(false)
+
+      await wrapper.find('.selector-trigger').trigger('click')
+      await wrapper.get('.selector-menu').trigger('keydown', { key: 'Escape' })
+      await flushPromises()
+      expect(wrapper.find('.selector-menu').exists()).toBe(false)
+      expect(document.activeElement).toBe(wrapper.get('.selector-trigger').element)
+      wrapper.unmount()
+    })
+
+    it('marks a linked project the account cannot list as unavailable instead of naming another project', async () => {
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/researcher/environments', component: { template: '<div />' }, meta: { projectScoped: true } }],
+      })
+      await router.push({ path: '/researcher/environments', query: { projectId: 'project-missing' } })
+      await router.isReady()
+      const wrapper = mount(GcpProjectSelector, { global: { plugins: [router] } })
+      await vi.waitFor(() => expect(wrapper.find('.trigger-primary').text()).toBe('项目不可用'))
+      expect(wrapper.text()).not.toContain('CS101 Operating Systems')
+      wrapper.unmount()
     })
 
     it('opens dropdown when trigger is clicked', async () => {
