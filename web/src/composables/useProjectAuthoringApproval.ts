@@ -50,6 +50,8 @@ export function useProjectAuthoringApproval(
   const problemPackage = ref<AsyncState<ProblemPackageSchema>>({ kind: 'idle' })
   const approval = ref<AsyncState<AuthoringApprovalSchema>>({ kind: 'idle' })
   const publication = ref<AsyncState<AuthoringApprovalPublicationStatusSchema>>({ kind: 'idle' })
+  /** Set when the URL's approval id belongs to a different version; that record is ignored. */
+  const rejectedApproval = ref<DiagnosticViewModel | null>(null)
   const acting = ref(false)
   let loadGeneration = 0
   let publicationGeneration = 0
@@ -120,7 +122,7 @@ export function useProjectAuthoringApproval(
       environmentCandidateRetryCount = 0
       environmentArtifactRetryCount = 0
     }
-    if (!silent) environmentCandidate.value = { kind: 'loading', message: '加载 Environment 候选…' }
+    if (!silent) environmentCandidate.value = { kind: 'loading', message: '读取环境候选…' }
     const result = await getProjectEnvironmentCandidate({ path: { projectId: project, candidateId } })
     if (generation !== loadGeneration) return
     if (result.error) {
@@ -128,13 +130,13 @@ export function useProjectAuthoringApproval(
       const candidateProjectionPending = result.response?.status === 404 && problem?.diagnosticCode === 'LW_CANDIDATE_NOT_FOUND'
       if (candidateProjectionPending && environmentCandidateRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES) {
         environmentCandidateRetryCount += 1
-        environmentCandidate.value = { kind: 'loading', message: '等待 Environment 候选同步…' }
+        environmentCandidate.value = { kind: 'loading', message: '等待环境候选同步…' }
         scheduleEnvironmentCandidateRetry(project, candidateId, generation)
         return
       }
       environmentCandidate.value = candidateProjectionPending
-        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', 'Environment 候选在限定时间内仍未同步，请重试。', true) }
-        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_ENVIRONMENT_LOAD_FAILED', '加载 Environment 候选失败') }
+        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', '环境候选在限定时间内仍未同步，请重试。', true) }
+        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_ENVIRONMENT_LOAD_FAILED', '读取环境候选失败') }
       return
     }
     if (
@@ -142,7 +144,7 @@ export function useProjectAuthoringApproval(
       || result.data.candidate.projectId !== project
       || result.data.candidate.runId !== runId.value
     ) {
-      environmentCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('Environment 候选') }
+      environmentCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('环境候选') }
       stopCandidatePolling()
       return
     }
@@ -171,7 +173,7 @@ export function useProjectAuthoringApproval(
       evaluationCandidateRetryCount = 0
       evaluationArtifactRetryCount = 0
     }
-    if (!silent) evaluationCandidate.value = { kind: 'loading', message: '加载 Evaluation 候选…' }
+    if (!silent) evaluationCandidate.value = { kind: 'loading', message: '读取评分规则候选…' }
     const result = await getProjectEvaluationCandidate({ path: { projectId: project, candidateId } })
     if (generation !== loadGeneration) return
     if (result.error) {
@@ -179,13 +181,13 @@ export function useProjectAuthoringApproval(
       const candidateProjectionPending = result.response?.status === 404 && problem?.diagnosticCode === 'LW_CANDIDATE_NOT_FOUND'
       if (candidateProjectionPending && evaluationCandidateRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES) {
         evaluationCandidateRetryCount += 1
-        evaluationCandidate.value = { kind: 'loading', message: '等待 Evaluation 候选同步…' }
+        evaluationCandidate.value = { kind: 'loading', message: '等待评分规则候选同步…' }
         scheduleEvaluationCandidateRetry(project, candidateId, generation)
         return
       }
       evaluationCandidate.value = candidateProjectionPending
-        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', 'Evaluation 候选在限定时间内仍未同步，请重试。', true) }
-        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_EVALUATION_LOAD_FAILED', '加载 Evaluation 候选失败') }
+        ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', '评分规则候选在限定时间内仍未同步，请重试。', true) }
+        : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_EVALUATION_LOAD_FAILED', '读取评分规则候选失败') }
       return
     }
     if (
@@ -193,7 +195,7 @@ export function useProjectAuthoringApproval(
       || result.data.candidate.projectId !== project
       || result.data.candidate.runId !== runId.value
     ) {
-      evaluationCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('Evaluation 候选') }
+      evaluationCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('评分规则候选') }
       stopCandidatePolling()
       return
     }
@@ -219,6 +221,126 @@ export function useProjectAuthoringApproval(
     if (data.status === 'ready' || data.status === 'failed') return
     publicationPollTimer = setTimeout(() => void loadPublication(data.approval.id, true), 3000)
   }
+
+  /**
+   * Whether an approval record belongs to the version on screen. The URL's
+   * approval id is only a hint: it must bind the loaded run's package and both
+   * candidates at their current revisions, otherwise another version's
+   * publication would hide this version's approval form.
+   */
+  function approvalBinding(record: AuthoringApprovalSchema): 'match' | 'mismatch' | 'pending' | 'unverifiable' {
+    if (run.value.kind !== 'success') return 'pending'
+    const runData = run.value.data
+    const environmentId = runData.tracks.find((track) => track.kind === 'environment')?.candidateId
+    const evaluationId = runData.tracks.find((track) => track.kind === 'evaluation')?.candidateId
+    if (
+      record.packageId !== runData.packageId
+      || record.environmentCandidateId !== environmentId
+      || record.evaluationCandidateId !== evaluationId
+    ) return 'mismatch'
+    const parts = [environmentCandidate.value, evaluationCandidate.value, problemPackage.value]
+    if (parts.some((part) => part.kind !== 'success' && part.kind !== 'loading' && part.kind !== 'idle')) return 'unverifiable'
+    if (
+      environmentCandidate.value.kind !== 'success'
+      || evaluationCandidate.value.kind !== 'success'
+      || problemPackage.value.kind !== 'success'
+    ) return 'pending'
+    if (
+      record.packageRevision !== problemPackage.value.data.revision
+      || record.environmentCandidateRevision !== environmentCandidate.value.data.candidate.revision
+      || record.evaluationCandidateRevision !== evaluationCandidate.value.data.candidate.revision
+    ) return 'mismatch'
+    return 'match'
+  }
+
+  /** Publication read from the server but not yet checked against the loaded version. */
+  let unverifiedPublication: AuthoringApprovalPublicationStatusSchema | null = null
+
+  function applyPublication(data: AuthoringApprovalPublicationStatusSchema) {
+    switch (approvalBinding(data.approval)) {
+      case 'pending':
+        unverifiedPublication = data
+        if (publication.value.kind !== 'success') publication.value = { kind: 'loading', message: '核对批准记录…' }
+        return
+      case 'unverifiable':
+        unverifiedPublication = null
+        publication.value = {
+          kind: 'error',
+          diagnostic: makeDiagnostic('PROJECT_APPROVAL_BINDING_UNVERIFIED', '材料包或候选没有读取成功，无法核对这条批准记录是否属于当前版本。请重试。', true),
+        }
+        return
+      case 'mismatch':
+        unverifiedPublication = null
+        stopPublicationPolling()
+        publication.value = { kind: 'idle' }
+        approval.value = { kind: 'idle' }
+        rejectedApproval.value = makeDiagnostic(
+          'PROJECT_APPROVAL_RUN_MISMATCH',
+          '链接中的批准记录不属于当前版本（材料包或候选不一致），已忽略。请核对当前版本后再决定是否批准。',
+          false,
+        )
+        return
+      case 'match':
+        unverifiedPublication = null
+        publication.value = { kind: 'success', data }
+        approval.value = { kind: 'success', data: data.approval }
+        schedulePublicationPoll(data)
+    }
+  }
+
+  watch(
+    () => [run.value.kind, environmentCandidate.value.kind, evaluationCandidate.value.kind, problemPackage.value.kind],
+    () => {
+      if (unverifiedPublication) applyPublication(unverifiedPublication)
+    },
+  )
+
+  /**
+   * Approval behind an existing Environment release of this run. An
+   * authoring release carries the id of the complete approval, which binds the
+   * package and both candidates; the Environment candidate alone cannot tell
+   * whether only the Evaluation candidate or the package changed since.
+   */
+  const releaseApprovalRecord = ref<AsyncState<AuthoringApprovalSchema>>({ kind: 'idle' })
+  let releaseApprovalGeneration = 0
+
+  async function loadReleaseApproval(id: string | null) {
+    const generation = ++releaseApprovalGeneration
+    const project = projectId.value
+    if (!project || !id) {
+      releaseApprovalRecord.value = { kind: 'idle' }
+      return
+    }
+    releaseApprovalRecord.value = { kind: 'loading', message: '核对已发布版本…' }
+    const result = await getProjectAuthoringApproval({ path: { projectId: project, approvalId: id } })
+    if (generation !== releaseApprovalGeneration) return
+    if (result.error) {
+      releaseApprovalRecord.value = {
+        kind: 'error',
+        diagnostic: errorDiagnostic(result.error, 'PROJECT_RELEASE_APPROVAL_LOAD_FAILED', '读取已发布版本的批准记录失败，无法确认这一版是否已经发布。'),
+      }
+      return
+    }
+    if (result.data.approval.id !== id || result.data.approval.projectId !== project) {
+      releaseApprovalRecord.value = { kind: 'error', diagnostic: staleContextDiagnostic('已发布版本的批准记录') }
+      return
+    }
+    releaseApprovalRecord.value = { kind: 'success', data: result.data.approval }
+  }
+
+  /**
+   * How the release's approval relates to the loaded version: `none` without a
+   * release, `match` only when package and both candidates agree at their
+   * current revisions, `unknown` when the record or the version cannot be read.
+   */
+  const releaseBinding = computed<'none' | 'pending' | 'match' | 'mismatch' | 'unknown'>(() => {
+    const record = releaseApprovalRecord.value
+    if (record.kind === 'idle') return 'none'
+    if (record.kind === 'loading') return 'pending'
+    if (record.kind !== 'success') return 'unknown'
+    const binding = approvalBinding(record.data)
+    return binding === 'unverifiable' ? 'unknown' : binding
+  })
 
   async function loadPublication(id = approvalId.value, silent = false) {
     const project = projectId.value
@@ -246,9 +368,7 @@ export function useProjectAuthoringApproval(
       stopPublicationPolling()
       return
     }
-    publication.value = { kind: 'success', data: result.data }
-    approval.value = { kind: 'success', data: result.data.approval }
-    schedulePublicationPoll(result.data)
+    applyPublication(result.data)
   }
 
   const imageArtifact = computed<CompleteAuthoringApprovalRequestSchemaImageArtifact | null>(() => {
@@ -278,8 +398,9 @@ export function useProjectAuthoringApproval(
       (!runnerArtifactRequired.value || runnerImageArtifact.value !== null) &&
       // An approval id identifies an already-created immutable approval. Its
       // publication may still be pending, but the same candidate tuple cannot
-      // be approved again. Keep the form closed while that status is rebuilt.
-      !approvalId.value &&
+      // be approved again. Keep the form closed while that status is rebuilt,
+      // unless the record was rejected as belonging to another version.
+      (!approvalId.value || rejectedApproval.value !== null) &&
       approval.value.kind !== 'success' &&
       approval.value.kind !== 'loading' &&
       !acting.value
@@ -294,6 +415,8 @@ export function useProjectAuthoringApproval(
     problemPackage.value = { kind: 'idle' }
     approval.value = { kind: 'idle' }
     publication.value = { kind: 'idle' }
+    rejectedApproval.value = null
+    unverifiedPublication = null
     completionIdempotencyKey = null
     completionFingerprint = null
     stopPublicationPolling()
@@ -306,21 +429,21 @@ export function useProjectAuthoringApproval(
     const rid = runId.value
     reset()
     if (!id || !rid) {
-      run.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_CONTEXT_MISSING', '请选择项目并提供 AgentRun ID。', false) }
+      run.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_CONTEXT_MISSING', '请选择项目，并从待审核列表选择一个版本。', false) }
       return
     }
 
     if (approvalId.value) void loadPublication(approvalId.value)
 
-    run.value = { kind: 'loading', message: '加载 AgentRun…' }
+    run.value = { kind: 'loading', message: '读取生成任务…' }
     const runResult = await getProjectAgentRun({ path: { projectId: id, runId: rid } })
     if (generation !== loadGeneration) return
     if (runResult.error) {
-      run.value = { kind: 'error', diagnostic: errorDiagnostic(runResult.error, 'PROJECT_APPROVAL_RUN_LOAD_FAILED', '加载 AgentRun 失败') }
+      run.value = { kind: 'error', diagnostic: errorDiagnostic(runResult.error, 'PROJECT_APPROVAL_RUN_LOAD_FAILED', '读取生成任务失败') }
       return
     }
     if (runResult.data.id !== rid || runResult.data.projectId !== id) {
-      run.value = { kind: 'error', diagnostic: staleContextDiagnostic('AgentRun') }
+      run.value = { kind: 'error', diagnostic: staleContextDiagnostic('生成任务') }
       return
     }
     if (runResult.data.purpose.kind !== 'authoring' || runResult.data.purpose.environmentClass !== 'experiment') {
@@ -337,17 +460,17 @@ export function useProjectAuthoringApproval(
     const candidateJobs: Promise<unknown>[] = []
 
     if (environmentTrack?.candidateId) {
-      environmentCandidate.value = { kind: 'loading', message: '加载 Environment 候选…' }
+      environmentCandidate.value = { kind: 'loading', message: '读取环境候选…' }
       candidateJobs.push(loadEnvironmentCandidate(id, environmentTrack.candidateId, generation))
     } else {
-      environmentCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_ENVIRONMENT_MISSING', '该 AgentRun 尚未生成 Environment 候选。', false) }
+      environmentCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_ENVIRONMENT_MISSING', '这个生成任务还没有环境候选。', false) }
     }
 
     if (evaluationTrack?.candidateId) {
-      evaluationCandidate.value = { kind: 'loading', message: '加载 Evaluation 候选…' }
+      evaluationCandidate.value = { kind: 'loading', message: '读取评分规则候选…' }
       candidateJobs.push(loadEvaluationCandidate(id, evaluationTrack.candidateId, generation))
     } else {
-      evaluationCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_EVALUATION_MISSING', '该 AgentRun 尚未生成 Evaluation 候选。', false) }
+      evaluationCandidate.value = { kind: 'blocked', diagnostic: makeDiagnostic('PROJECT_APPROVAL_EVALUATION_MISSING', '这个生成任务还没有评分规则候选。', false) }
     }
 
     problemPackage.value = { kind: 'loading', message: '加载材料包…' }
@@ -425,6 +548,7 @@ export function useProjectAuthoringApproval(
   onScopeDispose(() => {
     loadGeneration += 1
     publicationGeneration += 1
+    releaseApprovalGeneration += 1
     resetCandidatePolling()
     stopPublicationPolling()
   })
@@ -436,6 +560,10 @@ export function useProjectAuthoringApproval(
     problemPackage,
     approval,
     publication,
+    rejectedApproval,
+    releaseApprovalRecord,
+    releaseBinding,
+    loadReleaseApproval,
     imageArtifact,
     runnerImageArtifact,
     evaluationRunnerImageArtifact: runnerImageArtifact,

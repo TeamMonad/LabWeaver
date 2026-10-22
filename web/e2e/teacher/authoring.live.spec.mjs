@@ -11,6 +11,14 @@ import {
   uuidv7,
 } from '../support/live.mjs'
 import { startExperimentRunByUi, uploadPackageDirectoryByUi } from '../support/real-experiment.mjs'
+import {
+  approveAndPublishByUi,
+  expectPublicationStatusByUi,
+  expectPublishedReviewByUi,
+  expectReviewTechnicalIdentitiesByUi,
+  openAuthoringReviewByUi,
+  reopenAuthoringReviewByLink,
+} from '../support/authoring-review.mjs'
 
 const AUTHORING_CHAIN_TIMEOUT_MS = 1_800_000
 
@@ -56,20 +64,6 @@ async function waitForBuiltEnvironmentCandidate(request, projectId, candidateId)
   return candidate
 }
 
-async function openReview(page, projectId, runId, environmentCandidateId, evaluationCandidateId) {
-  await page.goto(`/teacher/approvals?projectId=${encodeURIComponent(projectId)}&runId=${encodeURIComponent(runId)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await selectProjectByUi(page, projectId)
-  await expect(page.getByRole('heading', { name: '实验包批准', exact: true })).toBeVisible()
-  await expect(page.locator('select[aria-label="选择项目"]')).toHaveValue(projectId)
-  await expect(page.locator('input[aria-label="AgentRun ID"]')).toHaveValue(runId)
-  await expect(page.getByText(environmentCandidateId, { exact: true }).first()).toBeVisible({ timeout: 120_000 })
-  await expect(page.getByText(evaluationCandidateId, { exact: true }).first()).toBeVisible({ timeout: 120_000 })
-  await expect(page.locator('.candidate-card')).toHaveCount(2)
-  await expect(page.locator('.approval-card')).toBeVisible()
-}
-
 test('teacher authors an independent project and publishes its complete experiment package', async ({ page, baseURL }) => {
   test.setTimeout(AUTHORING_CHAIN_TIMEOUT_MS)
   if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
@@ -91,29 +85,19 @@ test('teacher authors an independent project and publishes its complete experime
   const completed = await waitForCompletedAuthoringRun(page.context().request, project.id, initialRun.id)
   await waitForBuiltEnvironmentCandidate(page.context().request, project.id, completed.environmentCandidateId)
 
-  await openReview(page, project.id, completed.run.id, completed.environmentCandidateId, completed.evaluationCandidateId)
-  const approveButton = page.getByRole('button', { name: '批准完整实验包', exact: true })
-  await expect(approveButton).toBeDisabled()
-  await expect(page.getByRole('checkbox')).toHaveCount(1)
-  await page.getByRole('checkbox').check()
-  const reason = '已核对独立项目材料、Environment 和 Evaluation 候选及运行时镜像身份。'
-  await page.locator('textarea.reason-input').fill(reason)
-  await expect(approveButton).toBeEnabled()
+  // The teacher finds the version in the review queue; no internal ID is typed.
+  await openAuthoringReviewByUi(page, project.id, completed.run.id)
+  await expect(page.getByRole('tab')).toHaveText(['概览', '环境与权限', '评分规则', '材料', '技术详情'])
+  await expectReviewTechnicalIdentitiesByUi(page, [completed.run.id, completed.environmentCandidateId, completed.evaluationCandidateId])
 
-  const responsePromise = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'POST'
-      && url.pathname === `/api/v1/projects/${project.id}/authoring-approvals`
+  const reason = '已核对独立项目材料、环境与评分规则候选及运行时镜像身份。'
+  const approval = await approveAndPublishByUi(page, project.id, reason)
+  expect(approval).toMatchObject({
+    projectId: project.id,
+    environmentCandidateId: completed.environmentCandidateId,
+    evaluationCandidateId: completed.evaluationCandidateId,
   })
-  await approveButton.click()
-  const approvalResponse = await responsePromise
-  if (!approvalResponse.ok()) throw new Error(`AUTHORING_APPROVAL_FAILED:${approvalResponse.status()}`)
-  const approvalRequest = approvalResponse.request().postDataJSON()
-  expect(approvalRequest).toMatchObject({ projectId: project.id, reason })
-  const approval = await approvalResponse.json()
-  expect(approval).toMatchObject({ projectId: project.id, id: expect.any(String) })
 
-  await expect(page).toHaveURL(new RegExp(`[?&]approvalId=${encodeURIComponent(approval.id)}(?:&|$)`))
   const publication = await pollJson(
     page.context().request,
     `/api/v1/projects/${project.id}/authoring-approvals/${approval.id}`,
@@ -125,12 +109,18 @@ test('teacher authors an independent project and publishes its complete experime
     throw new Error(`AUTHORING_PUBLICATION_FAILED:${publication.diagnosticCode ?? 'diagnostic missing'}`)
   }
   expect(publication.status).toBe('ready')
-  await expect(page.locator('.publication-status')).toHaveAttribute('data-status', 'ready', { timeout: 120_000 })
+  await expectPublicationStatusByUi(page, 'ready')
 
+  // Refresh keeps the same project, run and approval and does not offer a second approval.
   await page.reload({ waitUntil: 'domcontentloaded' })
   await expect(page).toHaveURL(new RegExp(`[?&]projectId=${encodeURIComponent(project.id)}(?:&|$)`))
   await expect(page).toHaveURL(new RegExp(`[?&]runId=${encodeURIComponent(completed.run.id)}(?:&|$)`))
   await expect(page).toHaveURL(new RegExp(`[?&]approvalId=${encodeURIComponent(approval.id)}(?:&|$)`))
-  await expect(page.locator('.publication-status')).toHaveAttribute('data-status', 'ready', { timeout: 120_000 })
-  await expect(page.getByRole('button', { name: '批准完整实验包', exact: true })).toHaveCount(0)
+  await expectPublicationStatusByUi(page, 'ready')
+  await expect(page.getByTestId('approve-publish')).toHaveCount(0)
+
+  // Opened again without the approval id, the published run sits under “已发布”.
+  await expectPublishedReviewByUi(page, project.id, completed.run.id)
+  await reopenAuthoringReviewByLink(page, project.id, completed.run.id, approval.id)
+  await expectReviewTechnicalIdentitiesByUi(page, [approval.id, publication.environmentReleaseId, publication.evaluationReleaseId])
 })
