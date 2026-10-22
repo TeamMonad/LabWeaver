@@ -679,6 +679,19 @@ pub(super) async fn forward_evaluation(
     .await
 }
 
+fn resource_project_scope(uri: &Uri) -> Option<contracts::ProjectId> {
+    let segments = uri.path().split('/').collect::<Vec<_>>();
+    if segments.len() > 4
+        && segments[1] == "api"
+        && segments[2] == "v1"
+        && segments[3] == "projects"
+    {
+        segments[4].parse().ok()
+    } else {
+        None
+    }
+}
+
 pub(super) async fn forward_resource(
     State(state): State<std::sync::Arc<AppState>>,
     method: Method,
@@ -696,6 +709,7 @@ pub(super) async fn forward_resource(
     }
     let session = authenticated_session(&state, &headers).await?;
     let operation_id = authorize_resource_request(&state, &session, &method, &uri, &body).await?;
+    let project_scope = resource_project_scope(&uri);
     if method != Method::GET {
         require_browser_origin(&state, &headers)?;
         let supplied = headers
@@ -706,6 +720,7 @@ pub(super) async fn forward_resource(
     let delegation = auth::encode_resource_delegation(
         &state.resource_proxy.delegation_key,
         &session,
+        project_scope,
         OffsetDateTime::now_utc(),
     )
     .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_DELEGATION_INVALID"))?;
@@ -1186,6 +1201,7 @@ async fn fetch_resource_json<T: serde::de::DeserializeOwned>(
         auth::encode_resource_delegation(
             &state.resource_proxy.delegation_key,
             session,
+            None,
             OffsetDateTime::now_utc(),
         )
         .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_DELEGATION_INVALID"))?,

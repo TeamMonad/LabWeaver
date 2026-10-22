@@ -1,6 +1,8 @@
 //! Credits use the existing six-place fixed decimal. Amounts are never floats.
 use super::FixedDecimal;
-use crate::{ActorId, ProjectId, ResourceRequestId, Revision, UtcTimestamp};
+use crate::{
+    ActorId, ChargeId, ProjectId, RateId, ResourceRequestId, Revision, UsageRecordId, UtcTimestamp,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -73,6 +75,8 @@ pub enum CreditHoldResolutionRequest {
         reason: String,
     },
     Unknown {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<crate::EventId>,
         reason: String,
     },
 }
@@ -108,6 +112,14 @@ pub enum CreditAdminOperation {
     },
 }
 
+/// Immutable rate identity used by a Credits settlement ledger entry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreditRateSnapshot {
+    pub rate_id: RateId,
+    pub rate_revision: Revision,
+}
+
 /// Platform entries have no project ID and balance the project entries.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -123,6 +135,9 @@ pub struct CreditLedgerEntry {
     pub reversal_of: Option<Uuid>,
     pub kind: String,
     pub source_event_id: Option<crate::EventId>,
+    pub charge_id: Option<ChargeId>,
+    pub usage_record_id: Option<UsageRecordId>,
+    pub rate_snapshots: Vec<CreditRateSnapshot>,
     pub balance_delta: FixedDecimal,
     pub reserved_delta: FixedDecimal,
     pub spent_delta: FixedDecimal,

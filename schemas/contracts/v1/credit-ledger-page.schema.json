@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
+    "ChargeId": {
+      "description": "Strongly typed UUIDv7 identifier for `ChargeId`.",
+      "type": "string"
+    },
     "CreditLedgerEntry": {
       "additionalProperties": false,
       "description": "Platform entries have no project ID and balance the project entries.",
@@ -20,6 +24,16 @@
         },
         "balanceDelta": {
           "$ref": "#/$defs/FixedDecimal"
+        },
+        "chargeId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChargeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "createdAt": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -61,6 +75,12 @@
             }
           ]
         },
+        "rateSnapshots": {
+          "items": {
+            "$ref": "#/$defs/CreditRateSnapshot"
+          },
+          "type": "array"
+        },
         "reason": {
           "type": "string"
         },
@@ -86,18 +106,46 @@
         },
         "spentDelta": {
           "$ref": "#/$defs/FixedDecimal"
+        },
+        "usageRecordId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageRecordId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "id",
         "operationId",
         "kind",
+        "rateSnapshots",
         "balanceDelta",
         "reservedDelta",
         "spentDelta",
         "platformAbsorbed",
         "reason",
         "createdAt"
+      ],
+      "type": "object"
+    },
+    "CreditRateSnapshot": {
+      "additionalProperties": false,
+      "description": "Immutable rate identity used by a Credits settlement ledger entry.",
+      "properties": {
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "rateId",
+        "rateRevision"
       ],
       "type": "object"
     },
@@ -113,6 +161,20 @@
     },
     "ProjectId": {
       "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RateId": {
+      "description": "Strongly typed UUIDv7 identifier for `RateId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UsageRecordId": {
+      "description": "Strongly typed UUIDv7 identifier for `UsageRecordId`.",
       "type": "string"
     },
     "UtcTimestamp": {

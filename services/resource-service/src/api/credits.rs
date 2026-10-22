@@ -2,7 +2,7 @@
 use super::{
     DiagnosticCode, Extension, HeaderMap, IntoResponse, Json, PageQuery, Path, ProblemDetails,
     ProjectId, Query, ResourceApiState, ResourceCallerPrincipal, Response, Router, State,
-    StatusCode, authorize, get, header, post, require_admin, required_header,
+    StatusCode, authorize_project_access, get, header, post, require_admin, required_header,
 };
 use crate::credits::{CreditError, PgCreditStore};
 use axum::extract::rejection::JsonRejection;
@@ -32,7 +32,7 @@ async fn account(
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project): Path<ProjectId>,
 ) -> Result<Json<CreditAccount>, CreditApiError> {
-    authorize(&principal);
+    authorize_project_access(&principal, project).map_err(|_| CreditError::Denied)?;
     Ok(Json(
         PgCreditStore::new(state.store.pool())
             .account(project)
@@ -45,7 +45,7 @@ async fn ledger(
     Path(project): Path<ProjectId>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<CreditLedgerPage>, CreditApiError> {
-    authorize(&principal);
+    authorize_project_access(&principal, project).map_err(|_| CreditError::Denied)?;
     let (page, size, offset) = query.normalized().map_err(|_| CreditError::Invalid)?;
     Ok(Json(
         PgCreditStore::new(state.store.pool())
@@ -59,7 +59,7 @@ async fn holds(
     Path(project): Path<ProjectId>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<contracts::resource::credits::CreditHoldPage>, CreditApiError> {
-    authorize(&principal);
+    authorize_project_access(&principal, project).map_err(|_| CreditError::Denied)?;
     let (page, size, offset) = query.normalized().map_err(|_| CreditError::Invalid)?;
     Ok(Json(
         PgCreditStore::new(state.store.pool())

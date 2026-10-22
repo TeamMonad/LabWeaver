@@ -1651,6 +1651,7 @@ export type CreditHoldPageSchemaUtcTimestamp = string;
 export type CreditLedgerEntrySchema = {
     actorId?: CreditLedgerEntrySchemaActorId | null;
     balanceDelta: CreditLedgerEntrySchemaFixedDecimal;
+    chargeId?: ChargeId | null;
     createdAt: CreditLedgerEntrySchemaUtcTimestamp;
     holdId?: string | null;
     id: string;
@@ -1659,17 +1660,32 @@ export type CreditLedgerEntrySchema = {
     ownerClientId?: string | null;
     platformAbsorbed: CreditLedgerEntrySchemaFixedDecimal;
     projectId?: CreditLedgerEntrySchemaProjectId | null;
+    rateSnapshots: Array<CreditRateSnapshot>;
     reason: string;
     reservedDelta: CreditLedgerEntrySchemaFixedDecimal;
     reversalOf?: string | null;
     sourceEventId?: EventId | null;
     spentDelta: CreditLedgerEntrySchemaFixedDecimal;
+    usageRecordId?: UsageRecordId | null;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ActorId`.
  */
 export type CreditLedgerEntrySchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ChargeId`.
+ */
+export type ChargeId = string;
+
+/**
+ * Immutable rate identity used by a Credits settlement ledger entry.
+ */
+export type CreditRateSnapshot = {
+    rateId: RateId;
+    rateRevision: CreditLedgerEntrySchemaRevision;
+};
 
 /**
  * Strongly typed UUIDv7 identifier for `EventId`.
@@ -1692,6 +1708,21 @@ export type CreditLedgerEntrySchemaFixedDecimal = string;
 export type CreditLedgerEntrySchemaProjectId = string;
 
 /**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type RateId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreditLedgerEntrySchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UsageRecordId`.
+ */
+export type UsageRecordId = string;
+
+/**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type CreditLedgerEntrySchemaUtcTimestamp = string;
@@ -1712,11 +1743,17 @@ export type CreditLedgerPageSchema = {
 export type CreditLedgerPageSchemaActorId = string;
 
 /**
+ * Strongly typed UUIDv7 identifier for `ChargeId`.
+ */
+export type CreditLedgerPageSchemaChargeId = string;
+
+/**
  * Platform entries have no project ID and balance the project entries.
  */
 export type CreditLedgerEntry = {
     actorId?: CreditLedgerPageSchemaActorId | null;
     balanceDelta: CreditLedgerPageSchemaFixedDecimal;
+    chargeId?: CreditLedgerPageSchemaChargeId | null;
     createdAt: CreditLedgerPageSchemaUtcTimestamp;
     holdId?: string | null;
     id: string;
@@ -1725,11 +1762,21 @@ export type CreditLedgerEntry = {
     ownerClientId?: string | null;
     platformAbsorbed: CreditLedgerPageSchemaFixedDecimal;
     projectId?: CreditLedgerPageSchemaProjectId | null;
+    rateSnapshots: Array<CreditLedgerPageSchemaCreditRateSnapshot>;
     reason: string;
     reservedDelta: CreditLedgerPageSchemaFixedDecimal;
     reversalOf?: string | null;
     sourceEventId?: CreditLedgerPageSchemaEventId | null;
     spentDelta: CreditLedgerPageSchemaFixedDecimal;
+    usageRecordId?: CreditLedgerPageSchemaUsageRecordId | null;
+};
+
+/**
+ * Immutable rate identity used by a Credits settlement ledger entry.
+ */
+export type CreditLedgerPageSchemaCreditRateSnapshot = {
+    rateId: CreditLedgerPageSchemaRateId;
+    rateRevision: CreditLedgerPageSchemaRevision;
 };
 
 /**
@@ -1751,6 +1798,21 @@ export type CreditLedgerPageSchemaFixedDecimal = string;
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type CreditLedgerPageSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type CreditLedgerPageSchemaRateId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreditLedgerPageSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UsageRecordId`.
+ */
+export type CreditLedgerPageSchemaUsageRecordId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -10862,7 +10924,7 @@ export type ResourceChargeSchema = {
      * Actor that authorized an administrator adjustment.
      */
     adjustedBy?: ResourceChargeSchemaActorId | null;
-    adjustmentOf?: ChargeId | null;
+    adjustmentOf?: ResourceChargeSchemaChargeId | null;
     /**
      * Human supplied reason retained with an administrator adjustment.
      */
@@ -10870,12 +10932,12 @@ export type ResourceChargeSchema = {
     courseId?: ResourceChargeSchemaCourseId | null;
     createdAt: ResourceChargeSchemaUtcTimestamp;
     diagnosticCode?: string | null;
-    id: ChargeId;
+    id: ResourceChargeSchemaChargeId;
     lines: Array<ResourceChargeLine>;
     projectId: ResourceChargeSchemaProjectId;
     settlement: UsageSettlementState;
     total: ResourceChargeSchemaMoney;
-    usageRecordId: UsageRecordId;
+    usageRecordId: ResourceChargeSchemaUsageRecordId;
 };
 
 /**
@@ -10886,7 +10948,7 @@ export type ResourceChargeSchemaActorId = string;
 /**
  * Strongly typed UUIDv7 identifier for `ChargeId`.
  */
-export type ChargeId = string;
+export type ResourceChargeSchemaChargeId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `CourseId`.
@@ -10919,7 +10981,7 @@ export type ResourceChargeSchemaProjectId = string;
 /**
  * Strongly typed UUIDv7 identifier for `RateId`.
  */
-export type RateId = string;
+export type ResourceChargeSchemaRateId = string;
 
 /**
  * Resource dimension used by a versioned rate card.
@@ -10932,7 +10994,7 @@ export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | '
 export type ResourceChargeLine = {
     amount: ResourceChargeSchemaMoney;
     quantity: number;
-    rateId: RateId;
+    rateId: ResourceChargeSchemaRateId;
     rateRevision: ResourceChargeSchemaRevision;
     unit: ResourceChargeSchemaResourceBillingUnit;
     unitPrice: ResourceChargeSchemaMoney;
@@ -10947,7 +11009,7 @@ export type ResourceChargeSchemaRevision = number;
 /**
  * Strongly typed UUIDv7 identifier for `UsageRecordId`.
  */
-export type UsageRecordId = string;
+export type ResourceChargeSchemaUsageRecordId = string;
 
 /**
  * Settlement state for one immutable usage observation.

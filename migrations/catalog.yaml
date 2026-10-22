@@ -238,4 +238,4 @@ domains:
         sha256: fc0648f2dc2daf56d2170c7f670c0544fd452a98d66878ee02c9bdace3335352
       - id: 16
         file: resource/0016_project_credits.sql
-        sha256: a08012d2e5a69f898f617d758432f55fba327bb22a898c7b6acdedcd39e9e758
+        sha256: 442e27c0dc2cfa7d554440fbfca6b94a6f0997cc23b2273edcb2bc46e73e4571

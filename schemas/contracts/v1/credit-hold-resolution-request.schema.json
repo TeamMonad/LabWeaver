@@ -62,6 +62,16 @@
           "const": "unknown",
           "type": "string"
         },
+        "eventId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reason": {
           "type": "string"
         }

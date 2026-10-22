@@ -1,10 +1,11 @@
 //! Transactional Credits authority. All rows belong to Resource.
-use contracts::resource::FixedDecimal;
 use contracts::resource::credits::{
     CreditAccount, CreditAdminOperation, CreditHold, CreditHoldRequest,
     CreditHoldResolutionRequest, CreditHoldState, CreditLedgerEntry, CreditLedgerPage,
+    CreditRateSnapshot,
 };
-use contracts::{ActorId, PlatformRole, ProjectId, Revision, UtcTimestamp};
+use contracts::resource::{FixedDecimal, ResourceCharge};
+use contracts::{ActorId, EventId, PlatformRole, ProjectId, Revision, UtcTimestamp};
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, PersistenceError, Sha256Digest,
 };
@@ -257,11 +258,12 @@ impl PgCreditStore {
         {
             return Ok(serde_json::from_value(replay)?);
         }
-        let event_key = if let CreditHoldResolutionRequest::Settle { event_id, .. } = input {
-            Some(event_id.to_string())
-        } else {
-            None
+        let event_id = match input {
+            CreditHoldResolutionRequest::Settle { event_id, .. } => Some(*event_id),
+            CreditHoldResolutionRequest::Unknown { event_id, .. } => *event_id,
+            CreditHoldResolutionRequest::Release { .. } => None,
         };
+        let event_key = event_id.map(|event| event.to_string());
         if let Some(event_key) = &event_key
             && let Some(replay) = reserve(
                 &mut tx,
@@ -276,7 +278,7 @@ impl PgCreditStore {
             tx.commit().await?;
             return Ok(hold);
         }
-        let hold = resolve_in_transaction(&mut tx, owner, hold_id, input).await?;
+        let hold = resolve_in_transaction(&mut tx, owner, hold_id, input, None, event_id).await?;
         if let Some(event_key) = event_key {
             complete(&mut tx, "credits_event", &event_key, &hold).await?;
         }
@@ -387,6 +389,9 @@ fn entry(
         reversal_of: None,
         kind: kind.into(),
         source_event_id: None,
+        charge_id: None,
+        usage_record_id: None,
+        rate_snapshots: Vec::new(),
         balance_delta: decimal(balance)?,
         reserved_delta: decimal(reserved)?,
         spent_delta: decimal(spent)?,
@@ -404,7 +409,23 @@ async fn apply(tx: &mut Tx<'_>, e: &CreditLedgerEntry) -> Result<(), CreditError
             return Err(CreditError::Insufficient);
         }
     }
-    sqlx::query("INSERT INTO resource.credit_ledger_entries(entry_id,operation_id,project_id,hold_id,reversal_of,balance_delta,reserved_delta,spent_delta,platform_absorbed,contract,created_at) VALUES($1,$2,$3,$4,$5,$6::text::numeric,$7::text::numeric,$8::text::numeric,$9::text::numeric,$10,$11)").bind(e.id).bind(e.operation_id).bind(e.project_id.map(ProjectId::as_uuid)).bind(e.hold_id).bind(e.reversal_of).bind(e.balance_delta.scaled().to_string()).bind(e.reserved_delta.scaled().to_string()).bind(e.spent_delta.scaled().to_string()).bind(e.platform_absorbed.scaled().to_string()).bind(serde_json::to_value(e)?).bind(e.created_at.get()).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO resource.credit_ledger_entries(entry_id,operation_id,project_id,hold_id,reversal_of,source_event_id,charge_id,usage_record_id,balance_delta,reserved_delta,spent_delta,platform_absorbed,contract,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::text::numeric,$10::text::numeric,$11::text::numeric,$12::text::numeric,$13,$14)")
+        .bind(e.id)
+        .bind(e.operation_id)
+        .bind(e.project_id.map(ProjectId::as_uuid))
+        .bind(e.hold_id)
+        .bind(e.reversal_of)
+        .bind(e.source_event_id.map(contracts::EventId::as_uuid))
+        .bind(e.charge_id.map(contracts::ChargeId::as_uuid))
+        .bind(e.usage_record_id.map(contracts::UsageRecordId::as_uuid))
+        .bind(e.balance_delta.scaled().to_string())
+        .bind(e.reserved_delta.scaled().to_string())
+        .bind(e.spent_delta.scaled().to_string())
+        .bind(e.platform_absorbed.scaled().to_string())
+        .bind(serde_json::to_value(e)?)
+        .bind(e.created_at.get())
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 async fn reserve<T: Serialize>(
@@ -590,6 +611,8 @@ async fn resolve_in_transaction(
     owner: &str,
     hold_id: Uuid,
     input: &CreditHoldResolutionRequest,
+    charge: Option<&ResourceCharge>,
+    source_event_id: Option<EventId>,
 ) -> Result<CreditHold, CreditError> {
     // Account-before-hold is the common lock order with hold creation.
     let project: Uuid =
@@ -607,6 +630,24 @@ async fn resolve_in_transaction(
     let mut hold = decode_hold(&row)?;
     if hold.owner_client_id != owner {
         return Err(CreditError::Denied);
+    }
+    if charge.is_none()
+        && hold.business_key == "metered-usage"
+        && matches!(input, CreditHoldResolutionRequest::Settle { .. })
+    {
+        return Err(CreditError::Invalid);
+    }
+    if let Some(event_id) = source_event_id {
+        let duplicate: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM resource.credit_ledger_entries WHERE hold_id=$1 AND source_event_id=$2 AND project_id IS NOT NULL)",
+        )
+        .bind(hold.id)
+        .bind(event_id.as_uuid())
+        .fetch_one(&mut **tx)
+        .await?;
+        if duplicate {
+            return Ok(hold);
+        }
     }
     let (debit, released, absorbed, kind, reason) = hold_movement(&mut hold, input)?;
     hold.reason = Some(reason.clone());
@@ -627,6 +668,19 @@ async fn resolve_in_transaction(
     if let CreditHoldResolutionRequest::Settle { event_id, .. } = input {
         e.source_event_id = Some(*event_id);
     }
+    e.source_event_id = source_event_id.or(e.source_event_id);
+    if let Some(charge) = charge {
+        e.charge_id = Some(charge.id);
+        e.usage_record_id = Some(charge.usage_record_id);
+        e.rate_snapshots = charge
+            .lines
+            .iter()
+            .map(|line| CreditRateSnapshot {
+                rate_id: line.rate_id,
+                rate_revision: line.rate_revision,
+            })
+            .collect();
+    }
     e.reason = reason.clone();
     e.owner_client_id = Some(owner.into());
     apply(tx, &e).await?;
@@ -634,6 +688,9 @@ async fn resolve_in_transaction(
         let mut counterpart = entry(op, None, debit, 0, 0, 0, kind, now)?;
         counterpart.hold_id = Some(hold.id);
         counterpart.source_event_id = e.source_event_id;
+        counterpart.charge_id = e.charge_id;
+        counterpart.usage_record_id = e.usage_record_id;
+        counterpart.rate_snapshots = e.rate_snapshots.clone();
         counterpart.reason = reason;
         counterpart.owner_client_id = Some(owner.into());
         apply(tx, &counterpart).await?;
@@ -683,7 +740,7 @@ fn hold_movement(
             }
             ("release", reason.clone())
         }
-        CreditHoldResolutionRequest::Unknown { reason } => {
+        CreditHoldResolutionRequest::Unknown { reason, .. } => {
             validate_reason(reason)?;
             hold.measurement_unknown = true;
             if !terminal {
@@ -710,7 +767,13 @@ pub(crate) async fn settle_metered_charge(
     let Some(row) = row else {
         return Ok(());
     };
-    if charge.total.currency != "CREDITS" {
+    charge.validate().map_err(CreditError::Precision)?;
+    if charge.total.currency != "CREDITS"
+        || charge
+            .lines
+            .iter()
+            .any(|line| line.unit_price.currency != "CREDITS")
+    {
         return Err(CreditError::Invalid);
     }
     let hold_id: Uuid = row.try_get("hold_id")?;
@@ -725,7 +788,15 @@ pub(crate) async fn settle_metered_charge(
         .await?
         .is_none()
     {
-        let hold = resolve_in_transaction(tx, &owner, hold_id, &input).await?;
+        let hold = resolve_in_transaction(
+            tx,
+            &owner,
+            hold_id,
+            &input,
+            Some(charge),
+            Some(usage.source_event_id),
+        )
+        .await?;
         complete(tx, "credits_event", &key, &hold).await?;
     }
     Ok(())
@@ -747,6 +818,8 @@ pub(crate) async fn release_request_holds(
             &CreditHoldResolutionRequest::Release {
                 reason: "resource physical cleanup confirmed".into(),
             },
+            None,
+            None,
         )
         .await?;
     }
@@ -775,8 +848,11 @@ pub(crate) async fn observe_unknown_usage(
         &owner,
         id,
         &CreditHoldResolutionRequest::Unknown {
+            event_id: Some(usage.source_event_id),
             reason: reason.clone(),
         },
+        None,
+        Some(usage.source_event_id),
     )
     .await?;
     Ok(())

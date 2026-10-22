@@ -170,7 +170,7 @@ async fn settlement_replays_unknown_and_out_of_order_release_never_overdraw()
     let input = CreditHoldRequest {
         project_id: project,
         request_id,
-        business_key: "metered-usage".into(),
+        business_key: "synthetic-usage".into(),
         amount: amount("6.000000"),
     };
     let hold = store.hold("credits-hold-1", "evaluation", &input).await?;
@@ -178,12 +178,24 @@ async fn settlement_replays_unknown_and_out_of_order_release_never_overdraw()
         store.hold("hold-rebuilt", "evaluation", &input).await?.id,
         hold.id
     );
+    let unknown_event = EventId::new();
     let unknown = CreditHoldResolutionRequest::Unknown {
+        event_id: Some(unknown_event),
         reason: "provider measurement missing".into(),
     };
     store
         .resolve("unknown-1", "evaluation", hold.id, &unknown)
         .await?;
+    store
+        .resolve("unknown-rekeyed", "evaluation", hold.id, &unknown)
+        .await?;
+    let unknown_entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource.credit_ledger_entries WHERE hold_id=$1 AND contract->>'kind'='unknown'"
+    )
+    .bind(hold.id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(unknown_entries, 1);
     let account = store.account(project).await?;
     assert_eq!(account.unknown, amount("6.000000"));
     assert_eq!(account.pending, amount("0.000000"));

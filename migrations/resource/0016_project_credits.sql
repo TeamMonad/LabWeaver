@@ -30,6 +30,9 @@ CREATE TABLE resource.credit_ledger_entries (
     project_id uuid REFERENCES resource.credit_accounts(project_id),
     hold_id uuid REFERENCES resource.credit_holds(hold_id),
     reversal_of uuid UNIQUE REFERENCES resource.credit_ledger_entries(entry_id),
+    source_event_id uuid,
+    charge_id uuid,
+    usage_record_id uuid,
     balance_delta numeric(38,0) NOT NULL,
     reserved_delta numeric(38,0) NOT NULL,
     spent_delta numeric(38,0) NOT NULL,
@@ -37,6 +40,9 @@ CREATE TABLE resource.credit_ledger_entries (
     contract jsonb NOT NULL CHECK (jsonb_typeof(contract)='object'),
     created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX credit_ledger_hold_event_idx
+    ON resource.credit_ledger_entries(hold_id,source_event_id)
+    WHERE hold_id IS NOT NULL AND source_event_id IS NOT NULL AND project_id IS NOT NULL;
 CREATE INDEX credit_ledger_project_idx ON resource.credit_ledger_entries(project_id,created_at DESC,entry_id DESC);
 CREATE FUNCTION resource.credit_ledger_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN

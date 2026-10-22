@@ -4340,7 +4340,7 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
         idle_expires_at: now + time::Duration::minutes(5),
         csrf_token: auth::CsrfToken::from_secret("resource-auth-csrf".to_owned()),
     };
-    let delegation = auth::encode_resource_delegation(&delegation_key, &session, now)?;
+    let delegation = auth::encode_resource_delegation(&delegation_key, &session, None, now)?;
     let access_token = signed_resource_token(
         &authority.material,
         &authority.issuer,
@@ -4692,7 +4692,7 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
             },
         )
         .await?;
-    resource
+    let rate = resource
         .create_rate(
             "bridge-rate",
             &CreateResourceRateRequest {
@@ -4738,6 +4738,17 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
         .await?
         .ok_or("charge missing")?;
     assert_eq!(charge.total.amount.as_str(), "2.000000");
+    let ledger = credits.ledger(project, 1, 100, 0).await?;
+    let settlement = ledger
+        .items
+        .iter()
+        .find(|entry| entry.kind == "settle" && entry.project_id == Some(project))
+        .ok_or("settlement ledger missing")?;
+    assert_eq!(settlement.charge_id, Some(charge.id));
+    assert_eq!(settlement.usage_record_id, Some(usage.id));
+    assert_eq!(settlement.rate_snapshots.len(), 1);
+    assert_eq!(settlement.rate_snapshots[0].rate_id, rate.id);
+    assert_eq!(settlement.rate_snapshots[0].rate_revision, rate.revision);
     resource.settle_usage(usage.id).await?;
     assert_eq!(credits.account(project).await?.balance.as_str(), "8.000000");
     assert_eq!(
@@ -4850,7 +4861,7 @@ async fn credits_http_requires_signed_admin_and_exact_workload_owner()
         idle_expires_at: timestamp + time::Duration::minutes(5),
         csrf_token: auth::CsrfToken::from_secret("synthetic-credits-csrf".into()),
     };
-    let member = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let member = auth::encode_resource_delegation(&key, &session, Some(project), timestamp)?;
     let grant = serde_json::to_value(CreditAdminOperation::Grant {
         project_id: project,
         amount: FixedDecimal::parse("5.000000")?,
@@ -4868,7 +4879,7 @@ async fn credits_http_requires_signed_admin_and_exact_workload_owner()
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     session.roles = vec![PlatformRole::PlatformAdmin];
-    let admin = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let admin = auth::encode_resource_delegation(&key, &session, None, timestamp)?;
     let response = router
         .clone()
         .oneshot(credit_http_request(
@@ -4880,6 +4891,30 @@ async fn credits_http_requires_signed_admin_and_exact_workload_owner()
         )?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
+    let mut nonmember_session = session.clone();
+    nonmember_session.roles = vec![PlatformRole::Student];
+    let nonmember = auth::encode_resource_delegation(&key, &nonmember_session, None, timestamp)?;
+    for path in [
+        format!("/api/v1/projects/{project}/credits"),
+        format!("/api/v1/projects/{project}/credits/ledger"),
+        format!("/api/v1/projects/{project}/credits/holds"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(credit_read_request(&access, Some(&member), &path)?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router
+            .clone()
+            .oneshot(credit_read_request(&access, Some(&nonmember), &path)?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = router
+            .clone()
+            .oneshot(credit_read_request(&access, Some(&admin), &path)?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
     let hold = serde_json::to_value(CreditHoldRequest {
         project_id: project,
         request_id: request.id,
@@ -4997,6 +5032,20 @@ async fn credits_http_requires_signed_admin_and_exact_workload_owner()
         "5.000000"
     );
     Ok(())
+}
+fn credit_read_request(
+    token: &str,
+    delegation: Option<&str>,
+    path: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    if let Some(delegation) = delegation {
+        request = request.header("x-labweaver-resource-delegation", delegation);
+    }
+    Ok(request.body(Body::empty())?)
 }
 fn credit_http_request(
     token: &str,

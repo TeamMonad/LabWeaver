@@ -49,6 +49,7 @@ pub struct ResourceCallerPrincipal {
     actor_id: ActorId,
     roles: Vec<contracts::PlatformRole>,
     session_id: contracts::BffSessionId,
+    project_id: Option<ProjectId>,
 }
 
 #[derive(Clone)]
@@ -268,6 +269,7 @@ pub fn with_delegation(router: Router, delegation_key: Arc<Vec<u8>>) -> Router {
                     actor_id: delegation.actor_id,
                     roles: delegation.roles,
                     session_id: delegation.session_id,
+                    project_id: delegation.project_id,
                 });
                 next.run(request).await
             }
@@ -1427,6 +1429,16 @@ fn authorize(principal: &ResourceCallerPrincipal) {
         session_id = %principal.session_id,
     );
 }
+pub(super) fn authorize_project_access(
+    principal: &ResourceCallerPrincipal,
+    project: ProjectId,
+) -> Result<(), ResourceApiError> {
+    if is_admin(principal)? || principal.project_id == Some(project) {
+        Ok(())
+    } else {
+        Err(ResourceApiError::ScopeDenied)
+    }
+}
 fn scoped(principal: &ResourceCallerPrincipal, expected: ActorId) -> Result<(), ResourceApiError> {
     if principal.actor_id == expected {
         Ok(())
@@ -1790,6 +1802,7 @@ mod tests {
             actor_id: ActorId::new(),
             roles: vec![contracts::PlatformRole::Teacher],
             session_id: contracts::BffSessionId::new(),
+            project_id: None,
         };
         let forged_actor = ActorId::new();
         assert_ne!(principal.actor_id, forged_actor);
@@ -1806,6 +1819,7 @@ mod tests {
             actor_id: ActorId::new(),
             roles: vec![contracts::PlatformRole::PlatformAdmin],
             session_id: contracts::BffSessionId::new(),
+            project_id: None,
         };
         assert!(is_admin(&principal).is_ok_and(|value| value));
     }
