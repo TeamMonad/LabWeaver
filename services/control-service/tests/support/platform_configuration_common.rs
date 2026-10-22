@@ -205,19 +205,33 @@ pub(super) fn actual_loaded_bundle_replicas(
     }
     let output = root.join(".private/loaded");
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let producer = repository.join("tests/ansible/prepare_loaded_configuration_fixture.py");
+    let command = format!(
+        "python3 {} --version {} --output {} --control-replicas {}",
+        producer.display(),
+        input.display(),
+        output.display(),
+        replicas
+    );
     let result = std::process::Command::new("python3")
-        .arg(repository.join("tests/ansible/prepare_loaded_configuration_fixture.py"))
+        .arg(&producer)
         .arg("--version")
         .arg(&input)
         .arg("--output")
         .arg(&output)
         .arg("--control-replicas")
         .arg(replicas.to_string())
-        .output()?;
+        .output()
+        .map_err(|error| {
+            format!("LW_BUNDLE_TEST_PRODUCER_SPAWN_FAILED command={command} error={error}")
+        })?;
     if !result.status.success() {
-        return Err(
-            "actual synthetic Bundle producer failed; inspect local test environment".into(),
-        );
+        return Err(format!(
+            "LW_BUNDLE_TEST_PRODUCER_FAILED command={command} exit_code={:?} stderr={}",
+            result.status.code(),
+            String::from_utf8_lossy(&result.stderr).trim()
+        )
+        .into());
     }
     assert!(result.stdout.is_empty());
     let cipher = std::fs::read(output.join("synthetic.age"))?;

@@ -66,6 +66,8 @@ jobs:
           echo 'cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  /tmp/age.tar.gz' | sha256sum --check
           tar -xzf /tmp/age.tar.gz -C /tmp age/age age/age-keygen
           echo /tmp/age >> "$GITHUB_PATH"
+          echo 'AGE=/tmp/age/age' >> "$GITHUB_ENV"
+          echo 'AGE_KEYGEN=/tmp/age/age-keygen' >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -77,6 +79,7 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/bundle-tools/helm"
           echo "$RUNNER_TEMP/bundle-tools" >> "$GITHUB_PATH"
           cargo build -p xtask --locked
+          echo "LABWEAVER_BUNDLE_CONFIGURATION_TOOL=$GITHUB_WORKSPACE/target/debug/xtask" >> "$GITHUB_ENV"
       - name: Verify actual Bundle loading and failed apply recovery in Control and PostgreSQL
         run: cargo test -p control-service --test platform_configuration_loaded actual_bundle_load_is_required_for_success_and_failure_keeps_effective --locked -- --ignored --exact --test-threads=1
       - name: Verify both actual Control replica snapshots before applied
