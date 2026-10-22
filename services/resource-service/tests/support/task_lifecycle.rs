@@ -541,8 +541,13 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
         Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
     );
     assert_eq!(fixture.event_count().await?, events + 1);
-    assert!(fixture.lifecycle.release(&active).await?.cleanup_confirmed);
-    Ok(())
+    assert!(fixture.lifecycle.release(&active).await.is_err());
+    let released = fixture.lifecycle.release(&pending_cleanup).await?;
+    assert!(released.cleanup_confirmed);
+    assert_eq!(
+        released.request.diagnostic_code.as_deref(),
+        Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+    );
 }
 
 #[tokio::test]

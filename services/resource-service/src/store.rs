@@ -452,15 +452,46 @@ impl PgResourceStore {
         } else if request.state == ResourceRequestState::Active
             && request.diagnostic_code.as_deref() != Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
         {
-            let expired: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1
-                FROM resource.resource_leases WHERE request_id=$1 AND state='active'
-                AND expires_at<=clock_timestamp())",
+            let row = sqlx::query(
+                "SELECT c.contract AS claim_contract,l.contract AS lease_contract
+                 FROM resource.capacity_claims c
+                 JOIN resource.resource_leases l ON l.claim_id=c.claim_id
+                 WHERE c.request_id=$1 AND c.state='handed_off' AND l.state='active'
+                   AND l.expires_at<=clock_timestamp()
+                 FOR UPDATE OF c,l",
             )
             .bind(request.id.as_uuid())
-            .fetch_one(&mut *transaction)
+            .fetch_optional(&mut *transaction)
             .await?;
-            if expired {
+            if let Some(row) = row {
+                let claim = decode_claim(row.try_get("claim_contract")?)?;
+                let lease = decode_lease(row.try_get("lease_contract")?)?;
+                let mut fenced_claim = claim.clone();
+                fenced_claim.revision = Revision::new(
+                    claim
+                        .revision
+                        .get()
+                        .checked_add(1)
+                        .ok_or(ResourceStoreError::RevisionOverflow)?,
+                )?;
+                let mut fenced_lease = lease.clone();
+                fenced_lease.revision = Revision::new(
+                    lease
+                        .revision
+                        .get()
+                        .checked_add(1)
+                        .ok_or(ResourceStoreError::RevisionOverflow)?,
+                )?;
+                update_claim(
+                    &mut transaction,
+                    &claim,
+                    &fenced_claim,
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
+                update_lease(&mut transaction, &lease, &fenced_lease).await?;
                 let mut next = request.clone();
                 next.revision = Revision::new(
                     request
@@ -468,8 +499,7 @@ impl PgResourceStore {
                         .get()
                         .checked_add(1)
                         .ok_or(ResourceStoreError::RevisionOverflow)?,
-                )
-                .map_err(|_| ResourceStoreError::RevisionOverflow)?;
+                )?;
                 next.updated_at = now;
                 next.diagnostic_code = Some("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned());
                 update_request(&mut transaction, &request, &next).await?;
@@ -3084,6 +3114,7 @@ impl PgResourceStore {
     pub async fn release_task_resource(
         &self,
         task_run_id: TaskRunId,
+        expected_request_revision: Revision,
         expected_claim_revision: Revision,
         expected_lease_revision: Revision,
         trace_id: &str,
@@ -3120,7 +3151,11 @@ impl PgResourceStore {
         if request.state == ResourceRequestState::Expired
             && claim.state == CapacityClaimState::Released
             && lease.state == ResourceLeaseState::Revoked
-            && lease.revoke_reason_code.as_deref() == Some("task_owner_release")
+            && matches!(
+                lease.revoke_reason_code.as_deref(),
+                Some("task_owner_release") | Some("task_lease_expired")
+            )
+            && expected_request_revision.get().checked_add(2) == Some(request.revision.get())
             && expected_claim_revision.get().checked_add(2) == Some(claim.revision.get())
             && expected_lease_revision.get().checked_add(2) == Some(lease.revision.get())
         {
@@ -3136,6 +3171,7 @@ impl PgResourceStore {
             || claim.request_id != request.id
             || lease.request_id != request.id
             || lease.claim_id != claim.id
+            || request.revision != expected_request_revision
             || claim.revision != expected_claim_revision
             || lease.revision != expected_lease_revision
             || !matches!(
@@ -5340,18 +5376,19 @@ async fn release_task_locked(
     diagnostic: Option<&str>,
 ) -> Result<TaskResourceStatus, ResourceStoreError> {
     let now = database_now(transaction).await?;
+    let lease_reason = match diagnostic {
+        Some("LW_RESOURCE_APPROVAL_EXPIRED") => "task_approval_expired",
+        Some(_) => "task_lease_expired",
+        None if request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED") => {
+            "task_lease_expired"
+        }
+        None => "task_owner_release",
+    };
     let expiring_lease = ResourceLifecycle::begin_lease_expiry(
         lease,
         lease.revision,
         now,
-        Some(
-            if diagnostic.is_some() {
-                "task_approval_expired"
-            } else {
-                "task_owner_release"
-            }
-            .to_owned(),
-        ),
+        Some(lease_reason.to_owned()),
     )?;
     let expired_lease =
         ResourceLifecycle::complete_lease_expiry(&expiring_lease, expiring_lease.revision, now)?;
@@ -5360,6 +5397,8 @@ async fn release_task_locked(
         ResourceLifecycle::complete_expiry(&expiring_request, expiring_request.revision, now)?;
     if let Some(diagnostic) = diagnostic {
         expired_request.diagnostic_code = Some(diagnostic.to_owned());
+    } else if request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED") {
+        expired_request.diagnostic_code = request.diagnostic_code.clone();
     }
     let releasing_claim = transition_claim(claim, CapacityClaimState::Releasing)?;
     let released_claim = transition_claim(&releasing_claim, CapacityClaimState::Released)?;

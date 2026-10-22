@@ -144,6 +144,8 @@ pub struct AcknowledgeTaskResourceRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReleaseTaskResourceRequest {
+    /// Request revision observed together with the claim and lease revisions.
+    pub expected_request_revision: Revision,
     pub expected_claim_revision: Revision,
     pub expected_lease_revision: Revision,
 }

@@ -842,6 +842,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     let stale_release = store
         .release_task_resource(
             task_run_id,
+            acknowledged.request.revision,
             claimed.claim_revision,
             acknowledged.lease_revision,
             "trace-task-stale-release",
@@ -854,6 +855,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     let released = store
         .release_task_resource(
             task_run_id,
+            acknowledged.request.revision,
             acknowledged.claim_revision,
             acknowledged.lease_revision,
             "trace-task-release",
@@ -879,6 +881,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         store
             .release_task_resource(
                 task_run_id,
+                acknowledged.request.revision,
                 acknowledged.claim_revision,
                 acknowledged.lease_revision,
                 "trace-task-release-response-lost",
@@ -890,9 +893,10 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         store
             .release_task_resource(
                 task_run_id,
+                request.revision,
                 claimed.claim_revision,
                 claimed.lease_revision,
-                "trace-task-release-stale-worker",
+                "trace-task-stale-worker",
             )
             .await,
         Err(ResourceStoreError::CapacityClaimStateConflict)

@@ -76,13 +76,22 @@ impl ResourceProcessRuntime {
         }
         let deadline_ready: bool = sqlx::query_scalar(
             "SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns WHERE table_schema='resource'
-            AND table_name='resource_requests' AND column_name='approval_deadline_at')",
+             SELECT 1 FROM information_schema.columns WHERE table_schema='resource'
+             AND table_name='resource_requests' AND column_name='approval_deadline_at')",
         )
         .fetch_one(&pool)
         .await?;
         if !deadline_ready {
             return Err(ResourceProcessRuntimeError::SchemaMissing);
+        }
+        let missing_deadlines: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM resource.resource_requests
+             WHERE target_kind='task' AND state='reviewing' AND approval_deadline_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if missing_deadlines != 0 {
+            return Err(ResourceProcessRuntimeError::ApprovalDeadlineMissing);
         }
         let client = connect_nats_mtls(
             &required(NATS_SERVER)?,
@@ -404,6 +413,8 @@ pub enum ResourceProcessRuntimeError {
     PathConfiguration(&'static str),
     #[error("LW_RESOURCE_SCHEMA_MISSING")]
     SchemaMissing,
+    #[error("LW_RESOURCE_TASK_APPROVAL_DEADLINE_MISSING")]
+    ApprovalDeadlineMissing,
     #[error("LW_RESOURCE_DATABASE_CONNECT_FAILED")]
     Database(#[from] sqlx::Error),
     #[error("LW_RESOURCE_NATS_CREDENTIALS_INVALID")]

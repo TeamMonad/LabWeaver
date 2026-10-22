@@ -304,6 +304,7 @@ impl ResourceClient {
         task_run_id: TaskRunId,
         request: &ReleaseTaskResourceRequest,
     ) -> Result<TaskResourceStatus, ResourceClientError> {
+        validate_revision(request.expected_request_revision)?;
         validate_revision(request.expected_claim_revision)?;
         validate_revision(request.expected_lease_revision)?;
         let body = self.encode_request(request)?;
@@ -1001,6 +1002,7 @@ impl TaskResourceLifecycle {
             return Err(TaskResourceError::IdentityMismatch);
         }
         let request = ReleaseTaskResourceRequest {
+            expected_request_revision: status.request.revision,
             expected_claim_revision: status.claim_revision,
             expected_lease_revision: status.lease_revision,
         };

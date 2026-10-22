@@ -9,5 +9,5 @@ CREATE INDEX resource_task_approval_deadline
     ON resource_requests (approval_deadline_at, request_id)
     WHERE target_kind = 'task' AND state = 'reviewing';
 
--- Old rows have no recorded wait budget. The task owner must reconcile them
--- through the authenticated create command; this migration does not invent one.
+-- Old rows have no recorded wait budget. Resource refuses readiness while any old Reviewing
+-- task remains, so operators must reconcile them through an authenticated workflow.

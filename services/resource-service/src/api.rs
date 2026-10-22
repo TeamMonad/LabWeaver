@@ -884,6 +884,7 @@ async fn release_task_resource(
             .store
             .release_task_resource(
                 task_run_id,
+                input.expected_request_revision,
                 input.expected_claim_revision,
                 input.expected_lease_revision,
                 context.trace_id(),
