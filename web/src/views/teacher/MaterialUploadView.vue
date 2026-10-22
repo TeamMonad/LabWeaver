@@ -408,9 +408,9 @@
             <details class="technical-details run-technical-details">
               <summary>查看生成任务详情</summary>
               <dl class="technical-meta">
-                <dt>AgentRun ID</dt>
+                <dt>生成任务 ID</dt>
                 <dd><code>{{ data.id }}</code></dd>
-                <dt>Revision</dt>
+                <dt>版本</dt>
                 <dd><code>rev-{{ data.revision }}</code></dd>
                 <dt>材料包 ID</dt>
                 <dd><code>{{ data.packageId }}</code></dd>

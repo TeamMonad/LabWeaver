@@ -181,7 +181,7 @@
             <span>当前状态</span><span>{{ environmentStateLabel(selectedEnvironment.observedState) }}</span>
             <details class="advanced-details">
               <summary>查看环境版本</summary>
-              <code>Revision {{ selectedEnvironment.revision }}</code>
+              <code>版本 {{ selectedEnvironment.revision }}</code>
             </details>
           </div>
           <label class="authorization-field">
@@ -209,7 +209,7 @@
               <div><span>状态</span><span class="state-chip" :class="`state-chip--${data.state}`">{{ runStateLabel(data.state) }}</span></div>
               <details class="advanced-details">
                 <summary>查看任务标识</summary>
-                <small>Run ID：{{ data.id }} · Revision：{{ data.revision }}</small>
+                <small>任务 ID：{{ data.id }} · 版本：{{ data.revision }}</small>
               </details>
             </div>
             <div class="track-list">

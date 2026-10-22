@@ -100,6 +100,24 @@ async function waitForSettledEnvironment(page, routePrefix, projectId, environme
   )
 }
 
+const LIFECYCLE_CONFIRMATION = Object.freeze({
+  stop: { title: '停止环境', confirm: '停止' },
+  restart: { title: '重启环境', confirm: '重启' },
+})
+
+/**
+ * Stop and restart interrupt sessions, so the console asks first. Confirm the
+ * visible dialog the way a user would; no request is sent before this click.
+ */
+export async function confirmEnvironmentLifecycleByUi(page, action) {
+  const labels = LIFECYCLE_CONFIRMATION[action]
+  if (!labels) throw new Error(`ENVIRONMENT_LIFECYCLE_CONFIRMATION_UNKNOWN:${action}`)
+  const dialog = page.getByRole('alertdialog', { name: labels.title, exact: true })
+  await expect(dialog).toBeVisible({ timeout: PAGE_TIMEOUT_MS })
+  await dialog.getByRole('button', { name: labels.confirm, exact: true }).click()
+  await expect(dialog).toBeHidden({ timeout: PAGE_TIMEOUT_MS })
+}
+
 /**
  * Stop an environment through the visible environment control bar. Reads and
  * operation polling remain API observations; the state-changing request is
@@ -125,6 +143,7 @@ export async function stopEnvironmentByUi(page, {
       && url.pathname === `/api/v1/environments/${environmentId}/stop`
   })
   await stopButton.click()
+  await confirmEnvironmentLifecycleByUi(page, 'stop')
   const accepted = await expectJson(await responsePromise, `${label}_ACCEPT_FAILED`)
   expect(accepted).toMatchObject({ environmentId, operationId: expect.any(String), statusUrl: expect.any(String) })
   await waitForOperation(page, accepted, label)

@@ -7,13 +7,14 @@
       :class="{ 'selector-trigger--active': isOpen, 'selector-trigger--unavailable': routeProjectUnavailable }"
       aria-haspopup="dialog"
       :aria-expanded="isOpen"
-      :aria-label="routeProjectUnavailable ? '选择项目，链接中的项目不可用' : `选择项目，当前：${activeProject?.name ?? '未选择'}`"
+      aria-label="选择项目"
+      aria-describedby="project-selector-current"
       :title="activeProject?.name"
       @click="toggleOpen"
     >
       <SvgIcon :name="routeProjectUnavailable ? 'link_off' : 'folder_open'" size="sm" class="trigger-icon" aria-hidden="true" />
       <span class="trigger-label">
-        <span class="trigger-primary">{{ triggerLabel }}</span>
+        <span id="project-selector-current" class="trigger-primary">{{ triggerLabel }}</span>
       </span>
       <SvgIcon name="expand_more" size="sm" class="trigger-arrow" aria-hidden="true" />
     </button>

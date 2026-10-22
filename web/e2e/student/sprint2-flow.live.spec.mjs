@@ -36,6 +36,7 @@ import {
 import { readActorId } from '../support/real-experiment.mjs'
 import { runTerminalCudaProbe } from '../support/real-gpu.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
+import { confirmEnvironmentLifecycleByUi } from '../support/environment-lifecycle.mjs'
 import {
   createRealWorkSshIdentity,
   openPinnedSshSession,
@@ -1276,6 +1277,7 @@ test('student provisions a Work environment, configures it, and releases its cap
         return response.request().method() === 'POST' && url.pathname === `/api/v1/environments/${environmentId}/restart`
       })
       await restartButton.click()
+      await confirmEnvironmentLifecycleByUi(page, 'restart')
       const restartAccepted = await expectJson(await restartResponsePromise, 'REAL_WORK_ENVIRONMENT_RESTART_FAILED')
       expect(restartAccepted).toMatchObject({
         environmentId,
@@ -1381,6 +1383,7 @@ test('student provisions a Work environment, configures it, and releases its cap
       return response.request().method() === 'POST' && url.pathname === `/api/v1/environments/${environmentId}/stop`
     })
     await page.getByRole('button', { name: '停止', exact: true }).click()
+    await confirmEnvironmentLifecycleByUi(page, 'stop')
     const stopAccepted = await expectJson(await stopResponsePromise, 'WORK_ENVIRONMENT_STOP_FAILED')
     expect(stopAccepted).toMatchObject({
       environmentId,
