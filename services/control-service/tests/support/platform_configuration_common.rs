@@ -227,7 +227,7 @@ pub(super) fn actual_loaded_bundle_replicas(
         })?;
     if !result.status.success() {
         return Err(format!(
-            "LW_BUNDLE_TEST_PRODUCER_FAILED command={command} exit_code={:?} stderr={}",
+            "LW_BUNDLE_TEST_PRODUCER_FAILED\ncommand={command}\nexit_code={:?}\nstderr:\n{}",
             result.status.code(),
             String::from_utf8_lossy(&result.stderr).trim()
         )
