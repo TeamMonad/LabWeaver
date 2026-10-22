@@ -346,7 +346,7 @@ async fn actual_bundle_load_is_required_for_success_and_failure_keeps_effective(
     );
 
     let mut next = effective.configuration.clone();
-    next.runtime_policy.default_container_uid = 1000;
+    next.lifecycle.detailed_log_retention_seconds = 60;
     state = configuration::update(
         &pool,
         ActorId::new(),
