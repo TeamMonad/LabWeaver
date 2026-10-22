@@ -19,9 +19,6 @@
       "AgentRunHistoryPage": {
         "$ref": "../contracts/v1/agent-run-history-page.schema.json"
       },
-      "AgentRunTaskProgress": {
-        "$ref": "../contracts/v1/agent-run-task-progress.schema.json"
-      },
       "AgentWorkExecutionIntentMetadata": {
         "$ref": "../contracts/v1/http/agent-work-execution-intent-metadata.schema.json"
       },
@@ -72,9 +69,6 @@
       },
       "EvaluationRun": {
         "$ref": "../contracts/v1/evaluation-run.schema.json"
-      },
-      "EvaluationRunTaskProgress": {
-        "$ref": "../contracts/v1/evaluation-run-task-progress.schema.json"
       },
       "GeneratedArtifactRecord": {
         "$ref": "../contracts/v1/http/generated-artifact-record.schema.json"
@@ -250,9 +244,6 @@
       },
       "StudentEvaluationResult": {
         "$ref": "../contracts/v1/student-evaluation-result.schema.json"
-      },
-      "TaskAttemptProgress": {
-        "$ref": "../contracts/v1/task-attempt-progress.schema.json"
       },
       "WorkConfigurationAdmissionBinding": {
         "$ref": "../contracts/v1/http/work-configuration-admission-binding.schema.json"
@@ -489,38 +480,10 @@
               "minLength": 1,
               "type": "string"
             }
-          },
-          {
-            "in": "query",
-            "name": "page",
-            "required": false,
-            "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "pageSize",
-            "required": false,
-            "schema": {
-              "default": 25,
-              "maximum": 100,
-              "minimum": 1,
-              "type": "integer"
-            }
           }
         ],
         "responses": {
           "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "../contracts/v1/agent-run-task-progress.schema.json"
-                }
-              }
-            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -578,10 +541,10 @@
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
-          "LW_TASK_PROGRESS_PAGE_INVALID",
-          "LW_TASK_PROGRESS_CHANGED",
-          "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
-          "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-permission": "agent.control.invoke",
