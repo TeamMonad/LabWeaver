@@ -411,10 +411,7 @@ fn contracts_check() -> Result<(), AppError> {
     Ok(())
 }
 
-fn is_registered_generated_path(
-    relative: &str,
-    generated_paths: &BTreeSet<&str>,
-) -> bool {
+fn is_registered_generated_path(relative: &str, generated_paths: &BTreeSet<&str>) -> bool {
     relative == "schemas/contracts/v1/internal/labweaver-log-v1.schema.json"
         || generated_paths.contains(relative)
 }
@@ -1019,9 +1016,9 @@ fn run_cargo<const N: usize>(role: &'static str, arguments: [&str; N]) -> Result
 
 #[cfg(test)]
 mod tests {
+    use super::is_registered_generated_path;
     #[cfg(target_os = "linux")]
     use super::is_uuid_v7_run_id;
-    use super::is_registered_generated_path;
     use super::{
         EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
         identity_foundation, platform_application, platform_buildkit, platform_foundation,
@@ -1039,7 +1036,6 @@ mod tests {
             &registered,
         ));
     }
-
 
     #[cfg(target_os = "linux")]
     #[test]
