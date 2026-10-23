@@ -145,6 +145,10 @@ pub async fn register_bundle(
         .desired
         .as_ref()
         .ok_or(ConfigurationError::RevisionConflict)?;
+    desired
+        .configuration
+        .validate()
+        .map_err(ConfigurationError::Contract)?;
     if state.revision != request.expected_revision
         || desired.revision != desired_revision
         || desired.configuration_sha256 != request.configuration_sha256

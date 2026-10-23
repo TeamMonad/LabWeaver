@@ -664,7 +664,7 @@ def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
     builder = configuration["builderPolicy"]
     if runtime["defaultContainerUid"] != 0:
         raise BundleError(
-            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
             f"runtimePolicy.defaultContainerUid={runtime['defaultContainerUid']} has no "
             "execution-side consumer (see #207)"
         )
@@ -677,18 +677,18 @@ def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
     for value, field in unsupported:
         if value:
             raise BundleError(
-                "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+                "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
                 f"{field} has no execution-side consumer (see #207)"
             )
     if builder["allowPrivilegeEscalation"]:
         raise BundleError(
-            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
             "builderPolicy.allowPrivilegeEscalation has no execution-side consumer (see #207)"
         )
     location = runtime["privilegedExecutionLocation"]
     if location is not None and location.get("kind") != "dedicated_node_pool":
         raise BundleError(
-            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
             "runtimePolicy.privilegedExecutionLocation has no execution-side consumer (see #207)"
         )
     return {

@@ -211,10 +211,32 @@ impl PlatformConfigurationDesired {
         {
             return Err(PlatformConfigurationContractError::PreauthorizationInvalid);
         }
+        let unsupported = if policy.default_container_uid != 0 {
+            Some("runtimePolicy.defaultContainerUid")
+        } else if !policy.allowed_capabilities.is_empty() {
+            Some("runtimePolicy.allowedCapabilities")
+        } else if !policy.preauthorizations.is_empty() {
+            Some("runtimePolicy.preauthorizations")
+        } else if matches!(
+            policy.privileged_execution_location,
+            Some(PrivilegedExecutionLocation::VirtualMachineGuest { .. })
+        ) {
+            Some("runtimePolicy.privilegedExecutionLocation")
+        } else if !self.builder_policy.capabilities.is_empty() {
+            Some("builderPolicy.capabilities")
+        } else if self.builder_policy.allow_privilege_escalation {
+            Some("builderPolicy.allowPrivilegeEscalation")
+        } else if !self.builder_policy.entitlements.is_empty() {
+            Some("builderPolicy.entitlements")
+        } else {
+            None
+        };
+        if let Some(field) = unsupported {
+            return Err(PlatformConfigurationContractError::PolicyUnsupported { field });
+        }
         Ok(())
     }
 }
-
 fn valid_binding(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
@@ -470,6 +492,8 @@ pub enum PlatformConfigurationContractError {
     ExecutionLocationInvalid,
     #[error("LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID")]
     PreauthorizationInvalid,
+    #[error("LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:{field}")]
+    PolicyUnsupported { field: &'static str },
 }
 
 #[cfg(test)]
@@ -498,7 +522,12 @@ mod tests {
             Some(PrivilegedExecutionLocation::VirtualMachineGuest {
                 provider_binding: "kubevirt-dedicated".to_owned(),
             });
-        configuration.validate()?;
+        assert!(matches!(
+            configuration.validate(),
+            Err(PlatformConfigurationContractError::PolicyUnsupported {
+                field: "runtimePolicy.privilegedExecutionLocation"
+            })
+        ));
         assert_eq!(configuration.builder_policy, builder);
         Ok(())
     }
@@ -530,7 +559,12 @@ mod tests {
             .runtime_policy
             .allowed_capabilities
             .insert(LinuxCapability::SysAdmin);
-        configuration.validate()?;
+        assert!(matches!(
+            configuration.validate(),
+            Err(PlatformConfigurationContractError::PolicyUnsupported {
+                field: "runtimePolicy.preauthorizations"
+            })
+        ));
         configuration
             .runtime_policy
             .preauthorizations

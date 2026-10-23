@@ -26,7 +26,7 @@ import {
 export const PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES = 73_400_320
 
 /** Local fail-closed code; mirrors the Bundle/Helm rejection of settings without an execution-side consumer. */
-export const POLICY_UNSUPPORTED_CODE = 'LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED'
+export const POLICY_UNSUPPORTED_CODE = 'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED'
 
 export interface PlatformConfigurationConflict {
   /** The server facts read after the 409/412; the draft is kept untouched. */

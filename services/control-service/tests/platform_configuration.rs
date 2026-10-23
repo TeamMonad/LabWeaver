@@ -2,14 +2,14 @@
 
 use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
-    ApplyPlatformConfigurationRequest, PlatformConfigurationApplyStage as Stage,
-    PlatformConfigurationDesired, PlatformConfigurationFailureReason as Failure,
-    PlatformConfigurationNextStep as Next, PlatformConfigurationStatus,
+    ApplyPlatformConfigurationRequest, BuilderEntitlement,
+    PlatformConfigurationApplyStage as Stage, PlatformConfigurationDesired,
+    PlatformConfigurationFailureReason as Failure, PlatformConfigurationNextStep as Next,
+    PlatformConfigurationStatus, PrivilegedExecutionLocation,
     RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
-    UpdatePlatformConfigurationRequest,
+    RuntimePreauthorization, RuntimePreauthorizationScope, UpdatePlatformConfigurationRequest,
 };
-use contracts::{ActorId, OperationId, Revision, UtcTimestamp};
-use control_service::platform_configuration::{self as configuration, ConfigurationError};
+use contracts::{ActorId, OperationId, ProblemDetails, ProjectId, Revision, UtcTimestamp};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -779,6 +779,115 @@ async fn newer_desired_during_execution_does_not_change_the_applied_snapshot() -
         .await?;
     let persisted = configuration::get(&reconnect).await?;
     assert_eq!(persisted, state);
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> TestResult {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    let (_container, pool) = database().await?;
+    let fixture = http_fixture::HttpFixture::new(pool).await?;
+    let gateway = fixture.token("labweaver-access", "access.control.forward")?;
+    let session = contracts::BffSessionId::new();
+    let request = |configuration: PlatformConfigurationDesired, key: &str| {
+        Request::builder()
+            .method("PATCH")
+            .uri("/api/v1/admin/platform-configuration")
+            .header("Authorization", format!("Bearer {gateway}"))
+            .header("x-labweaver-actor-id", fixture.admin.to_string())
+            .header("x-labweaver-session-id", session.to_string())
+            .header("Content-Type", "application/json")
+            .header("If-Match", "\"rev-0\"")
+            .header("Idempotency-Key", key)
+            .body(Body::from(serde_json::to_vec(
+                &UpdatePlatformConfigurationRequest {
+                    expected_revision: 0,
+                    configuration,
+                },
+            )?))
+    };
+    let mut uid = PlatformConfigurationDesired::default();
+    uid.runtime_policy.default_container_uid = 1000;
+    let mut capabilities = PlatformConfigurationDesired::default();
+    capabilities
+        .runtime_policy
+        .allowed_capabilities
+        .insert(LinuxCapability::NetAdmin);
+    let mut preauthorization = PlatformConfigurationDesired::default();
+    preauthorization
+        .runtime_policy
+        .preauthorizations
+        .push(RuntimePreauthorization {
+            scope: RuntimePreauthorizationScope::Project {
+                project_id: ProjectId::new(),
+            },
+            capabilities: Default::default(),
+            privileged: false,
+        });
+    let mut guest = PlatformConfigurationDesired::default();
+    guest.runtime_policy.privileged_allowed = true;
+    guest.runtime_policy.privileged_execution_location =
+        Some(PrivilegedExecutionLocation::VirtualMachineGuest {
+            provider_binding: "kubevirt-test".to_owned(),
+        });
+    let mut builder_capabilities = PlatformConfigurationDesired::default();
+    builder_capabilities
+        .builder_policy
+        .capabilities
+        .insert(LinuxCapability::NetAdmin);
+    let mut escalation = PlatformConfigurationDesired::default();
+    escalation.builder_policy.allow_privilege_escalation = true;
+    let mut entitlements = PlatformConfigurationDesired::default();
+    entitlements
+        .builder_policy
+        .entitlements
+        .insert(BuilderEntitlement::NetworkHost);
+    let cases = [
+        ("runtimePolicy.defaultContainerUid", uid),
+        ("runtimePolicy.allowedCapabilities", capabilities),
+        ("runtimePolicy.preauthorizations", preauthorization),
+        ("runtimePolicy.privilegedExecutionLocation", guest),
+        ("builderPolicy.capabilities", builder_capabilities),
+        ("builderPolicy.allowPrivilegeEscalation", escalation),
+        ("builderPolicy.entitlements", entitlements),
+    ];
+    for (index, (field, configuration)) in cases.into_iter().enumerate() {
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(request(configuration, &format!("policy-{index}"))?)
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{field}"
+        );
+        let problem: ProblemDetails =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+        assert_eq!(
+            problem.diagnostic_code.as_str(),
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED"
+        );
+        assert!(
+            problem.detail.contains(field),
+            "{field}: {}",
+            problem.detail
+        );
+    }
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(request(
+            PlatformConfigurationDesired::default(),
+            "policy-valid",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
     Ok(())
 }
 
