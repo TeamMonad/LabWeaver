@@ -1612,7 +1612,7 @@ export type CreditHold = {
     projectId: CreditHoldPageSchemaProjectId;
     reason?: string | null;
     remaining: CreditHoldPageSchemaFixedDecimal;
-    requestId: ResourceRequestId;
+    requestId: CreditHoldPageSchemaResourceRequestId;
     state: CreditHoldState;
 };
 
@@ -1636,7 +1636,7 @@ export type CreditHoldPageSchemaProjectId = string;
 /**
  * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
  */
-export type ResourceRequestId = string;
+export type CreditHoldPageSchemaResourceRequestId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
