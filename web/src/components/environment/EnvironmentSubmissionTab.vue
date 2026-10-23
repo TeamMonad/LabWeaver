@@ -400,6 +400,7 @@ const {
 
 .freeze-section {
   margin-top: var(--space-6);
+  padding: var(--space-5);
 }
 
 .freeze-desc {

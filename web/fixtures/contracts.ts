@@ -757,7 +757,7 @@ export async function createSshPublicKey() { return unsupportedResponse('添加 
 export async function deleteSshPublicKey() { return unsupportedResponse('删除 SSH 公钥') }
 export async function listEnvironmentAccessGrantsForFixture() { return fixtureResponse({ items: [] }) }
 export async function freezeSubmission() { return unsupportedResponse('冻结提交') }
-const EVALUATION_SCENES = new Set(['student-results', 'student-result-score', 'student-result-zero', 'student-result-platform', 'student-result-running'])
+const EVALUATION_SCENES = new Set(['student-results', 'student-result-score', 'student-result-zero', 'student-result-platform', 'student-result-running', 'student-env-ready'])
 
 function frozenSubmissionFixture(id: string, frozenAt: string): FrozenSubmissionSchema {
   return {
