@@ -484,7 +484,7 @@ async fn approve_request(
         gpu_allocation: None,
         state: contracts::resource::CapacityClaimState::Reserved,
         revision: Revision::new(1).map_err(|_| ResourceApiError::Invalid)?,
-        updated_at: None,
+        updated_at: Some(now),
     };
     let allocation = PendingAllocation {
         claim,

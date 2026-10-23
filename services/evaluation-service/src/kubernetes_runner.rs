@@ -4975,7 +4975,7 @@ mod probe_recovery_tests {
             gpu_allocation: None,
             state: CapacityClaimState::HandedOff,
             revision,
-            updated_at: None,
+            updated_at: Some(now),
         };
         let lease_record = ResourceLease {
             id: lease_id,

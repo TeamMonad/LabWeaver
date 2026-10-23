@@ -427,7 +427,7 @@ async fn approve(
             gpu_allocation: None,
             state: CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
-            updated_at: None,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };

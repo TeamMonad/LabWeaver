@@ -2626,6 +2626,7 @@ impl PgResourceStore {
                 let now = database_now(&mut transaction).await?;
                 let next = ResourceLifecycle::accept_approval(&request, approval, policy, now)?;
                 let mut claim = allocation.claim.clone();
+                claim.updated_at = Some(now);
                 claim.gpu_allocation = resolve_gpu_allocation(
                     &mut transaction,
                     approval.provider_binding.as_str(),
@@ -2900,8 +2901,7 @@ impl PgResourceStore {
                     return Err(ResourceStoreError::CapacityClaimStateConflict);
                 }
                 let next = transition_claim(&claim, CapacityClaimState::Provisioning)?;
-                update_claim(&mut transaction, &claim, &next, None, None, None).await?;
-                next
+                update_claim(&mut transaction, &claim, &next, None, None, None).await?
             }
             CapacityClaimState::Provisioning
             | CapacityClaimState::Ready
@@ -3045,7 +3045,7 @@ impl PgResourceStore {
             ResourceLifecycle::activate_lease(&lease, expected_lease_revision, now, expires_at)?;
         let next_request = ResourceLifecycle::activate(&request, request.revision, now)?;
         let next_claim = transition_claim(&claim, CapacityClaimState::HandedOff)?;
-        update_claim(
+        let next_claim = update_claim(
             &mut transaction,
             &claim,
             &next_claim,
@@ -3562,12 +3562,10 @@ impl PgResourceStore {
                 previous_revision = claim.revision.get(),
                 recovered_revision = next.revision.get()
             );
-            update_claim(&mut transaction, &claim, &next, None, None, None).await?;
-            next
+            update_claim(&mut transaction, &claim, &next, None, None, None).await?
         } else {
             let next = transition_claim(&claim, CapacityClaimState::Provisioning)?;
-            update_claim(&mut transaction, &claim, &next, None, None, None).await?;
-            next
+            update_claim(&mut transaction, &claim, &next, None, None, None).await?
         };
         transaction.commit().await?;
         Ok(Some(ProvisioningCapacityClaim {
@@ -3647,7 +3645,7 @@ impl PgResourceStore {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
         let next = transition_claim(&claim, CapacityClaimState::Ready)?;
-        update_claim(
+        let next = update_claim(
             &mut transaction,
             &claim,
             &next,
@@ -5074,11 +5072,15 @@ async fn insert_claim(
     transaction: &mut Transaction<'_, Postgres>,
     claim: &CapacityClaim,
 ) -> Result<(), ResourceStoreError> {
+    let updated_at = claim.updated_at.ok_or(ResourceStoreError::Contract(
+        contracts::resource::ResourceError::InvalidClaim,
+    ))?;
     let workload_gpu = claim.workload_resources.gpu.as_ref();
     let quota_gpu = claim.quota_resources.gpu.as_ref();
     let gpu_allocation = claim.gpu_allocation.as_ref();
-    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,gpu_catalog_entry_id,gpu_mode,gpu_allocation_binding,contract) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)")
+    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,gpu_catalog_entry_id,gpu_mode,gpu_allocation_binding,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)")
         .bind(claim.id.as_uuid()).bind(claim.request_id.as_uuid()).bind(claim.approval_id.as_uuid()).bind(&claim.provider_binding).bind(wire(claim.state)?).bind(i64::try_from(claim.revision.get())?)
+        .bind(updated_at.get())
         .bind(i32::try_from(claim.workload_resources.cpu_millicores)?).bind(i64::try_from(claim.workload_resources.memory_bytes)?).bind(i64::try_from(claim.workload_resources.storage_bytes)?)
         .bind(workload_gpu.map(|value| value.class.as_str())).bind(workload_gpu.map(|value| i32::try_from(value.count)).transpose()?)
         .bind(i32::try_from(claim.quota_resources.cpu_millicores)?).bind(i64::try_from(claim.quota_resources.memory_bytes)?).bind(i64::try_from(claim.quota_resources.storage_bytes)?)
@@ -5208,17 +5210,21 @@ async fn update_claim(
     namespace: Option<&str>,
     namespace_uid: Option<&str>,
     quota_uid: Option<&str>,
-) -> Result<(), ResourceStoreError> {
+) -> Result<CapacityClaim, ResourceStoreError> {
+    let now = database_now(transaction).await?;
+    let mut stamped = next.clone();
+    stamped.updated_at = Some(now);
     update_claim_at(
         transaction,
         current,
-        next,
+        &stamped,
         namespace,
         namespace_uid,
         quota_uid,
-        None,
+        Some(now),
     )
-    .await
+    .await?;
+    Ok(stamped)
 }
 
 async fn update_claim_at(
@@ -5444,7 +5450,8 @@ async fn release_task_locked(
     }
     let releasing_claim = transition_claim(claim, CapacityClaimState::Releasing)?;
     let released_claim = transition_claim(&releasing_claim, CapacityClaimState::Released)?;
-    update_claim(transaction, claim, &released_claim, None, None, None).await?;
+    let released_claim =
+        update_claim(transaction, claim, &released_claim, None, None, None).await?;
     sqlx::query(
         "UPDATE resource.gpu_capacity_reservations
          SET state='released', released_at=clock_timestamp()
@@ -6109,7 +6116,7 @@ mod tests {
             gpu_allocation: None,
             state: CapacityClaimState::Blocked,
             revision: Revision::new(4).expect("fixed revision"),
-            updated_at: None,
+            updated_at: Some("2026-07-15T00:00:00.000Z".parse().expect("fixed timestamp")),
         };
         let releasing = transition_claim(&claim, CapacityClaimState::Releasing);
         assert!(releasing.is_ok());
