@@ -1362,7 +1362,7 @@ export type AvailableObjectActionsSchemaActorId = string;
 /**
  * An operation on an object. Platform identity alone does not grant these operations.
  */
-export type ObjectAction = 'browse' | 'edit' | 'start' | 'stop' | 'configure_agent' | 'grant_access' | 'manage_members' | 'view_costs' | 'request_runtime_permissions' | 'approve_runtime_permissions' | 'manage_runtime_policy';
+export type ObjectAction = 'browse' | 'archive' | 'edit' | 'start' | 'stop' | 'configure_agent' | 'grant_access' | 'manage_members' | 'view_costs' | 'request_runtime_permissions' | 'approve_runtime_permissions' | 'manage_runtime_policy';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.

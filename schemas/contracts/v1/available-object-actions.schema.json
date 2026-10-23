@@ -8,6 +8,7 @@
       "description": "An operation on an object. Platform identity alone does not grant these operations.",
       "enum": [
         "browse",
+        "archive",
         "edit",
         "start",
         "stop",

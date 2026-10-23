@@ -17,6 +17,7 @@ pub const AUTHORIZATION_CHECK_TIMEOUT_SECONDS: u64 = 5;
 #[serde(rename_all = "snake_case")]
 pub enum ObjectAction {
     Browse,
+    Archive,
     Edit,
     Start,
     Stop,
@@ -46,8 +47,8 @@ impl ProjectObjectRole {
     #[must_use]
     pub const fn actions(self) -> &'static [ObjectAction] {
         use ObjectAction::{
-            Browse, ConfigureAgent, Edit, GrantAccess, ManageMembers, RequestRuntimePermissions,
-            Start, Stop, ViewCosts,
+            Archive, Browse, ConfigureAgent, Edit, GrantAccess, ManageMembers,
+            RequestRuntimePermissions, Start, Stop, ViewCosts,
         };
         match self {
             Self::Viewer => &[Browse],
@@ -62,7 +63,7 @@ impl ProjectObjectRole {
                 ViewCosts,
                 RequestRuntimePermissions,
             ],
-            Self::Manager | Self::Owner => &[
+            Self::Manager => &[
                 Browse,
                 Edit,
                 Start,
@@ -72,6 +73,18 @@ impl ProjectObjectRole {
                 ManageMembers,
                 ViewCosts,
                 RequestRuntimePermissions,
+            ],
+            Self::Owner => &[
+                Browse,
+                Edit,
+                Start,
+                Stop,
+                ConfigureAgent,
+                GrantAccess,
+                ManageMembers,
+                ViewCosts,
+                RequestRuntimePermissions,
+                Archive,
             ],
         }
     }
@@ -104,7 +117,7 @@ pub struct AvailableObjectActions {
 /// Unknown operations retain their existing policy and cannot receive a guessed permission.
 #[must_use]
 pub fn project_operation_action(operation: &str) -> Option<ObjectAction> {
-    use ObjectAction::{Browse, ConfigureAgent, Edit, ManageMembers, ViewCosts};
+    use ObjectAction::{Archive, Browse, ConfigureAgent, Edit, ManageMembers, ViewCosts};
     match operation {
         "getResourceRuntimeAuthorization"
         | "listEnvironments"
@@ -126,12 +139,12 @@ pub fn project_operation_action(operation: &str) -> Option<ObjectAction> {
         | "getEnvironmentTemplateRelease"
         | "listProjectResourceRequests"
         | "listProjectResourceLeases" => Some(Browse),
+        "archiveProject" => Some(Archive),
         "createResourceRequest"
         | "createProjectResourceRequest"
         | "createEnvironment"
         | "freezeSubmission"
         | "updateProject"
-        | "archiveProject"
         | "createProjectProblemPackageUpload"
         | "completeProjectProblemPackageUpload"
         | "getProjectProblemPackageUpload"

@@ -8430,7 +8430,7 @@
           "LW_REVISION_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
-        "x-labweaver-object-action": "edit",
+        "x-labweaver-object-action": "archive",
         "x-labweaver-permission": "project:archive",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,

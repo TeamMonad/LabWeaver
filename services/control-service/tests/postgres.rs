@@ -4255,6 +4255,58 @@ async fn object_actions_use_control_truth_and_revoke_real_idle_sse()
     );
     logout_server.abort();
     server.abort();
+    assert!(
+        authorize_project_action(&restored_context, project.id, ObjectAction::Archive).is_err(),
+        "editor membership must not receive archive"
+    );
+    assert!(matches!(
+        service
+            .archive_project(
+                project.id,
+                member,
+                false,
+                edited.revision,
+                &IdempotencyKey::parse("editor-archive")?,
+                UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?,
+            )
+            .await,
+        Err(control_service::ControlError::ProjectGovernanceDenied)
+    ));
+    let owner_archived = service
+        .archive_project(
+            project.id,
+            owner,
+            false,
+            edited.revision,
+            &IdempotencyKey::parse("owner-archive")?,
+            UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?,
+        )
+        .await?;
+    assert_eq!(owner_archived.state, contracts::ProjectState::Archived);
+    let admin_project = service
+        .create_project(
+            owner,
+            contracts::PlatformRole::Student,
+            &contracts::CreateProjectRequest {
+                name: "admin archive project".to_owned(),
+                description: None,
+                course_id: None,
+            },
+            &IdempotencyKey::parse("admin-archive-project")?,
+            UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?,
+        )
+        .await?;
+    let admin_archived = service
+        .archive_project(
+            admin_project.id,
+            ActorId::new(),
+            true,
+            admin_project.revision,
+            &IdempotencyKey::parse("admin-archive")?,
+            UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?,
+        )
+        .await?;
+    assert_eq!(admin_archived.state, contracts::ProjectState::Archived);
     Ok(())
 }
 

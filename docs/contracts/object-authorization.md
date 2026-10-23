@@ -10,9 +10,9 @@ Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、A
 | operator | browse、start、stop |
 | editor | browse、edit、start、stop、configure_agent、grant_access、view_costs、request_runtime_permissions |
 | manager | editor 的动作，以及 manage_members |
-| owner | manager 的动作。创建项目时由 Control 保存 |
+| owner | manager 的动作，以及 archive |
 
-平台管理员可以执行被操作契约明确允许的全局管理动作。项目 `manager` 可执行 `manage_members`，但不能管理运行策略；`owner` 负责项目根所有权，成员 API 不能写入、替换或移除 owner。服务端仍检查身份期限，并记录操作者、操作和诊断。普通项目成员不能通过 `objectRole` 获取未列出的动作。
+平台管理员可以执行被操作契约明确允许的全局管理动作。项目 `manager` 可执行 `manage_members`，但不能管理运行策略或 archive；`owner` 负责项目根所有权，成员 API 不能写入、替换或移除 owner。服务端仍检查身份期限，并记录操作者、操作和诊断。普通项目成员不能通过 `objectRole` 获取未列出的动作。
 
 普通账号的课程范围仍要求当前课程成员。契约明确允许管理员的课程操作使用全局管理员权限。教学内容接口保留其既有角色约束。项目职责不会授予其他课程、其他项目或他人的个人实验内容。
 
