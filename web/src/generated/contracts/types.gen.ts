@@ -19824,7 +19824,7 @@ export type ListProjectResourceRequestsData = {
     };
     query?: {
         courseId?: string;
-        state?: Array<'reviewing' | 'allocating' | 'active' | 'expired' | 'rejected' | 'cancelled'>;
+        state?: Array<'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled'>;
         cursor?: string;
         limit?: number;
     };

@@ -13171,6 +13171,7 @@
                   "reviewing",
                   "allocating",
                   "active",
+                  "expiring",
                   "expired",
                   "rejected",
                   "cancelled"

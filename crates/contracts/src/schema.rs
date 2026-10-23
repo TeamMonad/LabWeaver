@@ -1168,7 +1168,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             Method::Delete => "delete",
         };
         let mut parameters = path_parameters(operation.path);
-        let resource_request_states = serde_json::to_value(crate::resource::ResourceRequestState::ALL)?;
+        let resource_request_states =
+            serde_json::to_value(crate::resource::ResourceRequestState::ALL)?;
         if matches!(
             operation.operation_id,
             "getPlatformConfigurationVersion"
