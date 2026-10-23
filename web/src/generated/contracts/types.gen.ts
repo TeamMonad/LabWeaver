@@ -11629,7 +11629,7 @@ export type ResourceRequest = {
     requestedResources: ResourceRequestPageSchemaWorkloadResources;
     requesterId: ResourceRequestPageSchemaActorId;
     revision: ResourceRequestPageSchemaRevision;
-    state: ResourceRequestState;
+    state: ResourceRequestPageSchemaResourceRequestState;
     target: ResourceRequestPageSchemaResourceTarget;
     updatedAt: ResourceRequestPageSchemaUtcTimestamp;
 };
@@ -11642,7 +11642,7 @@ export type ResourceRequestPageSchemaResourceRequestId = string;
 /**
  * Request lifecycle owned by Resource Service.
  */
-export type ResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+export type ResourceRequestPageSchemaResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
 
 /**
  * Immutable identity of a Resource request's target.
