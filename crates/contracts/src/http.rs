@@ -2108,7 +2108,7 @@ pub struct SnapshotPage<T> {
 
 pub const DEFAULT_PAGE_LIMIT: u16 = 50;
 pub const MAX_PAGE_LIMIT: u16 = 100;
-pub const MAX_CURSOR_LENGTH: usize = 512;
+pub const MAX_CURSOR_LENGTH: usize = 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

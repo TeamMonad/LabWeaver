@@ -36,7 +36,8 @@ pub fn cursor_key_id(domain: &str, key: &[u8]) -> String {
     hasher.update(domain.as_bytes());
     hasher.update([0]);
     hasher.update(key);
-    format!("{:x}", hasher.finalize())
+    let digest = format!("{:x}", hasher.finalize());
+    digest[..32].to_owned()
 }
 
 impl Display for Sha256Digest {
@@ -104,8 +105,8 @@ mod tests {
         let key = b"cursor-key";
         let agent = cursor_key_id("agent", key);
         let resource = cursor_key_id("resource", key);
-        assert_eq!(agent.len(), 64);
-        assert_eq!(resource.len(), 64);
+        assert_eq!(agent.len(), 32);
+        assert_eq!(resource.len(), 32);
         assert_ne!(agent, resource);
         assert_eq!(agent, cursor_key_id("agent", key));
     }

@@ -2771,7 +2771,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "type": "string"
             }
@@ -4201,7 +4201,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.~-]+$",
               "type": "string"
@@ -4661,7 +4661,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.~-]+$",
               "type": "string"
@@ -5264,7 +5264,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.~-]+$",
               "type": "string"
@@ -6150,7 +6150,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "type": "string"
             }
@@ -7414,7 +7414,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.~-]+$",
               "type": "string"
@@ -9858,7 +9858,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "type": "string"
             }
@@ -11143,7 +11143,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "type": "string"
             }
@@ -13186,7 +13186,7 @@
             "name": "cursor",
             "required": false,
             "schema": {
-              "maxLength": 512,
+              "maxLength": 1024,
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.~-]+$",
               "type": "string"

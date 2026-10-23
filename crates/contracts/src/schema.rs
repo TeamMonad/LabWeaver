@@ -1203,7 +1203,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "listOwnProjectEvaluationResults"
                 | "listSshPublicKeys"
         ) {
-            parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512}}));
+            parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024}}));
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}));
         }
         if matches!(
@@ -1216,7 +1216,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             parameters.extend([
                 json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
                 json!({"name":"state","in":"query","required":false,"style":"form","explode":true,"schema":{"type":"array","items":{"type":"string","enum":["reviewing","allocating","active","expired","rejected","cancelled"]}}}),
-                json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
+                json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
                 json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}),
             ]);
         } else if operation.operation_id == "listProjectResourceLeases" {
@@ -1232,7 +1232,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.operation_id == "listProjectAgentRuns" {
             parameters.extend([
                 json!({"name":"state","in":"query","required":false,"style":"form","explode":true,"schema":{"type":"array","items":{"type":"string","enum":["requested","running","partially_succeeded","succeeded","awaiting_approval","failed","cancelling","cancelled"]}}}),
-                json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
+                json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
                 json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}),
             ]);
         }
@@ -1794,7 +1794,7 @@ fn header_parameter(name: &str, required: bool) -> Value {
 }
 
 fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
-    let cursor = || json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[A-Za-z0-9_.~-]+$"}});
+    let cursor = || json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024,"pattern":"^[A-Za-z0-9_.~-]+$"}});
     let limit = || json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}});
     match operation_id {
         "listEnvironments" => vec![
