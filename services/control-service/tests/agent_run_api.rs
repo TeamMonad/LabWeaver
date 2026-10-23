@@ -529,7 +529,9 @@ async fn apply_domain_migrations(pool: &sqlx::PgPool) -> Result<(), Box<dyn std:
     for migration in &entry.migrations {
         let sql =
             persistence_sqlx::MigrationCatalog::read_verified_sql(&migration_root, migration)?;
-        sqlx::raw_sql(&sql).execute(&mut *connection).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *connection)
+            .await?;
     }
     Ok(())
 }

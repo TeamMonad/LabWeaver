@@ -52,7 +52,9 @@ async fn fixture() -> Result<
             migration.push('\n');
         }
     }
-    sqlx::raw_sql(&migration).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*migration))
+        .execute(&pool)
+        .await?;
     let store = PgCreditStore::new(pool.clone());
     Ok((container, pool, store))
 }

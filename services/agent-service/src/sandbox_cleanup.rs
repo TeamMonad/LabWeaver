@@ -891,7 +891,9 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("migration catalog has no agent domain"))?;
         for migration in &migrations.migrations {
             let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
-            sqlx::raw_sql(&sql).execute(&mut *connection).await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *connection)
+                .await?;
         }
         Ok(())
     }

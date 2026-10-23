@@ -40,7 +40,7 @@ impl IdempotencyStore {
              WHERE operation = $1 AND idempotency_key = $2",
             domain.schema()
         );
-        let Some(row) = sqlx::query(&query)
+        let Some(row) = sqlx::query(sqlx::AssertSqlSafe(&*query))
             .bind(operation)
             .bind(key)
             .fetch_optional(pool)
@@ -77,7 +77,7 @@ impl IdempotencyStore {
              VALUES ($1, $2, $3, 'in_progress') ON CONFLICT DO NOTHING",
             domain.schema()
         );
-        let result = sqlx::query(&insert)
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*insert))
             .bind(operation)
             .bind(key)
             .bind(request_hash.to_string())
@@ -91,7 +91,7 @@ impl IdempotencyStore {
              WHERE operation = $1 AND idempotency_key = $2 FOR UPDATE",
             domain.schema()
         );
-        let row = sqlx::query(&select)
+        let row = sqlx::query(sqlx::AssertSqlSafe(&*select))
             .bind(operation)
             .bind(key)
             .fetch_one(&mut **transaction)
@@ -122,7 +122,7 @@ impl IdempotencyStore {
              WHERE operation = $1 AND idempotency_key = $2 AND state = 'in_progress'",
             domain.schema()
         );
-        let updated = sqlx::query(&query)
+        let updated = sqlx::query(sqlx::AssertSqlSafe(&*query))
             .bind(operation)
             .bind(key)
             .bind(result)
@@ -170,7 +170,7 @@ impl OutboxStore {
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
             domain.schema()
         );
-        sqlx::query(&query)
+        sqlx::query(sqlx::AssertSqlSafe(&*query))
             .bind(event_id)
             .bind(subject)
             .bind(event_type)
@@ -224,7 +224,7 @@ impl InboxStore {
             "SELECT payload_sha256 FROM {}.inbox_events WHERE consumer = $1 AND event_id = $2",
             domain.schema()
         );
-        if let Some(row) = sqlx::query(&duplicate)
+        if let Some(row) = sqlx::query(sqlx::AssertSqlSafe(&*duplicate))
             .bind(consumer)
             .bind(event_id)
             .fetch_optional(&mut **transaction)
@@ -243,7 +243,7 @@ impl InboxStore {
              ON CONFLICT (consumer, aggregate_id) DO NOTHING",
             domain.schema()
         );
-        sqlx::query(&create_watermark)
+        sqlx::query(sqlx::AssertSqlSafe(&*create_watermark))
             .bind(consumer)
             .bind(aggregate_id)
             .execute(&mut **transaction)
@@ -253,7 +253,7 @@ impl InboxStore {
              WHERE consumer = $1 AND aggregate_id = $2 FOR UPDATE",
             domain.schema()
         );
-        let last = sqlx::query(&watermark_query)
+        let last = sqlx::query(sqlx::AssertSqlSafe(&*watermark_query))
             .bind(consumer)
             .bind(aggregate_id)
             .fetch_one(&mut **transaction)
@@ -272,7 +272,7 @@ impl InboxStore {
              VALUES ($1, $2, $3, $4, $5)",
             domain.schema()
         );
-        sqlx::query(&insert)
+        sqlx::query(sqlx::AssertSqlSafe(&*insert))
             .bind(consumer)
             .bind(event_id)
             .bind(aggregate_id)
@@ -285,7 +285,7 @@ impl InboxStore {
              WHERE consumer = $1 AND aggregate_id = $2 AND last_sequence = $4",
             domain.schema()
         );
-        let updated = sqlx::query(&update)
+        let updated = sqlx::query(sqlx::AssertSqlSafe(&*update))
             .bind(consumer)
             .bind(aggregate_id)
             .bind(sequence)

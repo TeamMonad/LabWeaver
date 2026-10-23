@@ -419,9 +419,11 @@ async fn set_role_passwords(pool: &PgPool) -> Result<(), sqlx::Error> {
         "lw_evaluation_runtime",
         "lw_resource_runtime",
     ] {
-        sqlx::query(&format!("ALTER ROLE {role} PASSWORD '{TEST_PASSWORD}'"))
-            .execute(pool)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER ROLE {role} PASSWORD '{TEST_PASSWORD}'"
+        )))
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }

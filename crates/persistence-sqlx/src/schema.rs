@@ -144,7 +144,10 @@ impl SchemaVerifier {
             "SELECT migration_id, sha256, outcome FROM {}.schema_migrations ORDER BY migration_id",
             expected.name.schema()
         );
-        let rows = match sqlx::query(&query).fetch_all(pool).await {
+        let rows = match sqlx::query(sqlx::AssertSqlSafe(&*query))
+            .fetch_all(pool)
+            .await
+        {
             Ok(rows) => rows,
             Err(error) if is_missing_schema(&error) => return SchemaStatus::Missing,
             Err(_) => return SchemaStatus::Unavailable,

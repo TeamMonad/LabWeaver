@@ -2662,7 +2662,9 @@ mod project_scope_tests {
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql")
         );
-        sqlx::raw_sql(&migrations).execute(&pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+            .execute(&pool)
+            .await?;
 
         let actor = Uuid::now_v7();
         sqlx::query("INSERT INTO access.actors (actor_id,issuer,subject_sha256) VALUES ($1,'https://issuer.example.test',$2)")
@@ -2747,7 +2749,9 @@ mod project_scope_tests {
             include_str!("../../../migrations/access/0004_actor_identity_metadata.sql"),
             include_str!("../../../migrations/access/0005_gateway_service_client_identity.sql")
         );
-        sqlx::raw_sql(&migrations).execute(&pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+            .execute(&pool)
+            .await?;
 
         let actor = Uuid::now_v7();
         sqlx::query(
@@ -2962,7 +2966,9 @@ mod project_scope_tests {
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql")
         );
-        sqlx::raw_sql(&migrations).execute(&pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+            .execute(&pool)
+            .await?;
 
         let actor = Uuid::now_v7();
         let project_id = ProjectId::new();
@@ -3085,7 +3091,9 @@ mod project_scope_tests {
             include_str!("../../../migrations/access/0004_actor_identity_metadata.sql"),
             include_str!("../../../migrations/access/0005_gateway_service_client_identity.sql")
         );
-        sqlx::raw_sql(&migrations).execute(&pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+            .execute(&pool)
+            .await?;
 
         let actor = Uuid::now_v7();
         let grant_id = Uuid::now_v7();

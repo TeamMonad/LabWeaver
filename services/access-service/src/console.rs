@@ -1215,7 +1215,9 @@ mod tests {
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql")
         );
-        sqlx::raw_sql(&migrations).execute(&pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+            .execute(&pool)
+            .await?;
 
         let actor_id = Uuid::now_v7();
         let project_id = ProjectId::new();

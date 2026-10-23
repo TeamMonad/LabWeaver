@@ -67,12 +67,14 @@ serde_jcs = "0.2.0"
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "uuid", "time"] }
+# Temporary pin to upstream SQLx #4394 until it is included in a crates.io 0.9.x release.
+# Switch this back to `version = "0.9.x"` once that release is available.
+sqlx = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json", "uuid", "time"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
 subtle = "2.6.1"
 thiserror = "2.0.12"
 tempfile = "3.27.0"
-time = { version = "=0.3.41", features = ["formatting", "parsing", "serde"] }
+time = { version = "0.3.48", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.45.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7.18", features = ["full"] }
