@@ -552,6 +552,60 @@ class DeploymentBundleTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
         self.clean_runtime()
+    def test_location_samples_match_rust_and_helm_schema(self) -> None:
+        helm = shutil.which("helm")
+        self.assertIsNotNone(helm, "The pinned Helm renderer is required for Bundle input tests.")
+        cases = json.loads(
+            (REPOSITORY / "tests/fixtures/platform-configuration-location-cases.json").read_bytes()
+        )
+        recipient = self.key()
+        for sample in (case for case in cases if case["accepted"]):
+            self.configuration["runtimePolicy"].update(
+                privilegedAllowed=True,
+                privilegedExecutionLocation=sample["location"],
+            )
+            self.save_version()
+            if self.archive.exists():
+                self.archive.unlink()
+            bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+            with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+                result = subprocess.run(
+                    [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(loaded / "helm-values.yaml")],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, sample["name"] + ": " + result.stderr)
+
+        self.configuration["runtimePolicy"].update(
+            privilegedAllowed=False,
+            privilegedExecutionLocation=None,
+        )
+        self.save_version()
+        if self.archive.exists():
+            self.archive.unlink()
+        bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+            original = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
+            values_path = loaded / "location-case.yaml"
+            for sample in (case for case in cases if not case["accepted"]):
+                values = copy.deepcopy(original)
+                values["platformConfigurationPolicy"]["runtimePolicy"].update(
+                    privilegedAllowed=True,
+                    privilegedExecutionLocation=sample["location"],
+                )
+                write(values_path, yaml.safe_dump(values, sort_keys=False).encode())
+                result = subprocess.run(
+                    [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0, sample["name"])
+                self.assertTrue(
+                    "values don't meet the specifications of the schema" in result.stderr
+                    or "platformConfigurationPolicy" in result.stderr,
+                    sample["name"] + ": " + result.stderr,
+                )
+        self.clean_runtime()
     def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(
         self,
     ) -> None:

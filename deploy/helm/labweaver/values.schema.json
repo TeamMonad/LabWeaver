@@ -470,15 +470,51 @@
                           "maxProperties": 16,
                           "minProperties": 1,
                           "propertyNames": {
-                            "maxLength": 317,
-                            "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                            "anyOf": [
+                              {
+                                "maxLength": 63,
+                                "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                              },
+                              {
+                                "allOf": [
+                                  {
+                                    "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                  },
+                                  {
+                                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                  },
+                                  {
+                                    "pattern": "^[^/]{1,253}/[^/]{1,63}$"
+                                  }
+                                ]
+                              }
+                            ],
+                            "type": "string"
                           },
                           "type": "object"
                         },
                         "taintKey": {
+                          "anyOf": [
+                            {
+                              "maxLength": 63,
+                              "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                            },
+                            {
+                              "allOf": [
+                                {
+                                  "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                },
+                                {
+                                  "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                },
+                                {
+                                  "pattern": "^[^/]{1,253}/[^/]{1,63}$"
+                                }
+                              ]
+                            }
+                          ],
                           "maxLength": 317,
                           "minLength": 1,
-                          "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$",
                           "type": "string"
                         },
                         "taintValue": {

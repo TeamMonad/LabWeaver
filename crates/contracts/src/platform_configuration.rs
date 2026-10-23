@@ -724,6 +724,26 @@ mod tests {
     }
 
     #[test]
+    fn location_samples_match_rust_validation() -> Result<(), Box<dyn std::error::Error>> {
+        for sample in serde_json::from_str::<Vec<serde_json::Value>>(include_str!(
+            "../../../tests/fixtures/platform-configuration-location-cases.json"
+        ))? {
+            let mut configuration = PlatformConfigurationDesired::default();
+            configuration.runtime_policy.privileged_allowed = true;
+            configuration.runtime_policy.privileged_execution_location =
+                Some(serde_json::from_value(sample["location"].clone())?);
+            let accepted = sample["accepted"].as_bool().ok_or("accepted")?;
+            assert_eq!(
+                configuration.validate().is_ok(),
+                accepted,
+                "{}",
+                sample["name"]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dedicated_node_pool_constraints_match_deployment_samples() {
         fn configuration(
             node_selector: BTreeMap<String, String>,
