@@ -6083,7 +6083,6 @@ async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::err
         &["resource.api.invoke"],
     )?;
     let state = resource_service::api::ResourceApiState::new(store.clone())
-        .with_unconfigured_runtime_inputs_for_test()
         .with_service_verifier(Arc::new(verifier))
         .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.into())
         .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
