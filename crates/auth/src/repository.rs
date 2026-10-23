@@ -1,7 +1,7 @@
 //! `PostgreSQL` compare-and-consume operations for one-time OIDC state.
 
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -197,15 +197,15 @@ pub async fn load_membership_snapshot(
         .parse()
         .map_err(|_| RepositoryError::MembershipInvalid)?;
     let course_rows = sqlx::query(
-        "SELECT course_id, actor_id, role, state, revision, expires_at \
-         FROM access.course_memberships WHERE actor_id = $1",
+        "SELECT course_id, actor_id, role, object_role, state, revision, expires_at \
+         FROM control.course_memberships WHERE actor_id = $1",
     )
     .bind(actor_id.as_uuid())
     .fetch_all(pool)
     .await?;
     let project_rows = sqlx::query(
-        "SELECT course_id, project_id, actor_id, role, state, revision, expires_at \
-         FROM access.project_memberships WHERE actor_id = $1",
+        "SELECT course_id, project_id, actor_id, role, object_role, state, revision, expires_at \
+         FROM control.project_memberships WHERE actor_id = $1",
     )
     .bind(actor_id.as_uuid())
     .fetch_all(pool)
@@ -224,75 +224,13 @@ pub async fn load_membership_snapshot(
     })
 }
 
-/// Inserts the initial active Project membership for a newly-created project.
-///
-/// Control calls this Access-owned helper while its project row is held in the
-/// same Postgres transaction. The database grant for the Control runtime is
-/// intentionally limited to this table; the helper therefore does not expose
-/// a generic membership mutation surface.
-pub async fn insert_project_owner_membership(
-    transaction: &mut Transaction<'_, Postgres>,
-    project_id: ProjectId,
-    actor_id: ActorId,
-    course_id: Option<CourseId>,
-    role: PlatformRole,
-) -> Result<ProjectMembership, RepositoryError> {
-    let revision = Revision::new(1).map_err(|_| RepositoryError::MembershipInvalid)?;
-    sqlx::query(
-        "INSERT INTO access.project_memberships \
-         (course_id, project_id, actor_id, role, state, revision, expires_at) \
-         VALUES ($1,$2,$3,$4,'active',1,NULL)",
-    )
-    .bind(course_id.map(CourseId::as_uuid))
-    .bind(project_id.as_uuid())
-    .bind(actor_id.as_uuid())
-    .bind(role_name(role))
-    .execute(&mut **transaction)
-    .await?;
-    Ok(ProjectMembership {
-        course_id,
-        project_id,
-        actor_id,
-        username: None,
-        display_name: None,
-        role,
-        state: MembershipState::Active,
-        revision,
-        expires_at: None,
-    })
-}
-
-/// Verifies that an actor has a live course membership with the role used to
-/// associate a newly-created project. The check runs on the caller's
-/// transaction so project creation cannot commit an unvalidated association.
-pub async fn require_course_membership(
-    transaction: &mut Transaction<'_, Postgres>,
-    course_id: CourseId,
-    actor_id: ActorId,
-    role: PlatformRole,
-    now: OffsetDateTime,
-) -> Result<(), RepositoryError> {
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM access.course_memberships \
-         WHERE course_id=$1 AND actor_id=$2 AND role=$3 AND state='active' \
-           AND (expires_at IS NULL OR expires_at > $4))",
-    )
-    .bind(course_id.as_uuid())
-    .bind(actor_id.as_uuid())
-    .bind(role_name(role))
-    .bind(now)
-    .fetch_one(&mut **transaction)
-    .await?;
-    if !exists {
-        return Err(RepositoryError::MembershipInvalid);
-    }
-    Ok(())
-}
-
-fn course_membership_from_row(
+/// Decodes a current Control-owned course member row without mutating authority.
+pub fn course_membership_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<CourseMembership, RepositoryError> {
     Ok(CourseMembership {
+        object_role: serde_json::from_value(serde_json::Value::String(row.try_get("object_role")?))
+            .map_err(|_| RepositoryError::MembershipInvalid)?,
         course_id: course_id(row.try_get("course_id")?)?,
         actor_id: actor_id(row.try_get("actor_id")?)?,
         role: parse_role(row.try_get::<String, _>("role")?.as_str())?,
@@ -306,6 +244,8 @@ fn project_membership_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ProjectMembership, RepositoryError> {
     Ok(ProjectMembership {
+        object_role: serde_json::from_value(serde_json::Value::String(row.try_get("object_role")?))
+            .map_err(|_| RepositoryError::MembershipInvalid)?,
         course_id: row
             .try_get::<Option<Uuid>, _>("course_id")?
             .map(course_id)

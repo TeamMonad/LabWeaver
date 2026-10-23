@@ -476,10 +476,10 @@ async fn insert_capability(
          WHERE g.grant_id=$3 AND g.actor_id=$6 AND g.state='active' AND g.revision=$4 AND g.environment_revision=$9
             AND g.expires_at>clock_timestamp() AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
             AND s.idle_expires_at>clock_timestamp()
-            AND EXISTS (SELECT 1 FROM access.project_memberships pm WHERE pm.project_id=g.project_id AND pm.actor_id=g.actor_id AND pm.state='active' AND pm.role=ANY(s.platform_roles)
+            AND EXISTS (SELECT 1 FROM control.project_memberships pm WHERE pm.project_id=g.project_id AND pm.actor_id=g.actor_id AND pm.state='active' AND pm.object_role IN ('editor','manager','owner') AND pm.role=ANY(s.platform_roles)
               AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END
               AND (pm.expires_at IS NULL OR pm.expires_at>clock_timestamp()))
-            AND (g.course_id IS NULL OR EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=g.course_id AND cm.actor_id=g.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles)
+            AND (g.course_id IS NULL OR EXISTS (SELECT 1 FROM control.course_memberships cm WHERE cm.course_id=g.course_id AND cm.actor_id=g.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles)
               AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END
               AND (cm.expires_at IS NULL OR cm.expires_at>clock_timestamp())))",
     )
@@ -622,7 +622,7 @@ async fn consume_capability(
         return Err(ApiError::unavailable("LW_CONSOLE_CAPACITY_EXHAUSTED"));
     }
     let row = sqlx::query(
-        "SELECT c.capability_id,c.kind,c.access_grant_id,c.access_grant_revision,c.actor_id,c.project_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,c.handoff_secret_sha256,c.expires_at,c.authorization_expires_at,c.consumed_at,g.state,g.revision AS current_grant_revision,g.environment_revision AS current_environment_revision,g.expires_at AS grant_expires_at,s.revoked_at,s.expires_at AS bff_expires_at,s.idle_expires_at,(EXISTS (SELECT 1 FROM access.project_memberships pm WHERE pm.project_id=c.project_id AND pm.actor_id=c.actor_id AND pm.state='active' AND pm.role=ANY(s.platform_roles) AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (pm.expires_at IS NULL OR pm.expires_at > clock_timestamp())) AND (c.course_id IS NULL OR EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=c.course_id AND cm.actor_id=c.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (cm.expires_at IS NULL OR cm.expires_at > clock_timestamp())))) AS membership_active \
+        "SELECT c.capability_id,c.kind,c.access_grant_id,c.access_grant_revision,c.actor_id,c.project_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,c.handoff_secret_sha256,c.expires_at,c.authorization_expires_at,c.consumed_at,g.state,g.revision AS current_grant_revision,g.environment_revision AS current_environment_revision,g.expires_at AS grant_expires_at,s.revoked_at,s.expires_at AS bff_expires_at,s.idle_expires_at,(EXISTS (SELECT 1 FROM control.project_memberships pm WHERE pm.project_id=c.project_id AND pm.actor_id=c.actor_id AND pm.state='active' AND pm.object_role IN ('editor','manager','owner') AND pm.role=ANY(s.platform_roles) AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (pm.expires_at IS NULL OR pm.expires_at > clock_timestamp())) AND (c.course_id IS NULL OR EXISTS (SELECT 1 FROM control.course_memberships cm WHERE cm.course_id=c.course_id AND cm.actor_id=c.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (cm.expires_at IS NULL OR cm.expires_at > clock_timestamp())))) AS membership_active \
          FROM access.console_capabilities c JOIN access.access_grants g ON g.grant_id=c.access_grant_id JOIN access.bff_sessions s ON s.session_id=c.bff_session_id \
          WHERE c.locator_sha256=$1 FOR UPDATE OF c",
     ).bind(Sha256Digest::of_bytes(locator.as_bytes()).to_string()).fetch_optional(&mut *tx).await
@@ -961,8 +961,18 @@ async fn bridge_inner(
             .unwrap_or_default(),
     );
     tokio::pin!(deadline);
+    let mut authorization_checks = tokio::time::interval(std::time::Duration::from_secs(
+        contracts::object_authorization::AUTHORIZATION_RECHECK_SECONDS,
+    ));
     loop {
         tokio::select! {
+            biased;
+            _ = authorization_checks.tick() => {
+                if !super::object_authorization::console_active(&state.pool, session.session_id.as_uuid()).await {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), browser_tx.send(Message::Close(Some(CloseFrame { code: 1008, reason: "authorization revoked".into() })))).await;
+                    return Err("LW_CONSOLE_AUTHORIZATION_ENDED");
+                }
+            }
             () = cancellation.cancelled() => { close_browser_on_cancellation(&mut browser_tx, cancellation.clone()).await; return Err("LW_CONSOLE_AUTHORIZATION_ENDED"); }
             () = &mut deadline => { let _ = browser_tx.send(Message::Close(Some(CloseFrame { code: 1008, reason: "authorization expired".into() }))).await; return Err("LW_CONSOLE_AUTHORIZATION_ENDED"); }
             message = browser_rx.next() => {
@@ -972,13 +982,13 @@ async fn bridge_inner(
                     Message::Binary(value) if value.len() <= MAX_FRAME_BYTES => UpstreamMessage::Binary(value),
                     Message::Text(value) if session.kind == ConsoleKind::Xterm && value.len() <= 1024 => { let control: contracts::access::ConsoleClientControl = contracts::parse_strict_json(value.as_bytes()).map_err(|_| "LW_CONSOLE_CONTROL_INVALID")?; control.validate().map_err(|_| "LW_CONSOLE_CONTROL_INVALID")?; UpstreamMessage::Text(value.to_string().into()) },
                     Message::Ping(value) => UpstreamMessage::Ping(value), Message::Pong(value) => UpstreamMessage::Pong(value), Message::Close(_) => return Ok(()), _ => return Err("LW_CONSOLE_FRAME_INVALID"),
-                }; upstream_tx.send(forwarded).await.map_err(|_| "LW_CONSOLE_UPSTREAM_IO_FAILED")?;
+                }; tokio::time::timeout(std::time::Duration::from_secs(5), upstream_tx.send(forwarded)).await.map_err(|_| "LW_CONSOLE_UPSTREAM_IO_FAILED")?.map_err(|_| "LW_CONSOLE_UPSTREAM_IO_FAILED")?;
             }
             message = upstream_rx.next() => {
                 let Some(message) = message else { return Ok(()); };
                 let message = message.map_err(|_| "LW_CONSOLE_UPSTREAM_IO_FAILED")?;
                 let forwarded = match message { UpstreamMessage::Binary(value) if value.len() <= MAX_FRAME_BYTES => Message::Binary(value), UpstreamMessage::Ping(value) => Message::Ping(value), UpstreamMessage::Pong(value) => Message::Pong(value), UpstreamMessage::Close(_) => return Ok(()), UpstreamMessage::Text(_) | UpstreamMessage::Frame(_) | UpstreamMessage::Binary(_) => return Err("LW_CONSOLE_UPSTREAM_FRAME_INVALID") };
-                browser_tx.send(forwarded).await.map_err(|_| "LW_CONSOLE_BROWSER_IO_FAILED")?;
+                tokio::time::timeout(std::time::Duration::from_secs(5), browser_tx.send(forwarded)).await.map_err(|_| "LW_CONSOLE_BROWSER_IO_FAILED")?.map_err(|_| "LW_CONSOLE_BROWSER_IO_FAILED")?;
             }
         }
     }
@@ -1210,8 +1220,12 @@ mod tests {
             .connect(&url)
             .await?;
         let migrations = format!(
-            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
-            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA control; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
+            concat!(
+                include_str!("../../../migrations/control/0017_object_authorization.sql"),
+                "\n",
+                include_str!("../../../migrations/access/0001_platform_baseline.sql")
+            ),
             include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
             include_str!("../../../migrations/access/0003_independent_project_memberships.sql")
         );
@@ -1240,7 +1254,7 @@ mod tests {
         .execute(&pool)
         .await?;
         sqlx::query(
-            "INSERT INTO access.project_memberships (course_id,project_id,actor_id,role,state,revision) VALUES (NULL,$1,$2,'student','active',1)",
+            "INSERT INTO control.project_memberships (course_id,project_id,actor_id,role,object_role,state,revision) VALUES (NULL,$1,$2,'student','editor','active',1)",
         )
         .bind(project_id.as_uuid())
         .bind(actor_id)

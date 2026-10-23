@@ -20,6 +20,14 @@
       @retry="releases.load"
     >
       <template #success="{ data }">
+        <p
+          v-if="!canCreateEnvironment"
+          class="create-permission-hint"
+          data-testid="create-permission-hint"
+          role="note"
+        >
+          {{ permissions.denialReason('edit', '创建环境') }}
+        </p>
         <DataTable
           :columns="releaseColumns"
           :rows="data"
@@ -35,7 +43,8 @@
             <button
               type="button"
               class="filled-button small"
-              :disabled="lifecycle.operating.has(`create:${row.id}`)"
+              :disabled="!canCreateEnvironment || lifecycle.operating.has(`create:${row.id}`)"
+              :title="permissions.denialReason('edit', '创建环境') ?? undefined"
               @click="createFromRelease(row)"
             >
               创建环境
@@ -101,6 +110,8 @@ const {
   isContextMissing,
   releases,
   lifecycle,
+  permissions,
+  canCreateEnvironment,
   createFromRelease,
   retryCreate,
 } = useEnvironmentEntryContext()
@@ -115,6 +126,12 @@ const releaseColumns: DataTableColumn<EnvironmentTemplateReleaseViewSchema & { a
 </script>
 
 <style scoped>
+.create-permission-hint {
+  margin: 0 0 var(--space-3);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
 .section-title {
   display: flex;
   align-items: center;

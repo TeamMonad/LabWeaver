@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive, ref } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
+import { getProjectAvailableActions } from '@/generated/contracts'
+import { makeDiagnostic } from '@/types/async'
+import { GRANTABLE_PROJECT_OBJECT_ROLES } from '@/utils/stateLabels'
 
 const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
@@ -28,13 +31,14 @@ const projectOne = {
   updatedAt: '2026-09-01T00:00:00.000Z',
 }
 const projectTwo = { ...projectOne, id: 'project-2', name: '另一个项目', courseId: null, state: 'archived' }
+const projectThree = { ...projectOne, id: 'project-3', name: '第三个项目', courseId: null }
 
 const projectsState = reactive({
-  projects: { kind: 'success' as const, data: [projectOne, projectTwo] },
+  projects: { kind: 'success' as const, data: [projectOne, projectTwo] as Array<typeof projectOne | typeof projectTwo> },
   selectedProjectId: projectOne.id as string | null,
   selectedProject: projectOne as typeof projectOne | null,
   acting: null as string | null,
-  outcome: null,
+  outcome: null as null | { kind: 'success' | 'error'; diagnostic: ReturnType<typeof makeDiagnostic> },
   load: vi.fn(),
   select(id: string) {
     projectsState.selectedProjectId = id
@@ -54,7 +58,7 @@ const membersState = reactive({
     ],
   },
   acting: null as string | null,
-  outcome: null,
+  outcome: null as null | { kind: 'success' | 'error'; diagnostic: ReturnType<typeof makeDiagnostic> },
   load: vi.fn(),
   add: mocks.add,
   remove: mocks.remove,
@@ -74,6 +78,34 @@ const authState = {
     profile: { roles: ['teacher'], actor_id: 'owner-1' },
   } as { expired: boolean; profile: TestProfile } | null),
 }
+
+
+vi.mock('@/generated/contracts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/generated/contracts')>()
+  return {
+    ...actual,
+    getProjectAvailableActions: vi.fn(),
+  }
+})
+
+/** Answers every project with these actions, as Control would for a member with one responsibility in each; the default is the owner's set. */
+function mockAvailableActions(actions: string[] = ['browse', 'archive', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs', 'request_runtime_permissions']) {
+  vi.mocked(getProjectAvailableActions).mockImplementation(async ({ path }) => ({
+    data: {
+      projectId: path.projectId,
+      actorId: 'actor-owner',
+      membershipRevision: 1,
+      validUntil: '2099-01-01T00:00:00.000Z',
+      actions,
+    },
+    error: undefined,
+  }) as never)
+}
+
+function refusal(code: string) {
+  return { kind: 'error' as const, diagnostic: makeDiagnostic(code, '你已没有这项操作的权限。', false, { status: 403 }) }
+}
+
 
 vi.mock('@/composables/useProjects', () => ({
   useProjects: () => projectsState,
@@ -111,6 +143,7 @@ async function mountView(projectId = 'project-1') {
 
 describe('WorkspaceListView', () => {
   beforeEach(() => {
+    mockAvailableActions()
     mocks.requests = []
     mocks.requestState = null
     mocks.loadResources.mockReset()
@@ -131,6 +164,9 @@ describe('WorkspaceListView', () => {
         { actorId: 'student-1', username: 'student-1', displayName: '学生一', role: 'student', state: 'active', revision: 2 },
       ],
     }
+    membersState.outcome = null
+    projectsState.outcome = null
+    projectsState.projects = { kind: 'success', data: [projectOne, projectTwo] }
     directoryState.users = { kind: 'idle' }
   })
 
@@ -229,9 +265,10 @@ describe('WorkspaceListView', () => {
     expect(wrapper.find('.directory-selection').exists()).toBe(false)
     expect(mocks.directoryClear).toHaveBeenCalled()
     await wrapper.find('.directory-result').trigger('click')
+    await wrapper.get('select[aria-label="项目职责"]').setValue('editor')
     await wrapper.get('.member-form').trigger('submit')
     await flushPromises()
-    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-2', role: 'student' })
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-2', role: 'student', objectRole: 'editor' })
     expect(mocks.directoryClear).toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -247,8 +284,9 @@ describe('WorkspaceListView', () => {
     wrapper.unmount()
   })
 
-  it('keeps a student member read-only while preserving project and member visibility', async () => {
+  it('keeps a viewer read-only, explains why, and preserves project and member visibility', async () => {
     authState.user.value = { expired: false, profile: { roles: ['student'], actor_id: 'student-1' } }
+    mockAvailableActions(['browse'])
     const { wrapper } = await mountView()
 
     expect(wrapper.get('input.text-input').attributes('readonly')).toBeDefined()
@@ -257,8 +295,222 @@ describe('WorkspaceListView', () => {
     expect(wrapper.find('button.danger-button').exists()).toBe(false)
     expect(wrapper.find('.member-form').exists()).toBe(false)
     expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
-    expect(wrapper.text()).toContain('只有项目所有者或平台管理员可以编辑项目、归档项目和管理成员')
+    expect(wrapper.findAll('a').some((anchor) => anchor.text().includes('新建 Work'))).toBe(false)
+    // Each closed write area says why, instead of silently disappearing.
+    expect(wrapper.find('[data-testid="edit-permission-hint"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="members-permission-hint"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('项目成员')
+    wrapper.unmount()
+  })
+
+  it('lets an editor edit the project but not manage members', async () => {
+    mockAvailableActions(['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'view_costs'])
+    const { wrapper } = await mountView()
+
+    expect(wrapper.get('button[type="submit"]').text()).toContain('保存项目')
+    expect(wrapper.find('button.danger-button').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="edit-permission-hint"]').exists()).toBe(false)
+    expect(wrapper.find('.member-form').exists()).toBe(false)
+    expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
+    expect(wrapper.find('[data-testid="members-permission-hint"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('offers archiving only when Control lists the archive action, whatever the project owner field says', async () => {
+    // The signed-in account matches ownerActorId, but without `archive` in the answer the page must not offer it.
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'owner-1' } }
+    mockAvailableActions(['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs'])
+    const manager = await mountView()
+    expect(manager.wrapper.find('button[type="submit"]').exists()).toBe(true)
+    expect(manager.wrapper.find('button.danger-button').exists()).toBe(false)
+    expect(manager.wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(true)
+    manager.wrapper.unmount()
+
+    // An account that is not ownerActorId gets the button as soon as Control lists `archive`.
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'someone-else' } }
+    mockAvailableActions(['browse', 'archive', 'edit'])
+    const owner = await mountView()
+    expect(owner.wrapper.find('button.danger-button').exists()).toBe(true)
+    expect(owner.wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(false)
+    owner.wrapper.unmount()
+  })
+
+  it('keeps every write closed and shows the reason while the permission read fails', async () => {
+    vi.mocked(getProjectAvailableActions).mockResolvedValue({
+      data: undefined,
+      error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: '成员服务暂时不可用。', diagnosticCode: 'LW_AUTH_MEMBERSHIP_UNAVAILABLE', retryable: true },
+    } as never)
+    const { wrapper } = await mountView()
+
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(wrapper.find('.member-form').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="edit-permission-hint"]').text()).toContain('成员服务暂时不可用。')
+    wrapper.unmount()
+  })
+
+  it('shows each member responsibility and adds a member with the chosen responsibility', async () => {
+    membersState.memberships = {
+      kind: 'success',
+      data: [
+        { actorId: 'owner-1', username: 'owner', displayName: '项目教师', role: 'teacher', objectRole: 'owner', state: 'active', revision: 1 },
+        { actorId: 'student-1', username: 'student-1', displayName: '学生一', role: 'student', objectRole: 'operator', state: 'active', revision: 2 },
+      ],
+    } as never
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper } = await mountView()
+
+    const rows = wrapper.findAll('.member-row')
+    expect(rows[0].text()).toContain('项目职责：负责人')
+    expect(rows[1].text()).toContain('项目职责：操作者')
+    const guide = wrapper.get('[data-testid="member-object-role-guide"]')
+    // Every grantable responsibility is explained before one is chosen; owner is never offered.
+    expect(guide.findAll('dt')).toHaveLength(GRANTABLE_PROJECT_OBJECT_ROLES.length)
+    expect(guide.findAll('dd').every((description) => description.text().length > 0)).toBe(true)
+    // The manager's own responsibility changes meanwhile; adding a member re-reads it.
+    mockAvailableActions(['browse'])
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-3')
+    await wrapper.get('select[aria-label="项目职责"]').setValue('operator')
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-3', role: 'student', objectRole: 'operator' })
+    await vi.waitFor(() => expect(wrapper.find('.member-form').exists()).toBe(false))
+    wrapper.unmount()
+  })
+
+  it('starts each new member without a responsibility', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper } = await mountView()
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-3')
+    await wrapper.get('select[aria-label="项目职责"]').setValue('operator')
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    // The next member starts without a responsibility again.
+    expect(wrapper.get('[role="combobox"][aria-label="项目职责"]').text()).toContain('请选择项目职责')
+    wrapper.unmount()
+  })
+
+  it('preselects no responsibility and keeps adding disabled until one is chosen', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper } = await mountView()
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-3')
+
+    expect(wrapper.get('[role="combobox"][aria-label="项目职责"]').text()).toContain('请选择项目职责')
+    expect(wrapper.find('.member-object-role-required').exists()).toBe(true)
+    const submit = wrapper.findAll('button').find((button) => button.text() === '添加成员')!
+    expect(submit.attributes('disabled')).toBeDefined()
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).not.toHaveBeenCalled()
+
+    await wrapper.get('select[aria-label="项目职责"]').setValue('viewer')
+    expect(submit.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it.each(GRANTABLE_PROJECT_OBJECT_ROLES.map((role) => [role]))('submits the %s responsibility with its contract value', async (role) => {
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper } = await mountView()
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-4')
+    await wrapper.get('select[aria-label="项目职责"]').setValue(role)
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-4', role: 'student', objectRole: role })
+    wrapper.unmount()
+  })
+
+  it('never offers the owner responsibility', async () => {
+    const { wrapper } = await mountView()
+    const values = wrapper.get('select[aria-label="项目职责"]').findAll('option').map((option) => option.attributes('value'))
+    expect(values).toEqual(['', 'viewer', 'operator', 'editor', 'manager'])
+    wrapper.unmount()
+  })
+
+  it.each([
+    'LW_PROJECT_GOVERNANCE_DENIED',
+    'LW_PROJECT_ARCHIVED',
+    'LW_PROJECT_MEMBERSHIP_CONFLICT',
+    'LW_PROJECT_MEMBERSHIP_NOT_FOUND',
+    'LW_PROJECT_COURSE_MEMBERSHIP_REQUIRED',
+    'LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED',
+    'LW_ACCESS_DIRECTORY_USERNAME_INVALID',
+    'LW_ACCESS_DIRECTORY_USER_NOT_FOUND',
+    'LW_ACCESS_DIRECTORY_USER_DISABLED',
+  ])('shows a Chinese reason before the code when the server refuses the member with %s', async (code) => {
+    const serverDetail = 'The request was rejected by a fail-closed control-plane boundary.'
+    membersState.outcome = { kind: 'error', diagnostic: makeDiagnostic(code, serverDetail, false, { status: 403, requestId: 'req-member-1' }) }
+    const { wrapper } = await mountView()
+    const banner = wrapper.get('.members-section .diagnostic-banner')
+    const reason = banner.get('.diagnostic-message').text()
+    expect(reason).not.toContain(serverDetail)
+    expect(/[\u4e00-\u9fff]/.test(reason)).toBe(true)
+    expect(banner.get('.diagnostic-code').text()).toBe(code)
+    // The reason is read before the collapsed code details.
+    expect(banner.text().indexOf(reason)).toBeLessThan(banner.text().indexOf(code))
+    wrapper.unmount()
+  })
+
+  it('drops a chosen responsibility when the project changes, so it must be chosen again', async () => {
+    projectsState.projects = { kind: 'success', data: [projectOne, projectThree, projectTwo] }
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper, router } = await mountView()
+    await wrapper.get('select[aria-label="项目职责"]').setValue('manager')
+
+    await router.push({ path: '/researcher/workspaces', query: { projectId: 'project-3' } })
+    await flushPromises()
+    expect(projectsState.selectedProjectId).toBe('project-3')
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-5')
+    const submit = wrapper.findAll('button').find((button) => button.text() === '添加成员')!
+    expect(submit.attributes('disabled')).toBeDefined()
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).not.toHaveBeenCalled()
+
+    await wrapper.get('select[aria-label="项目职责"]').setValue('viewer')
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-5', role: 'student', objectRole: 'viewer' })
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['saving', 'update'],
+    ['archiving', 'archive'],
+  ] as const)('re-reads project permissions and keeps the diagnostic after %s is refused', async (_label, operation) => {
+    const { wrapper } = await mountView()
+    mocks[operation].mockImplementation(async () => {
+      projectsState.outcome = refusal('LW_AUTH_SCOPE_DENIED')
+      return false
+    })
+    mockAvailableActions(['browse'])
+
+    if (operation === 'update') {
+      await wrapper.get('form.project-form').trigger('submit')
+    } else {
+      await wrapper.get('button.outlined-button.danger-button').trigger('click')
+      await flushPromises()
+      document.body.querySelector<HTMLButtonElement>('[role="alertdialog"] .filled-button')?.click()
+    }
+    await flushPromises()
+
+    expect(mocks[operation]).toHaveBeenCalled()
+    expect(wrapper.text()).toContain('LW_AUTH_SCOPE_DENIED')
+    // The refreshed answer (viewer) closes the write the stale answer had opened.
+    await vi.waitFor(() => expect(wrapper.find('button.danger-button').exists()).toBe(false))
+    expect(wrapper.find('[data-testid="edit-permission-hint"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not re-read permissions when a project write fails for another reason', async () => {
+    const { wrapper } = await mountView()
+    mocks.update.mockImplementation(async () => {
+      projectsState.outcome = { kind: 'error', diagnostic: makeDiagnostic('LW_REVISION_CONFLICT', 'conflict', false, { status: 409 }) }
+      return false
+    })
+    mockAvailableActions(['browse'])
+    await wrapper.get('form.project-form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('button.danger-button').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -278,6 +530,7 @@ describe('WorkspaceListView', () => {
 
   it('keeps a teacher who is not the owner under the same project restrictions', async () => {
     authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'teacher-2' } }
+    mockAvailableActions(['browse'])
     const { wrapper } = await mountView()
 
     expect(wrapper.find('button[type="submit"]').exists()).toBe(false)

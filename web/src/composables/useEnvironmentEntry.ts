@@ -9,6 +9,7 @@ import { useConnectionWatch } from '@/composables/useConnectionWatch'
 import { useConsoleCapability } from '@/composables/useConsoleCapability'
 import { useEnvironmentSubmission } from '@/composables/useEnvironmentSubmission'
 import { useProjects } from '@/composables/useProjects'
+import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import type { TimelineEvent } from '@/components/common/EventTimeline.vue'
 import type { ConsoleKind, EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
@@ -93,6 +94,19 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
   const releases = useEnvironmentTemplateReleases(projectId, courseId)
   const lifecycle = useEnvironmentLifecycle(projectId, courseId)
   const access = useEnvironmentAccess(selectedEnvironmentId, computed(() => instance.value?.revision), projectId, courseId)
+  /**
+   * Actions in the project the server checks: the open environment's own
+   * project once it is loaded (the browser cannot substitute another one),
+   * otherwise the selected project for creating an environment.
+   */
+  const permissions = useProjectAvailableActions(computed(() => instance.value?.projectId ?? projectId.value))
+  const canCreateEnvironment = computed(() => permissions.allows('edit'))
+  const canIssueGrantForProject = computed(() => permissions.allows('grant_access'))
+  const canCancelOperation = computed(() => permissions.allows('stop'))
+  /** A 403 means the actor's project responsibility changed since the page read it. */
+  function refreshPermissionsAfter(diagnostic: DiagnosticViewModel | null | undefined) {
+    if (diagnostic?.status === 403) void permissions.refresh()
+  }
 
   // ---- Connection readiness and browser console ----------------------------
 
@@ -140,6 +154,7 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
    */
   const connectAfterGrant = ref<string | null>(null)
   async function issueGrantAndConnect() {
+    if (!canIssueGrantForProject.value) return
     const environmentId = selectedEnvironmentId.value ?? null
     connectAfterGrant.value = environmentId
     await issueAccessGrant()
@@ -170,19 +185,21 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     ? null
     : latest(operationItems.value, (op) => op.state === 'failed' && op.retryEligible))
 
-  const controls = useEnvironmentLifecycleControls({ env, operations, lifecycle, activeOperation, retryableOperation })
-  const submission = useEnvironmentSubmission({ env, operations, releases, selectedEnvironmentId, isWorkConnection })
+  const controls = useEnvironmentLifecycleControls({ env, operations, lifecycle, activeOperation, retryableOperation, permissions })
+  const submission = useEnvironmentSubmission({ env, operations, releases, selectedEnvironmentId, isWorkConnection, permissions })
 
   async function refreshAll() {
     await Promise.all([env.load(), access.loadEndpoints(), operations.load()])
   }
 
   async function cancelCurrentOperation() {
+    if (!canCancelOperation.value) return
     const operation = activeOperation.value
     const data = instance.value
     if (!operation || !data || data.id !== operation.environmentId) return
     const result = await operations.cancel(data.id, data.revision)
     if (result.ok) await Promise.all([env.load(), operations.load()])
+    else refreshPermissionsAfter(operations.cancelDiagnostic)
   }
 
   // ---- Route and project context -----------------------------------------
@@ -305,6 +322,7 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
   const createIntentReleaseId = ref<string | null>(null)
 
   async function createFromRelease(release: EnvironmentTemplateReleaseViewSchema) {
+    if (!canCreateEnvironment.value) return
     createDiagnostic.value = null
     pendingRelease.value = release
     if (createIntentReleaseId.value !== release.id || !createIntentKey.value) {
@@ -317,6 +335,7 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
       const result = await lifecycle.create({ releaseId: release.id, releaseVersion: release.version }, intentKey)
       if (!result.ok) {
         createDiagnostic.value = result.diagnostic
+        refreshPermissionsAfter(result.diagnostic)
       } else {
         createIntentKey.value = null
         createIntentReleaseId.value = null
@@ -341,6 +360,10 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
       createGrantDiagnostic.value = makeDiagnostic('ACCESS_GRANT_ENVIRONMENT_NOT_READY', '环境状态尚未加载，无法签发访问授权。', false)
       return null
     }
+    if (!canIssueGrantForProject.value) {
+      createGrantDiagnostic.value = makeDiagnostic('ACCESS_GRANT_NOT_PERMITTED', permissions.denialReason('grant_access') ?? '', false)
+      return null
+    }
     if (!canIssueAccessGrant(data)) {
       createGrantDiagnostic.value = makeDiagnostic('ACCESS_GRANT_NOT_ELIGIBLE', accessGrantBlockReason(data), false)
       return null
@@ -348,11 +371,27 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     return data
   }
 
+  /**
+   * Why the actor cannot be issued an access grant for `data`: a missing
+   * `grant_access` responsibility comes before the instance state.
+   */
+  function grantBlockReason(data: EnvironmentInstanceSchema): string {
+    return permissions.denialReason('grant_access') ?? accessGrantBlockReason(data)
+  }
+
+  /** The instance can be connected and the actor may be issued an access grant for it. */
+  function canRequestAccessGrant(data: EnvironmentInstanceSchema): boolean {
+    return canIssueGrantForProject.value && canIssueAccessGrant(data)
+  }
+
   async function issueAccessGrant() {
     if (!accessGrantRequestEnvironment()) return
     createGrantDiagnostic.value = null
     const result = await access.createGrant()
-    if (result && !result.ok && result.diagnostic) createGrantDiagnostic.value = result.diagnostic
+    if (result && !result.ok && result.diagnostic) {
+      createGrantDiagnostic.value = result.diagnostic
+      refreshPermissionsAfter(result.diagnostic)
+    }
   }
 
   async function reconnectConsole() {
@@ -401,6 +440,11 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     releases,
     lifecycle,
     access,
+    permissions,
+    canCreateEnvironment,
+    canCancelOperation,
+    canRequestAccessGrant,
+    grantBlockReason,
     connection,
     connectionRechecking,
     recheckConnection,

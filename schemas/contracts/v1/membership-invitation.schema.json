@@ -1,0 +1,174 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "CourseObjectRole": {
+      "description": "Course responsibility does not change the actor's verified platform identity.",
+      "enum": [
+        "instructor",
+        "teaching_assistant",
+        "participant"
+      ],
+      "type": "string"
+    },
+    "MembershipInvitationId": {
+      "description": "Strongly typed UUIDv7 identifier for `MembershipInvitationId`.",
+      "type": "string"
+    },
+    "MembershipInvitationScope": {
+      "description": "Proposed responsibility. Acceptance does not create any unrelated membership.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "objectRole": {
+              "$ref": "#/$defs/ProjectObjectRole"
+            },
+            "projectId": {
+              "$ref": "#/$defs/ProjectId"
+            }
+          },
+          "required": [
+            "kind",
+            "projectId",
+            "objectRole"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "courseId": {
+              "$ref": "#/$defs/CourseId"
+            },
+            "kind": {
+              "const": "course",
+              "type": "string"
+            },
+            "objectRole": {
+              "$ref": "#/$defs/CourseObjectRole"
+            }
+          },
+          "required": [
+            "kind",
+            "courseId",
+            "objectRole"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MembershipInvitationState": {
+      "oneOf": [
+        {
+          "enum": [
+            "pending",
+            "accepted",
+            "revoked"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "The stored deadline makes a pending invitation unusable without a cleanup worker.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ProjectObjectRole": {
+      "description": "Responsibilities granted by Control in one project, independent of Teacher/Student identity.",
+      "enum": [
+        "viewer",
+        "operator",
+        "editor",
+        "manager",
+        "owner"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "acceptedMembershipRevision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Revision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "createdAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "createdBy": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "id": {
+      "$ref": "#/$defs/MembershipInvitationId"
+    },
+    "membershipExpiresAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "recipientActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "scope": {
+      "$ref": "#/$defs/MembershipInvitationScope"
+    },
+    "state": {
+      "$ref": "#/$defs/MembershipInvitationState"
+    }
+  },
+  "required": [
+    "id",
+    "scope",
+    "recipientActorId",
+    "createdBy",
+    "createdAt",
+    "expiresAt",
+    "state",
+    "revision"
+  ],
+  "title": "MembershipInvitation",
+  "type": "object"
+}

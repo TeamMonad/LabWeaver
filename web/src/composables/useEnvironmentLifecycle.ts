@@ -1,5 +1,6 @@
 import { reactive, ref, type Ref } from 'vue'
-import type { EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema } from '@/generated/contracts'
+import type { EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, ObjectAction } from '@/generated/contracts'
+import type { ProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { retryEnvironment } from '@/generated/contracts'
 import { environmentOperationKindLabel, environmentStateLabel } from '@/utils/stateLabels'
 import {
@@ -136,6 +137,19 @@ interface LifecycleTarget {
 
 type InstanceState = { kind: string; data?: EnvironmentInstanceSchema }
 
+/** The part of `useProjectAvailableActions` that page controls consume. */
+export type ObjectActionPermissions = Pick<ProjectAvailableActions, 'current' | 'allows' | 'denialReason' | 'refresh'>
+
+const LIFECYCLE_PERMISSION_NAMES = { start: '启动和重启', stop: '停止和取消', edit: '删除和重试' } as const
+
+/** Object action the server checks for each lifecycle route (contracts `environment_operation_action`). */
+export const LIFECYCLE_OBJECT_ACTION: Record<EnvironmentLifecycleAction, ObjectAction> = {
+  start: 'start',
+  restart: 'start',
+  stop: 'stop',
+  delete: 'edit',
+}
+
 export interface EnvironmentLifecycleControlsDeps {
   /** Current environment instance (the `useEnvironmentInstance` reactive). */
   env: { instance: InstanceState; load: () => Promise<unknown> }
@@ -143,6 +157,8 @@ export interface EnvironmentLifecycleControlsDeps {
   lifecycle: ReturnType<typeof useEnvironmentLifecycle>
   activeOperation: Ref<EnvironmentOperationSnapshotSchema | null>
   retryableOperation: Ref<EnvironmentOperationSnapshotSchema | null>
+  /** Current object actions in the environment's project. */
+  permissions: ObjectActionPermissions
 }
 
 /**
@@ -151,7 +167,7 @@ export interface EnvironmentLifecycleControlsDeps {
  * of a failed operation. API calls go through `useEnvironmentLifecycle`.
  */
 export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleControlsDeps) {
-  const { env, operations, lifecycle, activeOperation, retryableOperation } = deps
+  const { env, operations, lifecycle, activeOperation, retryableOperation, permissions } = deps
   const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
   const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
   const retryingEnvironment = ref(false)
@@ -172,7 +188,8 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   }
 
   function canStart(data: EnvironmentInstanceSchema) {
-    return !isTerminalEnvironment(data)
+    return permissions.allows('start')
+      && !isTerminalEnvironment(data)
       && !hasActiveLifecycleOperation(data)
       && data.desiredState !== 'deleted'
       && data.desiredState !== 'running'
@@ -181,7 +198,8 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   }
 
   function canStop(data: EnvironmentInstanceSchema) {
-    return !isTerminalEnvironment(data)
+    return permissions.allows('stop')
+      && !isTerminalEnvironment(data)
       && !hasActiveLifecycleOperation(data)
       && data.desiredState !== 'deleted'
       && data.desiredState !== 'stopped'
@@ -190,7 +208,8 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   }
 
   function canRestart(data: EnvironmentInstanceSchema) {
-    return !isTerminalEnvironment(data)
+    return permissions.allows('start')
+      && !isTerminalEnvironment(data)
       && !hasActiveLifecycleOperation(data)
       && data.desiredState !== 'deleted'
       && (data.observedState === 'ready' || data.observedState === 'stopped' || data.observedState === 'failed')
@@ -198,14 +217,25 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   }
 
   function canDelete(data: EnvironmentInstanceSchema) {
-    return !isTerminalEnvironment(data)
+    return permissions.allows('edit')
+      && !isTerminalEnvironment(data)
       && (data.desiredState !== 'deleted' || (failedCleanup(data) && !hasActiveLifecycleOperation(data)))
       && !(hasActiveLifecycleOperation(data) && data.operation.kind === 'delete')
       && !lifecycle.operating.has(`${data.id}:delete`)
   }
 
+  /** Retrying a failed operation is checked as `edit`, like reset and recover. */
+  function canRetryFailedOperation() {
+    return permissions.allows('edit')
+  }
+
   function lifecycleActionReason(data: EnvironmentInstanceSchema, action: EnvironmentLifecycleAction): string {
     if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
+    const denied = permissions.denialReason(
+      LIFECYCLE_OBJECT_ACTION[action],
+      action === 'restart' ? '重启环境' : action === 'delete' ? '删除环境' : undefined,
+    )
+    if (denied) return denied
     if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return action === 'delete'
       ? '上次回收失败，资源释放尚未确认；重新回收会删除仍存在的工作目录和关联磁盘数据。'
       : '环境正在等待回收，只能重试回收，不能重新启动或恢复环境。'
@@ -232,6 +262,25 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
   }
 
+  /**
+   * Which lifecycle actions the actor's project responsibility leaves out, in
+   * one sentence; null when every lifecycle action is permitted. Shown next to
+   * the action bar so a disabled button never needs a hover to be explained.
+   */
+  function lifecyclePermissionHint(): string | null {
+    const missing = (['start', 'stop', 'edit'] as const).filter((action) => !permissions.allows(action))
+    if (missing.length === 0) return null
+    // Until the project's actions are confirmed, the reason is the same for every action.
+    if (!permissions.current.value) return permissions.denialReason(missing[0])
+    const names = missing.map((action) => LIFECYCLE_PERMISSION_NAMES[action]).join('、')
+    return `你在此项目的职责不包含${names}环境。如需此权限，请联系项目负责人调整你的成员职责。`
+  }
+
+  /** A 403 means the actor's project responsibility changed since the page read it. */
+  function refreshPermissionsAfter(diagnostic: DiagnosticViewModel | null | undefined) {
+    if (diagnostic?.status === 403) void permissions.refresh()
+  }
+
   function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
     if (failedCleanup(data)) return '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。'
     const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
@@ -244,6 +293,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     const result = await lifecycle.act(data.id, data.revision, action)
     if (!result.ok) {
       lifecycleDiagnostic.value = result.diagnostic ?? null
+      refreshPermissionsAfter(result.diagnostic)
       return
     }
     // Refresh the operations timeline immediately so the new command shows up
@@ -263,6 +313,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   }
 
   async function retryFailedOperation(data: EnvironmentInstanceSchema) {
+    if (!canRetryFailedOperation()) return
     retryDiagnostic.value = null
     retryingEnvironment.value = true
     try {
@@ -278,6 +329,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
           problem?.retryable ?? true,
           problem,
         )
+        refreshPermissionsAfter(retryDiagnostic.value)
         return
       }
       await Promise.all([env.load(), operations.load()])
@@ -291,6 +343,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     if (!target) return
     const instance = currentInstance()
     if (!instance || instance.id !== target.environmentId) return
+    if (!permissions.allows(LIFECYCLE_OBJECT_ACTION[target.action])) return
     if (target.action === 'delete' && !canDelete(instance)) return
     await runLifecycle(instance, target.action)
   }
@@ -325,8 +378,10 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     canStop,
     canRestart,
     canDelete,
+    canRetryFailedOperation,
     lifecycleActionReason,
     lifecycleActionHint,
+    lifecyclePermissionHint,
     failedEnvironmentMessage,
     runLifecycle,
     requestLifecycleConfirmation,

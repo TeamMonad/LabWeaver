@@ -19,6 +19,7 @@ fn credits_reads_reject_other_projects_revocation_and_member_minting()
         course_memberships: vec![],
         project_memberships: vec![ProjectMembership {
             course_id: None,
+            object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
             project_id: project,
             actor_id,
             username: None,

@@ -15,10 +15,21 @@
         },
         {
           "const": "platform_admin",
-          "description": "Platform operator; course scope is still required for course data.",
+          "description": "Global operator when an operation explicitly permits administrator access.",
           "type": "string"
         }
       ]
+    },
+    "ProjectObjectRole": {
+      "description": "Responsibilities granted by Control in one project, independent of Teacher/Student identity.",
+      "enum": [
+        "viewer",
+        "operator",
+        "editor",
+        "manager",
+        "owner"
+      ],
+      "type": "string"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
@@ -39,6 +50,9 @@
         }
       ]
     },
+    "objectRole": {
+      "$ref": "#/$defs/ProjectObjectRole"
+    },
     "role": {
       "$ref": "#/$defs/PlatformRole"
     },
@@ -49,7 +63,8 @@
   },
   "required": [
     "username",
-    "role"
+    "role",
+    "objectRole"
   ],
   "title": "AddProjectMembershipRequest",
   "type": "object"

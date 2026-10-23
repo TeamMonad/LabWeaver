@@ -34,11 +34,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::ApprovalPolicy;
+use crate::runtime_authorization::RuntimeBindingError;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 
 mod credits;
 
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
+mod runtime_authorization;
 
 /// User identity extracted from an Access-signed resource delegation.
 ///
@@ -122,6 +124,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             get(list_leases_for_project),
         )
         .route("/api/v1/resource-requests/{request_id}", get(get_request))
+        .route(
+            "/api/v1/resource-requests/{request_id}/runtime-authorization",
+            get(runtime_authorization::get_binding),
+        )
         .route(
             "/api/v1/resource-requests/{request_id}/approve",
             post(approve_request),
@@ -469,6 +475,18 @@ async fn approve_request(
     )
     .map_err(|_| ResourceApiError::Invalid)?;
     let approval = contracts::resource::ResourceApproval {
+        runtime_authorization: if matches!(
+            request.target,
+            contracts::resource::ResourceTarget::Environment { .. }
+        ) {
+            Some(
+                crate::runtime_authorization::resolve_binding(&state.store.pool(), &request)
+                    .await
+                    .map_err(ResourceStoreError::from)?,
+            )
+        } else {
+            None
+        },
         id: contracts::ResourceApprovalId::new(),
         request_id,
         request_revision: input.expected_revision,
@@ -1519,8 +1537,11 @@ impl IntoResponse for ResourceApiError {
     fn into_response(self) -> Response {
         let diagnostic_code = resource_diagnostic_code(&self.to_string());
         let status = match &self {
-            Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
+            Self::Store(ResourceStoreError::RuntimeBinding(error)) => {
+                runtime_authorization::status(error)
+            }
             Self::ServiceConfiguration => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
             Self::Invalid | Self::Store(ResourceStoreError::RateEndInvalid) => {
                 StatusCode::BAD_REQUEST
             }
@@ -1535,12 +1556,17 @@ impl IntoResponse for ResourceApiError {
         };
         let retryable = matches!(
             self,
-            Self::Store(ResourceStoreError::Persistence(_) | ResourceStoreError::Database(_))
+            Self::Store(ResourceStoreError::Persistence(_) | ResourceStoreError::Database(_)
+                | ResourceStoreError::RuntimeBinding(RuntimeBindingError::Unavailable
+                    | RuntimeBindingError::Authorization(contracts::runtime_authorization::RuntimeAuthorizationError::PolicyNotVerified)))
         );
         let context = telemetry::current_request_context()
             .unwrap_or_else(telemetry::RequestContext::generate);
         let request_id = context.request_id().to_owned();
         let detail = match &self {
+            Self::Store(ResourceStoreError::RuntimeBinding(error)) => {
+                runtime_authorization::detail(error)
+            }
             Self::Store(ResourceStoreError::GpuCapacityExhausted) => {
                 "GPU 容量不足，请等待资源释放或回收已有环境后重试。"
             }

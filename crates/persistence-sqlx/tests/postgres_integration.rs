@@ -123,13 +123,13 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
     let auth_tables: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM information_schema.tables \
          WHERE table_schema = 'access' \
-         AND table_name IN ('actors', 'course_memberships', 'project_memberships', \
+         AND table_name IN ('actors', \
                             'service_identities', 'oidc_transactions', 'bff_sessions')",
     )
     .fetch_one(access)
     .await?;
     assert_eq!(
-        auth_tables, 6,
+        auth_tables, 4,
         "auth migration must be applied by the controlled catalog"
     );
     assert!(
@@ -149,26 +149,91 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         "opaque-subject-not-persisted",
     )
     .await?;
+    assert!(
+        sqlx::query(
+            "SELECT actor_id,username,display_name,disabled_at FROM access.actors WHERE actor_id=$1"
+        )
+        .bind(local_actor.actor_id)
+        .fetch_one(&runtime_pools[&Domain::Control])
+        .await
+        .is_ok()
+    );
+    assert!(
+        sqlx::query("SELECT issuer,subject_sha256 FROM access.actors WHERE actor_id=$1")
+            .bind(local_actor.actor_id)
+            .fetch_one(&runtime_pools[&Domain::Control])
+            .await
+            .is_err(),
+        "Control cannot read provider identity fields through its member directory grant"
+    );
     let now = time::OffsetDateTime::now_utc();
     let course_id = Uuid::now_v7();
     let project_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO access.course_memberships (course_id, actor_id, role, state, revision) \
+        "INSERT INTO control.course_memberships (course_id, actor_id, role, state, revision) \
          VALUES ($1, $2, 'student', 'active', 4)",
     )
     .bind(course_id)
     .bind(local_actor.actor_id)
-    .execute(access)
+    .execute(&runtime_pools[&Domain::Control])
     .await?;
     sqlx::query(
-        "INSERT INTO access.project_memberships (course_id, project_id, actor_id, role, state, revision) \
+        "INSERT INTO control.project_memberships (course_id, project_id, actor_id, role, state, revision) \
          VALUES ($1, $2, $3, 'student', 'active', 5)",
     )
     .bind(course_id)
     .bind(project_id)
     .bind(local_actor.actor_id)
-    .execute(access)
+    .execute(&runtime_pools[&Domain::Control])
     .await?;
+    assert!(
+        sqlx::query(
+            "UPDATE control.project_memberships SET object_role='owner' WHERE project_id=$1"
+        )
+        .bind(project_id)
+        .execute(access)
+        .await
+        .is_err(),
+        "Access can read Control facts but cannot expand object permissions"
+    );
+    assert!(
+        sqlx::query("DELETE FROM control.course_memberships WHERE course_id=$1")
+            .bind(course_id)
+            .execute(access)
+            .await
+            .is_err(),
+        "Access cannot mutate the course member authority"
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT has_table_privilege('lw_control_runtime','access.bff_sessions','SELECT')"
+        )
+        .fetch_one(access)
+        .await?,
+        "Control does not gain access to session secrets or raw bearer cookies"
+    );
+    assert!(sqlx::query_scalar::<_, bool>("SELECT has_table_privilege('lw_control_runtime','access.current_authorization_sessions','SELECT')").fetch_one(access).await?);
+    let resource = &runtime_pools[&Domain::Resource];
+    for query in [
+        "SELECT actor_id,disabled_at FROM access.actors",
+        "SELECT platform_roles,expires_at FROM access.current_authorization_sessions",
+        "SELECT contract FROM control.runtime_authorization_policy",
+        "SELECT release_contract,candidate_contract FROM control.runtime_authorization_configurations",
+    ] {
+        sqlx::query(query).fetch_all(resource).await?;
+    }
+    for query in [
+        "SELECT username,issuer,subject_sha256 FROM access.actors",
+        "SELECT * FROM access.bff_sessions",
+        "UPDATE control.project_memberships SET object_role='owner'",
+        "UPDATE control.platform_configuration_state SET contract='{}'::jsonb",
+        "UPDATE control.runtime_authorization_policy SET contract='{}'::jsonb",
+    ] {
+        assert!(
+            sqlx::query(query).execute(resource).await.is_err(),
+            "Resource runtime must not acquire identity secrets or Control write authority: {query}"
+        );
+    }
     let memberships = load_membership_snapshot(access, local_actor.actor_id).await?;
     assert_eq!(memberships.course_memberships.len(), 1);
     assert_eq!(memberships.project_memberships.len(), 1);

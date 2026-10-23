@@ -42,11 +42,19 @@
                       <button
                         type="button"
                         class="outlined-button"
-                        :disabled="operations.cancelling"
+                        :disabled="operations.cancelling || !canCancelOperation"
+                        :title="permissions.denialReason('stop', '取消操作') ?? undefined"
                         @click="cancelCurrentOperation"
                       >
                         {{ operations.cancelling ? '取消中…' : '取消操作' }}
                       </button>
+                      <p
+                        v-if="!canCancelOperation"
+                        class="operation-permission-hint"
+                        role="note"
+                      >
+                        {{ permissions.denialReason('stop', '取消操作') }}
+                      </p>
                     </div>
                   </div>
 
@@ -131,6 +139,8 @@ const {
   activeOperation,
   failedOperation,
   cancelCurrentOperation,
+  canCancelOperation,
+  permissions,
   retryDiagnostic,
   failedEnvironmentMessage,
 } = useEnvironmentEntryContext()
@@ -257,6 +267,13 @@ const {
   display: flex;
   gap: var(--space-2);
   margin-top: var(--space-2);
+}
+
+.operation-permission-hint {
+  margin: 0;
+  align-self: center;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
 }
 
 .timeline-section {

@@ -81,11 +81,11 @@
           <form class="project-form" @submit.prevent="saveProject">
             <label>
               <span>项目名称</span>
-              <input v-model="editName" class="text-input" :readonly="!canManageProject" required maxlength="160" />
+              <input v-model="editName" class="text-input" :readonly="!canEditProject" required maxlength="160" />
             </label>
             <label>
               <span>描述</span>
-              <textarea v-model="editDescription" class="text-input" :readonly="!canManageProject" rows="3" maxlength="2000" />
+              <textarea v-model="editDescription" class="text-input" :readonly="!canEditProject" rows="3" maxlength="2000" />
             </label>
             <div class="readonly-meta">
               <span>课程关联</span><span>{{ selectedProject.courseId ? '课程项目' : '独立项目' }}</span>
@@ -98,11 +98,12 @@
               <summary>查看项目标识</summary>
               <code>{{ selectedProject.id }}</code>
             </details>
-            <p v-if="!canManageProject" class="readonly-hint" role="note">当前账号可以查看项目和成员，但只有项目所有者或平台管理员可以编辑项目、归档项目和管理成员。</p>
+            <p v-if="!canEditProject && selectedProject.state === 'active'" class="readonly-hint" data-testid="edit-permission-hint" role="note">{{ availableActions.denialReason('edit', '编辑项目、新建 Work') }}</p>
+            <p v-else-if="!canArchiveProject && selectedProject.state === 'active'" class="readonly-hint" data-testid="archive-permission-hint" role="note">{{ availableActions.denialReason('archive', '归档项目') }}</p>
             <div class="form-actions">
-              <button v-if="canManageProject" type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
+              <button v-if="canEditProject" type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
               <button
-                v-if="canManageProject && selectedProject.state === 'active'"
+                v-if="canArchiveProject && selectedProject.state === 'active'"
                 type="button"
                 class="outlined-button danger-button"
                 :disabled="projects.acting !== null"
@@ -129,18 +130,19 @@
                   <li v-for="member in data" :key="member.actorId" class="member-row">
                     <span>
                       <strong>{{ memberDisplayName(member) }}</strong>
-                      <small>{{ member.username ? `账号：${member.username}` : '账号资料待同步' }} · {{ projectRoleLabel(member.role) }} · {{ membershipStateLabel(member.state) }}</small>
+                      <small>{{ member.username ? `账号：${member.username}` : '账号资料待同步' }} · {{ projectRoleLabel(member.role) }} · 项目职责：{{ projectObjectRoleLabel(member.objectRole) }} · {{ membershipStateLabel(member.state) }}</small>
                       <details class="advanced-details">
                         <summary>查看高级详情</summary>
                         <code>Actor ID：{{ member.actorId }}</code>
                       </details>
                     </span>
-                    <button v-if="canManageProject && member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
+                    <button v-if="canManageMembers && member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
                   </li>
                 </ul>
               </template>
             </AsyncStateView>
-            <form v-if="canManageProject && selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
+            <p v-if="!canManageMembers && selectedProject.state === 'active'" class="readonly-hint" data-testid="members-permission-hint" role="note">{{ availableActions.denialReason('manage_members') }}</p>
+            <form v-if="canManageMembers && selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
               <div v-if="canSearchOrganizationDirectory" class="directory-picker">
                 <label>
                   <span>查找组织账号</span>
@@ -189,12 +191,26 @@
                 <small class="field-hint">个人 Work 仅支持输入已知用户名，平台不会枚举组织账号。</small>
               </label>
               <label>
-                <span>角色</span>
-                <AppSelect v-model="memberRole">
+                <span>教学身份</span>
+                <AppSelect v-model="memberRole" aria-label="教学身份">
                   <option value="student">学生</option>
                   <option value="teacher">教师</option>
                 </AppSelect>
               </label>
+              <label class="member-object-role">
+                <span>项目职责</span>
+                <AppSelect v-model="memberObjectRole" aria-label="项目职责" aria-describedby="member-object-role-hint" required>
+                  <option value="" disabled>请选择项目职责</option>
+                  <option v-for="option in GRANTABLE_PROJECT_OBJECT_ROLES" :key="option" :value="option">{{ projectObjectRoleLabel(option) }}</option>
+                </AppSelect>
+              </label>
+              <dl id="member-object-role-hint" class="member-object-role-guide" data-testid="member-object-role-guide">
+                <template v-for="option in GRANTABLE_PROJECT_OBJECT_ROLES" :key="option">
+                  <dt>{{ projectObjectRoleLabel(option) }}</dt>
+                  <dd>{{ projectObjectRoleDescription(option) }}</dd>
+                </template>
+              </dl>
+              <p v-if="!memberObjectRole" class="field-hint member-object-role-required" role="note">选择项目职责后才能添加成员。</p>
               <button type="submit" class="outlined-button" :disabled="!canAddMember">添加成员</button>
             </form>
             <DiagnosticBanner
@@ -226,7 +242,7 @@
                   <SvgIcon name="refresh" size="sm" aria-hidden="true" />
                 </button>
                 <RouterLink
-                  v-if="selectedProject.state === 'active'"
+                  v-if="selectedProject.state === 'active' && canEditProject"
                   class="filled-button small"
                   :to="{ path: '/researcher/environments', query: { projectId: selectedProjectId } }"
                 >
@@ -345,10 +361,11 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjectResources } from '@/composables/useProjectResources'
 import { useAuth } from '@/composables/useAuth'
+import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } from '@/composables/useProjects'
 import type { OrganizationUser, ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
-import { environmentStateLabel, membershipStateLabel, projectRoleLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
+import { environmentStateLabel, GRANTABLE_PROJECT_OBJECT_ROLES, membershipStateLabel, projectObjectRoleDescription, projectObjectRoleLabel, projectRoleLabel, resourceAllocationFailureMessage, type GrantableProjectObjectRole } from '@/utils/stateLabels'
 import { actorIdFromProfile, hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const route = useRoute()
@@ -374,11 +391,11 @@ const routeProjectPending = computed(() => Boolean(
 const projectSelectionBlocked = computed(() => projects.projects.kind !== 'success' || routeProjectInvalid.value || routeProjectPending.value)
 const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : projects.selectedProjectId)
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
-const canManageProject = computed(() => {
-  const project = selectedProject.value
-  return Boolean(project && (currentRoles.value.includes('admin') || currentActorId.value === project.ownerActorId))
-})
-const canSearchOrganizationDirectory = computed(() => canManageProject.value && hasAnyRole(currentRoles.value, ['teacher', 'admin']))
+const availableActions = useProjectAvailableActions(selectedProjectId)
+const canEditProject = computed(() => availableActions.allows('edit'))
+const canArchiveProject = computed(() => availableActions.allows('archive'))
+const canManageMembers = computed(() => availableActions.allows('manage_members'))
+const canSearchOrganizationDirectory = computed(() => canManageMembers.value && hasAnyRole(currentRoles.value, ['teacher', 'admin']))
 const members = useProjectMemberships(selectedProjectId)
 const directory = useOrganizationDirectoryUsers()
 const workEnvironments = useProjectWorkEnvironments(selectedProjectId)
@@ -405,11 +422,14 @@ const memberUsername = ref('')
 const directoryQuery = ref('')
 const selectedDirectoryUser = ref<OrganizationUser | null>(null)
 const memberRole = ref<'student' | 'teacher'>('student')
-const canSave = computed(() => Boolean(canManageProject.value && editName.value.trim()))
+/** No responsibility is preselected: the manager chooses one explicitly for every new member. */
+const memberObjectRole = ref<GrantableProjectObjectRole | ''>('')
+const canSave = computed(() => Boolean(canEditProject.value && editName.value.trim()))
 const canAddMember = computed(() => Boolean(
-  canManageProject.value
+  canManageMembers.value
   && selectedProject.value?.state === 'active'
   && members.acting === null
+  && memberObjectRole.value
   && (canSearchOrganizationDirectory.value ? selectedDirectoryUser.value?.enabled && memberUsername.value.trim() : memberUsername.value.trim()),
 ))
 type WorkspaceConfirmation =
@@ -447,6 +467,8 @@ watch(
   () => {
     directoryQuery.value = ''
     memberUsername.value = ''
+    // A responsibility chosen for one project is never carried into another.
+    memberObjectRole.value = ''
     selectedDirectoryUser.value = null
     directory.clear()
   },
@@ -519,14 +541,20 @@ async function submitCreate() {
 }
 
 async function saveProject() {
-  if (!canManageProject.value) return
+  if (!canEditProject.value) return
   const project = projects.selectedProject
   if (!project) return
-  await projects.update(project, { name: editName.value.trim(), description: editDescription.value.trim() || null })
+  const ok = await projects.update(project, { name: editName.value.trim(), description: editDescription.value.trim() || null })
+  if (!ok) refreshActionsAfterProjectRefusal()
+}
+
+/** A 403 on a project write means the page's answer is stale; the diagnostic banner stays as reported. */
+function refreshActionsAfterProjectRefusal() {
+  if (projects.outcome?.kind === 'error' && projects.outcome.diagnostic.status === 403) void availableActions.refresh()
 }
 
 function openArchiveConfirmation() {
-  if (!canManageProject.value) return
+  if (!canArchiveProject.value) return
   const project = projects.selectedProject
   if (!project) return
   destructiveConfirmation.value = { kind: 'archive', project }
@@ -538,19 +566,27 @@ function refreshMembers() {
 }
 
 async function addMember() {
-  if (!canManageProject.value) return
+  if (!canManageMembers.value) return
   const username = memberUsername.value.trim()
-  if (!canAddMember.value || !username) return
-  const ok = await members.add({ username, role: memberRole.value })
+  const objectRole = memberObjectRole.value
+  if (!canAddMember.value || !username || !objectRole) return
+  const ok = await members.add({ username, role: memberRole.value, objectRole })
   if (ok) {
     memberUsername.value = ''
+    memberObjectRole.value = ''
     selectedDirectoryUser.value = null
     directory.clear()
   }
+  refreshActionsAfterMemberChange()
+}
+
+/** The actor's own responsibility may have changed, or a 403 shows the page's answer is stale. */
+function refreshActionsAfterMemberChange() {
+  void availableActions.refresh()
 }
 
 function openRemoveMemberConfirmation(member: ProjectMembershipSchema) {
-  if (!canManageProject.value) return
+  if (!canManageMembers.value) return
   const project = projects.selectedProject
   if (!project) return
   destructiveConfirmation.value = {
@@ -565,11 +601,15 @@ async function confirmDestructiveAction() {
   const confirmation = destructiveConfirmation.value
   destructiveConfirmation.value = null
   if (!confirmation) return
-  if (!canManageProject.value) return
   if (confirmation.kind === 'archive') {
-    if (projects.selectedProjectId === confirmation.project.id) await projects.archive(confirmation.project)
-  } else if (projects.selectedProjectId === confirmation.projectId) {
-    await members.remove(confirmation.member.actorId, confirmation.member)
+    if (!canArchiveProject.value) return
+    if (projects.selectedProjectId === confirmation.project.id && !await projects.archive(confirmation.project)) refreshActionsAfterProjectRefusal()
+  } else {
+    if (!canManageMembers.value) return
+    if (projects.selectedProjectId === confirmation.projectId) {
+      await members.remove(confirmation.member.actorId, confirmation.member)
+      refreshActionsAfterMemberChange()
+    }
   }
 }
 </script>
@@ -619,7 +659,11 @@ async function confirmDestructiveAction() {
 .advanced-details code { display: block; margin-top: var(--space-1); overflow-wrap: anywhere; }
 .member-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .member-row { display: flex; justify-content: space-between; gap: var(--space-3); align-items: center; padding: 11px var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
-.member-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto; gap: var(--space-3); align-items: end; }
+.member-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; }
+.member-object-role-guide { grid-column: 1 / -1; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-3); margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.member-object-role-guide dt { color: var(--md-sys-color-on-surface); font: var(--md-sys-label-medium); }
+.member-object-role-guide dd { margin: 0; }
+.member-object-role-required { grid-column: 1 / -1; margin: 0; }
 .directory-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); grid-column: 1 / -1; align-items: end; }
 .directory-picker > .async-state-view, .directory-selection { grid-column: 1 / -1; }
 .directory-results { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }

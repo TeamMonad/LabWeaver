@@ -33,6 +33,7 @@
                     :grant="access.grant"
                     :console-capability="consoleCapability.availability"
                     :instance-block-reason="accessGrantBlockReason(data)"
+                    :grant-block-reason="permissions.denialReason('grant_access')"
                     :now="connection.now.value"
                     :auto-checking="connection.autoChecking.value"
                     :checking="connectionRechecking"
@@ -72,11 +73,11 @@
                         </DataTable>
 
                         <div
-                          v-if="access.grant.kind === 'success' || canIssueAccessGrant(data)"
+                          v-if="access.grant.kind === 'success' || canRequestAccessGrant(data)"
                           class="grant-actions"
                         >
                           <button
-                            v-if="access.grant.kind !== 'success' && canIssueAccessGrant(data)"
+                            v-if="access.grant.kind !== 'success' && canRequestAccessGrant(data)"
                             type="button"
                             class="filled-button"
                             :disabled="access.creating || eps.length === 0"
@@ -95,11 +96,11 @@
                         </div>
 
                         <p
-                          v-if="access.grant.kind !== 'success' && !canIssueAccessGrant(data)"
+                          v-if="access.grant.kind !== 'success' && !canRequestAccessGrant(data)"
                           class="access-grant-hint"
                           role="status"
                         >
-                          {{ accessGrantBlockReason(data) }}
+                          {{ grantBlockReason(data) }}
                         </p>
 
                         <div
@@ -252,7 +253,7 @@ import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 import { formatTimestamp } from '@/utils/format'
 import { accessGrantStateLabel, endpointHealthLabel } from '@/utils/stateLabels'
 import { formatExpiry } from '@/types/access'
-import { accessGrantBlockReason, canIssueAccessGrant, desiredEnvironmentStateLabel, environmentMaterialDeadlineLabel } from '@/utils/environmentLifecycle'
+import { accessGrantBlockReason, desiredEnvironmentStateLabel, environmentMaterialDeadlineLabel } from '@/utils/environmentLifecycle'
 import { connectUrl, openContainerRuntime, sshCommand, sshFingerprint, sshGrant, webGrant } from '@/utils/environmentAccessGrant'
 
 /** 概览与访问：环境信息、访问端点、访问授权、容器入口和 SSH。 */
@@ -270,6 +271,9 @@ const {
   openConsoleTab,
   recheckConnection,
   revokeAccessGrant,
+  permissions,
+  canRequestAccessGrant,
+  grantBlockReason,
 } = useEnvironmentEntryContext()
 
 const endpointColumns: DataTableColumn<{ protocol: string; health: string; observedAt: string; id: string }>[] = [

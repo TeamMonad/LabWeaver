@@ -22,6 +22,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         };
     }
     document!(
+        "schemas/contracts/v1/runtime-authorization-binding.schema.json",
+        crate::runtime_authorization::RuntimeAuthorizationBinding
+    );
+    document!(
         "schemas/contracts/v1/problem-package.schema.json",
         crate::authoring::ProblemPackage
     );
@@ -32,6 +36,34 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/project-llm-policy-options.schema.json",
         crate::authoring::ProjectLlmPolicyOptions
+    );
+    document!(
+        "schemas/contracts/v1/available-object-actions.schema.json",
+        crate::object_authorization::AvailableObjectActions
+    );
+    document!(
+        "schemas/contracts/v1/membership-invitation.schema.json",
+        crate::membership_governance::MembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/membership-invitation-page.schema.json",
+        crate::membership_governance::MembershipInvitationPage
+    );
+    document!(
+        "schemas/contracts/v1/course-membership-page.schema.json",
+        crate::membership_governance::CourseMembershipPage
+    );
+    document!(
+        "schemas/contracts/v1/http/create-project-membership-invitation.schema.json",
+        crate::membership_governance::CreateProjectMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/create-course-membership-invitation.schema.json",
+        crate::membership_governance::CreateCourseMembershipInvitation
+    );
+    document!(
+        "schemas/contracts/v1/http/accept-membership-invitation.schema.json",
+        crate::membership_governance::AcceptMembershipInvitation
     );
     document!(
         "schemas/contracts/v1/project.schema.json",
@@ -1199,6 +1231,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "getInternalAgentTaskProgress"
                 | "listProjectCreditLedger"
                 | "listProjectCreditHolds"
+                | "listCourseMemberships"
+                | "listProjectMembershipInvitations"
+                | "listCourseMembershipInvitations"
+                | "listIncomingMembershipInvitations"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -1363,16 +1399,89 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
             ]);
         }
-        if operation.operation_id == "addProjectMembership" {
+        if operation.scope == OperationScopeKind::Project
+            && let Some(action) =
+                crate::object_authorization::project_operation_action(operation.operation_id)
+        {
+            operation_json["x-labweaver-object-action"] = json!(action);
+        }
+        if matches!(
+            operation.operation_id,
+            "addProjectMembership" | "removeProjectMembership"
+        ) {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
                 "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_PROJECT_GOVERNANCE_DENIED",
+                "LW_PROJECT_COURSE_MEMBERSHIP_REQUIRED",
+                "LW_PROJECT_MEMBERSHIP_CONFLICT",
+                "LW_PROJECT_MEMBERSHIP_NOT_FOUND",
+                "LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED",
+                "LW_PROJECT_ARCHIVED",
                 "LW_ACCESS_DIRECTORY_USERNAME_INVALID",
                 "LW_ACCESS_DIRECTORY_UNAVAILABLE",
                 "LW_ACCESS_DIRECTORY_USER_NOT_FOUND",
                 "LW_ACCESS_DIRECTORY_USER_DISABLED",
                 "LW_IDEMPOTENCY_CONFLICT",
-                "LW_REVISION_CONFLICT",
+                "LW_REVISION_CONFLICT"
+            ]);
+        }
+        if matches!(
+            operation.operation_id,
+            "createProjectMembershipInvitation"
+                | "listProjectMembershipInvitations"
+                | "createCourseMembershipInvitation"
+                | "listCourseMembershipInvitations"
+                | "listCourseMemberships"
+                | "listIncomingMembershipInvitations"
+                | "getMembershipInvitation"
+                | "acceptMembershipInvitation"
+                | "revokeMembershipInvitation"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_MEMBERSHIP_INVITATION_DENIED",
+                "LW_MEMBERSHIP_INVITATION_NOT_FOUND",
+                "LW_MEMBERSHIP_INVITATION_EXPIRED",
+                "LW_MEMBERSHIP_INVITATION_STATE_CONFLICT",
+                "LW_MEMBERSHIP_INVITATION_PRECONDITION_FAILED",
+                "LW_PROJECT_GOVERNANCE_DENIED",
+                "LW_PROJECT_COURSE_MEMBERSHIP_REQUIRED",
+                "LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED",
+                "LW_COURSE_GOVERNANCE_DENIED",
+                "LW_COURSE_LAST_INSTRUCTOR_PROTECTED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_REVISION_CONFLICT"
+            ]);
+        }
+        if operation.operation_id == "getProjectAvailableActions" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_PROJECT_GOVERNANCE_DENIED",
+                "LW_PROJECT_MEMBERSHIP_NOT_FOUND"
+            ]);
+        }
+        if operation.operation_id == "getResourceRuntimeAuthorization" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_RUNTIME_POLICY_NOT_VERIFIED",
+                "LW_RUNTIME_POLICY_CHANGED",
+                "LW_RUNTIME_CONFIGURATION_BINDING_MISMATCH",
+                "LW_RUNTIME_TEACHER_APPROVAL_REQUIRED",
+                "LW_RUNTIME_PERMISSION_OUTSIDE_PLATFORM_RANGE",
+                "LW_RUNTIME_PERMISSION_APPROVAL_REQUIRED",
+                "LW_RUNTIME_TARGET_NOT_ENVIRONMENT",
+                "LW_RUNTIME_LEASE_NOT_ACTIVE",
+                "LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE",
+                "LW_RUNTIME_SCOPE_DENIED",
+                "LW_REVISION_CONFLICT"
             ]);
         }
         if matches!(
@@ -1783,10 +1892,15 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "updatePlatformConfiguration" => "http/update-platform-configuration-request",
         "applyPlatformConfiguration" => "http/apply-platform-configuration-request",
         "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
+        "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
+        "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
+        "acceptMembershipInvitation" => "http/accept-membership-invitation",
+        "revokeMembershipInvitation" | "removeCourseMembership" | "removeProjectMembership" => {
+            "http/remove-project-membership-request"
+        }
         "createProject" => "http/create-project-request",
         "updateProject" => "http/update-project-request",
         "addProjectMembership" => "http/add-project-membership-request",
-        "removeProjectMembership" => "http/remove-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
         "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
@@ -1859,6 +1973,12 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "getResourceRuntimeAuthorization" => contract_ref("runtime-authorization-binding"),
+        "createProjectMembershipInvitation"
+        | "createCourseMembershipInvitation"
+        | "getMembershipInvitation"
+        | "acceptMembershipInvitation"
+        | "revokeMembershipInvitation" => contract_ref("membership-invitation"),
         "getPlatformConfiguration"
         | "updatePlatformConfiguration"
         | "applyPlatformConfiguration"
@@ -1870,6 +1990,12 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("control-configuration-replica-observation")
         }
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
+        "listIncomingMembershipInvitations"
+        | "listProjectMembershipInvitations"
+        | "listCourseMembershipInvitations" => contract_ref("membership-invitation-page"),
+        "listCourseMemberships" => contract_ref("course-membership-page"),
+        "removeCourseMembership" => contract_ref("course-membership"),
+        "getProjectAvailableActions" => contract_ref("available-object-actions"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")
         }

@@ -8,12 +8,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools/prepare_platform_access_seed.py"
-ADOPT_TEMPLATE = (
+PLATFORM_TEMPLATE = (
     ROOT
     / "deploy"
     / "ansible"
     / "roles"
     / "platform_application"
+    / "templates"
+    / "access-seed-reconcile.sql.j2"
+)
+RESOURCE_TEMPLATE = (
+    ROOT
+    / "deploy"
+    / "ansible"
+    / "roles"
+    / "resource_application"
     / "templates"
     / "access-seed-adopt.sql.j2"
 )
@@ -88,10 +97,11 @@ def test_seed_rejects_non_v7_course_identifier() -> None:
         raise AssertionError("non-v7 course identity must be rejected")
 
 
-def test_adoption_only_reconciles_unowned_legacy_v5_actor_ids() -> None:
-    template = ADOPT_TEMPLATE.read_text(encoding="utf-8")
-    assert "substring(current_actor_id::text from 15 for 1) <> '5'" in template
-    assert "PLATFORM_LEGACY_ACTOR_HAS_OWNED_DATA" in template
-    assert "UPDATE access.course_memberships" in template
-    assert "UPDATE access.bff_sessions" in template
-    assert "DELETE FROM access.actors" not in template
+def test_access_seeds_write_control_membership_truth() -> None:
+    for path in (PLATFORM_TEMPLATE, RESOURCE_TEMPLATE):
+        template = path.read_text(encoding="utf-8")
+        assert "control.course_memberships" in template
+        assert "object_role" in template
+        assert "SET ROLE lw_control_owner" in template
+        assert "access.course_memberships" not in template
+        assert "access.project_memberships" not in template

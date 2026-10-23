@@ -354,6 +354,8 @@ pub(super) async fn forward_control(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     authorize_evaluation_release_path(&state, &method, &uri, &headers).await?;
+    let body = super::membership_governance::resolve_request(&state, &method, &uri, &headers, body)
+        .await?;
     let body = if method == Method::POST {
         if let Some(project_id) = project_membership_path(uri.path()) {
             resolve_project_membership_request(&state, &headers, project_id, &body).await?
@@ -433,6 +435,7 @@ async fn resolve_project_membership_request(
             .parse()
             .map_err(|_| ApiError::internal("LW_AUTH_ACTOR_INVALID"))?,
         role: request.role,
+        object_role: request.object_role,
         expires_at: request.expires_at,
     })
     .map(Bytes::from)
@@ -444,7 +447,7 @@ async fn resolve_project_membership_request(
 /// decides whether the already-authenticated caller may proceed to resolve the
 /// provider username.  This ordering prevents a non-owner from using the
 /// provider directory as an account-existence oracle.
-async fn authorize_project_membership_governance(
+pub(super) async fn authorize_project_membership_governance(
     state: &AppState,
     headers: &HeaderMap,
     project_id: contracts::ProjectId,
@@ -481,15 +484,23 @@ async fn authorize_project_membership_governance(
     )
     .map_err(|_| ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_INVALID"))?;
     let actor = super::actor_from_session(session)?;
-    if project.id != project_id
-        || project.state == contracts::ProjectState::Archived
-        || (!actor
-            .roles
-            .contains(&contracts::PlatformRole::PlatformAdmin)
-            && project.owner_actor_id != actor.actor_id)
-    {
+    if project.id != project_id || project.state == contracts::ProjectState::Archived {
         return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
     }
+    let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
+        .await
+        .map_err(ApiError::from)?;
+    auth::object_authorization::authorize_project_action(
+        &auth::AuthorizationContext {
+            actor,
+            course_memberships: memberships.course_memberships,
+            project_memberships: memberships.project_memberships,
+            now: OffsetDateTime::now_utc(),
+        },
+        project_id,
+        contracts::object_authorization::ObjectAction::ManageMembers,
+    )
+    .map_err(ApiError::from)?;
     Ok(())
 }
 
@@ -559,6 +570,35 @@ pub(super) async fn forward_environment(
             .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
         authorize_environment_project(&state, &headers, query.project_id, "listEnvironments")
             .await?;
+    }
+    if let Some((environment_id, action)) =
+        super::object_authorization::environment_route_action(&method, uri.path())?
+    {
+        let instance = read_owned_environment(&state, &headers, environment_id).await?;
+        super::object_authorization::authorize_current_project(
+            &state,
+            &headers,
+            instance.project_id,
+            instance.course_id,
+            action,
+        )
+        .await?;
+    }
+    if method == Method::POST
+        && (uri.path() == "/api/v1/environments"
+            || uri.path().ends_with("/start")
+            || uri.path().ends_with("/restart")
+            || uri.path().ends_with("/reset")
+            || uri.path().ends_with("/retry"))
+    {
+        let status = auth::runtime_authorization::load_runtime_policy(&state.pool)
+            .await
+            .map_err(|_| ApiError::unavailable("LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE"))?;
+        contracts::runtime_authorization::check_policy_use(
+            &status,
+            contracts::runtime_authorization::RuntimePolicyUse::Admission,
+        )
+        .map_err(|_| ApiError::unavailable("LW_RUNTIME_POLICY_NOT_VERIFIED"))?;
     }
     forward(
         &state,
@@ -1113,6 +1153,22 @@ async fn resource_target_request(
 ) -> Result<(contracts::resource::ResourceRequest, &'static str), ApiError> {
     let segments = path.split('/').collect::<Vec<_>>();
     match segments.as_slice() {
+        [
+            "",
+            "api",
+            "v1",
+            "resource-requests",
+            request_id,
+            "runtime-authorization",
+        ] if *method == Method::GET => {
+            let id = request_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            Ok((
+                fetch_resource_request(state, session, id).await?,
+                "getResourceRuntimeAuthorization",
+            ))
+        }
         ["", "api", "v1", "resource-requests", request_id] if *method == Method::GET => {
             let id = request_id
                 .parse()
@@ -1260,7 +1316,7 @@ fn authorize_resource_actor(
     now: OffsetDateTime,
 ) -> Result<(), auth::AuthorizationError> {
     let scope = resource_authorization_scope(&actor, scope, policy);
-    auth::authorize(
+    auth::object_authorization::authorize_operation(
         &auth::AuthorizationContext {
             actor,
             course_memberships: memberships.course_memberships,
@@ -1268,7 +1324,7 @@ fn authorize_resource_actor(
             now,
         },
         scope,
-        &policy.allowed_roles.iter().copied().collect(),
+        policy,
     )
     .map(|_| ())
 }
@@ -1375,7 +1431,17 @@ pub(super) async fn forward_runtime(
     }
     let (endpoint_grant_id, runtime_path) = parse_runtime_path(uri.path())?;
     let session = authenticated_session(&state, &headers).await?;
-    let target = authorize_runtime(&state, session.actor_id, endpoint_grant_id).await?;
+    let target = authorize_runtime(
+        &state,
+        session.actor_id,
+        endpoint_grant_id,
+        if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+            contracts::object_authorization::ObjectAction::Browse
+        } else {
+            contracts::object_authorization::ObjectAction::Edit
+        },
+    )
+    .await?;
     let mut upstream = Url::parse(&format!(
         "http://runtime.lw-env-{}.svc.cluster.local:8080/",
         target.environment_id
@@ -1465,15 +1531,16 @@ async fn authorize_runtime(
     state: &AppState,
     actor_id: uuid::Uuid,
     endpoint_grant_id: contracts::EndpointGrantId,
+    action: contracts::object_authorization::ObjectAction,
 ) -> Result<RuntimeTarget, ApiError> {
     let now = OffsetDateTime::now_utc();
     let row = sqlx::query(
-        "SELECT g.project_id,g.course_id,g.environment_id,g.environment_revision,g.contract,\
+        "SELECT g.project_id,g.course_id,g.environment_id,g.environment_revision,g.contract,pm.object_role,\
                 eg.endpoint_id,eg.endpoint_revision,eg.protocol,eg.expires_at,\
                 pm.expires_at AS project_membership_expires_at,cm.expires_at AS course_membership_expires_at \
          FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
-         JOIN access.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
-         LEFT JOIN access.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+         JOIN control.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
+         LEFT JOIN control.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
            AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
          WHERE eg.endpoint_grant_id=$1 AND g.actor_id=$2 AND g.state='active' \
             AND g.not_before<=$3 AND g.expires_at>$3 AND eg.expires_at>$3 \
@@ -1490,6 +1557,12 @@ async fn authorize_runtime(
     .await
     .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?
     .ok_or_else(|| ApiError::forbidden("LW_ACCESS_RUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorization::ProjectObjectRole =
+        serde_json::from_value(serde_json::Value::String(row.get("object_role")))
+            .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    if !object_role.actions().contains(&action) {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
     let environment_id = row
         .get::<uuid::Uuid, _>("environment_id")
         .to_string()
@@ -1797,7 +1870,7 @@ async fn authorize_environment_project(
         .map_err(ApiError::from)?;
     let policy = contracts::operation_contract(operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
-    auth::authorize(
+    auth::object_authorization::authorize_operation(
         &auth::AuthorizationContext {
             actor,
             course_memberships: memberships.course_memberships,
@@ -1805,7 +1878,7 @@ async fn authorize_environment_project(
             now: time::OffsetDateTime::now_utc(),
         },
         contracts::AuthorizationScope::Project { project_id },
-        &policy.allowed_roles.iter().copied().collect(),
+        policy,
     )
     .map_err(ApiError::from)?;
     Ok(())
@@ -1990,6 +2063,7 @@ fn rewrite_runtime_location(
 fn valid_control_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     (path.starts_with("/api/v1/courses/")
+        || super::membership_governance::valid_invitation_path(path)
         || path == "/api/v1/projects"
         || path.starts_with("/api/v1/projects/")
         || valid_admin_image_path(path)
@@ -2168,7 +2242,7 @@ fn valid_resource_path(path: &str) -> bool {
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-requests", _, action]
-            if matches!(*action, "approve" | "resize-and-approve" | "cancel" | "reject" | "retry")
+            if matches!(*action, "approve" | "resize-and-approve" | "cancel" | "reject" | "retry" | "runtime-authorization")
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-leases", _, action]
@@ -2202,6 +2276,54 @@ pub(super) enum ControlGatewayError {
     Config,
     #[error("LW_AUTH_CONFIG_BINDING_MISSING")]
     Certificate,
+}
+
+/// Reads the actual Environment owner projection before a project action check.
+/// User input cannot choose the project. No original mutation is forwarded until this check succeeds.
+async fn read_owned_environment(
+    state: &AppState,
+    headers: &HeaderMap,
+    environment_id: contracts::EnvironmentId,
+) -> Result<contracts::environment::EnvironmentInstance, ApiError> {
+    let uri = Uri::from_str(&format!("/api/v1/environments/{environment_id}"))
+        .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+    let response = forward(
+        state,
+        &state.environment_proxy,
+        ForwardRequest {
+            method: Method::GET,
+            uri,
+            headers: headers.clone(),
+            body: ForwardBody::Buffered(Bytes::new()),
+            valid_path: valid_environment_path,
+            scope: None,
+            gateway: GatewayAuthority::Environment,
+        },
+    )
+    .await?;
+    if response.status().is_server_error() {
+        return Err(ApiError::unavailable("LW_AUTH_ENVIRONMENT_UNAVAILABLE"));
+    }
+    if !response.status().is_success() {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
+    let bytes = to_bytes(
+        response.into_body(),
+        state.environment_proxy.max_response_bytes,
+    )
+    .await
+    .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    let instance =
+        contracts::parse_strict_json::<contracts::environment::EnvironmentInstance>(&bytes)
+            .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    instance
+        .validate()
+        .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    let actor = authenticated_session(state, headers).await?;
+    if instance.id != environment_id || instance.owner_id.as_uuid() != actor.actor_id {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
+    Ok(instance)
 }
 
 #[cfg(test)]
@@ -2248,6 +2370,7 @@ mod tests {
         role: PlatformRole,
     ) -> ProjectMembership {
         ProjectMembership {
+            object_role: contracts::object_authorization::ProjectObjectRole::Editor,
             course_id: None,
             project_id,
             actor_id,

@@ -42,7 +42,8 @@
           v-if="retryableOperation"
           type="button"
           class="outlined-button"
-          :disabled="retryingEnvironment"
+          :disabled="retryingEnvironment || !canRetryFailedOperation()"
+          :title="permissions.denialReason('edit', '重试失败的操作') ?? undefined"
           @click="retryFailedOperation(env.instance.data)"
         >
           重试失败的操作
@@ -68,6 +69,14 @@
       role="status"
     >
       {{ lifecycleActionHint(env.instance.data) }}
+    </p>
+    <p
+      v-if="env.instance.kind === 'success' && lifecyclePermissionHint()"
+      class="lifecycle-action-hint lifecycle-permission-hint"
+      data-testid="lifecycle-permission-hint"
+      role="note"
+    >
+      {{ lifecyclePermissionHint() }}
     </p>
 
     <div
@@ -129,8 +138,11 @@ const {
   canStop,
   canRestart,
   canDelete,
+  canRetryFailedOperation,
+  permissions,
   lifecycleActionReason,
   lifecycleActionHint,
+  lifecyclePermissionHint,
   runLifecycle,
   requestLifecycleConfirmation,
   confirmLifecycle,

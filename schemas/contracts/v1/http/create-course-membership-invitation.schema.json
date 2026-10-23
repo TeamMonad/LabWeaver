@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "CourseObjectRole": {
+      "description": "Course responsibility does not change the actor's verified platform identity.",
+      "enum": [
+        "instructor",
+        "teaching_assistant",
+        "participant"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "membershipExpiresAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "objectRole": {
+      "$ref": "#/$defs/CourseObjectRole"
+    },
+    "username": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "username",
+    "objectRole",
+    "expiresAt"
+  ],
+  "title": "CreateCourseMembershipInvitation",
+  "type": "object"
+}

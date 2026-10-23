@@ -7,6 +7,8 @@ mod directory;
 mod grants;
 #[path = "../../http_transport.rs"]
 mod http_transport;
+mod membership_governance;
+mod object_authorization;
 mod oidc_login;
 mod proxy;
 
@@ -389,6 +391,26 @@ fn admin_browser_router() -> Router<Arc<AppState>> {
 fn project_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/api/v1/projects/{project_id}/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}/accept",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/member-invitations/{invitation_id}/revoke",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects",
             axum::routing::any(proxy::forward_control),
         )
@@ -398,6 +420,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/projects/{project_id}/archive",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/available-actions",
             axum::routing::any(proxy::forward_control),
         )
         .route(
@@ -528,6 +554,18 @@ fn project_browser_router() -> Router<Arc<AppState>> {
 
 fn course_browser_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route(
+            "/api/v1/courses/{course_id}/members",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/members/{actor_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/member-invitations",
+            axum::routing::any(proxy::forward_control),
+        )
         .route(
             "/api/v1/courses/{course_id}/problem-package-uploads",
             axum::routing::any(proxy::forward_control),
@@ -1026,7 +1064,7 @@ async fn authorization_decision(
         .await
         .map_err(ApiError::from)?;
     let requested_scope = request.scope.clone();
-    let mut decision = authorize(
+    let mut decision = auth::object_authorization::authorize_operation(
         &AuthorizationContext {
             actor,
             course_memberships: memberships.course_memberships,
@@ -1034,11 +1072,7 @@ async fn authorization_decision(
             now,
         },
         requested_scope,
-        &policy
-            .allowed_roles
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>(),
+        policy,
     )
     .map_err(ApiError::from)?;
     resolve_environment_owner(&state, &mut decision, now).await?;
@@ -1051,6 +1085,7 @@ async fn authorization_decision(
         duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         actor_id = %decision.actor.actor_id,
         operation = policy.operation_id,
+        scope = ?decision.scope,
         diagnostic_code = "LW_AUTH_DECISION_PERMIT",
         retryable = false,
     );
@@ -1265,7 +1300,6 @@ fn effective_session_scopes(
     for membership in memberships.course_memberships {
         if membership.actor_id == actor.actor_id
             && membership.state == contracts::MembershipState::Active
-            && actor.roles.contains(&membership.role)
             && membership.expires_at.is_none_or(|value| value.get() > now)
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
@@ -1283,7 +1317,10 @@ fn effective_session_scopes(
     for membership in memberships.project_memberships {
         if membership.actor_id == actor.actor_id
             && membership.state == contracts::MembershipState::Active
-            && actor.roles.contains(&membership.role)
+            && membership
+                .object_role
+                .actions()
+                .contains(&contracts::object_authorization::ObjectAction::Browse)
             && membership.expires_at.is_none_or(|value| value.get() > now)
         {
             revision = Revision::new(revision.get().max(membership.revision.get()))
@@ -2034,5 +2071,42 @@ mod tests {
         let exchange = ApiError::from(auth::OidcProviderError::TokenExchange);
         assert_eq!(exchange.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(exchange.diagnostic, "LW_AUTH_OIDC_TOKEN_EXCHANGE_FAILED");
+    }
+    #[test]
+    fn session_project_scopes_follow_object_membership_without_a_role_switch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor_id = contracts::ActorId::new();
+        let project_id = contracts::ProjectId::new();
+        let expiry: contracts::UtcTimestamp = "2026-10-13T00:00:00.000Z".parse()?;
+        let actor = contracts::AuthenticatedActor {
+            actor_id,
+            roles: vec![contracts::PlatformRole::Student],
+            expires_at: expiry,
+        };
+        let members = auth::MembershipSnapshot {
+            course_memberships: vec![],
+            project_memberships: vec![contracts::ProjectMembership {
+                course_id: None,
+                project_id,
+                actor_id,
+                username: None,
+                display_name: None,
+                role: contracts::PlatformRole::Teacher,
+                object_role: contracts::object_authorization::ProjectObjectRole::Viewer,
+                state: contracts::MembershipState::Active,
+                revision: contracts::Revision::new(3)?,
+                expires_at: None,
+            }],
+        };
+        let (scopes, _, _) = super::effective_session_scopes(
+            &actor,
+            members,
+            contracts::Revision::new(1)?,
+            expiry,
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .map_err(|e| std::io::Error::other(e.diagnostic))?;
+        assert!(scopes.contains(&contracts::AuthorizationScope::Project { project_id }));
+        Ok(())
     }
 }

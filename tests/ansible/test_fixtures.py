@@ -1,8 +1,10 @@
 """Contract evidence for the router-owned Ansible controller and safety policies."""
 
 from __future__ import annotations
-
 import importlib.util
+
+import subprocess
+import time
 import json
 from pathlib import Path
 import re
@@ -725,6 +727,152 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_ROLE_CONFLICT", seed)
         self.assertNotIn("resource_requests", seed)
         self.assertNotIn("environment_template_releases", seed)
+        platform_seed = (
+            ROOT
+            / "deploy/ansible/roles/platform_application/templates/access-seed-reconcile.sql.j2"
+        ).read_text(encoding="utf-8")
+        for template in (seed, platform_seed):
+            self.assertIn("control.course_memberships", template)
+            self.assertIn("object_role", template)
+            self.assertNotIn("access.course_memberships", template)
+            self.assertNotIn("access.project_memberships", template)
+        self.assertIn("SET ROLE lw_control_owner", seed)
+        self.assertIn("SET ROLE lw_control_owner", platform_seed)
+        self.assertIn("PLATFORM_ACCESS_ACTOR_IDENTITY_CONFLICT", platform_seed)
+        self.assertNotIn("ON CONFLICT (actor_id) DO UPDATE", platform_seed)
+    def test_platform_seed_replay_rejects_actor_rebinding_and_is_idempotent(self) -> None:
+        template = Environment(undefined=StrictUndefined).from_string(
+            (
+                ROOT
+                / "deploy/ansible/roles/platform_application/templates/access-seed-reconcile.sql.j2"
+            ).read_text(encoding="utf-8")
+        )
+        actor_id = "00000000-0000-7000-8000-000000000201"
+        course_id = "00000000-0000-7000-8000-000000000301"
+
+        def render(issuer: str, subject: str) -> str:
+            return template.render(
+                platform_application_access_seed={
+                    "courseMemberships": [
+                        {
+                            "actorId": actor_id,
+                            "issuer": issuer,
+                            "subjectSha256": subject,
+                            "courseId": course_id,
+                            "role": "teacher",
+                        }
+                    ]
+                }
+            )
+
+        container = subprocess.check_output(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--rm",
+                "-e",
+                "POSTGRES_PASSWORD=postgres",
+                "postgres:17.6-alpine",
+            ],
+            text=True,
+        ).strip()
+
+        def psql(sql: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    "-i",
+                    container,
+                    "psql",
+                    "-h",
+                    "127.0.0.1",
+                    "-At", 
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-U",
+                    "postgres",
+                    "-d",
+                    "postgres",
+                ],
+                input=sql,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if check and result.returncode != 0:
+                self.fail(result.stderr)
+            return result
+
+        try:
+            for _ in range(30):
+                ready = subprocess.run(
+                    ["docker", "exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+                    capture_output=True,
+                )
+                if ready.returncode == 0:
+                    break
+                time.sleep(1)
+            else:
+                self.fail("PostgreSQL seed fixture did not become ready")
+            psql(
+                """
+                CREATE ROLE lw_access_owner NOLOGIN;
+                CREATE ROLE lw_control_owner NOLOGIN;
+                CREATE SCHEMA access;
+                CREATE SCHEMA control;
+                CREATE TABLE access.service_identities (
+                    service_identity_id uuid PRIMARY KEY, san_uri text NOT NULL,
+                    service_name text NOT NULL, state text NOT NULL, revision bigint NOT NULL
+                );
+                CREATE TABLE access.actors (
+                    actor_id uuid PRIMARY KEY, issuer text NOT NULL, subject_sha256 text NOT NULL
+                );
+                CREATE TABLE control.course_memberships (
+                    course_id uuid NOT NULL, actor_id uuid NOT NULL, role text NOT NULL,
+                    object_role text NOT NULL, state text NOT NULL, revision bigint NOT NULL,
+                    updated_at timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY (course_id, actor_id)
+                );
+                GRANT USAGE ON SCHEMA access TO lw_access_owner;
+                GRANT ALL ON ALL TABLES IN SCHEMA access TO lw_access_owner;
+                GRANT USAGE ON SCHEMA control TO lw_control_owner;
+                GRANT ALL ON ALL TABLES IN SCHEMA control TO lw_control_owner;
+                """
+            )
+            original_issuer = "https://issuer.example.test/realm"
+            original_subject = "a" * 64
+            psql(render(original_issuer, original_subject))
+            self.assertEqual(
+                psql(
+                    "SELECT issuer || ':' || subject_sha256 FROM access.actors "
+                    f"WHERE actor_id='{actor_id}'"
+                ).stdout.strip(),
+                f"{original_issuer}:{original_subject}",
+            )
+            mismatch = psql(
+                render("https://evil.example.test/realm", "b" * 64),
+                check=False,
+            )
+            self.assertNotEqual(mismatch.returncode, 0)
+            self.assertIn("PLATFORM_ACCESS_ACTOR_IDENTITY_CONFLICT", mismatch.stderr)
+            self.assertEqual(
+                psql(
+                    "SELECT issuer || ':' || subject_sha256 FROM access.actors "
+                    f"WHERE actor_id='{actor_id}'"
+                ).stdout.strip(),
+                f"{original_issuer}:{original_subject}",
+            )
+            self.assertEqual(
+                psql(
+                    f"SELECT count(*) FROM control.course_memberships WHERE actor_id='{actor_id}'"
+                ).stdout.strip(),
+                "1",
+            )
+            psql(render(original_issuer, original_subject))
+        finally:
+            subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
 
     def test_postgres_apply_rejects_an_unknown_listener_without_protocol_probe(self) -> None:
         apply_path = ROOT / "deploy/ansible/library/labweaver_postgres_apply.py"

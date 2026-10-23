@@ -2607,6 +2607,7 @@ impl PgResourceStore {
             &approval.approved_resources,
             approval.approved_duration_seconds,
             &approval.reason,
+            &approval.runtime_authorization,
             &allocation.claim.quota_resources,
         ))
         .map_err(|_| ResourceStoreError::Wire)?;
@@ -2627,6 +2628,14 @@ impl PgResourceStore {
             IdempotencyDecision::Reserved => {
                 let now = database_now(&mut transaction).await?;
                 let next = ResourceLifecycle::accept_approval(&request, approval, policy, now)?;
+                if let Some(binding) = &approval.runtime_authorization {
+                    crate::runtime_authorization::validate_binding(
+                        &mut transaction,
+                        &request,
+                        binding,
+                    )
+                    .await?;
+                }
                 let mut claim = allocation.claim.clone();
                 claim.updated_at = Some(now);
                 claim.gpu_allocation = resolve_gpu_allocation(
@@ -5972,6 +5981,8 @@ fn safe_sqlstate_value(code: Option<&str>) -> String {
 pub enum ResourceStoreError {
     #[error(transparent)]
     Credits(#[from] crate::credits::CreditError),
+    #[error(transparent)]
+    RuntimeBinding(#[from] crate::runtime_authorization::RuntimeBindingError),
     #[error("LW_RESOURCE_NOT_FOUND")]
     NotFound,
     #[error("LW_RESOURCE_CREATE_STATE_INVALID")]
