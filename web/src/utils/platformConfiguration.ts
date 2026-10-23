@@ -5,35 +5,8 @@ import type {
   PlatformConfigurationDesired,
   PlatformConfigurationFailureReason,
   PlatformConfigurationNextStep,
-  PlatformConfigurationStatusSchemaBuilderEntitlement,
-  PlatformConfigurationStatusSchemaLinuxCapability,
   UpdatePlatformConfigurationRequestSchema,
 } from '@/generated/contracts'
-
-export type LinuxCapability = PlatformConfigurationStatusSchemaLinuxCapability
-export type BuilderEntitlement = PlatformConfigurationStatusSchemaBuilderEntitlement
-
-/**
- * Runtime list of the generated `LinuxCapability` union. The generated SDK only
- * ships the type, so the exhaustiveness check below fails typecheck if the
- * contract adds or removes a capability.
- */
-export const LINUX_CAPABILITIES = [
-  'CHOWN', 'DAC_OVERRIDE', 'DAC_READ_SEARCH', 'FOWNER', 'FSETID', 'KILL', 'SETGID', 'SETUID', 'SETPCAP',
-  'LINUX_IMMUTABLE', 'NET_BIND_SERVICE', 'NET_BROADCAST', 'NET_ADMIN', 'NET_RAW', 'IPC_LOCK', 'IPC_OWNER',
-  'SYS_MODULE', 'SYS_RAWIO', 'SYS_CHROOT', 'SYS_PTRACE', 'SYS_PACCT', 'SYS_ADMIN', 'SYS_BOOT', 'SYS_NICE',
-  'SYS_RESOURCE', 'SYS_TIME', 'SYS_TTY_CONFIG', 'MKNOD', 'LEASE', 'AUDIT_WRITE', 'AUDIT_CONTROL', 'SETFCAP',
-  'MAC_OVERRIDE', 'MAC_ADMIN', 'SYSLOG', 'WAKE_ALARM', 'BLOCK_SUSPEND', 'AUDIT_READ', 'PERFMON', 'BPF',
-  'CHECKPOINT_RESTORE',
-] as const satisfies readonly LinuxCapability[]
-
-export const BUILDER_ENTITLEMENTS = ['network.host', 'security.insecure'] as const satisfies readonly BuilderEntitlement[]
-
-type Exhaustive<All, Listed> = [All] extends [Listed] ? true : never
-const capabilitiesExhaustive: Exhaustive<LinuxCapability, (typeof LINUX_CAPABILITIES)[number]> = true
-const entitlementsExhaustive: Exhaustive<BuilderEntitlement, (typeof BUILDER_ENTITLEMENTS)[number]> = true
-void capabilitiesExhaustive
-void entitlementsExhaustive
 
 export const APPLY_STAGES = ['requested', 'validating', 'applying', 'verifying', 'succeeded'] as const satisfies readonly PlatformConfigurationApplyStage[]
 
@@ -48,12 +21,14 @@ export function applyStageLabel(stage: PlatformConfigurationApplyStage): string 
   } satisfies Record<PlatformConfigurationApplyStage, string>)[stage]
 }
 
-export function appliedStateLabel(state: PlatformConfigurationAppliedState): { label: string; detail: string; tone: 'neutral' | 'ok' | 'warn' } {
+export type AppliedTone = 'neutral' | 'ok' | 'warn'
+
+export function appliedStateLabel(state: PlatformConfigurationAppliedState): { label: string; detail: string; tone: AppliedTone } {
   return ({
     unconfigured: { label: '尚无验证结果', detail: '还没有任何一次完整验证通过的应用。', tone: 'neutral' },
     verified: { label: '已验证', detail: '最近一次完整验证通过，applied 即当前生效配置。', tone: 'ok' },
     unverified: { label: '待核对', detail: '外部结果待核对；applied 只是最后一次验证通过的版本，不代表当前集群状态。', tone: 'warn' },
-  } satisfies Record<PlatformConfigurationAppliedState, { label: string; detail: string; tone: 'neutral' | 'ok' | 'warn' }>)[state]
+  } satisfies Record<PlatformConfigurationAppliedState, { label: string; detail: string; tone: AppliedTone }>)[state]
 }
 
 export function failureReasonLabel(reason: PlatformConfigurationFailureReason): string {
@@ -77,6 +52,65 @@ export function nextStepLabel(step: PlatformConfigurationNextStep): string {
   } satisfies Record<PlatformConfigurationNextStep, string>)[step]
 }
 
+/**
+ * Settings the contract can express but no execution-side consumer enforces yet.
+ *
+ * The encrypted Bundle only derives policy from an authenticated managed
+ * version, and `tools/deployment_bundle.py::_configuration_policy` plus the Helm
+ * policy helper fail closed on any non-default value below ("尚无执行侧实现，见
+ * #207"). A desired version that sets them can be saved, but it can never be
+ * sealed, rendered or applied, so the console keeps them at the only value the
+ * deployment path accepts and refuses to submit anything else.
+ */
+export interface UnsupportedPolicyField {
+  path: string
+  label: string
+  /** The only value the deployment path accepts, as shown to the administrator. */
+  accepted: string
+}
+
+export function unsupportedPolicyFields(configuration: PlatformConfigurationDesired): UnsupportedPolicyField[] {
+  const runtime = configuration.runtimePolicy
+  const builder = configuration.builderPolicy
+  const fields: UnsupportedPolicyField[] = []
+  if (runtime.defaultContainerUid !== 0) {
+    fields.push({ path: 'runtimePolicy.defaultContainerUid', label: '默认容器 UID', accepted: '0' })
+  }
+  if (runtime.allowedCapabilities.length > 0) {
+    fields.push({ path: 'runtimePolicy.allowedCapabilities', label: '普通容器 capabilities 允许清单', accepted: '空' })
+  }
+  if (runtime.preauthorizations.length > 0) {
+    fields.push({ path: 'runtimePolicy.preauthorizations', label: '项目/课程预授权', accepted: '空' })
+  }
+  if (runtime.privilegedExecutionLocation?.kind === 'virtual_machine_guest') {
+    fields.push({ path: 'runtimePolicy.privilegedExecutionLocation', label: 'VM guest 执行位置', accepted: '专用节点池或不允许特权' })
+  }
+  if (builder.capabilities.length > 0) {
+    fields.push({ path: 'builderPolicy.capabilities', label: 'builder capabilities', accepted: '空' })
+  }
+  if (builder.allowPrivilegeEscalation) {
+    fields.push({ path: 'builderPolicy.allowPrivilegeEscalation', label: 'builder 提权', accepted: '关闭' })
+  }
+  if (builder.entitlements.length > 0) {
+    fields.push({ path: 'builderPolicy.entitlements', label: 'builder entitlements', accepted: '空' })
+  }
+  return fields
+}
+
+/** Copy of `configuration` with every unsupported setting reset to the accepted value; lifecycle and supported privileged placement are kept. */
+export function withoutUnsupportedPolicy(configuration: PlatformConfigurationDesired): PlatformConfigurationDesired {
+  const next = cloneConfiguration(configuration)
+  next.runtimePolicy.defaultContainerUid = 0
+  next.runtimePolicy.allowedCapabilities = []
+  next.runtimePolicy.preauthorizations = []
+  if (next.runtimePolicy.privilegedExecutionLocation?.kind === 'virtual_machine_guest') {
+    next.runtimePolicy.privilegedExecutionLocation = null
+    next.runtimePolicy.privilegedAllowed = false
+  }
+  next.builderPolicy = { capabilities: [], allowPrivilegeEscalation: false, entitlements: [] }
+  return next
+}
+
 const DAY = 86_400
 const HOUR = 3_600
 const MINUTE = 60
@@ -89,8 +123,6 @@ export function formatSeconds(seconds: number): string {
   if (seconds % MINUTE === 0) return `${seconds / MINUTE} 分钟`
   return `${seconds} 秒`
 }
-
-export const SHA256_PATTERN = /^[0-9a-f]{64}$/
 
 export function cloneConfiguration(configuration: PlatformConfigurationDesired): PlatformConfigurationDesired {
   return JSON.parse(JSON.stringify(configuration)) as PlatformConfigurationDesired
@@ -173,6 +205,17 @@ export function parseRequestYaml(text: string): YamlParseResult {
     if (!groups[group] || typeof groups[group] !== 'object') {
       return { ok: false, message: `configuration 缺少完整的 ${group} 设置组；更新会替换整个配置。` }
     }
+  }
+  const runtime = groups.runtimePolicy as Record<string, unknown>
+  const builder = groups.builderPolicy as Record<string, unknown>
+  const lists: [unknown, string][] = [
+    [runtime.allowedCapabilities, 'runtimePolicy.allowedCapabilities'],
+    [runtime.preauthorizations, 'runtimePolicy.preauthorizations'],
+    [builder.capabilities, 'builderPolicy.capabilities'],
+    [builder.entitlements, 'builderPolicy.entitlements'],
+  ]
+  for (const [list, path] of lists) {
+    if (!Array.isArray(list)) return { ok: false, message: `${path} 必须是列表；更新会替换整个配置。` }
   }
   return { ok: true, request: value as UpdatePlatformConfigurationRequestSchema }
 }

@@ -58,9 +58,9 @@ const platformConfigurationDesired = {
   configuration: {
     lifecycle: { readOnlyRetentionSeconds: 1209600, detailedLogRetentionSeconds: 2592000, expiryReminderSeconds: [86400, 3600], preemptionGraceSeconds: 120 },
     runtimePolicy: {
-      defaultContainerUid: 1000,
-      allowedCapabilities: ['NET_BIND_SERVICE', 'SYS_PTRACE'],
-      preauthorizations: [{ scope: { kind: 'project', projectId: fixtureProjectId }, capabilities: ['SYS_PTRACE'], privileged: false }],
+      defaultContainerUid: 0,
+      allowedCapabilities: [],
+      preauthorizations: [],
       privilegedAllowed: true,
       privilegedExecutionLocation: { kind: 'dedicated_node_pool', nodeSelector: { 'labweaver.io/pool': 'privileged' }, taintKey: 'labweaver.io/privileged', taintValue: 'true' },
     },
@@ -68,6 +68,25 @@ const platformConfigurationDesired = {
   },
   configurationSha256: '9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b',
   createdAt: '2026-09-14T06:30:00.000Z',
+  createdBy: 'fixture-admin',
+} satisfies PlatformConfigurationVersionSchema
+
+/** A version saved with settings that no execution-side consumer enforces; it cannot be sealed or applied. */
+const platformConfigurationUnsupportedDesired = {
+  revision: 6,
+  configuration: {
+    lifecycle: platformConfigurationDefaults.lifecycle,
+    runtimePolicy: {
+      defaultContainerUid: 1000,
+      allowedCapabilities: ['NET_BIND_SERVICE', 'SYS_PTRACE'],
+      preauthorizations: [{ scope: { kind: 'project', projectId: fixtureProjectId }, capabilities: ['SYS_PTRACE'], privileged: false }],
+      privilegedAllowed: false,
+      privilegedExecutionLocation: null,
+    },
+    builderPolicy: { capabilities: [], allowPrivilegeEscalation: false, entitlements: ['network.host'] },
+  },
+  configurationSha256: '6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d',
+  createdAt: '2026-09-15T03:00:00.000Z',
   createdBy: 'fixture-admin',
 } satisfies PlatformConfigurationVersionSchema
 
@@ -113,6 +132,20 @@ function platformConfigurationStatus(): PlatformConfigurationStatusSchema {
       impact: { runtimePolicyChanged: false, builderPolicyChanged: false, lifecyclePolicyChanged: false },
     }
   }
+  if (activeScene.value.id === 'platform-configuration-unsupported') {
+    return {
+      revision: 10,
+      appliedState: 'verified',
+      defaults: platformConfigurationDefaults,
+      desired: platformConfigurationUnsupportedDesired,
+      applied: platformConfigurationApplied,
+      appliedAt: '2026-09-10T02:20:00.000Z',
+      appliedBundleSha256: platformConfigurationPreviousApply.encryptedBundleSha256,
+      registeredBundle: null,
+      latestApply: platformConfigurationPreviousApply,
+      impact: { runtimePolicyChanged: true, builderPolicyChanged: true, lifecyclePolicyChanged: false },
+    }
+  }
   return {
     revision: 9,
     appliedState: 'unverified',
@@ -139,7 +172,7 @@ export async function getPlatformConfiguration(): Promise<Result<PlatformConfigu
   return preview(platformConfigurationStatus())
 }
 export async function getPlatformConfigurationVersion(options: { path: { revision: number } }): Promise<Result<PlatformConfigurationVersionSchema>> {
-  const version = [platformConfigurationApplied, platformConfigurationDesired].find((item) => item.revision === options.path.revision)
+  const version = [platformConfigurationApplied, platformConfigurationDesired, platformConfigurationUnsupportedDesired].find((item) => item.revision === options.path.revision)
   return version ? preview(version) : notFoundResponse('平台配置版本', String(options.path.revision))
 }
 export async function getPlatformConfigurationApply(options: { path: { applyId: string } }): Promise<Result<PlatformConfigurationApply>> {

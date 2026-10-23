@@ -44,6 +44,7 @@ export const fixtureScenes: FixtureScene[] = [
   { id: 'gpu-catalog', label: 'GPU 目录 · 目录与新建', group: '管理员任务', role: 'admin', path: '/admin/gpu-catalog', description: '展示 GPU class 目录条目并保留新建目录项表单。' },
   { id: 'platform-configuration-unverified', label: '平台配置 · 应用失败待核对', group: '管理员任务', role: 'admin', path: '/admin/platform-configuration', description: 'desired 领先于最后验证的 applied，最近一次应用在应用阶段失败，需要核对外部结果。' },
   { id: 'platform-configuration-unconfigured', label: '平台配置 · 尚未配置', group: '管理员任务', role: 'admin', path: '/admin/platform-configuration', description: '服务端尚无 desired，编辑器以服务端初始模板作为草稿。' },
+  { id: 'platform-configuration-unsupported', label: '平台配置 · 尚无执行侧实现', group: '管理员任务', role: 'admin', path: '/admin/platform-configuration', description: '已保存的 desired 含 capabilities、预授权、非 0 UID 与 builder entitlement；页面标注尚无执行侧实现，禁止登记与应用。' },
   { id: 'workspace-archive', label: '项目与工作 · 归档确认', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '保留项目归属，并检查危险归档确认文案。' },
   { id: 'work-launcher', label: 'Work 环境 · 无模型手工创建', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '项目没有可用模型：Agent 关闭并说明原因，仍可手工选择模板创建 Work。' },
   { id: 'work-launcher-empty', label: 'Work 环境 · 没有模板', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '没有已发布模板且没有模型时的下一步说明。' },

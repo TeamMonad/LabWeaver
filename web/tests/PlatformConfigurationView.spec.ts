@@ -5,8 +5,9 @@ import {
   applyPlatformConfiguration,
   getPlatformConfiguration,
   registerPlatformConfigurationBundle,
+  updatePlatformConfiguration,
 } from '@/generated/contracts'
-import type { PlatformConfigurationStatusSchema } from '@/generated/contracts'
+import type { PlatformConfigurationDesired, PlatformConfigurationStatusSchema } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -19,7 +20,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   }
 })
 
-const configuration = {
+const configuration: PlatformConfigurationDesired = {
   lifecycle: { readOnlyRetentionSeconds: 604800, detailedLogRetentionSeconds: 2592000, expiryReminderSeconds: [86400, 3600], preemptionGraceSeconds: 60 },
   runtimePolicy: { defaultContainerUid: 0, allowedCapabilities: [], preauthorizations: [], privilegedAllowed: false, privilegedExecutionLocation: null },
   builderPolicy: { capabilities: [], allowPrivilegeEscalation: false, entitlements: [] },
@@ -28,15 +29,19 @@ const configuration = {
 const configurationSha = 'a'.repeat(64)
 const bundleSha = 'd'.repeat(64)
 
-function statusWithoutRegistration(): PlatformConfigurationStatusSchema {
+function statusWithoutRegistration(desired: PlatformConfigurationDesired = configuration): PlatformConfigurationStatusSchema {
   return {
     revision: 4,
     appliedState: 'unverified',
     defaults: configuration,
-    desired: { revision: 4, configuration, configurationSha256: configurationSha, createdAt: '2026-09-14T08:00:00Z', createdBy: 'admin-a' },
+    desired: { revision: 4, configuration: desired, configurationSha256: configurationSha, createdAt: '2026-09-14T08:00:00Z', createdBy: 'admin-a' },
     applied: null,
     registeredBundle: null,
-    latestApply: null,
+    latestApply: {
+      id: 'apply-1', desiredRevision: 3, encryptedBundleSha256: 'b'.repeat(64), stage: 'failed', failedStage: 'applying',
+      failureReason: 'external_result_unknown', nextStep: 'reconcile_external_result', requestedAt: '2026-09-14T07:00:00Z',
+      requestedBy: 'admin-a', revision: 3, updatedAt: '2026-09-14T07:30:00Z',
+    },
     impact: { runtimePolicyChanged: true, builderPolicyChanged: false, lifecyclePolicyChanged: false },
   }
 }
@@ -54,6 +59,13 @@ function statusWithRegistration(): PlatformConfigurationStatusSchema {
       registeredBy: 'admin-a',
       registeredAt: '2026-09-14T08:10:00Z',
     },
+  }
+}
+
+function problem(status: number, code: string) {
+  return {
+    data: undefined,
+    error: { type: 'urn:x', title: 'Control request blocked', status, detail: 'The request was rejected by a fail-closed control-plane boundary.', instance: 'urn:labweaver:request:req-9', requestId: 'req-9', diagnosticCode: code, retryable: false },
   }
 }
 
@@ -75,28 +87,53 @@ async function mountView() {
   return wrapper
 }
 
+async function chooseFile(wrapper: VueWrapper, file: File) {
+  const input = wrapper.find('[data-testid="pc-bundle-file"]')
+  Object.defineProperty(input.element, 'files', { value: [file] })
+  await input.trigger('change')
+  await flushPromises()
+}
+
 describe('PlatformConfigurationView', () => {
-  it('shows desired, the verified state, impact and missing registration from server facts', async () => {
+  it('shows desired, the verified state, impact, attempt history and missing registration from server facts', async () => {
     const wrapper = await mountView()
     expect(wrapper.find('[data-testid="pc-applied-state"]').text()).toBe('待核对')
     expect(wrapper.find('[data-testid="pc-impact"]').text()).toContain('运行策略')
     expect(wrapper.text()).toContain('revision 4')
     expect(wrapper.find('[data-testid="pc-registered-bundle"]').text()).toContain('无')
+    const history = wrapper.find('[data-testid="pc-apply-history"]')
+    expect(history.find('tbody tr.data-table__row').text()).toContain('外部结果未知（应用中）')
+    expect(history.text()).toContain('先核对外部真实状态')
     expect(wrapper.find('[data-testid="pc-apply"]').attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="pc-apply-needs-register"]').exists()).toBe(true)
   })
 
-  it('registers a selected .age file then confirms apply without a hand-filled digest', async () => {
+  it('offers only deployable runtime and builder settings and labels the rest as having no execution-side implementation', async () => {
+    const wrapper = await mountView()
+    const form = wrapper.find('.pc-form')
+    // No editable capability, preauthorization, UID or builder controls exist.
+    expect(form.findAll('input[type="checkbox"]')).toHaveLength(0)
+    expect(form.text()).not.toContain('添加预授权')
+    expect(form.find('[data-testid="pc-runtime-fixed"]').text()).toContain('默认容器 UID')
+    expect(form.text()).toContain('尚无执行侧实现')
+    const privileged = form.find('select[data-testid="pc-privileged-mode"]')
+    const vmOption = privileged.find('option[value="virtual_machine_guest"]')
+    expect(vmOption.attributes('disabled')).toBeDefined()
+    expect(vmOption.text()).toContain('尚无执行侧实现')
+
+    await privileged.setValue('dedicated_node_pool')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="pc-node-pool"]').exists()).toBe(true)
+  })
+
+  it('registers a selected .age file then confirms apply through ConfirmDialog without a hand-filled digest', async () => {
     const registered = statusWithRegistration()
     vi.mocked(registerPlatformConfigurationBundle).mockResolvedValue({ data: registered, error: undefined } as never)
     vi.mocked(applyPlatformConfiguration).mockResolvedValue({ data: registered, error: undefined } as never)
     const wrapper = await mountView()
 
-    const input = wrapper.find('[data-testid="pc-bundle-file"]').element as HTMLInputElement
     const file = new File([new Uint8Array(128)], 'platform.age', { type: 'application/octet-stream' })
-    Object.defineProperty(input, 'files', { value: [file] })
-    await wrapper.find('[data-testid="pc-bundle-file"]').trigger('change')
-    await flushPromises()
+    await chooseFile(wrapper, file)
     expect(wrapper.find('[data-testid="pc-bundle-file-name"]').text()).toContain('platform.age')
 
     await wrapper.find('[data-testid="pc-register"]').trigger('click')
@@ -111,17 +148,16 @@ describe('PlatformConfigurationView', () => {
     expect(registerArgs.query).toEqual({ expectedRevision: 4, configurationSha256: configurationSha })
     expect(registerArgs.body).toBe(file)
     expect(wrapper.find('[data-testid="pc-registered-bundle"]').text()).toContain(bundleSha.slice(0, 12))
+    expect(wrapper.find('[data-testid="pc-apply-registered"]').text()).toContain(bundleSha)
     expect(wrapper.find('[data-testid="pc-apply"]').attributes('disabled')).toBeUndefined()
 
     await wrapper.find('[data-testid="pc-apply"]').trigger('click')
     await flushPromises()
     const dialog = document.body.querySelector('[role="alertdialog"]')
-    expect(dialog?.textContent).toContain('不会在浏览器中执行部署')
-    expect(dialog?.textContent).toContain('待核对')
-    expect(dialog?.querySelector('[data-testid="pc-bundle-sha"]')).toBeNull()
-    expect(dialog?.querySelector('[data-testid="pc-apply-registered"]')?.textContent).toContain(bundleSha)
-    const confirm = document.body.querySelector('[data-testid="pc-apply-confirm"]') as HTMLButtonElement
-    expect(confirm.disabled).toBe(false)
+    expect(dialog?.textContent).toContain('浏览器不会执行部署')
+    expect(dialog?.textContent).toContain(bundleSha.slice(0, 12))
+    expect(dialog?.querySelector('input')).toBeNull()
+    const confirm = [...document.body.querySelectorAll('[role="alertdialog"] button')].find((button) => button.textContent?.includes('记录应用请求')) as HTMLButtonElement
     confirm.click()
     await flushPromises()
 
@@ -131,6 +167,67 @@ describe('PlatformConfigurationView', () => {
     expect(applyBody).not.toHaveProperty('encryptedBundleSha256')
     expect(document.body.querySelector('[role="alertdialog"]')).toBeNull()
     expect(wrapper.find('[data-testid="pc-notice"]').text()).toContain('202')
+  })
+
+  it('opens the comparison on a 412 and keeps the draft and selected file', async () => {
+    vi.mocked(getPlatformConfiguration)
+      .mockResolvedValueOnce({ data: statusWithoutRegistration(), error: undefined } as never)
+      .mockResolvedValue({ data: { ...statusWithoutRegistration(), revision: 9 }, error: undefined } as never)
+    vi.mocked(registerPlatformConfigurationBundle).mockResolvedValue(problem(412, 'LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT') as never)
+    const wrapper = await mountView()
+    await chooseFile(wrapper, new File([new Uint8Array(64)], 'platform.age'))
+
+    await wrapper.find('[data-testid="pc-register"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="pc-conflict"]').text()).toContain('revision 9')
+    const banner = wrapper.find('[data-testid="pc-register-failure"]')
+    expect(banner.find('.diagnostic-message').text()).toBe('配置已被其他管理员更新，本次提交未生效。')
+    expect(banner.find('.diagnostic-code').text()).toBe('LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT')
+    expect(wrapper.find('[data-testid="pc-bundle-file-name"]').text()).toContain('platform.age')
+  })
+
+  it('shows the Chinese reason first when the server rejects the policy, never the generic English detail', async () => {
+    vi.mocked(updatePlatformConfiguration).mockResolvedValue(problem(422, 'LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID') as never)
+    const wrapper = await mountView()
+    await wrapper.find('[data-testid="pc-preemption-grace"]').setValue('301')
+    await wrapper.find('[data-testid="pc-save"]').trigger('click')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="pc-save-failure"]')
+    expect(banner.find('.diagnostic-message').text()).toBe('生命周期设置超出允许范围。')
+    expect(banner.text()).not.toContain('fail-closed')
+    expect(banner.find('.diagnostic-next-step').text()).toContain('1–300 秒')
+    expect(banner.find('.diagnostic-request-id').text()).toBe('req-9')
+  })
+
+  it('marks a saved desired with unsupported settings and blocks registration and apply', async () => {
+    const unsupported = structuredClone(configuration)
+    unsupported.runtimePolicy.allowedCapabilities = ['SYS_PTRACE']
+    unsupported.builderPolicy.entitlements = ['network.host']
+    vi.mocked(getPlatformConfiguration).mockResolvedValue({ data: statusWithoutRegistration(unsupported), error: undefined } as never)
+    const wrapper = await mountView()
+
+    const banner = wrapper.find('[data-testid="pc-desired-unsupported"]')
+    expect(banner.text()).toContain('普通容器 capabilities 允许清单')
+    expect(banner.text()).toContain('builder entitlements')
+    expect(wrapper.find('[data-testid="pc-bundle-file"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="pc-register"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="pc-apply"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="pc-save"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.find('[data-testid="pc-reset-unsupported"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="pc-draft-unsupported"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="pc-save"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('shows the administrator-only reason when a non-administrator opens the page', async () => {
+    vi.mocked(getPlatformConfiguration).mockResolvedValue(problem(403, 'LW_FORBIDDEN') as never)
+    const wrapper = await mountView()
+    expect(wrapper.find('.diagnostic-message').text()).toContain('只有平台管理员')
+    expect(wrapper.find('.pc-form').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="pc-save"]').exists()).toBe(false)
   })
 
   it('switches between the form and the advanced YAML of the same request', async () => {
