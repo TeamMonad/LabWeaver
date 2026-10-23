@@ -3223,6 +3223,18 @@ impl ImmutableObjectStore for FixtureObjects {
     ) -> Result<PresignedUpload, ObjectStoreError> {
         self.presign_upload(key, size, media_type, now).await
     }
+    async fn presign_upload_exact_until(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let mut signed = self.presign_upload(key, size, media_type, now).await?;
+        signed.expires_at = expires_at;
+        Ok(signed)
+    }
 
     async fn read_verified(
         &self,
@@ -3754,6 +3766,18 @@ impl ImmutableObjectStore for RecoveryObjects {
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
         self.presign_upload(key, size, media_type, now).await
+    }
+    async fn presign_upload_exact_until(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let mut signed = self.presign_upload(key, size, media_type, now).await?;
+        signed.expires_at = expires_at;
+        Ok(signed)
     }
 
     async fn read_verified(
