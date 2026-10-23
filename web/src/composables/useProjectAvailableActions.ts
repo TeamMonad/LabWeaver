@@ -9,6 +9,7 @@ import { diagnosticFromError, makeDiagnostic, type AsyncState } from '@/types/as
 /** Chinese names of object actions, used in every permission reason. */
 export const OBJECT_ACTION_LABELS: Record<ObjectAction, string> = {
   browse: '查看',
+  archive: '归档',
   edit: '编辑',
   start: '启动',
   stop: '停止',
@@ -135,6 +136,8 @@ export function useProjectAvailableActions(projectId: Ref<string | null | undefi
     if (value.kind !== 'success' || value.data.projectId !== currentId()) return `正在确认你在此项目的权限，确认前不能${task}。`
     if (!current.value) return `项目权限已过期，正在重新确认，确认前不能${task}。`
     const needs = purpose ? `，不能${purpose}` : ''
+    // Archive belongs to the owner responsibility alone, which membership management cannot grant.
+    if (action === 'archive') return `你在此项目的职责不包含“${label}”${needs}。归档需要项目负责人职责，不能通过成员管理授予。`
     return `你在此项目的职责不包含“${label}”${needs}。如需此权限，请联系项目负责人调整你的成员职责。`
   }
 

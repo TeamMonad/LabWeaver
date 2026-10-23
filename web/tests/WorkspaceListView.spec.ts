@@ -88,8 +88,8 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   }
 })
 
-/** Answers every project with these actions, as Control would for a member with one responsibility in each. */
-function mockAvailableActions(actions: string[] = ['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs']) {
+/** Answers every project with these actions, as Control would for a member with one responsibility in each; the default is the owner's set. */
+function mockAvailableActions(actions: string[] = ['browse', 'archive', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs', 'request_runtime_permissions']) {
   vi.mocked(getProjectAvailableActions).mockImplementation(async ({ path }) => ({
     data: {
       projectId: path.projectId,
@@ -308,7 +308,8 @@ describe('WorkspaceListView', () => {
     const { wrapper } = await mountView()
 
     expect(wrapper.get('button[type="submit"]').text()).toContain('保存项目')
-    expect(wrapper.find('button.danger-button').exists()).toBe(true)
+    expect(wrapper.find('button.danger-button').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="edit-permission-hint"]').exists()).toBe(false)
     expect(wrapper.find('.member-form').exists()).toBe(false)
     expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
@@ -316,17 +317,19 @@ describe('WorkspaceListView', () => {
     wrapper.unmount()
   })
 
-  it('offers archiving only to the project owner or a platform administrator', async () => {
-    // A manager holds every project action except runtime policy, yet Control archives only for the owner or an administrator.
-    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'manager-1' } }
+  it('offers archiving only when Control lists the archive action, whatever the project owner field says', async () => {
+    // The signed-in account matches ownerActorId, but without `archive` in the answer the page must not offer it.
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'owner-1' } }
     mockAvailableActions(['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs'])
     const manager = await mountView()
-    expect(manager.wrapper.get('button[type="submit"]').text()).toContain('保存项目')
+    expect(manager.wrapper.find('button[type="submit"]').exists()).toBe(true)
     expect(manager.wrapper.find('button.danger-button').exists()).toBe(false)
     expect(manager.wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(true)
     manager.wrapper.unmount()
 
-    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'owner-1' } }
+    // An account that is not ownerActorId gets the button as soon as Control lists `archive`.
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'someone-else' } }
+    mockAvailableActions(['browse', 'archive', 'edit'])
     const owner = await mountView()
     expect(owner.wrapper.find('button.danger-button').exists()).toBe(true)
     expect(owner.wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(false)

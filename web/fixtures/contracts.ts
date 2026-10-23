@@ -565,7 +565,7 @@ export async function listProjectMemberships(options?: FixtureOptions): Promise<
   ] : [])
 }
 
-const OWNER_ACTIONS: ObjectAction[] = ['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs', 'request_runtime_permissions']
+const OWNER_ACTIONS: ObjectAction[] = ['browse', 'archive', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs', 'request_runtime_permissions']
 const EDITOR_ACTIONS: ObjectAction[] = ['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'view_costs', 'request_runtime_permissions']
 
 /**
