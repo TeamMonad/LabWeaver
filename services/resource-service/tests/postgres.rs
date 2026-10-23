@@ -3403,6 +3403,20 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
             .all(|request| request.requester_id == member)
     );
     assert!(member_first.next_cursor.is_some());
+    let wrong_project = store
+        .list_project_requests_page(
+            ProjectId::new(),
+            Some(member),
+            &ResourceRequestListQuery {
+                cursor: member_first.next_cursor.clone(),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_project,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
     let wrong_actor = store
         .list_project_requests_page(
             project_id,

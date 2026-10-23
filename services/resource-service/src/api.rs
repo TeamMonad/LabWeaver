@@ -1753,6 +1753,11 @@ mod tests {
                 "LW_RESOURCE_REVISION_CONFLICT",
             ),
             (
+                ResourceApiError::InvalidCursor,
+                StatusCode::BAD_REQUEST,
+                "LW_RESOURCE_REQUEST_CURSOR_INVALID",
+            ),
+            (
                 ResourceApiError::Invalid,
                 StatusCode::BAD_REQUEST,
                 "LW_RESOURCE_REQUEST_INVALID",

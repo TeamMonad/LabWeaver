@@ -1379,6 +1379,28 @@ class AnsibleFixtureTests(unittest.TestCase):
                 self.assertIn(locator, manifest["secrets"][service])
             for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration):
                 self.assertIn(locator, manifest["configMaps"][config_map])
+
+    def test_service_config_secret_paths_match_declared_manifest_keys(self) -> None:
+        platform_manifest = json.loads(
+            (ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8")
+        )
+        resource_manifest = json.loads(
+            (ROOT / "deploy/config/resource-bundle-manifest.json").read_text(encoding="utf-8")
+        )
+        for service, example, manifest in (
+            ("control-service-secrets", "control-plane.yaml.example", platform_manifest),
+            ("access-service-secrets", "access-auth.yaml.example", platform_manifest),
+            ("agent-service-secrets", "agent-control-plane.yaml.example", platform_manifest),
+            ("evaluation-service-secrets", "evaluation-service.yaml.example", platform_manifest),
+            ("resource-service-secrets", "resource-service.yaml.example", resource_manifest),
+        ):
+            configuration = (ROOT / "deploy/config" / example).read_text(encoding="utf-8")
+            declared = set(manifest["secrets"][service]) | set(
+                manifest.get("optionalSecrets", {}).get(service, [])
+            )
+            for locator in re.findall(r"/etc/labweaver/secrets/([a-z0-9.-]+)", configuration):
+                self.assertIn(locator, declared, (example, locator))
+
     def test_cursor_and_service_secret_paths_match_manifests(self) -> None:
         values = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8"))
         platform = json.loads((ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8"))
