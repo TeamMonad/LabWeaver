@@ -1,10 +1,19 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+// Each test re-imports useAuth after vi.resetModules() so the BFF mode and the
+// module-level session state start fresh. Loading the graph once here moves
+// the cold transform (oidc-client-ts, config, SDK types) into file collection,
+// which has no per-test timeout; the per-test re-import only re-evaluates.
+import '@/composables/useAuth'
 
 describe('BFF browser session', () => {
+  beforeEach(() => {
+    // Drop the warm-up instance so every test evaluates useAuth under its own env stub.
+    vi.resetModules()
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.unstubAllEnvs()
-    vi.resetModules()
   })
 
   it('loads the safe actor, role, and course context without browser OIDC configuration', async () => {
