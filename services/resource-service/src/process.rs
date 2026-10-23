@@ -162,9 +162,7 @@ impl ResourceProcessRuntime {
             .with_environment_service_client_id(self.environment_service_client_id.clone())
             .with_cursor_signing_keys(
                 self.cursor_signing_key_current.as_ref().clone(),
-                self.cursor_signing_key_previous
-                    .as_deref()
-                    .map(|value| value.to_vec()),
+                self.cursor_signing_key_previous.as_deref().cloned(),
             )
     }
 
