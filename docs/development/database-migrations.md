@@ -43,3 +43,5 @@ Resource 0015 由 #200 的 `0015_task_approval_deadline.sql` 占用。组合时�
 在上游 #4445 修复发布前，生产代码禁止在已有 `Transaction` 上再次调用 `begin()` 或 `begin_with()` 创建嵌套事务。SQLx 0.9 的 PostgreSQL driver 虽已包含 #4394，但嵌套 begin 取消仍可能回滚外层事务。根目录 `clippy.toml` 通过 `disallowed_methods` 拦截 `sqlx::Acquire::begin`、`sqlx::Connection::begin` 和 `sqlx::Connection::begin_with`；`sqlx::Pool::begin_with` 是从 Pool 获取新连接并开启事务的固有入口，不属于嵌套事务。新获取的 PoolConnection/PgConnection 开始事务的审计例外必须用 `#[expect(clippy::disallowed_methods, reason = "fresh connection, not nested")]` 标注。上游修复 #4445 并完成回归验证后，才可以解除这些限制。
 
 git 依赖扩大了供应链风险：构建必须固定完整 commit，不得改用可变分支或 tag；更新前必须复核上游 commit、依赖源码、许可证和 Cargo.lock 的 source/revision，并重新运行取消 BEGIN 的真实 PostgreSQL 回归及 workspace 门禁。维护者应在 PR 中记录复核结果。
+
+离线或镜像站构建必须在进入 `--network=none` 的编译步骤前完成 SQLx git revision 的 `cargo fetch --locked`，并将同一 Cargo git 缓存挂载到编译步骤；构建环境还必须能访问 `github.com` 获取该仓库，或由维护者预先准备并复核完整缓存/ vendored 源码。只挂载 registry 缓存不足以构建 git 依赖。

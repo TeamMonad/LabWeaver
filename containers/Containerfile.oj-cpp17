@@ -24,6 +24,7 @@ RUN --mount=type=cache,id=labweaver-oj-cargo-registry,target=/usr/local/cargo/re
     cargo fetch --locked
 RUN --network=none \
     --mount=type=cache,id=labweaver-oj-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=labweaver-oj-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=labweaver-oj-cargo-target,target=/src/target,sharing=locked \
     test -n "${SOURCE_DATE_EPOCH}" && test -n "${SOURCE_COMMIT}" && \
     cargo build --release --locked --package evaluation-service && \
