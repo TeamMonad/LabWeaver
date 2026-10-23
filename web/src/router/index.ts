@@ -61,6 +61,7 @@ const ITEM_VIEWS: Record<NavigationItemId, ViewLoader> = {
   'admin-platform-images': () => import('@/views/admin/PlatformImageView.vue'),
   'admin-gpu-catalog': () => import('@/views/admin/GpuCatalogView.vue'),
   'admin-finance': () => import('@/views/admin/ResourceFinanceView.vue'),
+  'admin-platform-configuration': () => import('@/views/admin/PlatformConfigurationView.vue'),
 }
 
 const DETAIL_VIEWS: Record<string, ViewLoader> = {

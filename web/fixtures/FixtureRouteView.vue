@@ -17,6 +17,7 @@ import ResourceApprovalView from '@/views/admin/ResourceApprovalView.vue'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
 import PlatformImageView from '@/views/admin/PlatformImageView.vue'
 import GpuCatalogView from '@/views/admin/GpuCatalogView.vue'
+import PlatformConfigurationView from '@/views/admin/PlatformConfigurationView.vue'
 import WorkbenchModuleView from '@/views/teacher/WorkbenchModuleView.vue'
 import FixtureUnsupportedRoute from './FixtureUnsupportedRoute.vue'
 
@@ -40,6 +41,7 @@ const routePage = computed(() => {
   if (route.path.startsWith('/admin/resource-finance')) return ResourceFinanceView
   if (route.path.startsWith('/admin/platform-images')) return PlatformImageView
   if (route.path.startsWith('/admin/gpu-catalog')) return GpuCatalogView
+  if (route.path.startsWith('/admin/platform-configuration')) return PlatformConfigurationView
   if (route.path.startsWith('/teacher/environments')) return WorkbenchModuleView
   if (route.path.startsWith('/admin/')) return FixtureUnsupportedRoute
   return FixtureUnsupportedRoute

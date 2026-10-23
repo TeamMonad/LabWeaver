@@ -23,6 +23,7 @@ export type NavigationItemId =
   | 'admin-policies'
   | 'admin-platform-images'
   | 'admin-gpu-catalog'
+  | 'admin-platform-configuration'
   | 'admin-finance'
 
 export interface NavigationItem {
@@ -273,6 +274,15 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
         path: '/admin/gpu-catalog',
         icon: 'developer_board',
         keywords: ['管理员', 'GPU', '目录', 'class', 'capacity', 'catalog'],
+        allowedRoles: ADMIN_ONLY,
+      },
+      {
+        id: 'admin-platform-configuration',
+        label: '平台配置',
+        description: '管理平台生命周期、运行与构建策略，并提交应用请求。',
+        path: '/admin/platform-configuration',
+        icon: 'settings',
+        keywords: ['管理员', '平台配置', '配置', '运行策略', '构建策略', 'capabilities', 'configuration'],
         allowedRoles: ADMIN_ONLY,
       },
       {
