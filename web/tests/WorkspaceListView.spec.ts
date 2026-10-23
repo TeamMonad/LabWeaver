@@ -256,7 +256,7 @@ describe('WorkspaceListView', () => {
     await wrapper.find('.directory-result').trigger('click')
     await wrapper.get('.member-form').trigger('submit')
     await flushPromises()
-    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-2', role: 'student' })
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-2', role: 'student', objectRole: 'viewer' })
     expect(mocks.directoryClear).toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -272,7 +272,7 @@ describe('WorkspaceListView', () => {
     wrapper.unmount()
   })
 
-  it('keeps a student member read-only while preserving project and member visibility', async () => {
+  it('keeps a viewer read-only, explains why, and preserves project and member visibility', async () => {
     authState.user.value = { expired: false, profile: { roles: ['student'], actor_id: 'student-1' } }
     mockAvailableActions(['browse'])
     const { wrapper } = await mountView()
@@ -283,8 +283,61 @@ describe('WorkspaceListView', () => {
     expect(wrapper.find('button.danger-button').exists()).toBe(false)
     expect(wrapper.find('.member-form').exists()).toBe(false)
     expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
-    expect(wrapper.text()).toContain('缺少 edit / manage_members 对象动作')
+    expect(wrapper.findAll('a').some((anchor) => anchor.text().includes('新建 Work'))).toBe(false)
+    expect(wrapper.get('[data-testid="edit-permission-hint"]').text()).toBe('你在此项目的职责不包含“编辑”，不能编辑或归档项目、新建 Work。如需此权限，请联系项目负责人调整你的成员职责。')
+    expect(wrapper.get('[data-testid="members-permission-hint"]').text()).toBe('你在此项目的职责不包含“管理成员”。如需此权限，请联系项目负责人调整你的成员职责。')
     expect(wrapper.text()).toContain('项目成员')
+    wrapper.unmount()
+  })
+
+  it('lets an editor edit the project but not manage members', async () => {
+    mockAvailableActions(['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'view_costs'])
+    const { wrapper } = await mountView()
+
+    expect(wrapper.get('button[type="submit"]').text()).toContain('保存项目')
+    expect(wrapper.find('button.danger-button').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="edit-permission-hint"]').exists()).toBe(false)
+    expect(wrapper.find('.member-form').exists()).toBe(false)
+    expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
+    expect(wrapper.get('[data-testid="members-permission-hint"]').text()).toContain('不包含“管理成员”')
+    wrapper.unmount()
+  })
+
+  it('keeps every write closed and shows the reason while the permission read fails', async () => {
+    vi.mocked(getProjectAvailableActions).mockResolvedValue({
+      data: undefined,
+      error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: '成员服务暂时不可用。', diagnosticCode: 'LW_AUTH_MEMBERSHIP_UNAVAILABLE', retryable: true },
+    } as never)
+    const { wrapper } = await mountView()
+
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(wrapper.find('.member-form').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="edit-permission-hint"]').text()).toContain('无法确认你在此项目的权限，暂不能编辑或归档项目、新建 Work：成员服务暂时不可用。')
+    wrapper.unmount()
+  })
+
+  it('shows each member responsibility and adds a member with the chosen responsibility', async () => {
+    membersState.memberships = {
+      kind: 'success',
+      data: [
+        { actorId: 'owner-1', username: 'owner', displayName: '项目教师', role: 'teacher', objectRole: 'owner', state: 'active', revision: 1 },
+        { actorId: 'student-1', username: 'student-1', displayName: '学生一', role: 'student', objectRole: 'operator', state: 'active', revision: 2 },
+      ],
+    } as never
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper } = await mountView()
+
+    const rows = wrapper.findAll('.member-row')
+    expect(rows[0].text()).toContain('项目职责：负责人')
+    expect(rows[1].text()).toContain('项目职责：操作者')
+    expect(wrapper.text()).toContain('只能查看项目、成员和环境。')
+    const readsAfterMount = vi.mocked(getProjectAvailableActions).mock.calls.length
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-3')
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-3', role: 'student', objectRole: 'viewer' })
+    // The actor's own responsibility may have changed with the member list: read it again.
+    expect(vi.mocked(getProjectAvailableActions).mock.calls.length).toBe(readsAfterMount + 1)
     wrapper.unmount()
   })
 

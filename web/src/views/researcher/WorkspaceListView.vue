@@ -98,7 +98,7 @@
               <summary>查看项目标识</summary>
               <code>{{ selectedProject.id }}</code>
             </details>
-            <p v-if="!canEditProject && !canManageMembers" class="readonly-hint" role="note">当前账号可以查看项目和成员，但缺少 edit / manage_members 对象动作，不能编辑项目、归档项目或管理成员。</p>
+            <p v-if="!canEditProject && selectedProject.state === 'active'" class="readonly-hint" data-testid="edit-permission-hint" role="note">{{ availableActions.denialReason('edit', '编辑或归档项目、新建 Work') }}</p>
             <div class="form-actions">
               <button v-if="canEditProject" type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
               <button
@@ -129,7 +129,7 @@
                   <li v-for="member in data" :key="member.actorId" class="member-row">
                     <span>
                       <strong>{{ memberDisplayName(member) }}</strong>
-                      <small>{{ member.username ? `账号：${member.username}` : '账号资料待同步' }} · {{ projectRoleLabel(member.role) }} · {{ membershipStateLabel(member.state) }}</small>
+                      <small>{{ member.username ? `账号：${member.username}` : '账号资料待同步' }} · {{ projectRoleLabel(member.role) }} · 项目职责：{{ projectObjectRoleLabel(member.objectRole) }} · {{ membershipStateLabel(member.state) }}</small>
                       <details class="advanced-details">
                         <summary>查看高级详情</summary>
                         <code>Actor ID：{{ member.actorId }}</code>
@@ -140,6 +140,7 @@
                 </ul>
               </template>
             </AsyncStateView>
+            <p v-if="!canManageMembers && selectedProject.state === 'active'" class="readonly-hint" data-testid="members-permission-hint" role="note">{{ availableActions.denialReason('manage_members') }}</p>
             <form v-if="canManageMembers && selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
               <div v-if="canSearchOrganizationDirectory" class="directory-picker">
                 <label>
@@ -189,11 +190,18 @@
                 <small class="field-hint">个人 Work 仅支持输入已知用户名，平台不会枚举组织账号。</small>
               </label>
               <label>
-                <span>角色</span>
+                <span>教学身份</span>
                 <AppSelect v-model="memberRole">
                   <option value="student">学生</option>
                   <option value="teacher">教师</option>
                 </AppSelect>
+              </label>
+              <label>
+                <span>项目职责</span>
+                <AppSelect v-model="memberObjectRole">
+                  <option v-for="option in MEMBER_OBJECT_ROLE_OPTIONS" :key="option" :value="option">{{ projectObjectRoleLabel(option) }}</option>
+                </AppSelect>
+                <small class="field-hint">{{ projectObjectRoleDescription(memberObjectRole) }}</small>
               </label>
               <button type="submit" class="outlined-button" :disabled="!canAddMember">添加成员</button>
             </form>
@@ -226,7 +234,7 @@
                   <SvgIcon name="refresh" size="sm" aria-hidden="true" />
                 </button>
                 <RouterLink
-                  v-if="selectedProject.state === 'active'"
+                  v-if="selectedProject.state === 'active' && canEditProject"
                   class="filled-button small"
                   :to="{ path: '/researcher/environments', query: { projectId: selectedProjectId } }"
                 >
@@ -347,9 +355,9 @@ import { useProjectResources } from '@/composables/useProjectResources'
 import { useAuth } from '@/composables/useAuth'
 import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } from '@/composables/useProjects'
-import type { OrganizationUser, ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
+import type { OrganizationUser, ProjectMembershipSchema, ProjectObjectRole, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
-import { environmentStateLabel, membershipStateLabel, projectRoleLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
+import { environmentStateLabel, membershipStateLabel, projectObjectRoleDescription, projectObjectRoleLabel, projectRoleLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
 import { actorIdFromProfile, hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const route = useRoute()
@@ -376,8 +384,8 @@ const projectSelectionBlocked = computed(() => projects.projects.kind !== 'succe
 const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : projects.selectedProjectId)
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
 const availableActions = useProjectAvailableActions(selectedProjectId)
-const canEditProject = computed(() => availableActions.canEdit.value)
-const canManageMembers = computed(() => availableActions.canManageMembers.value)
+const canEditProject = computed(() => availableActions.allows('edit'))
+const canManageMembers = computed(() => availableActions.allows('manage_members'))
 const canSearchOrganizationDirectory = computed(() => canManageMembers.value && hasAnyRole(currentRoles.value, ['teacher', 'admin']))
 const members = useProjectMemberships(selectedProjectId)
 const directory = useOrganizationDirectoryUsers()
@@ -405,6 +413,9 @@ const memberUsername = ref('')
 const directoryQuery = ref('')
 const selectedDirectoryUser = ref<OrganizationUser | null>(null)
 const memberRole = ref<'student' | 'teacher'>('student')
+/** Owner is created with the project and cannot be granted through the member API. */
+const MEMBER_OBJECT_ROLE_OPTIONS: readonly Exclude<ProjectObjectRole, 'owner'>[] = ['viewer', 'operator', 'editor', 'manager']
+const memberObjectRole = ref<Exclude<ProjectObjectRole, 'owner'>>('viewer')
 const canSave = computed(() => Boolean(canEditProject.value && editName.value.trim()))
 const canAddMember = computed(() => Boolean(
   canManageMembers.value
@@ -541,12 +552,18 @@ async function addMember() {
   if (!canManageMembers.value) return
   const username = memberUsername.value.trim()
   if (!canAddMember.value || !username) return
-  const ok = await members.add({ username, role: memberRole.value })
+  const ok = await members.add({ username, role: memberRole.value, objectRole: memberObjectRole.value })
   if (ok) {
     memberUsername.value = ''
     selectedDirectoryUser.value = null
     directory.clear()
   }
+  refreshActionsAfterMemberChange()
+}
+
+/** The actor's own responsibility may have changed, or a 403 shows the page's answer is stale. */
+function refreshActionsAfterMemberChange() {
+  void availableActions.refresh()
 }
 
 function openRemoveMemberConfirmation(member: ProjectMembershipSchema) {
@@ -572,6 +589,7 @@ async function confirmDestructiveAction() {
     if (!canManageMembers.value) return
     if (projects.selectedProjectId === confirmation.projectId) {
       await members.remove(confirmation.member.actorId, confirmation.member)
+      refreshActionsAfterMemberChange()
     }
   }
 }
@@ -622,7 +640,7 @@ async function confirmDestructiveAction() {
 .advanced-details code { display: block; margin-top: var(--space-1); overflow-wrap: anywhere; }
 .member-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .member-row { display: flex; justify-content: space-between; gap: var(--space-3); align-items: center; padding: 11px var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
-.member-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto; gap: var(--space-3); align-items: end; }
+.member-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; }
 .directory-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); grid-column: 1 / -1; align-items: end; }
 .directory-picker > .async-state-view, .directory-selection { grid-column: 1 / -1; }
 .directory-results { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }

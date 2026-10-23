@@ -47,7 +47,8 @@
                           v-if="freezeOperation?.state === 'failed' && freezeOperation.retryEligible"
                           type="button"
                           class="outlined-button"
-                          :disabled="freezeState.kind === 'loading'"
+                          :disabled="freezeState.kind === 'loading' || !permissions.allows('edit')"
+                          :title="permissions.denialReason('edit', '提交评测') ?? undefined"
                           @click="retryFreeze"
                         >
                           重试冻结提交
@@ -278,6 +279,7 @@ const {
   freezeEvidenceFor,
   retryFreeze,
   trackedSubmissionsVersion,
+  permissions,
 } = useEnvironmentEntryContext()
 
 // Submission progress: the browser remembers only submission identifiers for

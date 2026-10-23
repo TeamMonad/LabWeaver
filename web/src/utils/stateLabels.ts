@@ -148,6 +148,32 @@ export function projectRoleLabel(value: string | null | undefined): string {
   return labelOf(PROJECT_ROLE, value)
 }
 
+/** Project responsibility (`objectRole`), independent of the teaching identity above. */
+const PROJECT_OBJECT_ROLE: Record<string, string> = {
+  viewer: '查看者',
+  operator: '操作者',
+  editor: '编辑者',
+  manager: '管理者',
+  owner: '负责人',
+}
+
+export function projectObjectRoleLabel(value: string | null | undefined): string {
+  return labelOf(PROJECT_OBJECT_ROLE, value)
+}
+
+/** What each responsibility permits, matching Control's `ProjectObjectRole::actions`. */
+const PROJECT_OBJECT_ROLE_DESCRIPTION: Record<string, string> = {
+  viewer: '只能查看项目、成员和环境。',
+  operator: '可以查看，并启动或停止项目环境。',
+  editor: '可以编辑项目、创建和删除环境、签发访问授权、配置 Agent 和查看费用；不能管理成员。',
+  manager: '拥有编辑者的全部权限，并可以管理成员。',
+  owner: '项目负责人，拥有管理者的全部权限；创建项目时确定，不能通过成员管理授予。',
+}
+
+export function projectObjectRoleDescription(value: string | null | undefined): string {
+  return labelOf(PROJECT_OBJECT_ROLE_DESCRIPTION, value)
+}
+
 const MEMBERSHIP_STATE: Record<string, string> = {
   active: '生效中',
   suspended: '已暂停',

@@ -960,6 +960,114 @@ describe('EnvironmentEntryView', () => {
     expect(pane.find('button').exists()).toBe(false)
   })
 
+  function mockActions(actions: string[], projectId = 'project-1') {
+    vi.mocked(getProjectAvailableActions).mockResolvedValue({
+      data: { projectId, actorId: 'actor-1', membershipRevision: 4, validUntil: '2099-01-01T00:00:00.000Z', actions },
+      error: undefined,
+    } as never)
+  }
+
+  function lifecycleButton(wrapper: { findAll: (selector: string) => Array<{ attributes: (name: string) => string | undefined }> }, label: string) {
+    return wrapper.findAll('button').find((button) => button.attributes('aria-label') === label)
+  }
+
+  it('reads actions for the environment\'s own project and offers an operator only start, stop and restart', async () => {
+    mockActions(['browse', 'start', 'stop'])
+    mockEnvironmentInstance({ operation: { id: 'op-current', kind: 'start', state: 'succeeded' } })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(lifecycleButton(wrapper, '停止')?.attributes('disabled')).toBeUndefined())
+    expect(vi.mocked(getProjectAvailableActions)).toHaveBeenLastCalledWith({ path: { projectId: 'project-1' } })
+    expect(lifecycleButton(wrapper, '重启')?.attributes('disabled')).toBeUndefined()
+    const remove = lifecycleButton(wrapper, '删除')
+    expect(remove?.attributes('disabled')).toBeDefined()
+    expect(remove?.attributes('title')).toBe('你在此项目的职责不包含“编辑”，不能删除环境。如需此权限，请联系项目负责人调整你的成员职责。')
+    expect(wrapper.get('[data-testid="lifecycle-permission-hint"]').text()).toBe('你在此项目的职责不包含删除和重试环境。如需此权限，请联系项目负责人调整你的成员职责。')
+    // An operator holds no grant_access: the console explains instead of offering a grant.
+    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    const pane = wrapper.get('.console-unauthorized-pane')
+    expect(pane.text()).toContain('你在此项目的职责不包含“签发访问授权”')
+    expect(pane.find('button').exists()).toBe(false)
+  })
+
+  it('gives a viewer no lifecycle, grant or submission action and never sends one', async () => {
+    mockActions(['browse'])
+    mockEnvironmentInstance({ operation: { id: 'op-current', kind: 'start', state: 'succeeded' } })
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
+      data: { items: [{ id: 'ep-ssh', protocol: 'ssh', health: 'healthy', observedAt: '2026-07-11T10:00:00.000Z' }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [{ ...mockRelease, submissionManifest: mockSubmissionManifest }] },
+      error: undefined as never,
+    } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="lifecycle-permission-hint"]').exists()).toBe(true))
+    for (const label of ['启动', '停止', '重启', '删除']) {
+      expect(lifecycleButton(wrapper, label)?.attributes('disabled')).toBeDefined()
+    }
+    expect(lifecycleButton(wrapper, '停止')?.attributes('title')).toBe('你在此项目的职责不包含“停止”。如需此权限，请联系项目负责人调整你的成员职责。')
+    expect(wrapper.get('[data-testid="lifecycle-permission-hint"]').text()).toContain('启动和重启、停止和取消、删除和重试')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="grant-permission-hint"]').exists()).toBe(true))
+    expect(wrapper.get('[data-testid="grant-permission-hint"]').text()).toContain('不包含“签发访问授权”')
+    expect(wrapper.findAll('button').some((button) => button.text().includes('签发授权并连接'))).toBe(false)
+    expect(wrapper.findAll('button').some((button) => button.text() === '签发访问授权')).toBe(false)
+
+    await wrapper.findAll('button').find((button) => button.text().includes('提交'))!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('你在此项目的职责不包含“编辑”，不能提交评测。'))
+    expect(wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')?.attributes('disabled')).toBeDefined()
+
+    expect(stopEnvironment).not.toHaveBeenCalled()
+    expect(deleteEnvironment).not.toHaveBeenCalled()
+    expect(createAccessGrant).not.toHaveBeenCalled()
+    expect(freezeSubmission).not.toHaveBeenCalled()
+  })
+
+  it('keeps every write closed while the project permissions cannot be read and shows the reason', async () => {
+    vi.mocked(getProjectAvailableActions).mockResolvedValue({
+      data: undefined,
+      error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: '成员服务暂时不可用。', diagnosticCode: 'LW_AUTH_MEMBERSHIP_UNAVAILABLE', retryable: true },
+    } as never)
+    mockEnvironmentInstance({ operation: { id: 'op-current', kind: 'start', state: 'succeeded' } })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="lifecycle-permission-hint"]').exists()).toBe(true))
+    expect(wrapper.get('[data-testid="lifecycle-permission-hint"]').text()).toBe('无法确认你在此项目的权限，暂不能启动：成员服务暂时不可用。')
+    expect(lifecycleButton(wrapper, '停止')?.attributes('disabled')).toBeDefined()
+  })
+
+  it('re-reads project permissions after the server refuses a lifecycle request', async () => {
+    mockEnvironmentInstance({ operation: { id: 'op-current', kind: 'start', state: 'succeeded' } })
+    vi.mocked(stopEnvironment).mockResolvedValue({
+      data: undefined,
+      error: { type: 'about:blank', title: 'Forbidden', status: 403, detail: '你已不是该项目的成员。', diagnosticCode: 'LW_AUTH_SCOPE_DENIED', retryable: false },
+    } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(lifecycleButton(wrapper, '停止')?.attributes('disabled')).toBeUndefined())
+    const readsBefore = vi.mocked(getProjectAvailableActions).mock.calls.length
+    mockActions(['browse'])
+
+    await wrapper.findAll('button').find((button) => button.attributes('aria-label') === '停止')!.trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLButtonElement>('[role="alertdialog"] .filled-button')?.click()
+    await flushPromises()
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('LW_AUTH_SCOPE_DENIED'))
+    await vi.waitFor(() => expect(vi.mocked(getProjectAvailableActions).mock.calls.length).toBe(readsBefore + 1))
+    await vi.waitFor(() => expect(lifecycleButton(wrapper, '停止')?.attributes('disabled')).toBeDefined())
+  })
+
+  it('does not offer creating an environment without the edit responsibility', async () => {
+    mockActions(['browse', 'start', 'stop'])
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [mockRelease] }, error: undefined as never } as never)
+    const { wrapper } = await mountAt({ projectId: 'project-1' })
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="create-permission-hint"]').exists()).toBe(true))
+    expect(wrapper.get('[data-testid="create-permission-hint"]').text()).toBe('你在此项目的职责不包含“编辑”，不能创建环境。如需此权限，请联系项目负责人调整你的成员职责。')
+    expect(wrapper.findAll('button').find((button) => button.text() === '创建环境')?.attributes('disabled')).toBeDefined()
+  })
+
   it('uses an explicit URL project over the shared context and preserves a linked environment', async () => {
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
     mockEnvironmentInstance()

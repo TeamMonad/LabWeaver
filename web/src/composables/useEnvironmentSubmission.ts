@@ -1,4 +1,5 @@
 import { computed, ref, type Ref } from 'vue'
+import type { ProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { freezeSubmission, getFrozenSubmission } from '@/generated/contracts'
 import type {
   EnvironmentInstanceSchema,
@@ -22,6 +23,8 @@ export interface EnvironmentSubmissionDeps {
   releases: { releases: ReleasesState }
   selectedEnvironmentId: Ref<string | undefined>
   isWorkConnection: Ref<boolean>
+  /** Freezing a submission is checked as the project's `edit` action. */
+  permissions: Pick<ProjectAvailableActions, 'allows' | 'denialReason'>
 }
 
 interface FreezeAcceptance {
@@ -34,7 +37,7 @@ interface FreezeAcceptance {
 
 /** Freeze-and-submit for one experiment environment. */
 export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
-  const { env, operations, releases, selectedEnvironmentId, isWorkConnection } = deps
+  const { env, operations, releases, selectedEnvironmentId, isWorkConnection, permissions } = deps
   const actorId = useCurrentActorId()
 
   const freezeState = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
@@ -101,6 +104,8 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
 
   function freezeBlockReason(data: EnvironmentInstanceSchema): string | null {
     if (data.class === 'work' || isWorkConnection.value) return '此 Work 环境未配置评测，无法提交评测。'
+    const denied = permissions.denialReason('edit', '提交评测')
+    if (denied) return denied
     if (data.observedState !== 'ready') return '环境必须处于就绪状态才能提交评测。'
     const releaseState = releases.releases
     if (releaseState.kind === 'idle' || releaseState.kind === 'loading') return '正在确认当前环境的提交内容。'
@@ -121,7 +126,8 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
   }
 
   function canFreeze(data: EnvironmentInstanceSchema): boolean {
-    return data.observedState === 'ready'
+    return permissions.allows('edit')
+      && data.observedState === 'ready'
       && selectedSubmissionManifestFor(data) !== null
       && freezeState.value.kind !== 'loading'
   }
@@ -234,6 +240,7 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
   }
 
   async function retryFreeze() {
+    if (!permissions.allows('edit')) return
     const id = lastFreezeEnvironmentId.value ?? freezeOperation.value?.environmentId ?? selectedEnvironmentId.value
     if (!id) return
     const instance = env.instance.kind === 'success' ? env.instance.data : undefined
