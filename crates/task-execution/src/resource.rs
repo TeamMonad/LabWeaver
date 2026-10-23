@@ -473,6 +473,43 @@ impl ResourceClient {
         decode_response(&bytes)
     }
 
+    pub async fn admit_model_cost(
+        &self,
+        key: &str,
+        input: &contracts::resource::model_costing::ModelCostAdmissionRequest,
+    ) -> Result<contracts::resource::model_costing::ModelCostAdmission, ResourceClientError> {
+        let body = self.encode_request(input)?;
+        let bytes = self
+            .execute(
+                Method::POST,
+                "internal/v1/credits/model/admit",
+                Some(body),
+                Some(key),
+                NotFound::Request,
+            )
+            .await?;
+        decode_response(&bytes)
+    }
+
+    pub async fn settle_model_cost(
+        &self,
+        hold_id: uuid::Uuid,
+        input: &contracts::resource::model_costing::ModelCostSettlementRequest,
+    ) -> Result<contracts::resource::credits::CreditHold, ResourceClientError> {
+        let body = self.encode_request(input)?;
+        let path = format!("internal/v1/credits/model/{hold_id}/settle");
+        let bytes = self
+            .execute(
+                Method::POST,
+                &path,
+                Some(body),
+                Some(&input.event_id.to_string()),
+                NotFound::Request,
+            )
+            .await?;
+        decode_response(&bytes)
+    }
+
     fn encode_request<T: Serialize>(&self, request: &T) -> Result<Vec<u8>, ResourceClientError> {
         let body = serde_json::to_vec(request).map_err(|_| ResourceClientError::RequestInvalid)?;
         if body.len() > self.max_request_bytes {
