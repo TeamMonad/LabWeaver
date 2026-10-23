@@ -12,7 +12,7 @@ Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、A
 | manager | editor 的动作，以及 manage_members |
 | owner | manager 的动作。创建项目时由 Control 保存 |
 
-平台管理员可以执行全局管理动作。服务端仍检查身份期限，并记录操作者、操作和诊断。普通项目成员不能通过 `objectRole` 获取 `manage_runtime_policy`。成员 API 不能写入 `owner`，也不能覆盖或移除项目所有者的成员记录。
+平台管理员可以执行被操作契约明确允许的全局管理动作。项目 `manager` 可执行 `manage_members`，但不能管理运行策略；`owner` 负责项目根所有权，成员 API 不能写入、替换或移除 owner。服务端仍检查身份期限，并记录操作者、操作和诊断。普通项目成员不能通过 `objectRole` 获取未列出的动作。
 
 普通账号的课程范围仍要求当前课程成员。契约明确允许管理员的课程操作使用全局管理员权限。教学内容接口保留其既有角色约束。项目职责不会授予其他课程、其他项目或他人的个人实验内容。
 
@@ -48,7 +48,7 @@ Access 在目录解析前检查管理权限。Control 再检查目标本人、�
 
 响应包含 `projectId`、`actorId`、`membershipRevision`、`actions` 和 `validUntil`。这些字段用于界面展示，不能作为写请求的授权证据。Project 视图、元数据编辑、成员管理、材料操作、Agent 配置和费用读取使用契约中对应的对象动作。现有实例请求先读取 Environment 的实际归属，再检查该项目的当前成员动作。浏览器参数不能替换对象所属项目。实例所有者在成员移除后也不能继续调用。OpenAPI 的 `x-labweaver-object-action` 记录这些映射。
 
-添加成员沿用 `POST /api/v1/projects/{projectId}/members`、原幂等键和精确用户名解析。新增 `objectRole`。未提供该字段时保存 `viewer`。`role` 保留教学职责的既有含义。移除成员沿用精确 `expectedRevision` 和原因。Control 在同一事务保存成员变更和 `member_authorization.changed.v1` 项目事件。事件包含目标成员、实际操作者、revision、状态和项目职责。
+添加成员沿用 `POST /api/v1/projects/{projectId}/members`、原幂等键和精确用户名解析。`objectRole` 为必填字段，必须明确指定项目职责；`role` 保留教学职责的既有含义。移除成员沿用精确 `expectedRevision` 和原因。Control 在同一事务保存成员变更和 `member_authorization.changed.v1` 项目事件。事件包含目标成员、实际操作者、revision、状态和项目职责。
 
 未获项目范围授权的账号访问项目或 `available-actions` 时返回 403，不泄漏该项目是否存在。平台管理员访问不存在的项目时返回 404。资源读取还须通过其领域的归属检查。403 不能改成空列表或成功响应。
 

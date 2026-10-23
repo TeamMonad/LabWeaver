@@ -1,5 +1,6 @@
 //! Real member facts and invitation transactions with synthetic verified identities.
 use super::{FixtureObjects, apply_domain_migrations, control_config};
+use base64::Engine as _;
 use contracts::http::{
     IdempotencyKey, PageQuery, RemoveProjectMembershipRequest, ResolvedProjectMembershipRequest,
 };
@@ -574,6 +575,28 @@ async fn invitation_expiry_cancel_and_account_disable_deny_acceptance() -> TestR
             .await,
         Err(ControlError::InvitationExpired)
     ));
+    let key_ring = auth::KeyRing::parse(
+        "synthetic".to_owned(),
+        &format!(
+            "synthetic:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+        ),
+    )?;
+    let _admin_session = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: admin.actor_id.as_uuid(),
+            roles: vec![PlatformRole::PlatformAdmin],
+            authorization_revision: 1,
+            expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(10),
+            idle_ttl: time::Duration::minutes(5),
+            oidc_sid: None,
+            logout_hint: "synthetic-admin-logout".to_owned(),
+        },
+        time::OffsetDateTime::now_utc(),
+    )
+    .await?;
     let disabled = service
         .create_membership_invitation(&admin, &request, &IdempotencyKey::parse("admin-invites")?)
         .await?;
@@ -607,5 +630,70 @@ async fn invitation_expiry_cancel_and_account_disable_deny_acceptance() -> TestR
             .items
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoked_admin_cannot_authorize_pending_invitation_acceptance() -> TestResult {
+    let (_container, pool, service, now) = fixture().await?;
+    let owner = actor(&pool, "owner", vec![PlatformRole::Student], now).await?;
+    let admin = actor(&pool, "admin", vec![PlatformRole::PlatformAdmin], now).await?;
+    let recipient = actor(&pool, "recipient", vec![PlatformRole::Student], now).await?;
+    let project_id = project(&service, &owner, now, "admin-revocation-project").await?;
+    let key_ring = auth::KeyRing::parse(
+        "synthetic".to_owned(),
+        &format!(
+            "synthetic:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+        ),
+    )?;
+    let admin_session = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: admin.actor_id.as_uuid(),
+            roles: vec![PlatformRole::PlatformAdmin],
+            authorization_revision: 1,
+            expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(10),
+            idle_ttl: time::Duration::minutes(5),
+            oidc_sid: None,
+            logout_hint: "synthetic-admin-revocation".to_owned(),
+        },
+        time::OffsetDateTime::now_utc(),
+    )
+    .await?;
+    let pending = service
+        .create_membership_invitation(
+            &admin,
+            &invitation(
+                MembershipInvitationScope::Project {
+                    project_id,
+                    object_role: ProjectObjectRole::Editor,
+                },
+                &recipient,
+                now,
+            )?,
+            &IdempotencyKey::parse("admin-revocation-invite")?,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE access.bff_sessions SET platform_roles=ARRAY['student'] WHERE session_id=$1",
+    )
+    .bind(admin_session.session_id)
+    .execute(&pool)
+    .await?;
+    assert!(matches!(
+        service
+            .accept_membership_invitation(
+                &recipient,
+                pending.id,
+                &AcceptMembershipInvitation {
+                    expected_revision: pending.revision,
+                },
+                &IdempotencyKey::parse("admin-revocation-accept")?,
+            )
+            .await,
+        Err(ControlError::InvitationDenied)
+    ));
     Ok(())
 }

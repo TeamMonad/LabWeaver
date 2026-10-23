@@ -38,6 +38,25 @@ fn scope_key(scope: &MembershipInvitationScope) -> (&'static str, Uuid) {
 fn is_admin(actor: &AuthenticatedActor) -> bool {
     actor.roles.contains(&PlatformRole::PlatformAdmin)
 }
+async fn admin_authorization_revision(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: ActorId,
+) -> Result<Option<Revision>, ControlError> {
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM access.current_authorization_sessions WHERE actor_id=$1 AND 'platform_admin'=ANY(platform_roles) AND expires_at>clock_timestamp() AND idle_expires_at>clock_timestamp())",
+    )
+    .bind(actor.as_uuid())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db)?;
+    if active {
+        Ok(Some(
+            Revision::new(1).map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
 
 async fn database_now(tx: &mut Transaction<'_, Postgres>) -> Result<UtcTimestamp, ControlError> {
     let value = sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
@@ -141,7 +160,7 @@ async fn govern(
     actor: &AuthenticatedActor,
 ) -> Result<Option<Revision>, ControlError> {
     if is_admin(actor) {
-        return Ok(None);
+        return admin_authorization_revision(tx, actor.actor_id).await;
     }
     if matches!(scope, MembershipInvitationScope::Course { .. })
         && !actor.roles.contains(&PlatformRole::Teacher)

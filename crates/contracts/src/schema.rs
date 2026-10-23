@@ -1405,16 +1405,83 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         {
             operation_json["x-labweaver-object-action"] = json!(action);
         }
-        if operation.operation_id == "addProjectMembership" {
+        if matches!(
+            operation.operation_id,
+            "addProjectMembership" | "removeProjectMembership"
+        ) {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
                 "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_PROJECT_GOVERNANCE_DENIED",
+                "LW_PROJECT_COURSE_MEMBERSHIP_REQUIRED",
+                "LW_PROJECT_MEMBERSHIP_CONFLICT",
+                "LW_PROJECT_MEMBERSHIP_NOT_FOUND",
+                "LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED",
+                "LW_PROJECT_ARCHIVED",
                 "LW_ACCESS_DIRECTORY_USERNAME_INVALID",
                 "LW_ACCESS_DIRECTORY_UNAVAILABLE",
                 "LW_ACCESS_DIRECTORY_USER_NOT_FOUND",
                 "LW_ACCESS_DIRECTORY_USER_DISABLED",
                 "LW_IDEMPOTENCY_CONFLICT",
-                "LW_REVISION_CONFLICT",
+                "LW_REVISION_CONFLICT"
+            ]);
+        }
+        if matches!(
+            operation.operation_id,
+            "createProjectMembershipInvitation"
+                | "listProjectMembershipInvitations"
+                | "createCourseMembershipInvitation"
+                | "listCourseMembershipInvitations"
+                | "listCourseMemberships"
+                | "listIncomingMembershipInvitations"
+                | "getMembershipInvitation"
+                | "acceptMembershipInvitation"
+                | "revokeMembershipInvitation"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_MEMBERSHIP_INVITATION_DENIED",
+                "LW_MEMBERSHIP_INVITATION_NOT_FOUND",
+                "LW_MEMBERSHIP_INVITATION_EXPIRED",
+                "LW_MEMBERSHIP_INVITATION_STATE_CONFLICT",
+                "LW_MEMBERSHIP_INVITATION_PRECONDITION_FAILED",
+                "LW_PROJECT_GOVERNANCE_DENIED",
+                "LW_PROJECT_COURSE_MEMBERSHIP_REQUIRED",
+                "LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED",
+                "LW_COURSE_GOVERNANCE_DENIED",
+                "LW_COURSE_LAST_INSTRUCTOR_PROTECTED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_REVISION_CONFLICT"
+            ]);
+        }
+        if operation.operation_id == "getProjectAvailableActions" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_PROJECT_GOVERNANCE_DENIED",
+                "LW_PROJECT_MEMBERSHIP_NOT_FOUND"
+            ]);
+        }
+        if operation.operation_id == "getResourceRuntimeAuthorization" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_RUNTIME_POLICY_NOT_VERIFIED",
+                "LW_RUNTIME_POLICY_CHANGED",
+                "LW_RUNTIME_CONFIGURATION_BINDING_MISMATCH",
+                "LW_RUNTIME_TEACHER_APPROVAL_REQUIRED",
+                "LW_RUNTIME_PERMISSION_OUTSIDE_PLATFORM_RANGE",
+                "LW_RUNTIME_PERMISSION_APPROVAL_REQUIRED",
+                "LW_RUNTIME_TARGET_NOT_ENVIRONMENT",
+                "LW_RUNTIME_LEASE_NOT_ACTIVE",
+                "LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE",
+                "LW_RUNTIME_SCOPE_DENIED",
+                "LW_REVISION_CONFLICT"
             ]);
         }
         if matches!(

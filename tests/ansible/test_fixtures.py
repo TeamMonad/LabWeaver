@@ -725,6 +725,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_ROLE_CONFLICT", seed)
         self.assertNotIn("resource_requests", seed)
         self.assertNotIn("environment_template_releases", seed)
+        platform_seed = (
+            ROOT
+            / "deploy/ansible/roles/platform_application/templates/access-seed-reconcile.sql.j2"
+        ).read_text(encoding="utf-8")
+        for template in (seed, platform_seed):
+            self.assertIn("control.course_memberships", template)
+            self.assertIn("object_role", template)
+            self.assertNotIn("access.course_memberships", template)
+            self.assertNotIn("access.project_memberships", template)
+        self.assertIn("SET ROLE lw_control_owner", seed)
+        self.assertIn("SET ROLE lw_control_owner", platform_seed)
 
     def test_postgres_apply_rejects_an_unknown_listener_without_protocol_probe(self) -> None:
         apply_path = ROOT / "deploy/ansible/library/labweaver_postgres_apply.py"

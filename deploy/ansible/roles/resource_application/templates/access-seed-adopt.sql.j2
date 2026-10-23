@@ -2,7 +2,7 @@
 BEGIN;
 SET ROLE lw_access_owner;
 {% for membership in resource_application_access_seed.courseMemberships %}
-DO $resource_seed$
+DO $resource_seed_actor$
 DECLARE
     existing_actor access.actors%ROWTYPE;
 BEGIN
@@ -19,44 +19,65 @@ BEGIN
     INSERT INTO access.actors (actor_id, issuer, subject_sha256)
     VALUES ('{{ membership.actorId }}'::uuid, '{{ membership.issuer }}', '{{ membership.subjectSha256 }}')
     ON CONFLICT (actor_id) DO NOTHING;
-
+END
+$resource_seed_actor$;
+SET ROLE lw_control_owner;
+DO $resource_seed_membership$
+BEGIN
     IF EXISTS (
-        SELECT 1 FROM access.course_memberships
+        SELECT 1 FROM control.course_memberships
         WHERE course_id = '{{ membership.courseId }}'::uuid
           AND actor_id = '{{ membership.actorId }}'::uuid
-          AND role <> '{{ membership.role }}'
+          AND (role <> '{{ membership.role }}'
+               OR object_role <> CASE '{{ membership.role }}' WHEN 'teacher' THEN 'instructor' ELSE 'participant' END)
     ) THEN
         RAISE EXCEPTION 'LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_ROLE_CONFLICT';
     END IF;
 
-    INSERT INTO access.course_memberships (course_id, actor_id, role, state, revision)
+    INSERT INTO control.course_memberships (course_id, actor_id, role, object_role, state, revision)
     VALUES ('{{ membership.courseId }}'::uuid, '{{ membership.actorId }}'::uuid,
-            '{{ membership.role }}', 'active', 1)
-    ON CONFLICT (course_id, actor_id, role) DO NOTHING;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM access.actors
-        WHERE actor_id = '{{ membership.actorId }}'::uuid
-          AND issuer = '{{ membership.issuer }}'
-          AND subject_sha256 = '{{ membership.subjectSha256 }}'
-    ) OR NOT EXISTS (
-        SELECT 1 FROM access.course_memberships
-        WHERE course_id = '{{ membership.courseId }}'::uuid
-          AND actor_id = '{{ membership.actorId }}'::uuid
-          AND role = '{{ membership.role }}'
-          AND state = 'active'
-          AND revision = 1
-    ) THEN
-        RAISE EXCEPTION 'LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_SEED_VERIFY_FAILED';
-    END IF;
+            '{{ membership.role }}',
+            CASE '{{ membership.role }}' WHEN 'teacher' THEN 'instructor' ELSE 'participant' END,
+            'active', 1)
+    ON CONFLICT (course_id, actor_id) DO UPDATE
+    SET role = EXCLUDED.role,
+        object_role = EXCLUDED.object_role,
+        state = 'active',
+        revision = control.course_memberships.revision + 1,
+        updated_at = now();
 END
-$resource_seed$;
+$resource_seed_membership$;
+SET ROLE lw_access_owner;
 {% endfor %}
+DO $resource_seed_verify$
+BEGIN
+SET ROLE lw_access_owner;
+{% for membership in resource_application_access_seed.courseMemberships %}
+IF NOT EXISTS (SELECT 1 FROM access.actors
+    WHERE actor_id = '{{ membership.actorId }}'::uuid
+      AND issuer = '{{ membership.issuer }}'
+      AND subject_sha256 = '{{ membership.subjectSha256 }}') THEN
+    RAISE EXCEPTION 'LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_SEED_VERIFY_FAILED';
+END IF;
+SET ROLE lw_control_owner;
+IF NOT EXISTS (SELECT 1 FROM control.course_memberships
+    WHERE course_id = '{{ membership.courseId }}'::uuid
+      AND actor_id = '{{ membership.actorId }}'::uuid
+      AND role = '{{ membership.role }}'
+      AND object_role = CASE '{{ membership.role }}' WHEN 'teacher' THEN 'instructor' ELSE 'participant' END
+      AND state = 'active') THEN
+    RAISE EXCEPTION 'LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_SEED_VERIFY_FAILED';
+END IF;
+SET ROLE lw_access_owner;
+{% endfor %}
+END
+$resource_seed_verify$;
+SET ROLE lw_control_owner;
 DO $resource_seed_exact$
 BEGIN
     IF (
         SELECT count(*)
-        FROM access.course_memberships
+        FROM control.course_memberships
         WHERE course_id = '{{ resource_application_access_seed.courseMemberships[0].courseId }}'::uuid
     ) <> {{ resource_application_access_seed.courseMemberships | length }} THEN
         RAISE EXCEPTION 'LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_MEMBERSHIP_CONFLICT';
