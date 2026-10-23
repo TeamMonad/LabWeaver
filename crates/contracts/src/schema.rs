@@ -320,6 +320,38 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::ResourceUsagePage
     );
     document!(
+        "schemas/contracts/v1/credit-hold-page.schema.json",
+        crate::resource::credits::CreditHoldPage
+    );
+    document!(
+        "schemas/contracts/v1/credit-account.schema.json",
+        crate::resource::credits::CreditAccount
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold.schema.json",
+        crate::resource::credits::CreditHold
+    );
+    document!(
+        "schemas/contracts/v1/credit-ledger-entry.schema.json",
+        crate::resource::credits::CreditLedgerEntry
+    );
+    document!(
+        "schemas/contracts/v1/credit-ledger-page.schema.json",
+        crate::resource::credits::CreditLedgerPage
+    );
+    document!(
+        "schemas/contracts/v1/credit-admin-operation.schema.json",
+        crate::resource::credits::CreditAdminOperation
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold-request.schema.json",
+        crate::resource::credits::CreditHoldRequest
+    );
+    document!(
+        "schemas/contracts/v1/credit-hold-resolution-request.schema.json",
+        crate::resource::credits::CreditHoldResolutionRequest
+    );
+    document!(
         "schemas/contracts/v1/resource-charge.schema.json",
         crate::resource::ResourceCharge
     );
@@ -1165,6 +1197,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "getOwnProjectEvaluationTaskProgress"
                 | "getOwnProjectEvaluationTaskForSubmission"
                 | "getInternalAgentTaskProgress"
+                | "listProjectCreditLedger"
+                | "listProjectCreditHolds"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -1775,6 +1809,9 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "resetEnvironment" => "http/reset-environment-request",
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
+        "createCreditAdminOperation" => "credit-admin-operation",
+        "createCreditHold" => "credit-hold-request",
+        "resolveCreditHold" => "credit-hold-resolution-request",
         "createResourceRate" => "http/create-resource-rate-request",
         "endResourceRate" => "http/end-resource-rate-request",
         "upsertProjectResourceBudget" => "http/upsert-resource-budget-request",
@@ -1933,6 +1970,13 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"array","items":contract_ref("resource-rate")})
         }
         "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
+        "listProjectCreditHolds" => contract_ref("credit-hold-page"),
+        "getProjectCredits" => contract_ref("credit-account"),
+        "listProjectCreditLedger" => contract_ref("credit-ledger-page"),
+        "createCreditAdminOperation" => {
+            json!({"type":"array","items":contract_ref("credit-ledger-entry")})
+        }
+        "createCreditHold" | "resolveCreditHold" => contract_ref("credit-hold"),
         "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
             contract_ref("resource-budget")
         }

@@ -39,3 +39,4 @@ Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；�
 内容摘要和镜像 digest 用于真实输入与产物完整性；运行时不要求开发证明包或固定镜像数量。生成与校验命令以当前 xtask 和 Web scripts 为准，修改公共契约必须重新生成并检查所有消费者。
 
 材料上传的查询、取消、恢复和限额见[材料上传与内容身份](material-uploads.md)。学生冻结提交继续使用[Collector 契约](submission-collector-v1.md)。
+项目 Credits 账户、预占与不可变账目接口见 [项目 Credits](project-credits.md)。Rust 真源位于 `resource::credits`，Schema/OpenAPI 与 Web SDK 从此真源生成。

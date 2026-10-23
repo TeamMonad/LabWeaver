@@ -36,6 +36,8 @@ use std::sync::Arc;
 use crate::ApprovalPolicy;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 
+mod credits;
+
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 
 /// User identity extracted from an Access-signed resource delegation.
@@ -47,6 +49,7 @@ pub struct ResourceCallerPrincipal {
     actor_id: ActorId,
     roles: Vec<contracts::PlatformRole>,
     session_id: contracts::BffSessionId,
+    project_id: Option<ProjectId>,
 }
 
 #[derive(Clone)]
@@ -107,6 +110,7 @@ impl ResourceApiState {
 )]
 pub fn resource_api_router(state: ResourceApiState) -> Router {
     let public = Router::new()
+        .merge(credits::public_routes())
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests", get(list_requests))
         .route(
@@ -168,6 +172,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .layer(Extension(state.service_verifier.clone()))
         .layer(Extension(state.access_service_client_id.clone()));
     let internal = Router::new()
+        .merge(credits::internal_routes())
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
             "/internal/v1/task-resources/{task_run_id}/request",
@@ -264,6 +269,7 @@ pub fn with_delegation(router: Router, delegation_key: Arc<Vec<u8>>) -> Router {
                     actor_id: delegation.actor_id,
                     roles: delegation.roles,
                     session_id: delegation.session_id,
+                    project_id: delegation.project_id,
                 });
                 next.run(request).await
             }
@@ -1368,6 +1374,12 @@ async fn internal_service_auth(
 }
 
 fn internal_route_permission(path: &str) -> Option<&'static str> {
+    if path == "/internal/v1/credits/holds" {
+        return Some("resource.credits.hold");
+    }
+    if path.starts_with("/internal/v1/credits/holds/") && path.ends_with("/resolve") {
+        return Some("resource.credits.resolve");
+    }
     if path == "/internal/v1/resource/usage" {
         return Some("resource.usage.record");
     }
@@ -1416,6 +1428,16 @@ fn authorize(principal: &ResourceCallerPrincipal) {
         actor_id = %principal.actor_id,
         session_id = %principal.session_id,
     );
+}
+pub(super) fn authorize_project_access(
+    principal: &ResourceCallerPrincipal,
+    project: ProjectId,
+) -> Result<(), ResourceApiError> {
+    if is_admin(principal)? || principal.project_id == Some(project) {
+        Ok(())
+    } else {
+        Err(ResourceApiError::ScopeDenied)
+    }
 }
 fn scoped(principal: &ResourceCallerPrincipal, expected: ActorId) -> Result<(), ResourceApiError> {
     if principal.actor_id == expected {
@@ -1780,6 +1802,7 @@ mod tests {
             actor_id: ActorId::new(),
             roles: vec![contracts::PlatformRole::Teacher],
             session_id: contracts::BffSessionId::new(),
+            project_id: None,
         };
         let forged_actor = ActorId::new();
         assert_ne!(principal.actor_id, forged_actor);
@@ -1796,6 +1819,7 @@ mod tests {
             actor_id: ActorId::new(),
             roles: vec![contracts::PlatformRole::PlatformAdmin],
             session_id: contracts::BffSessionId::new(),
+            project_id: None,
         };
         assert!(is_admin(&principal).is_ok_and(|value| value));
     }

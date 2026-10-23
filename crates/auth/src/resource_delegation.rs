@@ -5,7 +5,7 @@
 //! so actor and role values never arrive at Resource as unauthenticated HTTP
 //! assertions.
 
-use contracts::{ActorId, BffSessionId, PlatformRole};
+use contracts::{ActorId, BffSessionId, PlatformRole, ProjectId};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -21,6 +21,8 @@ struct Claims {
     sub: String,
     session_id: String,
     roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
     iat: usize,
     exp: usize,
     jti: String,
@@ -35,12 +37,15 @@ pub struct ResourceDelegation {
     pub session_id: BffSessionId,
     /// Base platform roles authenticated by Access.
     pub roles: Vec<PlatformRole>,
+    /// Project scope authorized by Access for this forwarded request.
+    pub project_id: Option<ProjectId>,
 }
 
 /// Signs the current BFF session with the shared service binding.
 pub fn encode_resource_delegation(
     secret: &[u8],
     session: &crate::BffSession,
+    project_id: Option<ProjectId>,
     now: OffsetDateTime,
 ) -> Result<String, ResourceDelegationError> {
     validate_secret(secret)?;
@@ -66,6 +71,7 @@ pub fn encode_resource_delegation(
         sub: session.actor_id.to_string(),
         session_id: session.session_id.to_string(),
         roles,
+        project_id: project_id.map(|value| value.to_string()),
         iat: usize::try_from(now_seconds).map_err(|_| ResourceDelegationError::Claims)?,
         exp: usize::try_from(expiry_seconds).map_err(|_| ResourceDelegationError::Claims)?,
         jti: Uuid::now_v7().to_string(),
@@ -118,10 +124,18 @@ pub fn decode_resource_delegation(
                 .map_err(|_| ResourceDelegationError::Claims)
         })
         .collect::<Result<Vec<PlatformRole>, _>>()?;
+    let project_id = token
+        .claims
+        .project_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| ResourceDelegationError::Claims)?;
     Ok(ResourceDelegation {
         actor_id,
         session_id,
         roles,
+        project_id,
     })
 }
 
@@ -181,7 +195,7 @@ mod tests {
             idle_expires_at: now + time::Duration::minutes(5),
             csrf_token: CsrfToken::from_secret("test-csrf".to_owned()),
         };
-        let token = encode_resource_delegation(&[7; 32], &session, now).expect("token");
+        let token = encode_resource_delegation(&[7; 32], &session, None, now).expect("token");
         let decoded = decode_resource_delegation(&[7; 32], &token).expect("delegation");
         assert_eq!(decoded.actor_id.as_uuid(), session.actor_id);
         assert_eq!(decoded.session_id.as_uuid(), session.session_id);

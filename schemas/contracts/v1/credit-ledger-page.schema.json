@@ -1,0 +1,217 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ChargeId": {
+      "description": "Strongly typed UUIDv7 identifier for `ChargeId`.",
+      "type": "string"
+    },
+    "CreditLedgerEntry": {
+      "additionalProperties": false,
+      "description": "Platform entries have no project ID and balance the project entries.",
+      "properties": {
+        "actorId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "balanceDelta": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "chargeId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChargeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "holdId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "operationId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ownerClientId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "platformAbsorbed": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "projectId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rateSnapshots": {
+          "items": {
+            "$ref": "#/$defs/CreditRateSnapshot"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reservedDelta": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "reversalOf": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceEventId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spentDelta": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "usageRecordId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageRecordId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "operationId",
+        "kind",
+        "rateSnapshots",
+        "balanceDelta",
+        "reservedDelta",
+        "spentDelta",
+        "platformAbsorbed",
+        "reason",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "CreditRateSnapshot": {
+      "additionalProperties": false,
+      "description": "Immutable rate identity used by a Credits settlement ledger entry.",
+      "properties": {
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "rateId",
+        "rateRevision"
+      ],
+      "type": "object"
+    },
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "FixedDecimal": {
+      "description": "Canonical signed decimal with exactly six fractional digits.\n\nDecimal values cross the API as strings so JavaScript clients and SQL\ndrivers cannot round monetary values through binary floating point. The\ninternal scaled representation is available to Resource arithmetic without\nintroducing a database-specific decimal dependency into the contracts crate.",
+      "format": "fixed-decimal-6",
+      "pattern": "^-?(0|[1-9][0-9]*)[.][0-9]{6}$",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RateId": {
+      "description": "Strongly typed UUIDv7 identifier for `RateId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UsageRecordId": {
+      "description": "Strongly typed UUIDv7 identifier for `UsageRecordId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "hasMore": {
+      "type": "boolean"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/CreditLedgerEntry"
+      },
+      "type": "array"
+    },
+    "page": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pageSize": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "items",
+    "page",
+    "pageSize",
+    "hasMore"
+  ],
+  "title": "CreditLedgerPage",
+  "type": "object"
+}

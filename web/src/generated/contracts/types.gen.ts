@@ -1516,6 +1516,310 @@ export type ConsoleCapabilitySchemaRevision = number;
 export type ConsoleCapabilitySchemaUtcTimestamp = string;
 
 /**
+ * CreditAccount
+ */
+export type CreditAccountSchema = {
+    available: FixedDecimal;
+    balance: FixedDecimal;
+    currency: string;
+    pending: FixedDecimal;
+    platformAbsorbed: FixedDecimal;
+    projectId: CreditAccountSchemaProjectId;
+    reserved: FixedDecimal;
+    revision: CreditAccountSchemaRevision;
+    spent: FixedDecimal;
+    unknown: FixedDecimal;
+    unknownCount: number;
+};
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type FixedDecimal = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreditAccountSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreditAccountSchemaRevision = number;
+
+/**
+ * CreditAdminOperation
+ */
+export type CreditAdminOperationSchema = {
+    action: 'grant';
+    amount: CreditAdminOperationSchemaFixedDecimal;
+    projectId: CreditAdminOperationSchemaProjectId;
+    reason: string;
+} | {
+    action: 'transfer';
+    amount: CreditAdminOperationSchemaFixedDecimal;
+    destinationProjectId: CreditAdminOperationSchemaProjectId;
+    projectId: CreditAdminOperationSchemaProjectId;
+    reason: string;
+} | {
+    action: 'adjust';
+    amount: CreditAdminOperationSchemaFixedDecimal;
+    projectId: CreditAdminOperationSchemaProjectId;
+    reason: string;
+} | {
+    action: 'reverse';
+    entryId: string;
+    reason: string;
+};
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type CreditAdminOperationSchemaFixedDecimal = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreditAdminOperationSchemaProjectId = string;
+
+/**
+ * CreditHoldPage
+ */
+export type CreditHoldPageSchema = {
+    hasMore: boolean;
+    items: Array<CreditHold>;
+    page: number;
+    pageSize: number;
+};
+
+export type CreditHold = {
+    amount: CreditHoldPageSchemaFixedDecimal;
+    businessKey: string;
+    createdAt: CreditHoldPageSchemaUtcTimestamp;
+    id: string;
+    measurementUnknown: boolean;
+    ownerClientId: string;
+    projectId: CreditHoldPageSchemaProjectId;
+    reason?: string | null;
+    remaining: CreditHoldPageSchemaFixedDecimal;
+    requestId: CreditHoldPageSchemaResourceRequestId;
+    state: CreditHoldState;
+};
+
+export type CreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type CreditHoldPageSchemaFixedDecimal = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreditHoldPageSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type CreditHoldPageSchemaResourceRequestId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CreditHoldPageSchemaUtcTimestamp = string;
+
+/**
+ * CreditLedgerEntry
+ *
+ * Platform entries have no project ID and balance the project entries.
+ */
+export type CreditLedgerEntrySchema = {
+    actorId?: CreditLedgerEntrySchemaActorId | null;
+    balanceDelta: CreditLedgerEntrySchemaFixedDecimal;
+    chargeId?: ChargeId | null;
+    createdAt: CreditLedgerEntrySchemaUtcTimestamp;
+    holdId?: string | null;
+    id: string;
+    kind: string;
+    operationId: string;
+    ownerClientId?: string | null;
+    platformAbsorbed: CreditLedgerEntrySchemaFixedDecimal;
+    projectId?: CreditLedgerEntrySchemaProjectId | null;
+    rateSnapshots: Array<CreditRateSnapshot>;
+    reason: string;
+    reservedDelta: CreditLedgerEntrySchemaFixedDecimal;
+    reversalOf?: string | null;
+    sourceEventId?: EventId | null;
+    spentDelta: CreditLedgerEntrySchemaFixedDecimal;
+    usageRecordId?: UsageRecordId | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CreditLedgerEntrySchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ChargeId`.
+ */
+export type ChargeId = string;
+
+/**
+ * Immutable rate identity used by a Credits settlement ledger entry.
+ */
+export type CreditRateSnapshot = {
+    rateId: RateId;
+    rateRevision: CreditLedgerEntrySchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EventId`.
+ */
+export type EventId = string;
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type CreditLedgerEntrySchemaFixedDecimal = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreditLedgerEntrySchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type RateId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreditLedgerEntrySchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UsageRecordId`.
+ */
+export type UsageRecordId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CreditLedgerEntrySchemaUtcTimestamp = string;
+
+/**
+ * CreditLedgerPage
+ */
+export type CreditLedgerPageSchema = {
+    hasMore: boolean;
+    items: Array<CreditLedgerEntry>;
+    page: number;
+    pageSize: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CreditLedgerPageSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ChargeId`.
+ */
+export type CreditLedgerPageSchemaChargeId = string;
+
+/**
+ * Platform entries have no project ID and balance the project entries.
+ */
+export type CreditLedgerEntry = {
+    actorId?: CreditLedgerPageSchemaActorId | null;
+    balanceDelta: CreditLedgerPageSchemaFixedDecimal;
+    chargeId?: CreditLedgerPageSchemaChargeId | null;
+    createdAt: CreditLedgerPageSchemaUtcTimestamp;
+    holdId?: string | null;
+    id: string;
+    kind: string;
+    operationId: string;
+    ownerClientId?: string | null;
+    platformAbsorbed: CreditLedgerPageSchemaFixedDecimal;
+    projectId?: CreditLedgerPageSchemaProjectId | null;
+    rateSnapshots: Array<CreditLedgerPageSchemaCreditRateSnapshot>;
+    reason: string;
+    reservedDelta: CreditLedgerPageSchemaFixedDecimal;
+    reversalOf?: string | null;
+    sourceEventId?: CreditLedgerPageSchemaEventId | null;
+    spentDelta: CreditLedgerPageSchemaFixedDecimal;
+    usageRecordId?: CreditLedgerPageSchemaUsageRecordId | null;
+};
+
+/**
+ * Immutable rate identity used by a Credits settlement ledger entry.
+ */
+export type CreditLedgerPageSchemaCreditRateSnapshot = {
+    rateId: CreditLedgerPageSchemaRateId;
+    rateRevision: CreditLedgerPageSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EventId`.
+ */
+export type CreditLedgerPageSchemaEventId = string;
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type CreditLedgerPageSchemaFixedDecimal = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreditLedgerPageSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type CreditLedgerPageSchemaRateId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreditLedgerPageSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UsageRecordId`.
+ */
+export type CreditLedgerPageSchemaUsageRecordId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CreditLedgerPageSchemaUtcTimestamp = string;
+
+/**
  * CsrfTokenResponse
  *
  * Synchronizer token returned only to an authenticated browser session.
@@ -3869,13 +4173,13 @@ export type CreateResourceAdjustmentRequestSchema = {
  * internal scaled representation is available to Resource arithmetic without
  * introducing a database-specific decimal dependency into the contracts crate.
  */
-export type FixedDecimal = string;
+export type CreateResourceAdjustmentRequestSchemaFixedDecimal = string;
 
 /**
  * A fixed-precision amount with an explicit ISO-4217-like currency code.
  */
 export type Money = {
-    amount: FixedDecimal;
+    amount: CreateResourceAdjustmentRequestSchemaFixedDecimal;
     currency: string;
 };
 
@@ -4606,7 +4910,7 @@ export type EnvironmentManagementStreamEvent = {
     courseId?: EnvironmentManagementEventSchemaCourseId | null;
     data: EnvironmentManagementEvent;
     effectiveAt: EnvironmentManagementEventSchemaUtcTimestamp;
-    eventId: EventId;
+    eventId: EnvironmentManagementEventSchemaEventId;
     projectId: EnvironmentManagementEventSchemaProjectId;
     streamSequence: EnvironmentManagementEventSchemaStreamSequence;
 };
@@ -4614,7 +4918,7 @@ export type EnvironmentManagementStreamEvent = {
 /**
  * Strongly typed UUIDv7 identifier for `EventId`.
  */
-export type EventId = string;
+export type EnvironmentManagementEventSchemaEventId = string;
 
 /**
  * Authoritative observed lifecycle state.
@@ -10620,7 +10924,7 @@ export type ResourceChargeSchema = {
      * Actor that authorized an administrator adjustment.
      */
     adjustedBy?: ResourceChargeSchemaActorId | null;
-    adjustmentOf?: ChargeId | null;
+    adjustmentOf?: ResourceChargeSchemaChargeId | null;
     /**
      * Human supplied reason retained with an administrator adjustment.
      */
@@ -10628,12 +10932,12 @@ export type ResourceChargeSchema = {
     courseId?: ResourceChargeSchemaCourseId | null;
     createdAt: ResourceChargeSchemaUtcTimestamp;
     diagnosticCode?: string | null;
-    id: ChargeId;
+    id: ResourceChargeSchemaChargeId;
     lines: Array<ResourceChargeLine>;
     projectId: ResourceChargeSchemaProjectId;
     settlement: UsageSettlementState;
     total: ResourceChargeSchemaMoney;
-    usageRecordId: UsageRecordId;
+    usageRecordId: ResourceChargeSchemaUsageRecordId;
 };
 
 /**
@@ -10644,7 +10948,7 @@ export type ResourceChargeSchemaActorId = string;
 /**
  * Strongly typed UUIDv7 identifier for `ChargeId`.
  */
-export type ChargeId = string;
+export type ResourceChargeSchemaChargeId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `CourseId`.
@@ -10677,7 +10981,7 @@ export type ResourceChargeSchemaProjectId = string;
 /**
  * Strongly typed UUIDv7 identifier for `RateId`.
  */
-export type RateId = string;
+export type ResourceChargeSchemaRateId = string;
 
 /**
  * Resource dimension used by a versioned rate card.
@@ -10690,7 +10994,7 @@ export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | '
 export type ResourceChargeLine = {
     amount: ResourceChargeSchemaMoney;
     quantity: number;
-    rateId: RateId;
+    rateId: ResourceChargeSchemaRateId;
     rateRevision: ResourceChargeSchemaRevision;
     unit: ResourceChargeSchemaResourceBillingUnit;
     unitPrice: ResourceChargeSchemaMoney;
@@ -10705,7 +11009,7 @@ export type ResourceChargeSchemaRevision = number;
 /**
  * Strongly typed UUIDv7 identifier for `UsageRecordId`.
  */
-export type UsageRecordId = string;
+export type ResourceChargeSchemaUsageRecordId = string;
 
 /**
  * Settlement state for one immutable usage observation.
@@ -15913,6 +16217,213 @@ export type CreateProjectResourceChargeAdjustmentResponses = {
 
 export type CreateProjectResourceChargeAdjustmentResponse = CreateProjectResourceChargeAdjustmentResponses[keyof CreateProjectResourceChargeAdjustmentResponses];
 
+export type GetProjectCreditsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/credits';
+};
+
+export type GetProjectCreditsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectCreditsError = GetProjectCreditsErrors[keyof GetProjectCreditsErrors];
+
+export type GetProjectCreditsResponses = {
+    /**
+     * Successful response
+     */
+    200: CreditAccountSchema;
+};
+
+export type GetProjectCreditsResponse = GetProjectCreditsResponses[keyof GetProjectCreditsResponses];
+
+export type ListProjectCreditHoldsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/credits/holds';
+};
+
+export type ListProjectCreditHoldsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectCreditHoldsError = ListProjectCreditHoldsErrors[keyof ListProjectCreditHoldsErrors];
+
+export type ListProjectCreditHoldsResponses = {
+    /**
+     * Successful response
+     */
+    200: CreditHoldPageSchema;
+};
+
+export type ListProjectCreditHoldsResponse = ListProjectCreditHoldsResponses[keyof ListProjectCreditHoldsResponses];
+
+export type ListProjectCreditLedgerData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/credits/ledger';
+};
+
+export type ListProjectCreditLedgerErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectCreditLedgerError = ListProjectCreditLedgerErrors[keyof ListProjectCreditLedgerErrors];
+
+export type ListProjectCreditLedgerResponses = {
+    /**
+     * Successful response
+     */
+    200: CreditLedgerPageSchema;
+};
+
+export type ListProjectCreditLedgerResponse = ListProjectCreditLedgerResponses[keyof ListProjectCreditLedgerResponses];
+
 export type GetProjectEnvironmentCandidateData = {
     body?: never;
     path: {
@@ -18987,6 +19498,76 @@ export type RetryResourceRequestResponses = {
 };
 
 export type RetryResourceRequestResponse = RetryResourceRequestResponses[keyof RetryResourceRequestResponses];
+
+export type CreateCreditAdminOperationData = {
+    body: CreditAdminOperationSchema;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/resource/credits/operations';
+};
+
+export type CreateCreditAdminOperationErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateCreditAdminOperationError = CreateCreditAdminOperationErrors[keyof CreateCreditAdminOperationErrors];
+
+export type CreateCreditAdminOperationResponses = {
+    /**
+     * Successful response
+     */
+    200: Array<CreditLedgerEntrySchema>;
+};
+
+export type CreateCreditAdminOperationResponse = CreateCreditAdminOperationResponses[keyof CreateCreditAdminOperationResponses];
 
 export type ListResourceGpuCatalogData = {
     body?: never;

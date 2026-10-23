@@ -128,9 +128,9 @@ impl MigrationCatalog {
         }
         Self::verify_file(root, &self.bootstrap)?;
         for domain in &self.domains {
+            Self::validate_contiguous_ids(domain)?;
             let mut ids = BTreeSet::new();
             let mut files = BTreeSet::new();
-            let mut previous = 0;
             if domain.migrations.is_empty() {
                 return Err(PersistenceError::Catalog(format!(
                     "{} has no Migration",
@@ -138,18 +138,29 @@ impl MigrationCatalog {
                 )));
             }
             for migration in &domain.migrations {
-                if migration.id == 0
-                    || migration.id <= previous
-                    || !ids.insert(migration.id)
-                    || !files.insert(&migration.file)
+                if migration.id == 0 || !ids.insert(migration.id) || !files.insert(&migration.file)
                 {
                     return Err(PersistenceError::Catalog(format!(
                         "{} Migration IDs and files must be unique and ordered",
                         domain.name
                     )));
                 }
-                previous = migration.id;
                 Self::verify_file(root, migration)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_contiguous_ids(domain: &CatalogDomain) -> Result<(), PersistenceError> {
+        for (index, migration) in domain.migrations.iter().enumerate() {
+            let expected = u64::try_from(index + 1).map_err(|_| {
+                PersistenceError::Catalog(format!("{} Migration index exceeds u64", domain.name))
+            })?;
+            if migration.id != expected {
+                return Err(PersistenceError::Catalog(format!(
+                    "{} Migration IDs must be contiguous starting at 1: expected {}, found {}",
+                    domain.name, expected, migration.id
+                )));
             }
         }
         Ok(())
@@ -189,6 +200,30 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
         let catalog = MigrationCatalog::load(&root.join("catalog.yaml"))?;
         assert_eq!(catalog.sha256()?, catalog.sha256()?);
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_rejects_domain_migration_gaps() -> Result<(), Box<dyn std::error::Error>> {
+        let domain = super::CatalogDomain {
+            name: crate::Domain::Resource,
+            migrations: vec![
+                CatalogMigration {
+                    id: 1,
+                    file: "resource/0001.sql".to_owned(),
+                    sha256: None,
+                },
+                CatalogMigration {
+                    id: 3,
+                    file: "resource/0003.sql".to_owned(),
+                    sha256: None,
+                },
+            ],
+        };
+        let error = MigrationCatalog::validate_contiguous_ids(&domain)
+            .err()
+            .ok_or("catalog gap was accepted")?;
+        assert!(error.to_string().contains("expected 2, found 3"));
         Ok(())
     }
 
