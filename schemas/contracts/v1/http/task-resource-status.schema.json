@@ -40,6 +40,17 @@
         "state": {
           "$ref": "#/$defs/CapacityClaimState"
         },
+        "updatedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Database-authoritative claim update time, populated on created and transitioned snapshots."
+        },
         "workloadResources": {
           "$ref": "#/$defs/WorkloadResources"
         }

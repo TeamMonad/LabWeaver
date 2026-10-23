@@ -437,6 +437,7 @@ async fn http_enqueue_returns_before_the_archive_read_and_running_cancel_unwinds
     );
     let jobs = PlatformImageImportJobStore::new(pool.clone());
     let state = Arc::new(AgentApiState {
+        resource: None,
         store: PostgresAgentRunStore::new(pool.clone()),
         build_store: PgBuildStore::new(pool.clone()),
         generated_artifacts: GeneratedArtifactStore::new(pool.clone()),

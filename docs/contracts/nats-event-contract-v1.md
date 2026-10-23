@@ -58,6 +58,19 @@ messages carry only their locator, hash, type, size and safe summary.
 | `labweaver.evaluation.submission.*.v1` | freeze request and immutable FrozenSubmission fact; no evaluation is scheduled |
 | `labweaver.resource.request.*.v1` and `labweaver.resource.lease.*.v1` | Resource request decisions and lease lifecycle facts |
 
+### Resource lease task lifecycle
+
+Resource Service owns `labweaver.resource.lease.created.v1`,
+`labweaver.resource.lease.activated.v1`,
+`labweaver.resource.lease.fenced.v1`,
+`labweaver.resource.lease.expiring.v1`, and
+`labweaver.resource.lease.expired.v1`. `LEASE_CREATED` records the initial
+allocation snapshot; `LEASE_FENCED` records an expired-before-cleanup revision
+fence and never represents a renewed validity window. The current deployment
+has no production downstream consumer for these task-resource lease facts;
+the PostgreSQL Inbox/JetStream replay test is the verified boundary and direct
+task status queries remain authoritative.
+
 The exact subjects and schemas are generated from `EVENT_CONTRACTS`; this table
 is explanatory and must not be extended independently.
 

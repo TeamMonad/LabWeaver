@@ -46,6 +46,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::AgentRunHistoryPage
     );
     document!(
+        "schemas/contracts/v1/agent-run-task-progress.schema.json",
+        crate::authoring::AgentRunTaskProgress
+    );
+    document!(
+        "schemas/contracts/v1/task-attempt-progress.schema.json",
+        crate::execution::TaskAttemptProgress
+    );
+    document!(
         "schemas/contracts/v1/environment-candidate.schema.json",
         crate::authoring::EnvironmentCandidate
     );
@@ -86,6 +94,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/evaluation-run.schema.json",
         crate::evaluation::EvaluationRun
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-run-task-progress.schema.json",
+        crate::evaluation::EvaluationRunTaskProgress
     );
     document!(
         "schemas/contracts/v1/student-evaluation-result.schema.json",
@@ -845,11 +857,19 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::ResourceRequestChanged>
     );
     document!(
+        "schemas/contracts/v1/events/resource-lease-created.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
         "schemas/contracts/v1/events/resource-lease-activated.schema.json",
         CloudEvent<events::ResourceLeaseChanged>
     );
     document!(
         "schemas/contracts/v1/events/resource-lease-renewed.schema.json",
+        CloudEvent<events::ResourceLeaseChanged>
+    );
+    document!(
+        "schemas/contracts/v1/events/resource-lease-fenced.schema.json",
         CloudEvent<events::ResourceLeaseChanged>
     );
     document!(
@@ -1078,7 +1098,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if matches!(
             operation.operation_id,
-            "listProjectAgentRuns" | "listProjectResourceUsage"
+            "listProjectAgentRuns"
+                | "listProjectResourceUsage"
+                | "getProjectAgentTaskProgress"
+                | "getOwnProjectEvaluationTaskProgress"
+                | "getOwnProjectEvaluationTaskForSubmission"
+                | "getInternalAgentTaskProgress"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -1198,6 +1223,20 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_AGENT_PERSISTENCE_FAILED",
             ]);
         }
+        if matches!(
+            operation.operation_id,
+            "getProjectAgentTaskProgress"
+                | "getInternalAgentTaskProgress"
+                | "getOwnProjectEvaluationTaskProgress"
+                | "getOwnProjectEvaluationTaskForSubmission"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_TASK_PROGRESS_PAGE_INVALID",
+                "LW_TASK_PROGRESS_CHANGED",
+                "LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE",
+                "LW_TASK_PROGRESS_IDENTITY_MISMATCH"
+            ]);
+        }
         if operation.operation_id == "addProjectMembership" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1287,6 +1326,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"OrganizationUser": contract_ref("organization-user")
                  ,"OrganizationUserPage": contract_ref("organization-user-page")
                  ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
+                 ,"AgentRunTaskProgress": contract_ref("agent-run-task-progress")
+                 ,"TaskAttemptProgress": contract_ref("task-attempt-progress")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
                 ,"LogoutBrowserSessionResponse": contract_ref("logout-browser-session-response")
                 ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
@@ -1316,6 +1357,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"AgentWorkExecutionIntentQuery": contract_ref("http/agent-work-execution-intent-query")
                 ,"EvaluationRelease": contract_ref("evaluation-release")
                 ,"EvaluationRun": contract_ref("evaluation-run")
+                ,"EvaluationRunTaskProgress": contract_ref("evaluation-run-task-progress")
                 ,"StudentEvaluationResult": contract_ref("student-evaluation-result")
                 ,"InternalPublishEvaluationReleaseRequest": contract_ref("http/internal-publish-evaluation-release-request")
                 ,"InternalWithdrawEvaluationReleaseRequest": contract_ref("http/internal-withdraw-evaluation-release-request")
@@ -1686,6 +1728,12 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }),
         "listOrganizationUsers" => contract_ref("organization-user-page"),
         "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
+        "getProjectAgentTaskProgress" | "getInternalAgentTaskProgress" => {
+            contract_ref("agent-run-task-progress")
+        }
+        "getOwnProjectEvaluationTaskProgress" | "getOwnProjectEvaluationTaskForSubmission" => {
+            contract_ref("evaluation-run-task-progress")
+        }
         "addProjectMembership" | "removeProjectMembership" => contract_ref("project-membership"),
         "createProjectProblemPackageUpload"
         | "getProjectProblemPackageUpload"

@@ -77,6 +77,7 @@ fn admitted_status(
             gpu_allocation: None,
             state: CapacityClaimState::HandedOff,
             revision,
+            updated_at: Some(created_at),
         },
         lease: ResourceLease {
             id: lease_id,

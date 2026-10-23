@@ -177,12 +177,15 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
     let submission_control_store = control_store.clone();
     let submission_authoring_admission = authoring_admission.clone();
     let api = with_service_auth(
-        evaluation_api_router(EvaluationApiState::new(
-            command_store.clone(),
-            freeze_store.clone(),
-            control_store.clone(),
-            Arc::new(authoring_admission.clone()),
-        )),
+        evaluation_api_router(
+            EvaluationApiState::new(
+                command_store.clone(),
+                freeze_store.clone(),
+                control_store.clone(),
+                Arc::new(authoring_admission.clone()),
+            )
+            .with_resource_client(resource_client.clone()),
+        ),
         service_verifier,
     );
     let coordinator = FreezeCoordinator::new(

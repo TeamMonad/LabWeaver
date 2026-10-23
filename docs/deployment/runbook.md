@@ -143,6 +143,8 @@ cargo xtask package-validate \
 
 ### 3.3 迁移边界
 
+Resource 任务协议要求资源迁移 `0015_task_approval_deadline.sql`。迁移不为旧 Reviewing Task 申请补造期限；Resource 启动 readiness 会 fail-closed，并以 `LW_RESOURCE_TASK_APPROVAL_DEADLINE_MISSING` 报告仍缺期限的行。保留原申请与历史；不要清空业务 schema。同步更新 Resource、Agent 和 Evaluation，内部任务创建须携带 `approvalTimeoutMilliseconds`。
+
 `migrations/catalog.yaml` 是迁移目录唯一真源。每个业务 schema 的在线 migration ledger 必须是该目录的有序前缀，新增迁移只能追加。部署失败时先读取服务诊断和 ledger，不能删表、清空 schema 或手工改 migration 状态来绕过校验。数据库迁移前向执行；需要数据恢复时使用经批准的数据库恢复方案，不把 Helm 回滚当作数据库回滚。
 
 ## 4. 增量部署和回滚
@@ -350,6 +352,7 @@ runner 会把口令、认证状态和 Playwright 临时输出放在临时目录�
 | --- | --- | --- |
 | HTTPS 或登录回调失败 | 公共 Gateway、Certificate、Keycloak redirect 和浏览器证书 | 修正 ingress/identity 配置后重新部署；不关闭证书检查 |
 | 模型任务失败 | bundle 中 base URL/model、Ollama Service、Agent 任务状态和诊断 | 区分模型、任务执行、资源和平台问题；本轮验收只对明确失败任务人工重试一次 |
+| 任务等待资源或审批超时 | 原任务尝试、Resource 申请状态、claim/lease 和 revision | 先刷新原任务；批准后仍失败时区分交接或执行失败。响应丢失恢复同一次尝试，不另建申请。真正超时或取消后的批准不能复活旧尝试；新尝试须等旧资源清理确认。参见资源占用与费用说明中的内部任务接口 |
 | 资源一直等待 | Resource UI 的申请、active lease、容量观测 TTL 和 provider binding | 不把未知容量当作零，不创建重复申请 |
 | 容器/VM 未就绪 | Environment 状态、provider、Pod/VMI、PVC/DataVolume 和 release | 等待原对象或按页面取消；不手工创建第二个环境 |
 | 评测失败 | Evaluation run、OJ runtime 配置、收据和用户提交版本 | 保留确定性错误和反馈；不以固定分数或 Mock 替代 |

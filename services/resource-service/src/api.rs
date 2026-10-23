@@ -484,6 +484,7 @@ async fn approve_request(
         gpu_allocation: None,
         state: contracts::resource::CapacityClaimState::Reserved,
         revision: Revision::new(1).map_err(|_| ResourceApiError::Invalid)?,
+        updated_at: Some(now),
     };
     let allocation = PendingAllocation {
         claim,
@@ -749,6 +750,9 @@ async fn create_task_resource(
     Json(input): Json<InternalCreateTaskResourceRequest>,
 ) -> Result<Response, ResourceApiError> {
     let idempotency_key = required_header(&headers, "idempotency-key")?;
+    if !(1..=3_600_000).contains(&input.approval_timeout_milliseconds) {
+        return Err(ResourceApiError::Invalid);
+    }
     let now = state.store.current_time().await?;
     let request = ResourceRequest {
         id: ResourceRequestId::new(),
@@ -770,7 +774,12 @@ async fn create_task_resource(
     };
     let stored = state
         .store
-        .create(&idempotency_key, &request, context.trace_id())
+        .create_task(
+            &idempotency_key,
+            &request,
+            input.approval_timeout_milliseconds,
+            context.trace_id(),
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(stored)).into_response())
 }
@@ -876,6 +885,7 @@ async fn release_task_resource(
             .store
             .release_task_resource(
                 task_run_id,
+                input.expected_request_revision,
                 input.expected_claim_revision,
                 input.expected_lease_revision,
                 context.trace_id(),

@@ -29,6 +29,7 @@ pub mod process;
 pub mod resource_client;
 pub mod ssh_source;
 pub mod submission_consumer;
+pub mod task_progress;
 pub mod worker;
 
 #[path = "../../http_transport.rs"]

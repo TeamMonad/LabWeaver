@@ -50,7 +50,9 @@ const REQUEST_REJECTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_REJECTED;
 const REQUEST_CANCELLED_SUBJECT: &str = subjects::RESOURCE_REQUEST_CANCELLED;
 const REQUEST_STATE_CHANGED_SUBJECT: &str = subjects::RESOURCE_REQUEST_STATE_CHANGED;
 const LEASE_ACTIVATED_SUBJECT: &str = subjects::RESOURCE_LEASE_ACTIVATED;
+const LEASE_CREATED_SUBJECT: &str = subjects::RESOURCE_LEASE_CREATED;
 const LEASE_RENEWED_SUBJECT: &str = subjects::RESOURCE_LEASE_RENEWED;
+const LEASE_FENCED_SUBJECT: &str = subjects::RESOURCE_LEASE_FENCED;
 const LEASE_REVOKED_SUBJECT: &str = subjects::RESOURCE_LEASE_REVOKED;
 const LEASE_EXPIRING_SUBJECT: &str = subjects::RESOURCE_LEASE_EXPIRING;
 const LEASE_EXPIRED_SUBJECT: &str = subjects::RESOURCE_LEASE_EXPIRED;
@@ -257,6 +259,42 @@ impl PgResourceStore {
         request: &ResourceRequest,
         trace_id: &str,
     ) -> Result<ResourceRequest, ResourceStoreError> {
+        if matches!(request.target, ResourceTarget::Task { .. }) {
+            return Err(ResourceStoreError::InvalidCreateState);
+        }
+        self.create_with_deadline(idempotency_key, request, None, trace_id)
+            .await
+    }
+
+    /// Captures the first task approval budget in the same creation transaction.
+    pub async fn create_task(
+        &self,
+        idempotency_key: &str,
+        request: &ResourceRequest,
+        approval_timeout_milliseconds: u64,
+        trace_id: &str,
+    ) -> Result<ResourceRequest, ResourceStoreError> {
+        if !matches!(request.target, ResourceTarget::Task { .. })
+            || !(1..=3_600_000).contains(&approval_timeout_milliseconds)
+        {
+            return Err(ResourceStoreError::InvalidCreateState);
+        }
+        self.create_with_deadline(
+            idempotency_key,
+            request,
+            Some(approval_timeout_milliseconds),
+            trace_id,
+        )
+        .await
+    }
+
+    async fn create_with_deadline(
+        &self,
+        idempotency_key: &str,
+        request: &ResourceRequest,
+        approval_timeout_milliseconds: Option<u64>,
+        trace_id: &str,
+    ) -> Result<ResourceRequest, ResourceStoreError> {
         request.validate().map_err(ResourceStoreError::Contract)?;
         if request.state != ResourceRequestState::Reviewing {
             return Err(ResourceStoreError::InvalidCreateState);
@@ -267,7 +305,7 @@ impl PgResourceStore {
         // The response identity and timestamps are server-owned.  Hash only the
         // caller's intent so a retry with the same key can replay the first
         // durable request even when the client rebuilt its JSON object.
-        let hash = Sha256Digest::of_canonical(&(
+        let intent = (
             request.requester_id,
             request.project_id,
             request.course_id,
@@ -275,7 +313,11 @@ impl PgResourceStore {
             &request.target,
             &request.requested_resources,
             request.requested_duration_seconds,
-        ))
+        );
+        let hash = match approval_timeout_milliseconds {
+            Some(milliseconds) => Sha256Digest::of_canonical(&(intent, milliseconds)),
+            None => Sha256Digest::of_canonical(&intent),
+        }
         .map_err(|_| ResourceStoreError::Wire)?;
         let outcome = match IdempotencyStore::reserve(
             &mut transaction,
@@ -293,6 +335,17 @@ impl PgResourceStore {
             }
             IdempotencyDecision::Reserved => {
                 insert_request(&mut transaction, request).await?;
+                if let Some(milliseconds) = approval_timeout_milliseconds {
+                    sqlx::query(
+                        "UPDATE resource.resource_requests
+                        SET approval_deadline_at=created_at+($2::bigint * interval '1 millisecond')
+                        WHERE request_id=$1 AND approval_deadline_at IS NULL",
+                    )
+                    .bind(request.id.as_uuid())
+                    .bind(i64::try_from(milliseconds)?)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
                 insert_transition(
                     &mut transaction,
                     request,
@@ -325,6 +378,201 @@ impl PgResourceStore {
         Ok(outcome)
     }
 
+    /// Settles one expired pending task using Resource's database clock.
+    /// Active handoffs remain owned by the executor until cleanup is confirmed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "request, claim, lease and outbox expiry commit under one request fence"
+    )]
+    pub async fn expire_task_resource(
+        &self,
+        task_run_id: TaskRunId,
+    ) -> Result<bool, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT contract,approval_deadline_at FROM resource.resource_requests
+            WHERE target_kind='task' AND task_run_id=$1 FOR UPDATE",
+        )
+        .bind(task_run_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let request = decode_request(row.try_get("contract")?)?;
+        let deadline: Option<time::OffsetDateTime> = row.try_get("approval_deadline_at")?;
+        if request.state == ResourceRequestState::Reviewing && deadline.is_none() {
+            return Err(ResourceStoreError::TaskApprovalDeadlineMissing);
+        }
+        let now = database_now(&mut transaction).await?;
+        let trace_id = format!("task-resource-expire-{task_run_id}");
+        let changed = if request.state == ResourceRequestState::Reviewing
+            && deadline.is_some_and(|deadline| deadline <= now.get())
+        {
+            expire_task_review_locked(&mut transaction, &request, now, &trace_id).await?;
+            true
+        } else if request.state == ResourceRequestState::Allocating {
+            let row = sqlx::query(
+                "SELECT c.contract AS claim_contract,l.contract AS lease_contract,
+                c.namespace_name AS execution_namespace,a.valid_until
+                FROM resource.capacity_claims c
+                JOIN resource.resource_leases l ON l.claim_id=c.claim_id
+                JOIN resource.resource_approvals a ON a.approval_id=c.approval_id
+                WHERE c.request_id=$1 FOR UPDATE OF c,l",
+            )
+            .bind(request.id.as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(row) = row {
+                let claim = decode_claim(row.try_get("claim_contract")?)?;
+                let lease = decode_lease(row.try_get("lease_contract")?)?;
+                let valid_until: time::OffsetDateTime = row.try_get("valid_until")?;
+                if valid_until <= now.get()
+                    && lease.state == ResourceLeaseState::Allocating
+                    && matches!(
+                        claim.state,
+                        CapacityClaimState::Reserved | CapacityClaimState::Provisioning
+                    )
+                {
+                    release_task_locked(
+                        &mut transaction,
+                        &request,
+                        &claim,
+                        &lease,
+                        row.try_get("execution_namespace")?,
+                        &trace_id,
+                        Some("LW_RESOURCE_APPROVAL_EXPIRED"),
+                    )
+                    .await?;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else if request.state == ResourceRequestState::Active
+            && request.diagnostic_code.as_deref() != Some("LW_RESOURCE_TASK_LEASE_EXPIRED")
+        {
+            let row = sqlx::query(
+                "SELECT c.contract AS claim_contract,l.contract AS lease_contract
+                 FROM resource.capacity_claims c
+                 JOIN resource.resource_leases l ON l.claim_id=c.claim_id
+                 WHERE c.request_id=$1 AND c.state='handed_off' AND l.state='active'
+                   AND l.expires_at<=clock_timestamp()
+                 FOR UPDATE OF c,l",
+            )
+            .bind(request.id.as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(row) = row {
+                let claim = decode_claim(row.try_get("claim_contract")?)?;
+                let lease = decode_lease(row.try_get("lease_contract")?)?;
+                let mut fenced_claim = claim.clone();
+                fenced_claim.revision = Revision::new(
+                    claim
+                        .revision
+                        .get()
+                        .checked_add(1)
+                        .ok_or(ResourceStoreError::RevisionOverflow)?,
+                )?;
+                fenced_claim.updated_at = Some(now);
+                let mut fenced_lease = lease.clone();
+                fenced_lease.revision = Revision::new(
+                    lease
+                        .revision
+                        .get()
+                        .checked_add(1)
+                        .ok_or(ResourceStoreError::RevisionOverflow)?,
+                )?;
+                fenced_lease.updated_at = now;
+                update_claim_at(
+                    &mut transaction,
+                    &claim,
+                    &fenced_claim,
+                    None,
+                    None,
+                    None,
+                    Some(now),
+                )
+                .await?;
+                update_lease(&mut transaction, &lease, &fenced_lease).await?;
+                enqueue_lease_event(
+                    &mut transaction,
+                    &fenced_lease,
+                    &request,
+                    LEASE_FENCED_SUBJECT,
+                    &trace_id,
+                )
+                .await?;
+                let mut next = request.clone();
+                next.revision = Revision::new(
+                    request
+                        .revision
+                        .get()
+                        .checked_add(1)
+                        .ok_or(ResourceStoreError::RevisionOverflow)?,
+                )?;
+                next.updated_at = now;
+                next.diagnostic_code = Some("LW_RESOURCE_TASK_LEASE_EXPIRED".to_owned());
+                update_request(&mut transaction, &request, &next).await?;
+                insert_transition(
+                    &mut transaction,
+                    &next,
+                    next.revision.get(),
+                    Some(request.state),
+                    None,
+                    &trace_id,
+                )
+                .await?;
+                enqueue_request_event(
+                    &mut transaction,
+                    &next,
+                    REQUEST_STATE_CHANGED_SUBJECT,
+                    &trace_id,
+                )
+                .await?;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        transaction.commit().await?;
+        Ok(changed)
+    }
+
+    /// Processes at most one expired wait or pre-handoff approval after a restart.
+    pub async fn expire_pending_task_once(&self) -> Result<bool, ResourceStoreError> {
+        let task: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT r.task_run_id
+            FROM resource.resource_requests r
+            LEFT JOIN resource.capacity_claims c ON c.request_id=r.request_id
+            LEFT JOIN resource.resource_leases l ON l.claim_id=c.claim_id
+            LEFT JOIN resource.resource_approvals a ON a.approval_id=c.approval_id
+            WHERE r.target_kind='task' AND (
+                (r.state='reviewing' AND r.approval_deadline_at<=clock_timestamp()) OR
+                (r.state='allocating' AND l.state='allocating'
+                 AND c.state IN ('reserved','provisioning') AND a.valid_until<=clock_timestamp()) OR
+                (r.state='active' AND l.state='active' AND l.expires_at<=clock_timestamp()
+                 AND r.diagnostic_code IS DISTINCT FROM 'LW_RESOURCE_TASK_LEASE_EXPIRED'))
+            ORDER BY r.updated_at,r.request_id LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(task) = task {
+            self.expire_task_resource(
+                task.to_string()
+                    .parse()
+                    .map_err(|_| ResourceStoreError::Wire)?,
+            )
+            .await
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Loads one strict request projection. Empty legacy snapshots are never accepted.
     pub async fn load(
         &self,
@@ -346,6 +594,7 @@ impl PgResourceStore {
         &self,
         task_run_id: TaskRunId,
     ) -> Result<ResourceRequest, ResourceStoreError> {
+        self.expire_task_resource(task_run_id).await?;
         let rows = sqlx::query(
             "SELECT contract FROM resource.resource_requests
              WHERE task_run_id=$1 AND target_kind='task'
@@ -2306,6 +2555,10 @@ impl PgResourceStore {
     }
 
     /// Appends an approval and transitions a request to allocation in one transaction.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "deadline and administrative approval use the same locked transaction"
+    )]
     pub async fn approve(
         &self,
         idempotency_key: &str,
@@ -2319,6 +2572,25 @@ impl PgResourceStore {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let request = load_locked(&mut transaction, request_id).await?;
+        if request.state == ResourceRequestState::Reviewing
+            && matches!(request.target, ResourceTarget::Task { .. })
+        {
+            let expired: Option<bool> = sqlx::query_scalar(
+                "SELECT approval_deadline_at<=clock_timestamp()
+                FROM resource.resource_requests WHERE request_id=$1",
+            )
+            .bind(request.id.as_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if expired.ok_or(ResourceStoreError::TaskApprovalDeadlineMissing)? {
+                let now = database_now(&mut transaction).await?;
+                expire_task_review_locked(&mut transaction, &request, now, trace_id).await?;
+                transaction.commit().await?;
+                return Err(ResourceStoreError::Lifecycle(
+                    LifecycleError::ApprovalExpired,
+                ));
+            }
+        }
         // Approval, claim, and lease IDs are generated for the resulting
         // records.  The idempotency fingerprint is the stable administrative
         // decision and selected allocation intent, so transport retries replay
@@ -2354,6 +2626,7 @@ impl PgResourceStore {
                 let now = database_now(&mut transaction).await?;
                 let next = ResourceLifecycle::accept_approval(&request, approval, policy, now)?;
                 let mut claim = allocation.claim.clone();
+                claim.updated_at = Some(now);
                 claim.gpu_allocation = resolve_gpu_allocation(
                     &mut transaction,
                     approval.provider_binding.as_str(),
@@ -2376,6 +2649,14 @@ impl PgResourceStore {
                     .await?;
                 }
                 insert_lease(&mut transaction, &lease).await?;
+                enqueue_lease_event(
+                    &mut transaction,
+                    &lease,
+                    &next,
+                    LEASE_CREATED_SUBJECT,
+                    trace_id,
+                )
+                .await?;
                 update_request(&mut transaction, &request, &next).await?;
                 insert_transition(
                     &mut transaction,
@@ -2499,6 +2780,14 @@ impl PgResourceStore {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
         let request = load_locked(&mut transaction, request_id).await?;
+        // One TaskRunId names one execution attempt. Only the task owner can
+        // retry, with a fresh TaskRunId after confirmed cleanup; a generic
+        // Resource retry must not resurrect the old authorization.
+        if matches!(request.target, ResourceTarget::Task { .. }) {
+            return Err(ResourceStoreError::Lifecycle(
+                crate::LifecycleError::StateConflict,
+            ));
+        }
         let hash = Sha256Digest::of_canonical(&(
             request_id,
             request.project_id,
@@ -2580,6 +2869,7 @@ impl PgResourceStore {
         trace_id: &str,
     ) -> Result<TaskResourceStatus, ResourceStoreError> {
         validate_trace(trace_id)?;
+        self.expire_task_resource(task_run_id).await?;
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT r.contract AS request_contract,c.contract AS claim_contract,
@@ -2611,8 +2901,7 @@ impl PgResourceStore {
                     return Err(ResourceStoreError::CapacityClaimStateConflict);
                 }
                 let next = transition_claim(&claim, CapacityClaimState::Provisioning)?;
-                update_claim(&mut transaction, &claim, &next, None, None, None).await?;
-                next
+                update_claim(&mut transaction, &claim, &next, None, None, None).await?
             }
             CapacityClaimState::Provisioning
             | CapacityClaimState::Ready
@@ -2650,6 +2939,7 @@ impl PgResourceStore {
             return Err(ResourceStoreError::InvalidNamespace);
         }
         validate_trace(trace_id)?;
+        self.expire_task_resource(task_run_id).await?;
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT r.contract AS request_contract,c.contract AS claim_contract,
@@ -2681,6 +2971,45 @@ impl PgResourceStore {
             || lease.claim_id != claim.id
             || approval_id != claim.approval_id.as_uuid()
             || approval_request_id != request.id.as_uuid()
+        {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        let now = database_now(&mut transaction).await?;
+        // Replay a committed handoff after a lost response, or accept its
+        // current status during same-attempt recovery. Replays neither extend
+        // the lease nor emit another event, and still fence namespace/revision.
+        if request.state == ResourceRequestState::Active
+            && lease.state == ResourceLeaseState::Active
+            && lease.expires_at.is_some_and(|expiry| expiry <= now)
+        {
+            return Err(ResourceStoreError::TaskLeaseExpired);
+        }
+        let current_fence =
+            claim.revision == expected_claim_revision && lease.revision == expected_lease_revision;
+        let handoff_fence = expected_claim_revision.get().checked_add(1)
+            == Some(claim.revision.get())
+            && expected_lease_revision.get().checked_add(1) == Some(lease.revision.get());
+        if claim.state == CapacityClaimState::HandedOff
+            && request.state == ResourceRequestState::Active
+            && lease.state == ResourceLeaseState::Active
+            && current_namespace.as_deref() == Some(execution_namespace)
+            && lease.expires_at.is_some_and(|expiry| expiry > now)
+            && (current_fence || handoff_fence)
+        {
+            transaction.commit().await?;
+            return Ok(task_resource_status(
+                request,
+                claim,
+                lease,
+                current_namespace,
+            ));
+        }
+        if !matches!(request.target, ResourceTarget::Task { task_run_id: id } if id == task_run_id)
+            || claim.request_id != request.id
+            || lease.request_id != request.id
+            || lease.claim_id != claim.id
+            || approval_id != claim.approval_id.as_uuid()
+            || approval_request_id != request.id.as_uuid()
             || claim.state != CapacityClaimState::Provisioning
             || request.state != ResourceRequestState::Allocating
             || claim.revision != expected_claim_revision
@@ -2692,9 +3021,22 @@ impl PgResourceStore {
         {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
-        let now = database_now(&mut transaction).await?;
-        if approved_duration_seconds <= 0 || approval_valid_until <= now.get() {
+        if approved_duration_seconds <= 0 {
             return Err(ResourceStoreError::ApprovalInvalid);
+        }
+        if approval_valid_until <= now.get() {
+            release_task_locked(
+                &mut transaction,
+                &request,
+                &claim,
+                &lease,
+                current_namespace,
+                trace_id,
+                Some("LW_RESOURCE_APPROVAL_EXPIRED"),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
         let duration = approved_duration_seconds;
         let expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(duration))
@@ -2703,7 +3045,7 @@ impl PgResourceStore {
             ResourceLifecycle::activate_lease(&lease, expected_lease_revision, now, expires_at)?;
         let next_request = ResourceLifecycle::activate(&request, request.revision, now)?;
         let next_claim = transition_claim(&claim, CapacityClaimState::HandedOff)?;
-        update_claim(
+        let next_claim = update_claim(
             &mut transaction,
             &claim,
             &next_claim,
@@ -2752,6 +3094,7 @@ impl PgResourceStore {
         &self,
         task_run_id: TaskRunId,
     ) -> Result<TaskResourceStatus, ResourceStoreError> {
+        self.expire_task_resource(task_run_id).await?;
         let row = sqlx::query(
             "SELECT r.contract AS request_contract,c.contract AS claim_contract,
                     l.contract AS lease_contract,c.namespace_name AS execution_namespace
@@ -2792,6 +3135,7 @@ impl PgResourceStore {
     pub async fn release_task_resource(
         &self,
         task_run_id: TaskRunId,
+        expected_request_revision: Revision,
         expected_claim_revision: Revision,
         expected_lease_revision: Revision,
         trace_id: &str,
@@ -2815,10 +3159,40 @@ impl PgResourceStore {
         let claim = decode_claim(row.try_get("claim_contract")?)?;
         let lease = decode_lease(row.try_get("lease_contract")?)?;
         let execution_namespace: Option<String> = row.try_get("execution_namespace")?;
+        // Release advances each fence twice (begin/complete). Only the exact
+        // completed operation may replay; an older pre-handoff worker cannot
+        // claim cleanup success for a different revision.
         if !matches!(request.target, ResourceTarget::Task { task_run_id: id } if id == task_run_id)
             || claim.request_id != request.id
             || lease.request_id != request.id
             || lease.claim_id != claim.id
+        {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        if request.state == ResourceRequestState::Expired
+            && claim.state == CapacityClaimState::Released
+            && lease.state == ResourceLeaseState::Revoked
+            && matches!(
+                lease.revoke_reason_code.as_deref(),
+                Some("task_owner_release" | "task_lease_expired")
+            )
+            && expected_request_revision.get().checked_add(2) == Some(request.revision.get())
+            && expected_claim_revision.get().checked_add(2) == Some(claim.revision.get())
+            && expected_lease_revision.get().checked_add(2) == Some(lease.revision.get())
+        {
+            transaction.commit().await?;
+            return Ok(task_resource_status(
+                request,
+                claim,
+                lease,
+                execution_namespace,
+            ));
+        }
+        if !matches!(request.target, ResourceTarget::Task { task_run_id: id } if id == task_run_id)
+            || claim.request_id != request.id
+            || lease.request_id != request.id
+            || lease.claim_id != claim.id
+            || request.revision != expected_request_revision
             || claim.revision != expected_claim_revision
             || lease.revision != expected_lease_revision
             || !matches!(
@@ -2838,65 +3212,18 @@ impl PgResourceStore {
         {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
-        let now = database_now(&mut transaction).await?;
-        let expiring_lease = ResourceLifecycle::begin_lease_expiry(
+        let status = release_task_locked(
+            &mut transaction,
+            &request,
+            &claim,
             &lease,
-            expected_lease_revision,
-            now,
-            Some("task_owner_release".to_owned()),
-        )?;
-        let expired_lease = ResourceLifecycle::complete_lease_expiry(
-            &expiring_lease,
-            expiring_lease.revision,
-            now,
-        )?;
-        let expiring_request = ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
-        let expired_request =
-            ResourceLifecycle::complete_expiry(&expiring_request, expiring_request.revision, now)?;
-        let releasing_claim = transition_claim(&claim, CapacityClaimState::Releasing)?;
-        let released_claim = transition_claim(&releasing_claim, CapacityClaimState::Released)?;
-        update_claim(&mut transaction, &claim, &released_claim, None, None, None).await?;
-        sqlx::query(
-            "UPDATE resource.gpu_capacity_reservations
-             SET state='released', released_at=clock_timestamp()
-             WHERE claim_id=$1 AND state='reserved'",
-        )
-        .bind(claim.id.as_uuid())
-        .execute(&mut *transaction)
-        .await?;
-        update_lease(&mut transaction, &lease, &expired_lease).await?;
-        update_request(&mut transaction, &request, &expired_request).await?;
-        insert_transition(
-            &mut transaction,
-            &expired_request,
-            expired_request.revision.get(),
-            Some(request.state),
+            execution_namespace,
+            trace_id,
             None,
-            trace_id,
-        )
-        .await?;
-        enqueue_lease_event(
-            &mut transaction,
-            &expired_lease,
-            &expired_request,
-            LEASE_EXPIRED_SUBJECT,
-            trace_id,
-        )
-        .await?;
-        enqueue_request_event(
-            &mut transaction,
-            &expired_request,
-            REQUEST_STATE_CHANGED_SUBJECT,
-            trace_id,
         )
         .await?;
         transaction.commit().await?;
-        Ok(task_resource_status(
-            expired_request,
-            released_claim,
-            expired_lease,
-            execution_namespace,
-        ))
+        Ok(status)
     }
 
     /// Applies an administrator renewal with an exact revision and idempotency fence.
@@ -2933,6 +3260,13 @@ impl PgResourceStore {
                 let next =
                     ResourceLifecycle::renew_lease(&lease, expected_revision, expires_at, now)?;
                 let request = load_locked(&mut transaction, lease.request_id).await?;
+                if matches!(request.target, ResourceTarget::Task { .. })
+                    && (lease.expires_at.is_some_and(|expiry| expiry <= now)
+                        || request.diagnostic_code.as_deref()
+                            == Some("LW_RESOURCE_TASK_LEASE_EXPIRED"))
+                {
+                    return Err(ResourceStoreError::TaskLeaseExpired);
+                }
                 update_lease(&mut transaction, &lease, &next).await?;
                 enqueue_lease_event(
                     &mut transaction,
@@ -3228,12 +3562,10 @@ impl PgResourceStore {
                 previous_revision = claim.revision.get(),
                 recovered_revision = next.revision.get()
             );
-            update_claim(&mut transaction, &claim, &next, None, None, None).await?;
-            next
+            update_claim(&mut transaction, &claim, &next, None, None, None).await?
         } else {
             let next = transition_claim(&claim, CapacityClaimState::Provisioning)?;
-            update_claim(&mut transaction, &claim, &next, None, None, None).await?;
-            next
+            update_claim(&mut transaction, &claim, &next, None, None, None).await?
         };
         transaction.commit().await?;
         Ok(Some(ProvisioningCapacityClaim {
@@ -3313,7 +3645,7 @@ impl PgResourceStore {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
         let next = transition_claim(&claim, CapacityClaimState::Ready)?;
-        update_claim(
+        let next = update_claim(
             &mut transaction,
             &claim,
             &next,
@@ -4740,11 +5072,15 @@ async fn insert_claim(
     transaction: &mut Transaction<'_, Postgres>,
     claim: &CapacityClaim,
 ) -> Result<(), ResourceStoreError> {
+    let updated_at = claim.updated_at.ok_or(ResourceStoreError::Contract(
+        contracts::resource::ResourceError::InvalidClaim,
+    ))?;
     let workload_gpu = claim.workload_resources.gpu.as_ref();
     let quota_gpu = claim.quota_resources.gpu.as_ref();
     let gpu_allocation = claim.gpu_allocation.as_ref();
-    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,gpu_catalog_entry_id,gpu_mode,gpu_allocation_binding,contract) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)")
+    sqlx::query("INSERT INTO resource.capacity_claims (claim_id,request_id,approval_id,provider_binding,state,revision,created_at,updated_at,workload_cpu_millicores,workload_memory_bytes,workload_storage_bytes,workload_gpu_class,workload_gpu_count,quota_cpu_millicores,quota_memory_bytes,quota_storage_bytes,quota_gpu_class,quota_gpu_count,gpu_catalog_entry_id,gpu_mode,gpu_allocation_binding,contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)")
         .bind(claim.id.as_uuid()).bind(claim.request_id.as_uuid()).bind(claim.approval_id.as_uuid()).bind(&claim.provider_binding).bind(wire(claim.state)?).bind(i64::try_from(claim.revision.get())?)
+        .bind(updated_at.get())
         .bind(i32::try_from(claim.workload_resources.cpu_millicores)?).bind(i64::try_from(claim.workload_resources.memory_bytes)?).bind(i64::try_from(claim.workload_resources.storage_bytes)?)
         .bind(workload_gpu.map(|value| value.class.as_str())).bind(workload_gpu.map(|value| i32::try_from(value.count)).transpose()?)
         .bind(i32::try_from(claim.quota_resources.cpu_millicores)?).bind(i64::try_from(claim.quota_resources.memory_bytes)?).bind(i64::try_from(claim.quota_resources.storage_bytes)?)
@@ -4874,10 +5210,35 @@ async fn update_claim(
     namespace: Option<&str>,
     namespace_uid: Option<&str>,
     quota_uid: Option<&str>,
+) -> Result<CapacityClaim, ResourceStoreError> {
+    let now = database_now(transaction).await?;
+    let mut stamped = next.clone();
+    stamped.updated_at = Some(now);
+    update_claim_at(
+        transaction,
+        current,
+        &stamped,
+        namespace,
+        namespace_uid,
+        quota_uid,
+        Some(now),
+    )
+    .await?;
+    Ok(stamped)
+}
+
+async fn update_claim_at(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &CapacityClaim,
+    next: &CapacityClaim,
+    namespace: Option<&str>,
+    namespace_uid: Option<&str>,
+    quota_uid: Option<&str>,
+    updated_at: Option<UtcTimestamp>,
 ) -> Result<(), ResourceStoreError> {
-    let changed = sqlx::query("UPDATE resource.capacity_claims SET state=$3,revision=$4,namespace_name=COALESCE($5,namespace_name),namespace_uid=COALESCE($6,namespace_uid),quota_uid=COALESCE($7,quota_uid),updated_at=clock_timestamp(),contract=$8 WHERE claim_id=$1 AND revision=$2")
+    let changed = sqlx::query("UPDATE resource.capacity_claims SET state=$3,revision=$4,namespace_name=COALESCE($5,namespace_name),namespace_uid=COALESCE($6,namespace_uid),quota_uid=COALESCE($7,quota_uid),updated_at=COALESCE($8::timestamptz,clock_timestamp()),contract=$9 WHERE claim_id=$1 AND revision=$2")
         .bind(current.id.as_uuid()).bind(i64::try_from(current.revision.get())?).bind(wire(next.state)?).bind(i64::try_from(next.revision.get())?)
-        .bind(namespace).bind(namespace_uid).bind(quota_uid).bind(serde_json::to_value(next)?)
+        .bind(namespace).bind(namespace_uid).bind(quota_uid).bind(updated_at.map(UtcTimestamp::get)).bind(serde_json::to_value(next)?)
         .execute(&mut **transaction).await?;
     if changed.rows_affected() != 1 {
         return Err(ResourceStoreError::RevisionConflict);
@@ -5051,6 +5412,129 @@ fn decode_request(value: Value) -> Result<ResourceRequest, ResourceStoreError> {
     let request: ResourceRequest = serde_json::from_value(value)?;
     request.validate()?;
     Ok(request)
+}
+
+async fn release_task_locked(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ResourceRequest,
+    claim: &CapacityClaim,
+    lease: &ResourceLease,
+    execution_namespace: Option<String>,
+    trace_id: &str,
+    diagnostic: Option<&str>,
+) -> Result<TaskResourceStatus, ResourceStoreError> {
+    let now = database_now(transaction).await?;
+    let lease_reason = match diagnostic {
+        Some("LW_RESOURCE_APPROVAL_EXPIRED") => "task_approval_expired",
+        Some(_) => "task_lease_expired",
+        None if request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED") => {
+            "task_lease_expired"
+        }
+        None => "task_owner_release",
+    };
+    let expiring_lease = ResourceLifecycle::begin_lease_expiry(
+        lease,
+        lease.revision,
+        now,
+        Some(lease_reason.to_owned()),
+    )?;
+    let expired_lease =
+        ResourceLifecycle::complete_lease_expiry(&expiring_lease, expiring_lease.revision, now)?;
+    let expiring_request = ResourceLifecycle::begin_expiry(request, request.revision, now)?;
+    let mut expired_request =
+        ResourceLifecycle::complete_expiry(&expiring_request, expiring_request.revision, now)?;
+    if let Some(diagnostic) = diagnostic {
+        expired_request.diagnostic_code = Some(diagnostic.to_owned());
+    } else if request.diagnostic_code.as_deref() == Some("LW_RESOURCE_TASK_LEASE_EXPIRED") {
+        expired_request.diagnostic_code = request.diagnostic_code.clone();
+    }
+    let releasing_claim = transition_claim(claim, CapacityClaimState::Releasing)?;
+    let released_claim = transition_claim(&releasing_claim, CapacityClaimState::Released)?;
+    let released_claim =
+        update_claim(transaction, claim, &released_claim, None, None, None).await?;
+    sqlx::query(
+        "UPDATE resource.gpu_capacity_reservations
+         SET state='released', released_at=clock_timestamp()
+         WHERE claim_id=$1 AND state='reserved'",
+    )
+    .bind(claim.id.as_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    update_lease(transaction, lease, &expired_lease).await?;
+    update_request(transaction, request, &expired_request).await?;
+    insert_transition(
+        transaction,
+        &expired_request,
+        expired_request.revision.get(),
+        Some(request.state),
+        None,
+        trace_id,
+    )
+    .await?;
+    enqueue_lease_event(
+        transaction,
+        &expiring_lease,
+        &expiring_request,
+        LEASE_EXPIRING_SUBJECT,
+        trace_id,
+    )
+    .await?;
+    enqueue_request_event(
+        transaction,
+        &expiring_request,
+        REQUEST_STATE_CHANGED_SUBJECT,
+        trace_id,
+    )
+    .await?;
+    enqueue_lease_event(
+        transaction,
+        &expired_lease,
+        &expired_request,
+        LEASE_EXPIRED_SUBJECT,
+        trace_id,
+    )
+    .await?;
+    enqueue_request_event(
+        transaction,
+        &expired_request,
+        REQUEST_STATE_CHANGED_SUBJECT,
+        trace_id,
+    )
+    .await?;
+
+    Ok(task_resource_status(
+        expired_request,
+        released_claim,
+        expired_lease,
+        execution_namespace,
+    ))
+}
+
+async fn expire_task_review_locked(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ResourceRequest,
+    now: UtcTimestamp,
+    trace_id: &str,
+) -> Result<(), ResourceStoreError> {
+    let mut expired = ResourceLifecycle::reject_or_cancel(
+        request,
+        request.revision,
+        ResourceRequestState::Cancelled,
+        now,
+    )?;
+    expired.diagnostic_code = Some("LW_TASK_RESOURCE_APPROVAL_TIMEOUT".to_owned());
+    update_request(transaction, request, &expired).await?;
+    insert_transition(
+        transaction,
+        &expired,
+        expired.revision.get(),
+        Some(request.state),
+        None,
+        trace_id,
+    )
+    .await?;
+    enqueue_request_event(transaction, &expired, REQUEST_CANCELLED_SUBJECT, trace_id).await?;
+    Ok(())
 }
 
 fn task_resource_status(
@@ -5573,6 +6057,10 @@ pub enum ResourceStoreError {
     InvalidNamespace,
     #[error("LW_RESOURCE_APPROVAL_INVALID")]
     ApprovalInvalid,
+    #[error("LW_RESOURCE_TASK_APPROVAL_DEADLINE_MISSING")]
+    TaskApprovalDeadlineMissing,
+    #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
+    TaskLeaseExpired,
     #[error("LW_RESOURCE_WIRE_INVALID")]
     Wire,
     #[error("LW_RESOURCE_EVENT_CONTRACT_INVALID")]
@@ -5628,6 +6116,7 @@ mod tests {
             gpu_allocation: None,
             state: CapacityClaimState::Blocked,
             revision: Revision::new(4).expect("fixed revision"),
+            updated_at: Some("2026-07-15T00:00:00.000Z".parse().expect("fixed timestamp")),
         };
         let releasing = transition_claim(&claim, CapacityClaimState::Releasing);
         assert!(releasing.is_ok());

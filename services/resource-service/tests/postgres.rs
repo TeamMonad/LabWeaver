@@ -57,6 +57,9 @@ use resource_service::store::{PendingAllocation, PgResourceStore, ResourceStoreE
 use testcontainers::GenericImage;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 
+#[path = "support/task_lifecycle.rs"]
+mod task_lifecycle;
+
 #[tokio::test]
 async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_invariants()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +73,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -91,6 +94,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
+        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql"),
     ))
     .execute(&pool)
     .await?;
@@ -178,6 +182,7 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -533,6 +538,7 @@ async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -674,12 +680,22 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         diagnostic_code: None,
     };
     store
-        .create("task-resource-create-1", &request, "trace-task-create")
+        .create_task(
+            "task-resource-create-1",
+            &request,
+            30_000,
+            "trace-task-create",
+        )
         .await?;
     assert_eq!(store.load_task_request(task_run_id).await?, request);
     assert_eq!(
         store
-            .create("task-resource-create-1", &request, "trace-task-replay")
+            .create_task(
+                "task-resource-create-1",
+                &request,
+                30_000,
+                "trace-task-replay"
+            )
             .await?,
         request
     );
@@ -687,9 +703,10 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     conflicting_request.request_key = "task-resource-conflict".into();
     assert!(matches!(
         store
-            .create(
+            .create_task(
                 "task-resource-create-conflict",
                 &conflicting_request,
+                30_000,
                 "trace-task-conflict",
             )
             .await,
@@ -718,6 +735,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -762,36 +780,6 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         stale_ack,
         Err(resource_service::store::ResourceStoreError::CapacityClaimStateConflict)
     ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET created_at=clock_timestamp() - interval '1 hour',
-             valid_until=clock_timestamp() - interval '1 minute'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
-    let expired_ack = store
-        .acknowledge_task_resource(
-            task_run_id,
-            claimed.claim_revision,
-            claimed.lease_revision,
-            "labweaver-evaluation-runs",
-            "trace-task-expired-ack",
-        )
-        .await;
-    assert!(matches!(
-        expired_ack,
-        Err(resource_service::store::ResourceStoreError::ApprovalInvalid)
-    ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET valid_until=clock_timestamp() + interval '1 hour'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
     let acknowledged = store
         .acknowledge_task_resource(
             task_run_id,
@@ -816,6 +804,32 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     assert_eq!(acknowledged.lease_revision, acknowledged.lease.revision);
     assert!(!acknowledged.cleanup_confirmed);
     assert_eq!(store.load_task_resource(task_run_id).await?, acknowledged);
+    // A committed handoff whose HTTP response was lost must replay the same
+    // namespace and lease without extending its window or advancing revisions.
+    assert_eq!(
+        store
+            .acknowledge_task_resource(
+                task_run_id,
+                claimed.claim_revision,
+                claimed.lease_revision,
+                "labweaver-evaluation-runs",
+                "trace-task-ack-response-lost",
+            )
+            .await?,
+        acknowledged
+    );
+    assert!(matches!(
+        store
+            .acknowledge_task_resource(
+                task_run_id,
+                claimed.claim_revision,
+                claimed.lease_revision,
+                "another-namespace",
+                "trace-task-ack-wrong-namespace",
+            )
+            .await,
+        Err(ResourceStoreError::CapacityClaimStateConflict)
+    ));
     let lease_window = acknowledged
         .lease
         .expires_at
@@ -831,6 +845,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     let stale_release = store
         .release_task_resource(
             task_run_id,
+            acknowledged.request.revision,
             claimed.claim_revision,
             acknowledged.lease_revision,
             "trace-task-stale-release",
@@ -843,6 +858,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     let released = store
         .release_task_resource(
             task_run_id,
+            acknowledged.request.revision,
             acknowledged.claim_revision,
             acknowledged.lease_revision,
             "trace-task-release",
@@ -864,6 +880,42 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     assert_eq!(released.lease_revision, released.lease.revision);
     assert!(released.cleanup_confirmed);
     assert_eq!(store.load_task_resource(task_run_id).await?, released);
+    assert_eq!(
+        store
+            .release_task_resource(
+                task_run_id,
+                acknowledged.request.revision,
+                acknowledged.claim_revision,
+                acknowledged.lease_revision,
+                "trace-task-release-response-lost",
+            )
+            .await?,
+        released
+    );
+    assert!(matches!(
+        store
+            .release_task_resource(
+                task_run_id,
+                request.revision,
+                claimed.claim_revision,
+                claimed.lease_revision,
+                "trace-task-stale-worker",
+            )
+            .await,
+        Err(ResourceStoreError::CapacityClaimStateConflict)
+    ));
+    assert!(matches!(
+        store
+            .retry(
+                "task-resource-retry-old-identity",
+                request.id,
+                released.request.revision,
+                owner_id,
+                "trace-task-retry-old-identity",
+            )
+            .await,
+        Err(ResourceStoreError::Lifecycle(LifecycleError::StateConflict))
+    ));
     Ok(())
 }
 
@@ -900,7 +952,12 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
 
     let pending = make_request(TaskRunId::new(), "task-cancel");
     store
-        .create("task-cancel-create", &pending, "trace-task-cancel-create")
+        .create_task(
+            "task-cancel-create",
+            &pending,
+            30_000,
+            "trace-task-cancel-create",
+        )
         .await?;
     let cancelled = store
         .reject_or_cancel(
@@ -931,9 +988,10 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
 
     let approving = make_request(TaskRunId::new(), "task-approval-race");
     store
-        .create(
+        .create_task(
             "task-approval-race-create",
             &approving,
+            30_000,
             "trace-task-approval-race-create",
         )
         .await?;
@@ -960,6 +1018,7 @@ async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race(
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -1358,6 +1417,7 @@ async fn gpu_time_slice_approval_rejects_count_above_one_with_stable_catalog_err
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -3353,6 +3413,7 @@ async fn create_active_request(
                     gpu_allocation: None,
                     state: contracts::resource::CapacityClaimState::Reserved,
                     revision: Revision::new(1)?,
+                    updated_at: Some(now),
                 },
                 lease_id,
             },
@@ -3926,7 +3987,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -3946,7 +4007,8 @@ async fn migrated_pool()
         ),
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
-        )
+        ),
+        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql")
     ))
     .execute(&pool)
     .await?;
@@ -4015,6 +4077,7 @@ fn gpu_bundle(
             gpu_allocation: None,
             state: contracts::resource::CapacityClaimState::Reserved,
             revision: Revision::new(1).expect("fixed claim revision"),
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -4348,6 +4411,7 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
 struct ResourceOidcState {
     issuer: String,
     jwk: Value,
+    task_token: String,
 }
 
 struct ResourceAuthAuthority {
@@ -4397,12 +4461,26 @@ async fn build_resource_verifier(
 async fn spawn_resource_auth_authority(
     material: ResourceSigningMaterial,
 ) -> Result<ResourceAuthAuthority, Box<dyn std::error::Error>> {
+    spawn_resource_auth_authority_for_client(material, RESOURCE_EVALUATION_CLIENT_ID).await
+}
+
+async fn spawn_resource_auth_authority_for_client(
+    material: ResourceSigningMaterial,
+    task_client_id: &str,
+) -> Result<ResourceAuthAuthority, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let issuer = format!("http://localhost:{}/realms/test", address.port());
     let state = ResourceOidcState {
         issuer: issuer.clone(),
         jwk: material.jwk.clone(),
+        task_token: signed_resource_token(
+            &material,
+            &issuer,
+            task_client_id,
+            RESOURCE_AUTH_AUDIENCE,
+            task_execution::resource::required_scopes_for_diagnostics(),
+        )?,
     };
     let router = Router::new()
         .route(
@@ -4410,6 +4488,10 @@ async fn spawn_resource_auth_authority(
             get(resource_oidc_discovery),
         )
         .route("/realms/test/jwks", get(resource_oidc_jwks))
+        .route(
+            "/realms/test/token",
+            axum::routing::post(resource_oidc_token),
+        )
         .with_state(state);
     let (shutdown, shutdown_signal) = oneshot::channel();
     let task = tokio::spawn(async move {
@@ -4444,6 +4526,10 @@ async fn resource_oidc_discovery(State(state): State<ResourceOidcState>) -> Json
 
 async fn resource_oidc_jwks(State(state): State<ResourceOidcState>) -> Json<Value> {
     Json(json!({"keys": [state.jwk]}))
+}
+
+async fn resource_oidc_token(State(state): State<ResourceOidcState>) -> Json<Value> {
+    Json(json!({"access_token": state.task_token, "token_type": "Bearer", "expires_in": 300}))
 }
 
 fn resource_signing_material(
@@ -4520,6 +4606,7 @@ fn task_input(
             gpu: None,
         },
         duration_seconds: 60,
+        approval_timeout_milliseconds: 30_000,
     }
 }
 

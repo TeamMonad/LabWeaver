@@ -1,5 +1,6 @@
 //! Repository workflow entry point for `LabWeaver`.
 
+use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -372,10 +373,18 @@ fn contracts_generate() -> Result<(), AppError> {
 
 fn contracts_check() -> Result<(), AppError> {
     let root = repository_root();
-    for artifact in contracts::schema::generate_all().map_err(|error| AppError::Io {
+    require_internal_schema(
+        &root.join("schemas/contracts/v1/internal/labweaver-log-v1.schema.json"),
+    )?;
+    let artifacts = contracts::schema::generate_all().map_err(|error| AppError::Io {
         role: "generate contracts",
         detail: error.to_string(),
-    })? {
+    })?;
+    let generated_paths = artifacts
+        .iter()
+        .map(|artifact| artifact.relative_path.as_str())
+        .collect::<BTreeSet<_>>();
+    for artifact in &artifacts {
         let checked_in =
             fs::read(root.join(&artifact.relative_path)).map_err(|error| AppError::Io {
                 role: "read checked-in contract",
@@ -383,11 +392,64 @@ fn contracts_check() -> Result<(), AppError> {
             })?;
         if checked_in != artifact.bytes {
             return Err(AppError::ContractDrift {
-                path: artifact.relative_path,
+                path: artifact.relative_path.clone(),
             });
         }
     }
+    for generated_root in ["schemas/contracts", "schemas/openapi"] {
+        for path in repository_files(&root.join(generated_root))? {
+            let relative = path
+                .strip_prefix(&root)
+                .map_err(|error| AppError::Io {
+                    role: "resolve checked-in contract path",
+                    detail: error.to_string(),
+                })?
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            if !is_registered_generated_path(relative.as_str(), &generated_paths) {
+                return Err(AppError::ContractDrift { path: relative });
+            }
+        }
+    }
     Ok(())
+}
+
+fn require_internal_schema(path: &Path) -> Result<(), AppError> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(AppError::Io {
+            role: "read required telemetry contract",
+            detail: format!("{} is missing", path.display()),
+        })
+    }
+}
+
+fn is_registered_generated_path(relative: &str, generated_paths: &BTreeSet<&str>) -> bool {
+    relative == "schemas/contracts/v1/internal/labweaver-log-v1.schema.json"
+        || generated_paths.contains(relative)
+}
+
+fn repository_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let mut files = Vec::new();
+    let entries = fs::read_dir(root).map_err(|error| AppError::Io {
+        role: "read generated contract directory",
+        detail: format!("{}: {error}", root.display()),
+    })?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| AppError::Io {
+                role: "read generated contract entry",
+                detail: error.to_string(),
+            })?
+            .path();
+        if path.is_dir() {
+            files.extend(repository_files(&path)?);
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 fn contract_test_suite() -> Result<(), AppError> {
@@ -968,6 +1030,7 @@ fn run_cargo<const N: usize>(role: &'static str, arguments: [&str; N]) -> Result
 
 #[cfg(test)]
 mod tests {
+    use super::is_registered_generated_path;
     #[cfg(target_os = "linux")]
     use super::is_uuid_v7_run_id;
     use super::{
@@ -975,6 +1038,37 @@ mod tests {
         identity_foundation, platform_application, platform_buildkit, platform_foundation,
         platform_harbor_route,
     };
+    #[test]
+    fn unregistered_internal_contract_is_an_orphan() {
+        let registered = std::collections::BTreeSet::new();
+        assert!(is_registered_generated_path(
+            "schemas/contracts/v1/internal/labweaver-log-v1.schema.json",
+            &registered,
+        ));
+        assert!(!is_registered_generated_path(
+            "schemas/contracts/v1/internal/other.schema.json",
+            &registered,
+        ));
+    }
+    #[test]
+    fn required_telemetry_schema_accepts_existing_file() -> Result<(), String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = directory.path().join("labweaver-log-v1.schema.json");
+        std::fs::write(&path, b"{}").map_err(|error| error.to_string())?;
+        super::require_internal_schema(&path).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn required_telemetry_schema_rejects_missing_file() -> Result<(), String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = directory.path().join("labweaver-log-v1.schema.json");
+        let error = super::require_internal_schema(&path)
+            .expect_err("missing telemetry schema must fail closed");
+        if !error.to_string().contains("missing") {
+            return Err("missing telemetry schema diagnostic is not readable".into());
+        }
+        Ok(())
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
