@@ -307,7 +307,7 @@ describe('WorkEnvironmentsView', () => {
     const second = await mountAt()
     expect(second.wrapper.get('[data-testid="preparing-list"]').text()).toContain('已批准，正在分配资源')
     expect(second.wrapper.get('[data-testid="ended-list"]').text()).toContain('管理员已拒绝申请')
-    expect(listProjectResourceRequests).toHaveBeenLastCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceRequests).toHaveBeenLastCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
     second.wrapper.unmount()
   })
 
