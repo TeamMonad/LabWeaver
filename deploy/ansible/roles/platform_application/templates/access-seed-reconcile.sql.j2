@@ -36,6 +36,7 @@ BEGIN
     END IF;
 END
 $seed_actor_identity$;
+RESET ROLE;
 SET ROLE lw_control_owner;
 INSERT INTO control.course_memberships (
     course_id, actor_id, role, object_role, state, revision
@@ -50,6 +51,7 @@ SET role = EXCLUDED.role,
     state = 'active',
     revision = control.course_memberships.revision + 1,
     updated_at = now();
+RESET ROLE;
 SET ROLE lw_access_owner;
 {% endfor %}
 DO $verify_seed$
@@ -62,6 +64,7 @@ IF NOT EXISTS (SELECT 1 FROM access.actors
       AND subject_sha256 = '{{ membership.subjectSha256 }}') THEN
     RAISE EXCEPTION 'PLATFORM_ACCESS_SEED_CONFLICT';
 END IF;
+RESET ROLE;
 SET ROLE lw_control_owner;
 IF NOT EXISTS (SELECT 1 FROM control.course_memberships
     WHERE course_id = '{{ membership.courseId }}'
@@ -71,6 +74,7 @@ IF NOT EXISTS (SELECT 1 FROM control.course_memberships
       AND state = 'active') THEN
     RAISE EXCEPTION 'PLATFORM_CONTROL_SEED_CONFLICT';
 END IF;
+RESET ROLE;
 SET ROLE lw_access_owner;
 {% endfor %}
 END
