@@ -503,6 +503,7 @@ class DeploymentBundleTests(unittest.TestCase):
                 ("runtimePolicy", "preauthorizations", [{}]),
                 ("runtimePolicy", "defaultContainerUid", {}),
                 ("runtimePolicy", "defaultContainerUid", 1.0),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "virtual_machine_guest", "providerBinding": "kubevirt"}),
                 ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"pool": "privileged"}}),
                 ("lifecycle", "expiryReminderSeconds", [1] * 17),
                 ("lifecycle", "expiryReminderSeconds", [1, 1]),
@@ -518,6 +519,31 @@ class DeploymentBundleTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0, field)
                 self.assertIn(field, result.stderr)
+            invalid_null = copy.deepcopy(original)
+            invalid_null["platformConfigurationPolicy"]["runtimePolicy"].update(
+                privilegedAllowed=True,
+                privilegedExecutionLocation=None,
+            )
+            write(values_path, yaml.safe_dump(invalid_null, sort_keys=False).encode())
+            result = subprocess.run(
+                [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("privilegedExecutionLocation", result.stderr)
+            valid_null = copy.deepcopy(original)
+            valid_null["platformConfigurationPolicy"]["runtimePolicy"].update(
+                privilegedAllowed=False,
+                privilegedExecutionLocation=None,
+            )
+            write(values_path, yaml.safe_dump(valid_null, sort_keys=False).encode())
+            result = subprocess.run(
+                [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
         self.clean_runtime()
     def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(

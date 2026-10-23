@@ -1188,12 +1188,34 @@ fn platform_values_schema() -> Result<Value, GenerationError> {
     runtime["properties"]["defaultContainerUid"] = json!({"const": 0, "type": "integer"});
     runtime["properties"]["allowedCapabilities"]["maxItems"] = json!(0);
     runtime["properties"]["preauthorizations"]["maxItems"] = json!(0);
+    let dedicated_location = desired["$defs"]["PrivilegedExecutionLocation"]["oneOf"][0].clone();
     runtime["properties"]["privilegedExecutionLocation"] = json!({
         "anyOf": [
             {"type": "null"},
-            {"$ref": "#/$defs/PrivilegedExecutionLocation"}
+            dedicated_location
         ]
     });
+    runtime["allOf"] = json!([
+        {
+            "if": {
+                "properties": {"privilegedAllowed": {"const": true}},
+                "required": ["privilegedAllowed"]
+            },
+            "then": {
+                "required": ["privilegedExecutionLocation"],
+                "properties": {"privilegedExecutionLocation": {"not": {"type": "null"}}}
+            }
+        },
+        {
+            "if": {
+                "properties": {"privilegedAllowed": {"const": false}},
+                "required": ["privilegedAllowed"]
+            },
+            "then": {
+                "properties": {"privilegedExecutionLocation": {"type": "null"}}
+            }
+        }
+    ]);
     let builder = &mut policy["properties"]["builderPolicy"];
     builder["properties"]["capabilities"]["maxItems"] = json!(0);
     builder["properties"]["entitlements"]["maxItems"] = json!(0);

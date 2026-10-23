@@ -379,6 +379,51 @@
             },
             "runtimePolicy": {
               "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "privilegedAllowed": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "privilegedAllowed"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "privilegedExecutionLocation": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "required": [
+                      "privilegedExecutionLocation"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "privilegedAllowed": {
+                        "const": false
+                      }
+                    },
+                    "required": [
+                      "privilegedAllowed"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "privilegedExecutionLocation": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              ],
               "description": "Platform allowed range. This does not replace object authorization or actual placement.",
               "properties": {
                 "allowedCapabilities": {
@@ -409,7 +454,32 @@
                       "type": "null"
                     },
                     {
-                      "$ref": "#/definitions/PrivilegedExecutionLocation"
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "dedicated_node_pool",
+                          "type": "string"
+                        },
+                        "nodeSelector": {
+                          "additionalProperties": {
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "taintKey": {
+                          "type": "string"
+                        },
+                        "taintValue": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "nodeSelector",
+                        "taintKey",
+                        "taintValue"
+                      ],
+                      "type": "object"
                     }
                   ]
                 }
