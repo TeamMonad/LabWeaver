@@ -147,6 +147,20 @@ async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn 
         .await?;
     assert_eq!(first.items.len(), 2);
     assert!(first.next_cursor.is_some());
+    let foreign_project = store
+        .list_project_runs_filtered(
+            ProjectId::new(),
+            &AgentRunListQuery {
+                state: Some(vec![AgentRunState::Requested]),
+                cursor: first.next_cursor.clone(),
+                limit: Some(2),
+            },
+        )
+        .await;
+    assert!(matches!(
+        foreign_project,
+        Err(AgentRunStoreError::InvalidHistoryCursor)
+    ));
     let mut tampered_cursor = first.next_cursor.clone().ok_or("cursor missing")?;
     let last = tampered_cursor.pop().ok_or("cursor empty")?;
     tampered_cursor.push(if last == 'A' { 'B' } else { 'A' });

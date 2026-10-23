@@ -12,6 +12,7 @@ import {
 import type { ResourceLeaseSchema, ResourceRequestSchema, WorkloadResources } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey as makeIdempotencyKey, ifMatch } from '@/utils/format'
+import { collectCursorPages } from '@/utils/cursorPagination'
 
 function errorDiagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
@@ -19,23 +20,11 @@ function errorDiagnostic(error: unknown, code: string, message: string): Diagnos
 }
 
 async function listProjectRequests(projectId: string): Promise<ResourceRequestSchema[]> {
-  const items: ResourceRequestSchema[] = []
-  const seen = new Set<string>()
-  let cursor: string | undefined
-  do {
-    const result = await listProjectResourceRequests({
-      path: { projectId },
-      query: { limit: 100, ...(cursor ? { cursor } : {}) },
-    })
-    if (result.error) throw result.error
-    items.push(...result.data.items)
-    const nextCursor = result.data.nextCursor ?? undefined
-    if (!nextCursor) break
-    if (seen.has(nextCursor)) throw new Error('Resource request cursor repeated')
-    seen.add(nextCursor)
-    cursor = nextCursor
-  } while (cursor)
-  return items
+  const page = await collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({
+    path: { projectId },
+    query: { limit: 100, ...(cursor ? { cursor } : {}) },
+  }))
+  return page.items
 }
 
 async function listProjectLeases(projectId: string) {

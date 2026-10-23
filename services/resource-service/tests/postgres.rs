@@ -3403,6 +3403,35 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
             .all(|request| request.requester_id == member)
     );
     assert!(member_first.next_cursor.is_some());
+    let wrong_actor = store
+        .list_project_requests_page(
+            project_id,
+            Some(other_member),
+            &ResourceRequestListQuery {
+                cursor: member_first.next_cursor.clone(),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_actor,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
+    let wrong_filter = store
+        .list_project_requests_page(
+            project_id,
+            Some(member),
+            &ResourceRequestListQuery {
+                state: Some(vec![ResourceRequestState::Active]),
+                cursor: member_first.next_cursor.clone(),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_filter,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
     let mut tampered_cursor = member_first.next_cursor.clone().ok_or("cursor missing")?;
     let last = tampered_cursor.pop().ok_or("cursor empty")?;
     tampered_cursor.push(if last == 'A' { 'B' } else { 'A' });
