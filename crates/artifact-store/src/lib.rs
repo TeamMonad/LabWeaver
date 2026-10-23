@@ -216,13 +216,7 @@ pub trait ImmutableObjectStore: Send + Sync {
         now: UtcTimestamp,
         expires_at: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
-        let signed = self
-            .presign_upload_until(key, size_bytes, media_type, now, expires_at)
-            .await?;
-        if signed.expires_at > expires_at {
-            return Err(ObjectStoreError::ConfigurationInvalid);
-        }
-        Ok(signed)
+        Err(ObjectStoreError::ConfigurationInvalid)
     }
 
     /// Reissues conditional upload authority without extending the session deadline.
