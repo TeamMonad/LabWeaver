@@ -164,6 +164,48 @@ async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn 
         tampered,
         Err(AgentRunStoreError::InvalidHistoryCursor)
     ));
+    let old_store = PostgresAgentRunStore::new(pool.clone())
+        .with_cursor_signing_keys(b"old-cursor-key-012345678901234567".to_vec(), None);
+    let old_page = old_store
+        .list_project_runs_filtered(
+            project,
+            &AgentRunListQuery {
+                state: Some(vec![AgentRunState::Requested]),
+                cursor: None,
+                limit: Some(2),
+            },
+        )
+        .await?;
+    let rotated_store = PostgresAgentRunStore::new(pool.clone()).with_cursor_signing_keys(
+        b"new-cursor-key-012345678901234567".to_vec(),
+        Some(b"old-cursor-key-012345678901234567".to_vec()),
+    );
+    let accepted_old = rotated_store
+        .list_project_runs_filtered(
+            project,
+            &AgentRunListQuery {
+                state: Some(vec![AgentRunState::Requested]),
+                cursor: old_page.next_cursor.clone(),
+                limit: Some(2),
+            },
+        )
+        .await?;
+    assert!(!accepted_old.items.is_empty());
+    let removed_previous = PostgresAgentRunStore::new(pool.clone())
+        .with_cursor_signing_keys(b"new-cursor-key-012345678901234567".to_vec(), None);
+    assert!(matches!(
+        removed_previous
+            .list_project_runs_filtered(
+                project,
+                &AgentRunListQuery {
+                    state: Some(vec![AgentRunState::Requested]),
+                    cursor: old_page.next_cursor,
+                    limit: Some(2),
+                },
+            )
+            .await,
+        Err(AgentRunStoreError::InvalidHistoryCursor)
+    ));
     let second = store
         .list_project_runs_filtered(
             project,

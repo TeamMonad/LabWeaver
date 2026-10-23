@@ -3393,7 +3393,8 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
     };
     let member_first = store
         .list_project_requests_page(project_id, Some(member), &query)
-        .await?;
+        .await
+        .map_err(|error| format!("member first: {error}"))?;
     assert_eq!(member_first.items.len(), 2);
     assert!(
         member_first
@@ -3416,15 +3417,58 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
         )
         .await;
     assert!(matches!(tampered, Err(ResourceStoreError::InvalidCursor)));
+    let old_store = store
+        .clone()
+        .with_cursor_signing_keys(b"old-cursor-key-012345678901234567".to_vec(), None);
+    let old_page = old_store
+        .list_project_requests_page(project_id, Some(member), &query)
+        .await
+        .map_err(|error| format!("old page: {error}"))?;
+    let rotated_store = store.clone().with_cursor_signing_keys(
+        b"new-cursor-key-012345678901234567".to_vec(),
+        Some(b"old-cursor-key-012345678901234567".to_vec()),
+    );
+    assert!(
+        rotated_store
+            .list_project_requests_page(
+                project_id,
+                Some(member),
+                &ResourceRequestListQuery {
+                    cursor: old_page.next_cursor.clone(),
+                    ..query.clone()
+                },
+            )
+            .await
+            .map_err(|error| format!("rotated page: {error}"))
+            .is_ok()
+    );
+    let removed_previous = store
+        .clone()
+        .with_cursor_signing_keys(b"new-cursor-key-012345678901234567".to_vec(), None);
+    assert!(matches!(
+        removed_previous
+            .list_project_requests_page(
+                project_id,
+                Some(member),
+                &ResourceRequestListQuery {
+                    cursor: old_page.next_cursor,
+                    ..query.clone()
+                },
+            )
+            .await,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
 
     let non_member = store
         .list_project_requests_page(project_id, Some(ActorId::new()), &query)
-        .await?;
+        .await
+        .map_err(|error| format!("non-member: {error}"))?;
     assert!(non_member.items.is_empty());
 
     let admin_first = store
         .list_project_requests_page(project_id, None, &query)
-        .await?;
+        .await
+        .map_err(|error| format!("admin first: {error}"))?;
     let admin_second = store
         .list_project_requests_page(
             project_id,
@@ -3434,7 +3478,8 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
                 ..query.clone()
             },
         )
-        .await?;
+        .await
+        .map_err(|error| format!("admin second: {error}"))?;
     assert_eq!(admin_first.items.len() + admin_second.items.len(), 4);
 
     let mut inserted = outbox_request()?;

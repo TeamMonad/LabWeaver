@@ -19,7 +19,10 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
 })
 
 function success<T>(data: T) {
-  return { data, error: undefined as never }
+  return { data, error: undefined }
+}
+function requestPage(items: unknown[], nextCursor: string | null = null) {
+  return success({ items, nextCursor })
 }
 
 function request(id: string, state: 'reviewing' | 'active' = 'reviewing') {
@@ -37,7 +40,7 @@ afterEach(() => {
 
 describe('useProjectResources', () => {
   it('loads requests and leases when the project context becomes available', async () => {
-    mocks.listProjectResourceRequests.mockResolvedValue(success([request('one')]))
+    mocks.listProjectResourceRequests.mockResolvedValue(requestPage([request('one')]))
     mocks.listProjectResourceLeases.mockResolvedValue(success([lease('one')]))
 
     const projectId = ref<string | null>('project-1')
@@ -47,7 +50,7 @@ describe('useProjectResources', () => {
 
     await vi.waitFor(() => expect(state.requests).toEqual({ kind: 'success', data: [request('one')] }))
     expect(state.leases).toEqual({ kind: 'success', data: [lease('one')] })
-    expect(mocks.listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(mocks.listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
     expect(mocks.listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
     scope.stop()
   })
@@ -80,9 +83,9 @@ describe('useProjectResources', () => {
     const pollRequests = new Promise((resolve) => { resolvePollRequests = resolve })
     const pollLeases = new Promise((resolve) => { resolvePollLeases = resolve })
     mocks.listProjectResourceRequests
-      .mockResolvedValueOnce(success([request('one', 'active')]))
+      .mockResolvedValueOnce(requestPage([request('one', 'active')]))
       .mockImplementation(({ path }: { path: { projectId: string } }) => (
-        path.projectId === 'project-1' ? pollRequests : Promise.resolve(success([]))
+        path.projectId === 'project-1' ? pollRequests : Promise.resolve(requestPage([]))
       ))
     mocks.listProjectResourceLeases
       .mockResolvedValueOnce(success([lease('one', 'active')]))
@@ -104,7 +107,7 @@ describe('useProjectResources', () => {
     await vi.waitFor(() => expect(state.requests).toEqual({ kind: 'empty' }))
     expect(state.leases).toEqual({ kind: 'empty' })
 
-    resolvePollRequests(success([request('stale', 'active')]))
+    resolvePollRequests(requestPage([request('stale', 'active')]))
     resolvePollLeases(success([lease('stale', 'active')]))
     await Promise.resolve()
     await Promise.resolve()

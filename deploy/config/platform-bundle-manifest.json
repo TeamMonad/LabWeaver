@@ -67,9 +67,9 @@
       "mtls-ca.pem",
       "nats-ca.pem",
       "nats-client.crt",
-      "nats-client.key",
-      "nats.creds",
       "service-client-secret",
+      "cursor-signing-key-current",
+      "cursor-signing-key-previous",
       "tls.crt",
       "tls.key",
       "portal-public-root.crt"

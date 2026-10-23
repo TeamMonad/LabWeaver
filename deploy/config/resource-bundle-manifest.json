@@ -16,11 +16,11 @@
       "nats-client.key",
       "nats.creds",
       "mtls-ca.pem",
-      "oidc-ca.pem",
       "service-client-secret",
+      "cursor-signing-key-current",
+      "cursor-signing-key-previous",
       "tls.crt",
       "tls.key",
-      "resource-delegation-key",
       "postgres-ca.pem"
     ]
   }

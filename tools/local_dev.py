@@ -3304,6 +3304,8 @@ def make_app_input(
                 client_service = {"container-executor":"environment-service",
                                   "openssh-gateway":"access-service"}.get(service, service)
                 values[key]=clients[client_service]
+            elif key in ("cursor-signing-key-current", "cursor-signing-key-previous"):
+                values[key] = hashlib.sha256(f"labweaver:{service}:{key}".encode()).digest()
             elif key=="oidc-client-secret": values[key]=clients["web-service"]
             elif key=="resource-delegation-key": values[key]=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
             elif key=="session-keyring.json": values[key]=keyring
@@ -3414,6 +3416,8 @@ def make_app_input(
         elif key == "mtls-ca.pem": resource_values[key] = platform_ca
         elif key in ("oidc-ca.pem", "postgres-ca.pem"): resource_values[key] = ca
         elif key == "service-client-secret": resource_values[key] = clients["resource-service"]
+        elif key in ("cursor-signing-key-current", "cursor-signing-key-previous"):
+            resource_values[key] = hashlib.sha256(f"labweaver:resource-service:{key}".encode()).digest()
         elif key == "tls.crt": resource_values[key] = (identities / "resource-service" / "certificate.pem").read_bytes()
         elif key == "tls.key": resource_values[key] = (identities / "resource-service" / "key.pem").read_bytes()
         elif key == "resource-delegation-key": resource_values[key] = (root / "secrets/access-service-secrets/resource-delegation-key").read_bytes()

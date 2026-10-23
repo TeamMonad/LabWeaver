@@ -248,8 +248,11 @@ pub struct PostgresAgentRunStore {
 }
 
 const AGENT_HISTORY_CURSOR_VERSION: u8 = 2;
-const CURRENT_CURSOR_KEY_ID: &str = "current";
-const PREVIOUS_CURSOR_KEY_ID: &str = "previous";
+
+fn cursor_key_id(key: &[u8]) -> String {
+    let digest = format!("{:x}", Sha256::digest(key));
+    digest[..8].to_owned()
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -354,10 +357,13 @@ fn decode_history_cursor(
     if serde_json::to_vec(&signed).map_err(|_| AgentRunStoreError::InvalidHistoryCursor)? != bytes {
         return Err(AgentRunStoreError::InvalidHistoryCursor);
     }
-    let key = match signed.cursor.key_id.as_str() {
-        CURRENT_CURSOR_KEY_ID => Some(current),
-        PREVIOUS_CURSOR_KEY_ID => previous,
-        _ => None,
+    let current_id = cursor_key_id(current);
+    let key = if signed.cursor.key_id == current_id {
+        Some(current)
+    } else if previous.is_some_and(|key| signed.cursor.key_id == cursor_key_id(key)) {
+        previous
+    } else {
+        None
     }
     .ok_or(AgentRunStoreError::InvalidHistoryCursor)?;
     let payload =
@@ -1710,7 +1716,7 @@ impl PostgresAgentRunStore {
             Some(encode_history_cursor(
                 &AgentHistoryCursor {
                     version: AGENT_HISTORY_CURSOR_VERSION,
-                    key_id: CURRENT_CURSOR_KEY_ID.to_owned(),
+                    key_id: cursor_key_id(self.cursor_signing_key_current.as_slice()),
                     project_id,
                     states,
                     snapshot_at,
