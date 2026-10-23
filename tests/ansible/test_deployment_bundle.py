@@ -438,7 +438,7 @@ class DeploymentBundleTests(unittest.TestCase):
             self.save_version()
             with self.assertRaisesRegex(
                 bundle.BundleError,
-                "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED",
+                "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED",
             ):
                 bundle.load_bundle(self.root)
             self.configuration[group][field] = original
