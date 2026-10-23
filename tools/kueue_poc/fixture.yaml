@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kueue-poc
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: poc-default
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: poc-cq
+spec:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: kueue-poc
+  queueingStrategy: BestEffortFIFO
+  preemption:
+    withinClusterQueue: LowerPriority
+  resourceGroups:
+  - coveredResources: ["cpu", "memory", "pods"]
+    flavors:
+    - name: poc-default
+      resources:
+      - name: cpu
+        nominalQuota: "1"
+      - name: memory
+        nominalQuota: 1Gi
+      - name: pods
+        nominalQuota: 1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: poc-queue
+  namespace: kueue-poc
+spec:
+  clusterQueue: poc-cq
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: poc-low
+value: 10
+globalDefault: false
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: poc-high
+value: 100
+globalDefault: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: low-interactive
+  namespace: kueue-poc
+  labels:
+    app: low-interactive
+    kueue.x-k8s.io/queue-name: poc-queue
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: low-interactive
+  template:
+    metadata:
+      labels:
+        app: low-interactive
+    spec:
+      priorityClassName: poc-low
+      terminationGracePeriodSeconds: 20
+      containers:
+      - name: shell
+        image: busybox-poc:1.36.1
+        imagePullPolicy: Never
+        command: ["sh", "-c"]
+        args:
+        - trap 'echo TERM_RECEIVED >&2; sleep 30' TERM; while true; do sleep 1; done
+        resources:
+          requests:
+            cpu: 900m
+            memory: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: high-interactive
+  namespace: kueue-poc
+  labels:
+    app: high-interactive
+    kueue.x-k8s.io/queue-name: poc-queue
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: high-interactive
+  template:
+    metadata:
+      labels:
+        app: high-interactive
+    spec:
+      priorityClassName: poc-high
+      terminationGracePeriodSeconds: 20
+      containers:
+      - name: shell
+        image: busybox-poc:1.36.1
+        imagePullPolicy: Never
+        command: ["sh", "-c"]
+        args: ["while true; do sleep 1; done"]
+        resources:
+          requests:
+            cpu: 900m
+            memory: 128Mi
