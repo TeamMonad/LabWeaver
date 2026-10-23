@@ -1222,7 +1222,7 @@ mod tests {
         let migrations = format!(
             "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA control; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
             concat!(
-                include_str!("../../../migrations/control/0016_object_authorization.sql"),
+                include_str!("../../../migrations/control/0017_object_authorization.sql"),
                 "\n",
                 include_str!("../../../migrations/access/0001_platform_baseline.sql")
             ),

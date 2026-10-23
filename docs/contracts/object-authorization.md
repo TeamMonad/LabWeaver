@@ -66,7 +66,7 @@ Access 在目录解析前检查管理权限。Control 再检查目标本人、�
 
 ## 数据库切换
 
-Control 的 `0016_object_authorization.sql` 建立唯一成员表。`0017_membership_governance.sql` 保存课程职责和成员邀请。每个账号在同一课程只保存一条成员事实。旧重复角色记录会阻止迁移，不能静默丢弃。Control `0014` 属于材料上传，`0015` 属于平台配置，`0019` 提供现有配置、发布和批准的只读投影。组合 catalog 时保留全部有序条目。
+Control 的 `0017_object_authorization.sql` 建立唯一成员表。`0018_membership_governance.sql` 保存课程职责和成员邀请。每个账号在同一课程只保存一条成员事实。旧重复角色记录会阻止迁移，不能静默丢弃。Control `0014` 属于材料上传，`0015` 属于平台配置，`0016` 属于平台配置 Bundle，`0019` 提供现有配置、发布和批准的只读投影。组合 catalog 时保留全部有序条目。
 
 本次使用 Sprint5 已确认的无旧接口兼容规则。Access 旧成员表的创建和写入路径已移除。Access `0006` 只提供当前会话 hash、actor、期限和已验证的平台角色。Access `0007` 将 Control 的账号读取限定为 actor_id、username、display_name 和 disabled_at。Resource 仅获得账号状态列、当前会话安全投影及 Control 授权投影的读取权限。Control 和 Resource 无法通过这些读取获取原始会话 Cookie、加密 CSRF、Token、sid 或 issuer subject。非空旧数据库的 catalog 身份不匹配时必须停止。普通应用启动不能清空、复制或静默修复旧成员数据。
 

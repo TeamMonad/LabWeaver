@@ -1923,11 +1923,6 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("control-configuration-replica-observation")
         }
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
-        "createProjectMembershipInvitation"
-        | "createCourseMembershipInvitation"
-        | "getMembershipInvitation"
-        | "acceptMembershipInvitation"
-        | "revokeMembershipInvitation" => contract_ref("membership-invitation"),
         "listIncomingMembershipInvitations"
         | "listProjectMembershipInvitations"
         | "listCourseMembershipInvitations" => contract_ref("membership-invitation-page"),
