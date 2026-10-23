@@ -66,6 +66,7 @@ pub struct ResourceApiState {
     environment_service_client_id: Option<String>,
     task_service_client_ids: Option<BTreeSet<String>>,
     build_service_client_id: Option<String>,
+    allow_unconfigured_runtime_inputs: bool,
 }
 
 impl ResourceApiState {
@@ -78,6 +79,7 @@ impl ResourceApiState {
             environment_service_client_id: None,
             task_service_client_ids: None,
             build_service_client_id: None,
+            allow_unconfigured_runtime_inputs: false,
         }
     }
 
@@ -116,6 +118,14 @@ impl ResourceApiState {
     #[must_use]
     pub fn with_task_service_client_ids(mut self, client_ids: BTreeSet<String>) -> Self {
         self.task_service_client_ids = Some(client_ids);
+        self
+    }
+
+    /// Allows isolated Resource-only fixtures without a Control runtime projection.
+    /// Production constructors leave this disabled and fail closed.
+    #[must_use]
+    pub fn with_unconfigured_runtime_inputs_for_test(mut self) -> Self {
+        self.allow_unconfigured_runtime_inputs = true;
         self
     }
     /// Installs the current and optional previous mounted Secrets used to authenticate cursors.
@@ -508,11 +518,16 @@ async fn approve_request(
             request.target,
             contracts::resource::ResourceTarget::Environment { .. }
         ) {
-            Some(
-                crate::runtime_authorization::resolve_binding(&state.store.pool(), &request)
-                    .await
-                    .map_err(ResourceStoreError::from)?,
-            )
+            match crate::runtime_authorization::resolve_binding(&state.store.pool(), &request).await
+            {
+                Ok(binding) => Some(binding),
+                Err(RuntimeBindingError::Unavailable)
+                    if state.allow_unconfigured_runtime_inputs =>
+                {
+                    None
+                }
+                Err(error) => return Err(ResourceStoreError::from(error).into()),
+            }
         } else {
             None
         },
