@@ -191,17 +191,17 @@
               </label>
               <label>
                 <span>教学身份</span>
-                <AppSelect v-model="memberRole">
+                <AppSelect v-model="memberRole" aria-label="教学身份">
                   <option value="student">学生</option>
                   <option value="teacher">教师</option>
                 </AppSelect>
               </label>
               <label>
                 <span>项目职责</span>
-                <AppSelect v-model="memberObjectRole">
+                <AppSelect v-model="memberObjectRole" aria-label="项目职责" aria-describedby="member-object-role-hint">
                   <option v-for="option in MEMBER_OBJECT_ROLE_OPTIONS" :key="option" :value="option">{{ projectObjectRoleLabel(option) }}</option>
                 </AppSelect>
-                <small class="field-hint">{{ projectObjectRoleDescription(memberObjectRole) }}</small>
+                <small id="member-object-role-hint" class="field-hint">{{ projectObjectRoleDescription(memberObjectRole) }}</small>
               </label>
               <button type="submit" class="outlined-button" :disabled="!canAddMember">添加成员</button>
             </form>
