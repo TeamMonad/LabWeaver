@@ -190,7 +190,7 @@
           "type": "null"
         }
       ],
-      "description": "Database-authoritative claim update time, present on expired-fence snapshots."
+      "description": "Database-authoritative claim update time, populated on created and transitioned snapshots."
     },
     "workloadResources": {
       "$ref": "#/$defs/WorkloadResources"
