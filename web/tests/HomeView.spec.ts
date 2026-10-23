@@ -79,8 +79,8 @@ describe('HomeView (current project in progress)', () => {
     expect(wrapper.get('h1').text()).toBe('量子材料实验室')
     expect(wrapper.find('[data-task-group]').exists()).toBe(false)
     expect(listEnvironments).toHaveBeenCalledWith({ query: { projectId: 'project-1', desiredState: 'running', limit: 50 } })
-    expect(listProjectAgentRuns).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 50 } })
-    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectAgentRuns).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 50, state: ['requested', 'running', 'awaiting_approval', 'cancelling'] } })
+    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 50, state: ['reviewing', 'allocating', 'expiring', 'active'] } })
     expect(wrapper.text()).toContain('当前项目没有运行中的环境。')
   })
 
@@ -200,10 +200,9 @@ describe('HomeView (current project in progress)', () => {
   })
 
   it('says when only the first page was checked instead of implying the list is complete', async () => {
-    vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [environment('env-ready', 'ready')], nextCursor: 'cursor-2' }))
-    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: [], nextCursor: null }))
+    vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [environment('env-ready', 'ready')], nextCursor: null }))
     const { wrapper } = await createWrapper()
-    expect(wrapper.get('[data-home-section="environments"]').text()).toContain('只显示前 50 个运行中的环境')
+    expect(wrapper.get('[data-home-section="environments"]').text()).not.toContain('只显示前 50 个运行中的环境')
     expect(wrapper.get('[data-home-section="agent-runs"]').text()).not.toContain('只检查了最近 50 个任务')
   })
 })

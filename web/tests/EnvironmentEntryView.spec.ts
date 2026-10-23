@@ -503,7 +503,7 @@ describe('EnvironmentEntryView', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
     expect(wrapper.text()).not.toContain('环境正在准备')
-    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
     expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
     expect(getEnvironment).toHaveBeenCalledTimes(1)
   })
