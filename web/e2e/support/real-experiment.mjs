@@ -396,7 +396,24 @@ export async function readActorId(request) {
   return actorId
 }
 
-export async function addProjectStudentByUi(page, projectId, username = process.env.LABWEAVER_STUDENT_USERNAME?.trim() || 'platform-student') {
+/** Visible labels of the project responsibility select, keyed by `objectRole`. */
+const PROJECT_OBJECT_ROLE_LABELS = { viewer: '查看者', operator: '操作者', editor: '编辑者', manager: '管理者' }
+
+/** Opens an AppSelect (Reka combobox) and picks the option with this visible label. */
+async function chooseAppSelectOption(page, trigger, label) {
+  if (!label) throw new Error('REAL_EXPERIMENT_SELECT_OPTION_UNKNOWN')
+  await trigger.click()
+  await page.getByRole('option', { name: label, exact: true }).click()
+  await expect(trigger).toContainText(label)
+}
+
+/**
+ * Adds the student through the project member form. Creating an experiment
+ * environment and freezing a submission are checked as the project's `edit`
+ * action, so the course journeys add the student as an editor; pass another
+ * `objectRole` to exercise a narrower responsibility.
+ */
+export async function addProjectStudentByUi(page, projectId, username = process.env.LABWEAVER_STUDENT_USERNAME?.trim() || 'platform-student', objectRole = 'editor') {
   if (!username) throw new Error('REAL_EXPERIMENT_STUDENT_USERNAME_REQUIRED')
   await page.goto(`/researcher/workspaces?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
   await selectProjectByUi(page, projectId)
@@ -415,7 +432,8 @@ export async function addProjectStudentByUi(page, projectId, username = process.
   } else {
     await memberForm.getByLabel('成员账号用户名', { exact: true }).fill(username)
   }
-  await memberForm.getByRole('combobox', { name: '角色', exact: true }).selectOption('student')
+  await chooseAppSelectOption(page, memberForm.getByRole('combobox', { name: '教学身份', exact: true }), '学生')
+  await chooseAppSelectOption(page, memberForm.getByRole('combobox', { name: '项目职责', exact: true }), PROJECT_OBJECT_ROLE_LABELS[objectRole])
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
@@ -424,7 +442,7 @@ export async function addProjectStudentByUi(page, projectId, username = process.
   await page.getByRole('button', { name: '添加成员', exact: true }).click()
   const response = await responsePromise
   const member = await expectJson(response, 'REAL_EXPERIMENT_STUDENT_MEMBERSHIP_FAILED')
-  expect(member).toMatchObject({ projectId, username, role: 'student', state: 'active' })
+  expect(member).toMatchObject({ projectId, username, role: 'student', objectRole, state: 'active' })
   return member
 }
 

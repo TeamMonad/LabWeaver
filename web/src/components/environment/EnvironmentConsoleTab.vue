@@ -62,11 +62,11 @@
                       aria-hidden="true"
                     />
                     <h4>冻结完成，终端连接已断开</h4>
-                    <p v-if="canIssueAccessGrant(data)">
+                    <p v-if="canRequestAccessGrant(data)">
                       重新签发访问授权后即可继续使用当前环境。现有权限校验保持不变。
                     </p>
                     <button
-                      v-if="canIssueAccessGrant(data)"
+                      v-if="canRequestAccessGrant(data)"
                       type="button"
                       class="filled-button"
                       :disabled="access.creating"
@@ -79,7 +79,7 @@
                       class="access-grant-hint"
                       role="status"
                     >
-                      {{ accessGrantBlockReason(data) }}
+                      {{ grantBlockReason(data) }}
                     </p>
                   </div>
                   <div
@@ -92,11 +92,11 @@
                       aria-hidden="true"
                     />
                     <h4>终端未连接</h4>
-                    <p v-if="canIssueAccessGrant(data)">
+                    <p v-if="canRequestAccessGrant(data)">
                       连接云终端需要有效的访问授权。请点击下方按钮一键签发：
                     </p>
                     <button
-                      v-if="canIssueAccessGrant(data)"
+                      v-if="canRequestAccessGrant(data)"
                       type="button"
                       class="filled-button"
                       :disabled="access.creating"
@@ -109,7 +109,7 @@
                       class="access-grant-hint"
                       role="status"
                     >
-                      {{ accessGrantBlockReason(data) }}
+                      {{ grantBlockReason(data) }}
                     </p>
                   </div>
   </div>
@@ -120,7 +120,6 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import ConsolePanel from '@/components/console/ConsolePanel.vue'
 import type { EnvironmentInstanceSchema } from '@/generated/contracts'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
-import { accessGrantBlockReason, canIssueAccessGrant } from '@/utils/environmentLifecycle'
 
 /** Web 控制台：授权后连接终端或桌面；冻结提交期间说明断开原因并提供重新连接。 */
 defineProps<{ data: EnvironmentInstanceSchema }>()
@@ -134,6 +133,8 @@ const {
   grantUsable,
   issueAccessGrant,
   reconnectConsole,
+  canRequestAccessGrant,
+  grantBlockReason,
   consoleReconnectRequired,
   freezeStatus,
   freezeSubmissionPending,

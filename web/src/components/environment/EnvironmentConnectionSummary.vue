@@ -43,7 +43,7 @@
       <span v-if="autoChecking"> 页面每隔几秒自动重新检查。</span>
     </p>
     <div
-      v-if="readiness.kind === 'needs-grant' || readiness.kind === 'needs-regrant'"
+      v-if="(readiness.kind === 'needs-grant' || readiness.kind === 'needs-regrant') && !grantBlockReason"
       class="connection-summary__actions"
     >
       <button
@@ -55,6 +55,14 @@
         {{ issuing ? '签发中…' : readiness.kind === 'needs-regrant' ? '重新签发并连接' : '签发授权并连接' }}
       </button>
     </div>
+    <p
+      v-else-if="(readiness.kind === 'needs-grant' || readiness.kind === 'needs-regrant') && grantBlockReason"
+      class="connection-summary__detail"
+      data-testid="grant-permission-hint"
+      role="note"
+    >
+      {{ grantBlockReason }}
+    </p>
     <ul
       v-if="methods.length > 0"
       class="connection-summary__methods"
@@ -110,6 +118,8 @@ const props = defineProps<{
   consoleCapability: AsyncState<ConsoleCapabilityAvailabilitySchema>
   /** Why the instance cannot be connected yet, worded by the console that owns lifecycle actions. */
   instanceBlockReason: string
+  /** Why the actor may not be issued an access grant in this project; null when permitted. */
+  grantBlockReason: string | null
   now: number
   autoChecking: boolean
   checking: boolean

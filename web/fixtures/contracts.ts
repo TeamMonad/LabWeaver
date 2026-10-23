@@ -1,6 +1,8 @@
 import { activeScene, fixtureProjectId } from './scenes'
 import { agentRunHistory, authoringPublicationStatus, authoringReleases, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
 import type {
+  AvailableObjectActionsSchema,
+  ObjectAction,
   AccessGrantSchema,
   AgentRunHistoryPageSchema,
   ConsoleCapabilityAvailabilitySchema,
@@ -557,10 +559,27 @@ export async function listProjectMemberships(options?: FixtureOptions): Promise<
   const selectedProject = knownProject(projectId)
   if (!selectedProject) return notFoundResponse('读取项目成员', projectId)
   if (selectedProject.state === 'archived') return fixtureResponse([])
-  return fixtureResponse(activeScene.value.id === 'workspace-members' ? [
-    { actorId: '周同学', projectId: fixtureProjectId, role: 'student', state: 'active', revision: 2, courseId: 'course-physics-2026', expiresAt: null },
-    { actorId: '助教·陈老师', projectId: fixtureProjectId, role: 'teacher', state: 'active', revision: 1, courseId: 'course-physics-2026', expiresAt: null },
+  return fixtureResponse(activeScene.value.id === 'workspace-members' || activeScene.value.id === 'workspace-viewer' ? [
+    { actorId: '周同学', projectId: fixtureProjectId, role: 'student', objectRole: 'operator', state: 'active', revision: 2, courseId: 'course-physics-2026', expiresAt: null },
+    { actorId: '助教·陈老师', projectId: fixtureProjectId, role: 'teacher', objectRole: 'manager', state: 'active', revision: 1, courseId: 'course-physics-2026', expiresAt: null },
   ] : [])
+}
+
+const OWNER_ACTIONS: ObjectAction[] = ['browse', 'archive', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs', 'request_runtime_permissions']
+const EDITOR_ACTIONS: ObjectAction[] = ['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'view_costs', 'request_runtime_permissions']
+
+/**
+ * Preview of the current actor's object actions. Teacher and administrator
+ * scenes preview the project owner, student scenes an editor of their own
+ * experiment project, and the `*-viewer` scenes a read-only member, so each
+ * permission state of the console can be inspected.
+ */
+export async function getProjectAvailableActions(options?: FixtureOptions): Promise<FixtureResult<AvailableObjectActionsSchema>> {
+  const projectId = options?.path?.projectId
+  if (!knownProject(projectId) || !projectId) return notFoundResponse('读取项目可用动作', projectId)
+  const scene = activeScene.value
+  const actions = scene.id.endsWith('-viewer') ? ['browse' as const] : scene.role === 'student' ? EDITOR_ACTIONS : OWNER_ACTIONS
+  return fixtureResponse({ projectId, actorId: `fixture-${scene.role}`, membershipRevision: 1, validUntil: '2099-01-01T00:00:00.000Z', actions })
 }
 
 export async function listEnvironments(options?: FixtureOptions): Promise<FixtureResult<EnvironmentSummaryPageSchema>> {

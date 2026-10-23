@@ -39,6 +39,7 @@ export const fixtureScenes: FixtureScene[] = [
   { id: 'student-env-stopped', label: '学生环境 · 已停止', group: '学生环境', role: 'student', path: '/student/environments', projectId: DEFAULT_PROJECT_ID, environmentId: 'env-physics-stopped', environmentState: 'stopped', description: '停止状态下突出启动动作。' },
   { id: 'student-env-deleted', label: '学生环境 · 已删除', group: '学生环境', role: 'student', path: '/student/environments', projectId: DEFAULT_PROJECT_ID, environmentId: 'env-physics-deleted', environmentState: 'deleted', description: '删除后明确说明不能继续打开控制台。' },
   { id: 'student-env-failed', label: '学生环境 · 失败诊断', group: '学生环境', role: 'student', path: '/student/environments', projectId: DEFAULT_PROJECT_ID, environmentId: 'env-physics-failed', environmentState: 'failed', description: '失败操作展示诊断和可重试动作。' },
+  { id: 'student-env-viewer', label: '学生环境 · 只读成员', group: '学生环境', role: 'student', path: '/student/environments', projectId: DEFAULT_PROJECT_ID, environmentId: 'env-physics-ready', environmentState: 'ready', description: '项目职责只有查看：生命周期、访问授权和提交入口关闭，并说明缺少的职责。' },
   { id: 'resource-empty', label: '资源申请 · 空状态', group: '资源与费用', role: 'student', path: '/researcher/resources', projectId: DEFAULT_PROJECT_ID, description: '资源申请与使用授权均为空。' },
   { id: 'resource-processing', label: '资源申请 · 处理中', group: '资源与费用', role: 'student', path: '/researcher/resources', projectId: DEFAULT_PROJECT_ID, description: '展示审核中和分配中的请求。' },
   { id: 'resource-authorized', label: '资源申请 · 已授权', group: '资源与费用', role: 'student', path: '/researcher/resources', projectId: DEFAULT_PROJECT_ID, description: '展示已授权资源和续期、回收确认入口。' },
@@ -54,6 +55,7 @@ export const fixtureScenes: FixtureScene[] = [
   { id: 'work-launcher', label: 'Work 环境 · 无模型手工创建', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '项目没有可用模型：Agent 关闭并说明原因，仍可手工选择模板创建 Work。' },
   { id: 'work-launcher-empty', label: 'Work 环境 · 没有模板', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '没有已发布模板且没有模型时的下一步说明。' },
   { id: 'workspace-members', label: '项目成员 · 成员管理', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '展示可读成员名称和移除确认入口。' },
+  { id: 'workspace-viewer', label: '项目成员 · 只读成员', group: '项目与工作', role: 'student', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '项目职责只有查看：编辑、归档和成员管理关闭，并说明缺少的职责。' },
   { id: 'resource-reclaim', label: '资源授权 · 回收确认', group: '项目与工作', role: 'student', path: '/researcher/resources', projectId: DEFAULT_PROJECT_ID, description: '已授权 Lease 的回收动作会要求确认。' },
 ]
 
