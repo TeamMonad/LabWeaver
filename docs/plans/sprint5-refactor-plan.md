@@ -33,7 +33,7 @@ CSV 的观察提交为 `8cedce5ed2284f241692f8fae03f87cc26f93733`，不能把扫
 | 服务 | 保留 Control、Access、Environment、Agent、Evaluation、Resource 六个独立服务 |
 | 资源产品 | 保证容量的预留，以及使用闲置容量的可抢占资源 |
 | 预留停止 | 保留商业容量和期间费用。允许暂借给兼容的可抢占 Work，不允许重复售卖 |
-| 预留重启 | 接受从 Kueue eviction 时刻起到可重新准入、运行并可连接最多 5 分钟；Kueue 只保证 SIGTERM 和管理员配置的 terminationGracePeriodSeconds，默认 30 秒，不保证业务保存宽限 |
+| 预留重启 | 接受从 Kueue eviction 时刻起到可重新准入、运行并可连接最多 5 分钟；Kueue 只保证 SIGTERM 和管理员配置的 terminationGracePeriodSeconds，有效范围 1–120 秒，默认 30 秒，不保证业务保存宽限 |
 | 召回超时 | 明确失败，停止继续借出该容量，退还 eviction 后不可用期间费用，并按费率配置追加固定补偿，以幂等账务事件入账 |
 | 提前释放 | 用户显式释放预留后，按未使用时长比例退款，不收违约费 |
 | 项目 Credits | 项目共享账户。管理员发放、转移和调整，不接真实支付 |
@@ -173,7 +173,7 @@ Kueue 当前的 Deployment 支持基于独立 Plain Pod，并不原子管理整�
 - **当前物理分配**：节点、GPU/profile、运行代次及观察状态。
 - **可借用容量**：停止的预留只可供兼容的可抢占任务使用；Kueue eviction 后仍需 Environment/Resource 确认旧 UID 停止和 fencing，才能继续借出。
 
-可抢占 Work 的重启以 Kueue eviction/deletionTimestamp 为计时起点。Kueue 只发送 SIGTERM 并等待管理员配置的 terminationGracePeriodSeconds（默认 30 秒）；文件只保证已落盘/提交的数据，进程内存不保留。Environment 对账新 UID，未同时获得匹配 Resource binding、generation 和 Kueue admission 前保持 SchedulingGated。Resource 确认 attachment、storage fencing 和旧实例不可继续写盘后，才允许容量 projection 重新准入。从 eviction 时刻到新 generation 可连接最多 5 分钟；超时进入明确失败，停止继续借出相关容量，退还不可用期间费用并追加固定补偿。
+可抢占 Work 的重启以源 Pod API 的 `metadata.deletionTimestamp` 为计时起点。Kueue 只发送 SIGTERM 并等待管理员配置的 terminationGracePeriodSeconds（有效范围 1–120 秒，默认 30 秒）；文件只保证已落盘/提交的数据，进程内存不保留。Environment 对账新 UID，未同时获得匹配 Resource binding、generation 和 Kueue admission 前保持 SchedulingGated。Resource 确认 attachment、storage fencing 和旧实例不可继续写盘后，才允许容量 projection 重新准入。从 eviction 时刻到新 generation 可连接最多 5 分钟；超时进入明确失败，停止继续借出相关容量，按不可用期间退款并追加固定补偿。
 
 节点失联时，不能把未知占用算成空闲。必须通过 fencing 排除旧实例继续写盘后才能恢复。Kueue 的直接删除不绕过 Resource 的 fencing、账务对账和被动 eviction 观察；它不提供业务保存保证。
 
