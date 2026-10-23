@@ -74,6 +74,25 @@ class ImageEventCoverageTests(unittest.TestCase):
                 push = workflow["on"].get("push") or {}
                 self.assertEqual(push.get("branches"), ["main", "develop"])
 
+    def test_web_build_inputs_keep_image_checks(self):
+        for event in ("pull_request", "push"):
+            for branch in ("main", "develop"):
+                with self.subTest(event=event, branch=branch):
+                    self.assertTrue(self.covered(event, branch, "web/src/App.vue"))
+                    self.assertTrue(self.covered(event, branch, "web/pnpm-lock.yaml"))
+
+
+    def test_rust_merge_gate_runs_after_scope_and_rust_jobs(self):
+        workflow = yaml.load(
+            (ROOT / ".github/workflows/rust.yml").read_text(),
+            Loader=yaml.BaseLoader,
+        )
+        gate = workflow["jobs"]["rust-merge-gate"]
+        self.assertEqual(gate["if"], "always()")
+        self.assertEqual(gate["name"], "rust-merge-gate")
+        self.assertEqual(
+            gate["needs"], ["scope", "postgres-persistence", "rust"]
+        )
     def test_single_star_does_not_hide_nested_path_gaps(self):
         self.assertTrue(path_matches("crates/auth/src/lib.rs", "crates/**"))
         self.assertFalse(path_matches("crates/auth/src/lib.rs", "crates/*"))

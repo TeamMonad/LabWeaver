@@ -97,3 +97,44 @@ jobs:
       - name: Run Agent retry PostgreSQL regression
         run: cargo test -p agent-service --test claude_code_runtime postgres_authoring_retry_starts_a_new_fenced_attempt --locked -- --ignored
       - run: cargo test --workspace --locked --no-fail-fast
+  rust-merge-gate:
+    name: rust-merge-gate
+    if: always()
+    needs: [scope, postgres-persistence, rust]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a completed Rust decision
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          RUST_REQUIRED: ${{ needs.scope.outputs.rust_required }}
+          POSTGRES_RESULT: ${{ needs.postgres-persistence.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$SCOPE_RESULT" != success ]]; then
+            echo "ci-scope result=$SCOPE_RESULT; refusing a skipped Rust decision" >&2
+            exit 1
+          fi
+          case "$RUST_REQUIRED" in
+            true)
+              [[ "$POSTGRES_RESULT" == success ]] || {
+                echo "postgres-persistence-gate result=$POSTGRES_RESULT" >&2
+                exit 1
+              }
+              [[ "$RUST_RESULT" == success ]] || {
+                echo "rust-gate result=$RUST_RESULT" >&2
+                exit 1
+              }
+              ;;
+            false)
+              [[ "$POSTGRES_RESULT" == skipped && "$RUST_RESULT" == skipped ]] || {
+                echo "Rust gates must be skipped only when scope selects no Rust checks" >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "ci-scope produced no valid rust_required output: $RUST_REQUIRED" >&2
+              exit 1
+              ;;
+          esac

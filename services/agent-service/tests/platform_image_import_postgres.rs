@@ -29,6 +29,7 @@ mod support;
 use support::{FakeObjects, FakeRegistry, apply_agent_migrations};
 
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+const DIAGNOSTIC_LEAK_SENTINEL: &str = "LeakSentinel7Q";
 
 static TELEMETRY: OnceLock<()> = OnceLock::new();
 
@@ -140,7 +141,7 @@ fn import_request(binding: &str, target_reference: &str, archive_bytes: u64) -> 
         "archiveObjectKey": "problem-packages/platform-image-uploads/staged.tar",
         "trustRevision": 1,
         "actorId": ActorId::new(),
-        "reason": "reviewed archive import",
+        "reason": DIAGNOSTIC_LEAK_SENTINEL,
     })
 }
 
@@ -336,6 +337,10 @@ async fn enqueue_import(
         );
         body.extend_from_slice(&chunk);
     }
+    assert!(
+        !String::from_utf8_lossy(&body).contains(DIAGNOSTIC_LEAK_SENTINEL),
+        "enqueue response leaked request content: case={case}"
+    );
     let response_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
     let diagnostic = response_json
         .as_ref()
@@ -371,6 +376,15 @@ async fn enqueue_import(
 }
 
 fn assert_safe_diagnostic(case: &str, status: &InternalPlatformImageImportJobStatus) {
+    if matches!(status.state, PlatformImageImportJobState::Failed) {
+        assert!(
+            status
+                .diagnostic
+                .as_deref()
+                .is_some_and(|diagnostic| !diagnostic.is_empty()),
+            "failed import must have a diagnostic code: case={case}"
+        );
+    }
     let Some(diagnostic) = status.diagnostic.as_deref() else {
         return;
     };
@@ -381,7 +395,12 @@ fn assert_safe_diagnostic(case: &str, status: &InternalPlatformImageImportJobSta
                 .all(|byte| byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit()),
         "diagnostic must be a stable code only: case={case} diagnostic={diagnostic}"
     );
-    for forbidden in ["secret", "robot$platform", "staged.tar"] {
+    for forbidden in [
+        "secret",
+        "robot$platform",
+        "staged.tar",
+        DIAGNOSTIC_LEAK_SENTINEL,
+    ] {
         assert!(
             !diagnostic.contains(forbidden),
             "diagnostic leaked fixture secret or object identity: case={case}"
@@ -498,6 +517,11 @@ async fn wait_for_import(
         started.elapsed().as_millis()
     );
     result??;
+    let serialized_status = serde_json::to_string(&last)?;
+    assert!(
+        !serialized_status.contains(DIAGNOSTIC_LEAK_SENTINEL),
+        "status response leaked request content: case={case}"
+    );
     let catalog: contracts::http::PlatformImageCatalog = client
         .get(format!("{api}/internal/v1/platform-images"))
         .send()
