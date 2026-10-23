@@ -311,6 +311,10 @@ async fn failed_begin_normal_commit_and_cancellation_boundaries_remain_usable() 
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this test intentionally covers fresh and nested transaction boundaries"
+)]
 #[tokio::test]
 async fn cancelled_aborted_begin_and_failed_savepoint_do_not_commit_partial_writes() -> TestResult {
     let fixture = Fixture::start().await?;
@@ -387,6 +391,7 @@ async fn tls_h2_rst_drops_cancel_handler_during_plain_begin_without_poisoning_po
         build_store: PgBuildStore::new(fixture.writer.clone()),
         generated_artifacts: GeneratedArtifactStore::new(fixture.writer.clone()),
         llm_reviews: LlmReviewStore::new(fixture.writer.clone()),
+        platform_images: PgPlatformImageCatalog::new(fixture.writer.clone()),
         platform_registry: None,
         platform_image_import_jobs: writer_jobs.clone(),
         resource: None,
