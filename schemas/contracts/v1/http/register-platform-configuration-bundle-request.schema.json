@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "configurationSha256": {
+      "type": "string"
+    },
+    "expectedRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "expectedRevision",
+    "configurationSha256"
+  ],
+  "title": "RegisterPlatformConfigurationBundleRequest",
+  "type": "object"
+}

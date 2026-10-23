@@ -10,6 +10,7 @@ mod candidate_builds;
 pub mod clients;
 mod material_uploads;
 pub mod messaging;
+pub mod platform_configuration;
 pub mod platform_image_jobs;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -405,6 +406,7 @@ pub struct ControlService {
     objects: Arc<dyn ImmutableObjectStore>,
     config: ControlConfig,
     material_verification: Arc<tokio::sync::Semaphore>,
+    loaded_platform_configuration: Option<Arc<platform_configuration::LoadedConfiguration>>,
 }
 
 enum CompletionReservation {
@@ -444,7 +446,19 @@ impl ControlService {
             objects,
             config,
             material_verification: Arc::new(tokio::sync::Semaphore::new(2)),
+            loaded_platform_configuration: None,
         })
+    }
+
+    /// Attaches settings actually loaded at process startup from the private Bundle inputs.
+    /// Desired edits and executor report bodies cannot replace this process snapshot.
+    #[must_use]
+    pub fn with_loaded_platform_configuration(
+        mut self,
+        loaded: platform_configuration::LoadedConfiguration,
+    ) -> Self {
+        self.loaded_platform_configuration = Some(Arc::new(loaded));
+        self
     }
 
     /// Returns the non-secret deployment-owned project AI policy defaults.

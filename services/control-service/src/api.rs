@@ -60,6 +60,8 @@ use crate::clients::{
 use crate::{ControlError, ControlService};
 use auth::ServiceTokenVerifier;
 
+mod platform_configuration;
+
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
 /// Runtime state shared only by authenticated mTLS connections.
@@ -292,6 +294,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             "/api/v1/admin/images/{catalog_id}/disable",
             post(disable_admin_image),
         )
+        .merge(platform_configuration::public_routes())
         .with_state(state);
     telemetry::instrument_http(router, "control-service", "control-api")
 }
@@ -354,6 +357,10 @@ pub fn authenticated_router(state: &Arc<ApiState>, verifier: &Arc<ServiceTokenVe
     );
     Router::new()
         .merge(public)
+        .merge(platform_configuration::internal_routes(
+            Arc::clone(state),
+            Arc::clone(verifier),
+        ))
         .merge(internal)
         .merge(work_admission)
         .merge(evaluation_policy)

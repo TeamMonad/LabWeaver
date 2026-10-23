@@ -131,10 +131,10 @@ fn browser_client(ca: &str, provider_ca: &str) -> Result<reqwest::Client, reqwes
         .build()
 }
 
-struct OidcFixture {
+pub(super) struct OidcFixture {
     _tasks: Tasks,
-    app: Arc<AppState>,
-    base: String,
+    pub(super) app: Arc<AppState>,
+    pub(super) base: String,
     callback_uri: String,
     portal_ca: String,
     provider_ca: String,
@@ -153,6 +153,25 @@ async fn navigation_destination() -> axum::response::Html<&'static str> {
     reason = "reuse real OIDC infrastructure for protocol and browser engine tests"
 )]
 async fn real_oidc_fixture(portal_host: &str) -> Result<OidcFixture, Box<dyn Error>> {
+    real_oidc_fixture_with(
+        portal_host,
+        |_| Ok(()),
+        async |_, _, _| Ok(()),
+        Router::new(),
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture owns real Keycloak and browser TLS setup"
+)]
+pub(super) async fn real_oidc_fixture_with(
+    portal_host: &str,
+    configure_realm: impl FnOnce(&mut Value) -> Result<(), Box<dyn Error>>,
+    configure_app: impl AsyncFnOnce(&mut AppState, &str, &mut Tasks) -> Result<(), Box<dyn Error>>,
+    extra_routes: Router,
+) -> Result<OidcFixture, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("https://{portal_host}:{}", listener.local_addr()?.port());
     let callback_uri = format!("{base}/auth/callback");
@@ -171,6 +190,7 @@ async fn real_oidc_fixture(portal_host: &str) -> Result<OidcFixture, Box<dyn Err
     realm["clients"][0]["redirectUris"] = json!([callback_uri]);
     realm["clients"][0]["webOrigins"] = json!([base]);
     realm["clients"][0]["attributes"]["post.logout.redirect.uris"] = json!(format!("{base}/"));
+    configure_realm(&mut realm)?;
     // Pinned to the same real authority release as deploy/versions.lock.yml.
     let keycloak = GenericImage::new(
         "docker.io/keycloak/keycloak",
@@ -178,6 +198,7 @@ async fn real_oidc_fixture(portal_host: &str) -> Result<OidcFixture, Box<dyn Err
     )
     .with_exposed_port(8443.tcp())
     .with_wait_for(WaitFor::message_on_stdout("Listening on:"))
+    .with_env_var("JAVA_OPTS_KC_HEAP", "-Xms128m -Xmx512m")
     .with_copy_to(
         "/opt/keycloak/conf/test.crt",
         provider_ca.as_bytes().to_vec(),
@@ -246,11 +267,13 @@ async fn real_oidc_fixture(portal_host: &str) -> Result<OidcFixture, Box<dyn Err
         )
         .await?,
     );
+    configure_app(&mut app, &provider_ca, &mut tasks).await?;
     let app = Arc::new(app);
     let router = browser_router(app.clone())
         .route("/", get(navigation_destination))
         .route("/oidc-probe", get(navigation_destination))
-        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }));
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
+        .merge(extra_routes);
     tasks.0.push(tokio::spawn(async move {
         let _ = http_transport::serve_tls(listener, router, browser_server).await;
     }));

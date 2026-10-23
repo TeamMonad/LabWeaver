@@ -317,6 +317,26 @@ fn control_browser_router() -> Router<Arc<AppState>> {
 fn admin_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/api/v1/admin/platform-configuration",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/versions/{revision}",
+            get(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/versions/{revision}/bundle",
+            get(proxy::forward_control).post(proxy::forward_control_bundle),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/applies",
+            post(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/platform-configuration/applies/{apply_id}",
+            get(proxy::forward_control),
+        )
+        .route(
             "/api/v1/admin/images",
             axum::routing::any(proxy::forward_control),
         )

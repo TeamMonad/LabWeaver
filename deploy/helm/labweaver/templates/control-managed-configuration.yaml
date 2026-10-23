@@ -1,0 +1,41 @@
+{{- if .Values.managedControlConfiguration }}
+{{- $version := required "managedControlConfiguration.versionJson is required" .Values.managedControlConfiguration.versionJson -}}
+{{- $source := required "managedControlConfiguration.sourceJson is required" .Values.managedControlConfiguration.sourceJson -}}
+{{- $parsedVersion := mustFromJson $version -}}
+{{- $policy := include "labweaver.platformPolicy" . -}}
+{{- $parsedPolicy := mustFromJson $policy -}}
+{{- $versionConfiguration := required "managedControlConfiguration.versionJson.configuration is required" $parsedVersion.configuration -}}
+{{- $expectedPolicy := dict "apiVersion" "deploy.labweaver.io/platform-policy/v1" "configurationSha256" $parsedVersion.configurationSha256 "lifecycle" (index $versionConfiguration "lifecycle") "runtimePolicy" (index $versionConfiguration "runtimePolicy") "builderPolicy" (index $versionConfiguration "builderPolicy") -}}
+{{- if ne (toJson $parsedPolicy) (toJson $expectedPolicy) -}}
+{{- fail "platformConfigurationPolicy differs from authenticated version (including apiVersion, digest, or unknown fields)" -}}
+{{- end -}}
+{{- $parsedSource := mustFromJson $source -}}
+{{- $control := index .Values.workloads "control-service" -}}
+{{- if not $control.enabled }}
+{{- fail "managed Control configuration requires the Control workload" -}}
+{{- end }}
+{{- if ne (int $parsedSource.expectedControlReplicas) (int (default 1 $control.replicas)) }}
+{{- fail "managed Control replica count differs" -}}
+{{- end }}
+{{- if or (ne $parsedSource.apiVersion "deploy.labweaver.io/loaded-source/v1") (not (regexMatch "^[0-9a-f]{64}$" $parsedSource.encryptedBundleSha256)) }}
+{{- fail "managed Control source is invalid" -}}
+{{- end }}
+{{- if or (ne (int64 $parsedVersion.revision) (int64 $parsedSource.desiredRevision)) (ne $parsedVersion.configurationSha256 $parsedSource.configurationSha256) }}
+{{- fail "managed Control configuration binding differs" -}}
+{{- end }}
+{{- if or (ne $parsedSource.installation.namespace .Release.Namespace) (ne $parsedSource.installation.releaseName .Release.Name) }}
+{{- fail "managed Control configuration installation differs" -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "labweaver.controlManagedConfigMap" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+immutable: true
+data:
+  platform-configuration.json: {{ $version | quote }}
+  platform-configuration-source.json: {{ $source | quote }}
+  platform-configuration-policy.json: {{ $policy | quote }}
+{{- end }}

@@ -38,6 +38,50 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::project::Project
     );
     document!(
+        "schemas/contracts/v1/platform-configuration-desired.schema.json",
+        crate::platform_configuration::PlatformConfigurationDesired
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-status.schema.json",
+        crate::platform_configuration::PlatformConfigurationStatus
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-version.schema.json",
+        crate::platform_configuration::PlatformConfigurationVersion
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-apply.schema.json",
+        crate::platform_configuration::PlatformConfigurationApply
+    );
+    document!(
+        "schemas/contracts/v1/platform-configuration-bundle.schema.json",
+        crate::platform_configuration::PlatformConfigurationBundle
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-replica-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationReplicaObservation
+    );
+    document!(
+        "schemas/contracts/v1/control-configuration-deployment-observation.schema.json",
+        crate::platform_configuration::ControlConfigurationDeploymentObservation
+    );
+    document!(
+        "schemas/contracts/v1/http/register-platform-configuration-bundle-request.schema.json",
+        crate::platform_configuration::RegisterPlatformConfigurationBundleRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/update-platform-configuration-request.schema.json",
+        crate::platform_configuration::UpdatePlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/apply-platform-configuration-request.schema.json",
+        crate::platform_configuration::ApplyPlatformConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/report-platform-configuration-apply-request.schema.json",
+        crate::platform_configuration::ReportPlatformConfigurationApplyRequest
+    );
+    document!(
         "schemas/contracts/v1/agent-run.schema.json",
         crate::authoring::AgentRun
     );
@@ -1058,6 +1102,23 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let mut parameters = path_parameters(operation.path);
         if matches!(
             operation.operation_id,
+            "getPlatformConfigurationVersion"
+                | "getPlatformConfigurationBundle"
+                | "getLoadedPlatformConfiguration"
+                | "registerPlatformConfigurationBundle"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "revision" {
+                    parameter["schema"] = json!({"type":"integer","minimum":1,"maximum":9_223_372_036_854_775_807_u64});
+                }
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            parameters.push(json!({"name":"expectedRevision","in":"query","required":true,"schema":{"type":"integer","minimum":0,"maximum":9_223_372_036_854_775_807_u64}}));
+            parameters.push(json!({"name":"configurationSha256","in":"query","required":true,"schema":{"type":"string","pattern":"^[0-9a-f]{64}$"}}));
+        }
+        if matches!(
+            operation.operation_id,
             "getProjectCandidateBuild" | "cancelProjectCandidateBuild"
         ) {
             for parameter in &mut parameters {
@@ -1199,6 +1260,37 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ,"x-labweaver-problem-content-type":"application/problem+json"
             ,"x-labweaver-errors":["LW_CONTRACT_DOCUMENT_INVALID","LW_ACCESS_DENIED","LW_IDEMPOTENCY_CONFLICT","LW_REVISION_CONFLICT"]
         });
+        if matches!(
+            operation.operation_id,
+            "getPlatformConfiguration"
+                | "updatePlatformConfiguration"
+                | "getPlatformConfigurationVersion"
+                | "applyPlatformConfiguration"
+                | "getPlatformConfigurationApply"
+                | "reportPlatformConfigurationApply"
+                | "registerPlatformConfigurationBundle"
+                | "getPlatformConfigurationBundle"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_PLATFORM_CONFIGURATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+                "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+                "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+                "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+                "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+                "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+                "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+                "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+                "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+                "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+                "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_OPERATION_IN_PROGRESS"
+            ]);
+        }
         if operation.operation_id == "resolveEnvironmentOwner" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1290,6 +1382,18 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if let Some(schema) = request_schema(operation.operation_id) {
             operation_json["requestBody"] =
                 json!({"required":true,"content":{"application/json":{"schema":schema}}});
+            if operation.operation_id == "updatePlatformConfiguration" {
+                operation_json["requestBody"]["content"]["application/yaml"] =
+                    json!({"schema":request_schema(operation.operation_id)});
+            }
+        }
+        if operation.operation_id == "registerPlatformConfigurationBundle" {
+            operation_json["requestBody"] = json!({"required":true,"content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}});
+            operation_json["responses"]["413"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["responses"]["415"] = json!({"$ref":"#/components/responses/Problem"});
+            operation_json["description"] = json!(
+                "Register received ciphertext and an administrator-declared binding to the current desired settings. Control computes the ciphertext digest but does not decrypt or approve deployment. Maximum upload: 73400320 bytes."
+            );
         }
         let entry = paths
             .entry(operation.path.to_owned())
@@ -1642,6 +1746,9 @@ fn contract_ref(name: &str) -> Value {
 
 fn request_schema(operation_id: &str) -> Option<Value> {
     let name = match operation_id {
+        "updatePlatformConfiguration" => "http/update-platform-configuration-request",
+        "applyPlatformConfiguration" => "http/apply-platform-configuration-request",
+        "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
         "createProject" => "http/create-project-request",
         "updateProject" => "http/update-project-request",
         "addProjectMembership" => "http/add-project-membership-request",
@@ -1715,6 +1822,17 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "getPlatformConfiguration"
+        | "updatePlatformConfiguration"
+        | "applyPlatformConfiguration"
+        | "registerPlatformConfigurationBundle"
+        | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
+        "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
+        "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
+        "getLoadedPlatformConfiguration" => {
+            contract_ref("control-configuration-replica-observation")
+        }
+        "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")
         }

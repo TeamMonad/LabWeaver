@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Facts returned by a running Control process, rather than a reread of mounted files.",
+  "properties": {
+    "configurationSha256": {
+      "type": "string"
+    },
+    "desiredRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "encryptedBundleSha256": {
+      "type": "string"
+    },
+    "instanceId": {
+      "description": "Changes on process restart even if Kubernetes reuses the same Pod UID.",
+      "type": "string"
+    },
+    "namespace": {
+      "type": "string"
+    },
+    "observedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "podName": {
+      "type": "string"
+    },
+    "podUid": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "podName",
+    "podUid",
+    "namespace",
+    "instanceId",
+    "desiredRevision",
+    "configurationSha256",
+    "encryptedBundleSha256",
+    "observedAt"
+  ],
+  "title": "ControlConfigurationReplicaObservation",
+  "type": "object"
+}

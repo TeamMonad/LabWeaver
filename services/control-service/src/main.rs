@@ -72,9 +72,27 @@ struct NatsFileConfig {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), StartupError> {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments == [std::ffi::OsString::from("--prepare-managed-configuration")] {
+        control_service::platform_configuration::prepare_projected_configuration(
+            std::path::Path::new(&required_env(
+                "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_DIR",
+            )?),
+            std::path::Path::new(&required_env(
+                "LABWEAVER_PLATFORM_CONFIGURATION_RUNTIME_DIR",
+            )?),
+            &required_env("LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_SHA256")?,
+        )
+        .map_err(|_| StartupError::Configuration)?;
+        return Ok(());
+    }
+    if !arguments.is_empty() {
+        return Err(StartupError::Configuration);
+    }
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
+    let loaded_configuration = load_platform_configuration()?;
     let tls = http_transport::load_server_config(
         &deployment.gateway_tls.server_certificate_file,
         &deployment.gateway_tls.server_key_file,
@@ -101,7 +119,10 @@ async fn main() -> Result<(), StartupError> {
         )
         .await?,
     );
-    let service = ControlService::new(pool.clone(), objects, deployment.control)?;
+    let mut service = ControlService::new(pool.clone(), objects, deployment.control)?;
+    if let Some(loaded) = loaded_configuration {
+        service = service.with_loaded_platform_configuration(loaded);
+    }
     let access = AccessClient::new_authenticated(
         deployment.access_service,
         Arc::clone(&service_token_client),
@@ -302,6 +323,40 @@ async fn outbox_loop(
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+}
+
+fn load_platform_configuration()
+-> Result<Option<control_service::platform_configuration::LoadedConfiguration>, StartupError> {
+    match (
+        std::env::var_os("LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE"),
+        std::env::var_os("LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE"),
+    ) {
+        (Some(version), Some(source)) => {
+            let loaded = control_service::platform_configuration::LoadedConfiguration::load(
+                std::path::Path::new(&version),
+                std::path::Path::new(&source),
+            )
+            .map_err(|_| StartupError::Configuration)?;
+            match (
+                std::env::var("LABWEAVER_CONTROL_POD_NAME"),
+                std::env::var("LABWEAVER_CONTROL_POD_NAMESPACE"),
+                std::env::var("LABWEAVER_CONTROL_POD_UID"),
+            ) {
+                (Ok(name), Ok(namespace), Ok(uid)) => loaded
+                    .on_replica(&name, &namespace, &uid)
+                    .map(Some)
+                    .map_err(|_| StartupError::Configuration),
+                (
+                    Err(std::env::VarError::NotPresent),
+                    Err(std::env::VarError::NotPresent),
+                    Err(std::env::VarError::NotPresent),
+                ) if !loaded.requires_replica_identity() => Ok(Some(loaded)),
+                _ => Err(StartupError::Configuration),
+            }
+        }
+        (None, None) => Ok(None),
+        _ => Err(StartupError::Configuration),
     }
 }
 
