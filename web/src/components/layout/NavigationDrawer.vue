@@ -124,6 +124,10 @@ onScopeDispose(() => window.removeEventListener('resize', updateViewportWidth))
     z-index: auto;
     grid-row: 3;
     grid-column: 1;
+    align-self: stretch;
+    height: auto;
+    min-height: 0;
+    background: var(--md-sys-color-background);
     transform: none;
   }
 

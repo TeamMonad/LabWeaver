@@ -50,7 +50,7 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     // runner output live under the temporary directory supplied by the harness.
     reporter: [['list']],
     use: {
-      baseURL: process.env.LABWEAVER_BASE_URL || 'http://localhost:4173',
+      baseURL: process.env.LABWEAVER_BASE_URL || 'http://127.0.0.1:4174',
       trace: 'off',
       screenshot: 'off',
       video: 'off',
@@ -72,12 +72,17 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
       toHaveScreenshot: { maxDiffPixelRatio: 0.025 },
     },
     projects,
+    // Without a deployed base URL only the shell visual/a11y projects can run.
+    // They render the built fixture preview: the production preview has no BFF
+    // and would stop at the project-context gate, and the fixture dev server
+    // optimizes dependencies on first request, which makes cold runs flaky.
     ...(!process.env.LABWEAVER_BASE_URL
       ? {
           webServer: {
-            command: 'pnpm preview --port 4173',
-            url: 'http://localhost:4173',
+            command: 'pnpm build:fixtures && pnpm exec vite preview --config vite.fixtures.config.ts --host 127.0.0.1 --port 4174 --strictPort',
+            url: 'http://127.0.0.1:4174/fixture-preview.html',
             reuseExistingServer: !ci,
+            timeout: 180_000,
           },
         }
       : {}),
