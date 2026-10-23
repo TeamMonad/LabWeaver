@@ -8,7 +8,7 @@
 
 Sprint5 同时提供有保证容量的预留和可回收借用的可抢占 Work。Resource 已经拥有商业资格、审批、CapacityClaim、Lease、配额、用量和费用；Environment 已经拥有长生命周期 Work 的运行代次、实例、持久盘和端点。Kueue 只应承担 Kubernetes 层的队列配额、公平性、准入和 Kueue 语义的驱逐，不能成为第二个 Resource，也不能成为 Environment 的第二个运行对象控制器。
 
-Kubernetes 同一资源只能有一个管理者。Kueue 的 Pod integration 会为 Pod 注入 scheduling gate，并在 Workload admitted 后移除 gate；在抢占时会终止并删除被抢占的 Pod。因此，Kueue 不得直接删除 Environment 的 Deployment、VM、磁盘或 `virt-launcher`，也不得在 Resource 的 60 秒保存宽限完成前把一次驱逐解释为商业容量已释放。
+Kubernetes 同一资源只能有一个管理者。Kueue 的 Pod integration 会为 Pod 注入 scheduling gate，并在 Workload admitted 后移除 gate；原生抢占会终止并删除被抢占的 Pod，Environment 必须对账被动删除和重建 UID。Kueue 不得管理 VM、磁盘或 `virt-launcher`，Resource 不能在 fencing 未确认前把 Kueue eviction 当作商业容量释放。
 
 ## 决定
 
@@ -25,7 +25,7 @@ Kubernetes 同一资源只能有一个管理者。Kueue 的 Pod integration 会�
 | 事实或字段 | 唯一 writer | Kueue/其他组件边界 |
 | --- | --- | --- |
 | ResourceRequest、Approval、CapacityClaim、ResourceLease、商业资格、售出预留、Credits、费用、退款和补偿 | **Resource** | Kueue 的 admission 不代表商业批准、售出容量、账务结算或 Resource lease release。 |
-| 召回通知、保存截止、召回操作的运行代次和 Resource fencing | **Resource**（持久状态；调用 Environment 执行） | Kueue 只能接收 Resource 已授权的 Workload 投影；不能自己启动 60 秒计时或退款。 |
+| 召回通知、eviction 时间、重启截止、运行代次和 Resource fencing | **Resource**（持久状态；调用 Environment 执行） | Kueue 负责原生 eviction；不能自己启动业务计时、确认 fencing、退款或补偿。 |
 | Work/Environment 的 desired revision、运行 plan、Deployment、VM、PVC/磁盘挂载、端点和运行代次 | **Environment**（Environment executor 代表 Environment 写 Kubernetes 对象） | Kueue 不能写 Deployment/VM/PVC 的业务字段，也不能创建 Environment 的第二份实例。 |
 | Kueue `Workload` object, `spec`/`status`, queue, PodSet, priority, admission, `active` and eviction | **Kueue native integration/controller** | Resource projection MUST NOT create, patch, delete, or set an ownerReference on a Workload. Kueue creates the Workload from the source Pod/Job and owns its UID, spec and status. |
 | Pod 到节点的绑定和实际放置 | **kube-scheduler** | LabWeaver 不增加 Pod-to-Node scheduler。ResourceFlavor 只表达受 Resource 认可的拓扑/设备类别。 |
@@ -49,33 +49,20 @@ Kueue v0.20.2 **不把 Deployment 作为一个原子 Workload**。本契约采�
 一次性执行固定使用 Kueue 的 **`batch/v1 Job` integration**，不使用 plain Pod 或 JobSet。`task-execution`/Evaluation 是 Job 的唯一业务 owner，负责 Job template、immutable execution identity、submit/observe/cancel/cleanup；Kueue native Job integration 负责该 Job 对应 Workload 及 admission/suspension fields。幂等键是 `(TaskRunId, execution_generation, ResourceRequestId, CapacityClaimId, LeaseId+revision)`，数据库 checkpoint 同时保存 Job UID 和 Workload UID。取消先持久化取消事实并通过 Kueue Workload/Job integration 停止 admission，随后观察 Job/Pod 终止并确认 cleanup，最后 Resource release；重复 submit/recovery 复用该键和已有 UID，绝不创建第二个 Job 或第二个 Workload。#212 负责实现该已定接口。
 
 
-#### 有状态抢占机制评估（产品决定待定）
+#### 有状态抢占机制：已决定采用 Kueue 原生立即驱逐
 
-Kueue 原生 `withinClusterQueue: LowerPriority` 抢占会立即为低优先级 Work 删除 Pod；Pod 会先收到 Kubernetes `SIGTERM`，最多等待该 Pod 的 `terminationGracePeriodSeconds`，之后被强制终止。这个 grace 是进程退出宽限，不是方案要求的 60 秒保存宽限。Deployment 随后会按 desired replicas 创建新的 Pod UID；新 Pod 在未获准入时保持 gate，但旧 Pod 的数据保存/fencing 可能尚未完成。
+用户已决定可抢占的有状态 Work 采用方案 B：Kueue `withinClusterQueue: LowerPriority` 原生立即驱逐。方案 A（禁用 Kueue 自动抢占、由 Resource 先召回）已否决：它无法使用 Kueue 原生公平抢占，并把所有抢占状态机转移到额外的 Resource/Environment 协调器。方案 C（AdmissionCheck/自定义 controller 延迟 eviction）已否决：它需要新的 controller/CRD、权限、恢复和运维面，且会形成第二套抢占握手。
 
-| 方案/决策项 | 对 60 秒和数据的影响 | 实现与账务影响 | 结论 |
-| --- | --- | --- | --- |
-| A. 保留 Resource 召回握手；有状态队列禁用 Kueue 自动抢占（`withinClusterQueue: Never`） | 60 秒内旧 UID 不被 Kueue 删除；Environment 可保存文件/盘并完成 fencing，之后再停止和释放 | 需要 Resource 持久 deadline、Environment desired-state CAS、Workload 对账；与当前产品规则一致 | 当前安全推荐；等待用户确认 |
-| B. Kueue 原生立即抢占，接受没有 60 秒保存窗口 | 未保存的进程内存和最近文件写入可能丢失；只能依赖 Pod termination grace，不能保证保存完成后才释放容量 | 简化 Kueue 集成，但 Resource 必须处理被动 eviction、迟到/重建 UID、未知盘写入、退款和重复 ledger；预留重启承诺需要改产品契约 | 用户要求评估；不符合现行 60 秒规则，等待用户确认 |
-| C. AdmissionCheck/自定义 controller 延迟 eviction | 可保留 60 秒，但新增 controller 必须持有 eviction handshake 状态 | 最大实现和运维复杂度；需额外 CRD/权限/恢复测试 | 备选，不在 #211 实现 |
+新语义明确如下：
 
-原生方案 B 需要同步修改的现行条款如下：
+1. Kueue 驱逐只保证 Kubernetes 对 Pod 发送 `SIGTERM`，并等待 Pod 的 `terminationGracePeriodSeconds`；它不调用业务保存 API，也不保证进程内存或尚未提交的文件写入被保存。管理员通过 Environment/Work 配置设定该值；默认值为 **30 秒**。PoC 使用 20 秒时观测到 Pod 对象约 22 秒后消失，默认提高到 30 秒是为覆盖 API 观察和 kubelet 调度抖动；30 秒仍只是进程退出宽限，不是数据保存保证。
+2. 文件只保证已经落盘/提交的数据；进程内存不保存。应用可选用定期 checkpoint、CoW/快照、写入日志和幂等恢复降低损失，但不得把这些缓解措施声称为驱逐前保存确认。
+3. Environment 必须对被动驱逐做对账：Kueue 删除旧 Pod 后，Deployment/Environment 产生的新 UID 在同时满足相同 Resource binding、Environment generation 和 Kueue admission 前必须保持 `SchedulingGated`，不得运行。Environment 记录旧/新 UID 和 Workload UID，拒绝迟到旧 generation 的观察或 admission。
+4. Resource 在磁盘 attachment、storage fencing 和旧运行代次不可继续写入尚未确认前，不释放可借容量、不结束售出预留、不退款，也不因 Kueue quota 空闲推断真实释放。清理失败进入 `Unknown/Pending`，由对账恢复。
+5. 5 分钟承诺的起点定义为 **Kueue 对被抢占 Work 设置 eviction/deletionTimestamp 的时刻**；Resource 持久化 `eviction_at` 和 `reconnect_deadline = eviction_at + 5m`。到 deadline 前，Environment 必须完成新 generation 的 Resource admission、Kueue admission、实际运行和可连接端点；只重新创建对象或仅获得 Kueue admission 不算可连接。超时即失败，停止继续借出相关容量。
+6. 超时/不可用区间退还不可用期间费用，并追加管理员在费率配置中设定的固定补偿。两者都以唯一 `(operation_id, lease_revision, ledger_event_type)` 幂等 ledger event 入账；重复 eviction、重试、旧 UID 观察和迟到 Kueue 状态不得重复退款/补偿。
 
-| 来源 | 当前条款 | B 方案必须改变的语义 |
-| --- | --- | --- |
-| `docs/plans/sprint5-refactor-plan.md:34-37` | 预留停止保留商业容量；预留重启包含 60 秒抢占保存宽限；5 分钟内恢复，超时退款/补偿 | 改为“尽力保存 + `terminationGracePeriodSeconds`”，并重新定义未保存数据、容量释放和超时起点；不能继续声称 60 秒保存 |
-| `docs/plans/sprint5-refactor-plan.md:41-43` | 可抢占余额耗尽时有界停止；停止/抢占保留工作文件，不保留进程内存 | 明确原生 eviction 可能在业务保存前发生；文件只能依赖应用 checkpoint/定期快照，进程内存仍丢失 |
-| `docs/plans/sprint5-refactor-plan.md:166-178` | Resource 管商业事实，Environment 管运行对象；先召回、60 秒保存、停止和盘隔离后再重分配；Kueue 不能绕过宽限 | 删除“先召回再释放”的保证，或新增 eviction 前握手；否则与方案冲突 |
-| `docs/plans/sprint5-refactor-plan.md:180` | 公平队列和配额由成熟机制提供 | Kueue 仍可公平排队，但原生优先级会直接驱逐，必须把等待原因和数据风险展示为产品语义 |
-| `docs/plans/sprint5-refactor-plan.md:188-196` | 余额、尾部成本、平台故障退款和按配置补偿 | 增加 eviction 未保存数据、不可用区间和重复/迟到释放的账务规则；不能用 Kueue quota 空闲推断 Resource 已释放 |
-| Issue #211 “下一步/验收” | 60 秒保存→停止→真实释放→再准入；不直接删除 virt-launcher | B 方案无法满足当前验收，须重新获产品批准；VM 仍禁止直接删除 virt-launcher |
-| Issue #225 实施范围/验收 | 召回、60 秒保存、fencing、5 分钟恢复、失败退款/补偿；清理失败不得重新售出 | B 方案须把“清理失败不得重新售出”扩展到原生 eviction，并降低数据持久性承诺；否则不能合入 #225 |
-
-未保存工作的影响及缓解：原生 eviction 不能保留进程内存，写入中的文件可能只落在应用/文件系统的已提交边界。可用定期应用 checkpoint、CoW/快照、写入日志、幂等恢复和较长 `terminationGracePeriodSeconds` 降低损失，但这些措施不能证明在任意 eviction 前完成快照；Kueue 也不会调用业务保存 API。PoC 脚本 `tools/kueue_poc/run.sh` 使用 20 秒 `terminationGracePeriodSeconds` 和 SIGTERM trap，测量原生 eviction 的实际 Pod 删除窗口；该窗口不是 60 秒保证。
-
-B 方案的持久账务仍必须有 `restart_operation_id`、`accepted_at`、`reconnect_deadline`、阶段和幂等 ledger event。原生 eviction 发生后若无法确认磁盘 fencing，Resource 保持容量不可借用；不能退款或释放预留仅因为 Workload 被驱逐。若产品接受 B，5 分钟承诺必须改成新的可实施承诺并补充数据损失/退款规则。
-
-在用户确认前不把任何方案标为生产定稿；PoC 评估原生 eviction，不代表批准立即驱逐。
+原生方案 B 对现行条款的影响已由实现范围同步到 `docs/plans/sprint5-refactor-plan.md` 和 Issue #211/#225：60 秒保存承诺删除，替换为 30 秒默认 termination grace + 已落盘文件语义；5 分钟从 eviction 时刻计算；Resource fencing 和账务幂等不变且更严格。
 
 ### 4. KubeVirt VM
 
@@ -97,24 +84,24 @@ VM 继续由 Resource 做商业准入、预留/lease、费用、召回和 fencin
 
 KubeVirt 真实集群未在本次 Kind PoC 安装，故 VM 结论仍是设计边界而非运行通过。
 
-### 5. 可回收借用、抢占与 60 秒宽限
+### 5. 可回收借用、原生驱逐与 5 分钟重启
 
 Kueue 的 quota 是 Kubernetes admission accounting，不是 Resource 的售出库存。Resource 保持三种独立事实：
 
 1. **售出预留**：预留期间持续占用商业库存；停止或暂借都不能再次售卖。
 2. **当前物理分配**：节点/设备、运行代次、盘 attachment 和观察/fencing 状态。
-3. **可借用容量**：只有预留仍有效、当前物理容量可安全释放、且 Work 具备召回能力时，才可投影成 Kueue 可抢占配额。
+3. **可借用容量**：只有预留仍有效、当前物理容量可安全释放、且 Work 具备被动 eviction 对账和 fencing 能力时，才可投影成 Kueue 可抢占配额。
 
 可回收借用的时序固定为：
 
-1. Resource 记录召回操作，持久化 `operation_id`、ResourceRequest/CapacityClaim/Lease revision、Work generation、借用 Workload UID、`notified_at`、`save_deadline = notified_at + 60s`、`accepted_at`、`reconnect_deadline = accepted_at + 5m` 和阶段；发送一次幂等通知。服务重启从这些绝对时间恢复，不能以内存 timer 代替。
-2. 60 秒内，Environment 保存容器工作文件/VM 盘状态，撤销连接并将 desired state 置为停止；不删除持久盘，不把 Kueue 的 eviction 当作保存完成。
-3. 到期后，Environment 通过带 UID/resourceVersion 的官方 API 停止 Deployment/VM，并隔离盘；Resource 观察权威对象、Pod/VMI、attachment 和必要的 storage fencing。响应成功、Pod 消失或 Kueue status 更新本身都不是释放确认。
-4. 只有停止和隔离被确认、旧运行代次不可再写入后，Resource 才将借用标记 Released，写入费用/补偿账目，并允许 Environment 删除源 Pod/Job 使 Kueue 原生 Workload 完成并释放 admission；Resource 不直接 patch Kueue Workload。Kueue status 变化不能单独构成商业 release。
-5. 新的高优先级 Work 先经过 Resource 商业资格和容量 fencing，再建立新的 Kueue Workload/admission。Resource 的预留权仍保留；可借用 Work 释放的是当前物理使用，不是预留库存或预付费用。
-6. 召回失败、停止超时、权限拒绝、节点失联、storage attachment/fencing 未知或超过 5 分钟 `reconnect_deadline` 时：禁止继续借出该容量；保持售出预留但不把容量标为可用。Resource 退还不可用期间的费用，并追加一笔管理员在费率配置中声明的固定补偿，均以唯一 `(operation_id, lease_revision, ledger_event_type)` 幂等 ledger event 入账；重复通知、重试或迟到 Kueue 状态不得重复退款/补偿。禁止因 Kueue quota 空闲而确认物理释放。
+1. Resource 记录召回操作，持久化 `operation_id`、ResourceRequest/CapacityClaim/Lease revision、Work generation、借用 Workload UID、`eviction_at`、管理员配置的 `terminationGracePeriodSeconds`（默认 30 秒）、`reconnect_deadline = eviction_at + 5m` 和阶段；eviction 事件重复投递使用同一 operation ID。
+2. Kueue 原生 eviction 删除旧 Pod 并发送 SIGTERM；Environment 读取 deletionTimestamp、旧/新 Pod UID 和 Workload UID。新 Pod 即使由 Deployment 重建，也必须在匹配 Resource binding、Environment generation 和 Kueue admission 前保持 SchedulingGated；只创建对象不算运行。
+3. Environment 保存已落盘/提交的文件并观察 VM/容器状态；进程内存不保存。Resource 观察 attachment、storage fencing 和旧运行代次不可继续写入。响应成功、Pod 消失、termination grace 到期或 Kueue status 更新本身都不是释放确认。
+4. 只有 fencing 和清理确认后，Resource 才将借用标记 Released，更新账务并允许新的 generation 重新准入；Resource 不直接 patch Kueue Workload，不因 quota 空闲确认物理释放。fencing 未知时保持 reservation 和容量不可借出。
+5. 新高优先级 Work 经过 Resource reservation projection 与 Kueue admission 后才可运行；可借用 Work 释放的是当前物理使用，不是预留库存或预付费用。
+6. 从 `eviction_at` 到新 generation 完成 Resource admission、Kueue admission、实际运行和可连接端点最多 5 分钟。超时、停止失败、权限拒绝、节点失联或 attachment/fencing 未知时，停止继续借出相关容量，退还 eviction 后不可用期间费用，并追加管理员费率中的固定补偿；每项以唯一 `(operation_id, lease_revision, ledger_event_type)` 幂等 ledger event 入账。
 
-Kueue `preemption` policy 只决定 Kubernetes 层队列公平和候选选择，不能表达或推导 Resource 账务。项目权重/老化、Resource 的预留优先级、Credits、补偿和 60 秒延迟由 Resource policy 决定并投影为源 Pod/Job 的 Kueue-supported queue/priority；Kueue 的 `cohort`/borrowing 只代表 Kubernetes 层暂借 quota，不能扩大 Resource 可售库存。
+Kueue `preemption` policy 只决定 Kubernetes 层队列公平和候选选择，不能表达或推导 Resource 账务。项目权重/老化、Resource 的预留优先级、Credits 和补偿由 Resource policy 决定并投影为源 Pod/Job 的 Kueue-supported queue/priority；Kueue 的 `cohort`/`borrowing` 只代表 Kubernetes 层暂借 quota，不能扩大 Resource 可售库存。
 
 ### 资源映射、公平性和 GPU 依赖
 
@@ -141,15 +128,14 @@ GPU 独占、MIG、容器时间片和 VM vGPU 的目录/profile、设备插件�
 | Deployment template/replicas/desired generation | 不写 | Environment 唯一写 | 只写 gate/观察关联，不写业务 desired state |
 | Pod scheduling gate/admission annotation | 不写业务 template | 不删除 Kueue gate | Kueue webhook/controller 写 |
 | VM start/stop/restart、VMI、virt-launcher、PVC attachment | Resource 授权并观察 | Environment/KubeVirt 唯一写 | 不写、不建 Workload |
-| 保存通知、60 秒 deadline、停止和盘 fencing | Resource 持久化 policy/fact；Environment 执行并回报 | Environment 写运行事实 | 不计时、不确认释放 |
+| Eviction 时间、30 秒默认 termination grace、5 分钟 deadline、运行代次和盘 fencing | Resource 持久化 policy/fact；Environment 执行并回报 | Kueue 发送 SIGTERM、设置 eviction/status；不确认业务保存、fencing、退款或补偿 |
 | 借用 release、费用、退款、补偿 | Resource 唯一写 | 回报实际释放证据 | Workload admission/eviction 仅在 projection 允许后更新 |
 
 - `Workload` 已 admitted 但 Environment/task-execution 创建或观察失败：保持业务状态为 pending/failed，按已有 source UID 做确定性清理；不把 admission 当成功，不创建第二个 Job/Pod/Workload。恢复必须先匹配持久的 Workload UID 和 binding revision。
 
 - 任何丢失/过期/不一致的 Resource binding、Lease revision、Work generation、queue binding 或 namespace 都 fail closed；不因 Kueue admission 存在而创建运行对象。
-- `Workload` 已 admitted 但 Environment 创建/观察失败：保持业务状态为 pending/failed，执行确定性清理；不把 admission 当成功，不重复创建第二个 Workload。
-- 召回通知、保存、停止、eviction 和 release 都必须按操作 ID + generation 幂等；重启恢复持久 deadline，不重置 60 秒。
-- Kueue eviction 早于 Resource deadline、Deployment 重建新 UID、VMI/virt-launcher 重建、节点失联或 attachment 状态未知，均进入 `Unknown/Pending`，不得标记 Released 或新准入。
+- Eviction、重建 UID、停止、fencing、release 和 ledger event 都必须按 operation ID + generation 幂等；重启恢复持久 `eviction_at`/`reconnect_deadline`，不得重置 5 分钟窗口。
+- Kueue eviction、Deployment 重建新 UID、VMI/virt-launcher 重建、节点失联或 attachment 状态未知，均进入 `Unknown/Pending`，不得标记 Released 或新准入；5 分钟超时只表示重启承诺失败，不表示 fencing 成功。
 - Resource/Kueue projection 快照不一致时，以 Resource 的 reservation/revision 和 Environment 的权威运行/fencing 事实为准；projection 标 stale、停止新 admission、保留现有 reservation，不 patch Workload、不创建第二套 lease，按 reservation ID + revision + Workload UID CAS 对账后才恢复。
 
 ## 验证边界和 PoC
@@ -193,13 +179,13 @@ Kueue eviction set deletionTimestamp; SIGTERM log=<not observed before object de
 Pod object removal observed after approximately 22s; terminationGracePeriodSeconds=20s
 deployment.apps/high-interactive condition met
 high phase=Running; replacement low state=low-interactive-5d855b47fb-h5445 ... Pending kueue.x-k8s.io/admission
-PASS: native preemption is immediate; SIGTERM had only terminationGracePeriodSeconds=20s, not the business 60s save window
+PASS: native preemption is immediate; SIGTERM had only terminationGracePeriodSeconds=20s, with no business save guarantee
 Normal Preempted ... Preempted to accommodate a workload ... preemptor effective priority: 100 ... preemptee effective priority: 10
 Normal Stopped ... Preempted to accommodate a workload ...
 POC PASS
 ```
 
-Kind 使用 `kindest/node:v1.35.0`（kubectl client v1.35.8，server v1.35.0）。Fixture 配置 `cpu=1`、`memory=1Gi`、`pods=1`，低优先级 `10` 和高优先级 `100` 各请求 `900m/128Mi`，`withinClusterQueue: LowerPriority`，低 Pod 设置 `terminationGracePeriodSeconds: 20` 并安装 SIGTERM trap。结果证明：低 Pod 先被准入；高 Work 触发原生 `PreemptedWorkload`，低 Pod 获得删除时间戳并约 22 秒后消失；Deployment 创建的新低 Pod 保持 `SchedulingGated`，高 Pod Running。SIGTERM 期间未能从 API 读到 trap 日志，但对象删除窗口与 20 秒 termination grace 相符；无证据表明业务保存完成。该结果是原生立即驱逐方案的反例，不是 60 秒保存验收。
+Kind 使用 `kindest/node:v1.35.0`（kubectl client v1.35.8，server v1.35.0）。Fixture 配置 `cpu=1`、`memory=1Gi`、`pods=1`，低优先级 `10` 和高优先级 `100` 各请求 `900m/128Mi`，`withinClusterQueue: LowerPriority`，低 Pod 设置 `terminationGracePeriodSeconds: 20` 并安装 SIGTERM trap。结果证明：低 Pod 先被准入；高 Work 触发原生 `PreemptedWorkload`，低 Pod 获得删除时间戳并约 22 秒后消失；Deployment 创建的新低 Pod 保持 `SchedulingGated`，高 Pod Running。SIGTERM 期间未能从 API 读到 trap 日志，但对象删除窗口与 20 秒 termination grace 相符；无证据表明业务保存完成。该结果是原生立即驱逐方案的实测证据，文件/内存语义和被动 fencing 对账仍由 #212 实现。
 
 KubeVirt 未安装：一节点 Kind 无虚拟化设备，且 Kueue v0.20.2 没有内建 VMI/VirtualMachine Workload integration。本次 VM 结论是 Resource reservation projection 的设计契约，不是 KubeVirt 运行验收。
 ### Acceptance conclusions for #211
@@ -207,9 +193,9 @@ KubeVirt 未安装：一节点 Kind 无虚拟化设备，且 Kueue v0.20.2 没�
 | 验收项 | 结论 | 证据/剩余风险 |
 | --- | --- | --- |
 | 对象/字段唯一管理表和事件时序，覆盖容器、VM、一次性任务 | **完成（设计，实施归 #212）** | Kueue native integration 唯一拥有 Workload object/spec/status/UID；Environment/task-execution 拥有源 Pod/Job；Resource 保存 binding+source UID+Workload UID 关联和 CAS fence；VM 使用 Resource reservation projection。 |
-| 受支持接口证明暂停/准入/抢占不会被 Deployment/VMI 立即重建 | **容器原生抢占反例已完成；60 秒契约待决** | 可复现 PoC 证明 Kueue `LowerPriority` 会立即 eviction，约 22 秒后 Pod 删除（20 秒 terminationGrace），Deployment 创建的新 UID 保持 `SchedulingGated`；这不能证明 60 秒保存。VMI 未安装/未验证。用户需在 A/B/C 方案中确认有状态抢占机制。 |
+| 受支持接口证明暂停/准入/抢占不会被 Deployment/VMI 立即重建 | **容器原生 eviction 已完成；VM 未验证** | 可复现 PoC 证明 Kueue `LowerPriority` 立即 eviction，约 22 秒后 Pod 删除（20 秒 terminationGrace）；Deployment 创建的新 UID 保持 `SchedulingGated`，高优先级 Pod Running。ADR 已将语义定为 SIGTERM + 默认 30 秒 terminationGrace，不保证业务保存或进程内存；VMI 未安装/未验证。 |
 | 容器和 VM 使用同一商业准入规则；不篡改 virt-launcher | **设计完成；运行未验收** | Resource 是 VM/容器商业权威；VM 通过同一 reservation/fencing 事务投影 Kueue quota；GPU/MIG/vGPU 依赖 #213/#214，真实设备验证前禁止共享容量上线；无 virt-launcher 修改。 |
-| 依赖、限定版本和失败处理明确后进入 #212 | **设计完成；实现和抢占产品决定仍阻塞** | Kueue v0.20.2/v1beta2、Workload owner、统一容量 projection、持久 60s/5m 字段、固定补偿 ledger 语义已明确；#212 仍需实现接口、CAS、对账、节点失联/fencing 和用户选择的抢占机制。
+| 依赖、限定版本和失败处理明确后进入 #212 | **设计完成；实现仍归 #212** | Kueue v0.20.2/v1beta2、Workload owner、统一 capacity projection、eviction-to-connect 5m、默认 30s termination grace、被动 UID/fencing 对账、退款与固定补偿 ledger 语义已明确；#212 仍需实现接口、CAS、对账、节点失联/fencing 和 native eviction integration。
 
 ## 替换和回滚
 
