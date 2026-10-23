@@ -58,7 +58,9 @@ async fn fixture() -> Result<(
             )?);
             ddl.push('\n');
         }
-        sqlx::raw_sql(&ddl).execute(&pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*ddl))
+            .execute(&pool)
+            .await?;
     }
     let store = PgResourceStore::new(pool.clone());
     let credits = PgCreditStore::new(pool.clone());
@@ -115,6 +117,8 @@ async fn rate(store: &PgResourceStore, from: UtcTimestamp, value: &str) -> Resul
                 gpu_class: None,
                 gpu_mode: None,
                 builder_binding: Some("synthetic-builder".into()),
+                model_binding: None,
+                max_preauthorization: None,
                 unit_price: Money {
                     currency: "CREDITS".into(),
                     amount: amount(value)?,
@@ -364,6 +368,8 @@ async fn missing_historical_price_keeps_known_time_and_one_unknown_deadline() ->
                 gpu_class: None,
                 gpu_mode: None,
                 builder_binding: Some("synthetic-builder".into()),
+                model_binding: None,
+                max_preauthorization: None,
                 unit_price: Money {
                     currency: "CREDITS".into(),
                     amount: amount("2.000000")?,

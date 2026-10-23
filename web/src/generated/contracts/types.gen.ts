@@ -4425,6 +4425,8 @@ export type CreateResourceRateRequestSchema = {
     effectiveUntil?: CreateResourceRateRequestSchemaUtcTimestamp | null;
     gpuClass?: string | null;
     gpuMode?: CreateResourceRateRequestSchemaGpuAllocationMode | null;
+    maxPreauthorization?: CreateResourceRateRequestSchemaFixedDecimal | null;
+    modelBinding?: string | null;
     unit: CreateResourceRateRequestSchemaResourceBillingUnit;
     unitPrice: CreateResourceRateRequestSchemaMoney;
     /**

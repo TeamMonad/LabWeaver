@@ -92,7 +92,9 @@ impl BuildBillingFixture {
                 )?);
                 ddl.push('\n');
             }
-            sqlx::raw_sql(&ddl).execute(&pool).await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(&*ddl))
+                .execute(&pool)
+                .await?;
         }
         let signing = rcgen::KeyPair::generate()?;
         let public = signing.public_key_raw();
@@ -219,6 +221,8 @@ impl BuildBillingFixture {
                     gpu_class: None,
                     gpu_mode: None,
                     builder_binding: Some(builder.into()),
+                    model_binding: None,
+                    max_preauthorization: None,
                     unit_price: contracts::resource::Money {
                         currency: "CREDITS".into(),
                         amount: contracts::resource::FixedDecimal::parse(value)?,

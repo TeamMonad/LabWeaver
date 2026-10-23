@@ -671,6 +671,8 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
                 &Uuid::now_v7().to_string(),
                 &CreateResourceRateRequest {
                     builder_binding: None,
+                    model_binding: None,
+                    max_preauthorization: None,
                     unit,
                     unit_quantity: 1,
                     gpu_class: None,
@@ -1752,6 +1754,8 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     .await?;
     let base_rate = |unit| CreateResourceRateRequest {
         builder_binding: None,
+        model_binding: None,
+        max_preauthorization: None,
         unit,
         unit_quantity: 1,
         gpu_class: None,
@@ -1780,6 +1784,8 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
             "environment-gpu-rate-gpu",
             &CreateResourceRateRequest {
                 builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
                 unit: ResourceBillingUnit::GpuUnitSecond,
                 unit_quantity: 1,
                 gpu_class: Some(catalog.class.clone()),
@@ -2333,6 +2339,8 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     };
     let rate_input = |unit, unit_quantity, amount| CreateResourceRateRequest {
         builder_binding: None,
+        model_binding: None,
+        max_preauthorization: None,
         unit,
         unit_quantity,
         gpu_class: None,
@@ -2745,6 +2753,8 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
             "billing-rate-cpu-1",
             &CreateResourceRateRequest {
                 builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -2787,6 +2797,8 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
             "billing-rate-cpu-2",
             &CreateResourceRateRequest {
                 builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -3041,6 +3053,8 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
 
     let rate_input = |unit, price| CreateResourceRateRequest {
         builder_binding: None,
+        model_binding: None,
+        max_preauthorization: None,
         unit,
         unit_quantity: 1,
         gpu_class: None,
@@ -3075,6 +3089,8 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
             "rate-end-replay",
             &CreateResourceRateRequest {
                 builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
                 unit: ResourceBillingUnit::GpuUnitSecond,
                 unit_quantity: 1,
                 gpu_class: Some("replay-gpu".to_owned()),
@@ -3312,6 +3328,8 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
             "rate-concurrent-create",
             &CreateResourceRateRequest {
                 builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
                 unit: ResourceBillingUnit::MemoryByteSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -3881,6 +3899,8 @@ async fn activate_synthetic_environment(
                         gpu_class,
                         gpu_mode,
                         builder_binding: None,
+                        model_binding: None,
+                        max_preauthorization: None,
                         unit_price: Money {
                             currency: "CREDITS".into(),
                             amount: FixedDecimal::zero(),
@@ -3956,6 +3976,8 @@ async fn activate_synthetic_environment(
                     gpu_class: rate.gpu_class,
                     gpu_mode: rate.gpu_mode,
                     builder_binding: rate.builder_binding,
+                    model_binding: rate.model_binding,
+                    max_preauthorization: rate.max_preauthorization,
                     unit_price: rate.unit_price,
                     effective_from: ended_from,
                     effective_until: Some(ended_until),
@@ -5299,6 +5321,8 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
             "bridge-rate",
             &CreateResourceRateRequest {
                 builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
                 unit: ResourceBillingUnit::CpuMillicoreSecond,
                 unit_quantity: 1,
                 gpu_class: None,
@@ -5750,6 +5774,8 @@ async fn estimated_cost_http_uses_signed_user_preview_and_exact_service_scope()
                 &Uuid::now_v7().to_string(),
                 &CreateResourceRateRequest {
                     builder_binding: None,
+                    model_binding: None,
+                    max_preauthorization: None,
                     unit,
                     unit_quantity: 1,
                     gpu_class: None,
@@ -5992,6 +6018,8 @@ async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::err
                     gpu_class: None,
                     gpu_mode: None,
                     builder_binding: None,
+                    model_binding: None,
+                    max_preauthorization: None,
                     unit_price: Money {
                         currency: "CREDITS".into(),
                         amount: FixedDecimal::parse(amount)?,

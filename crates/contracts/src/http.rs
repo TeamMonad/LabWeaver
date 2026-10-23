@@ -178,6 +178,10 @@ pub struct CreateResourceRateRequest {
     pub effective_until: Option<UtcTimestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builder_binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_preauthorization: Option<crate::resource::FixedDecimal>,
 }
 
 /// Closes one open immutable rate version at a future timestamp.

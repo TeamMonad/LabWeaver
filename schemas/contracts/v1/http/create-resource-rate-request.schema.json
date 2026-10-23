@@ -91,6 +91,22 @@
         }
       ]
     },
+    "maxPreauthorization": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "modelBinding": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "unit": {
       "$ref": "#/$defs/ResourceBillingUnit"
     },

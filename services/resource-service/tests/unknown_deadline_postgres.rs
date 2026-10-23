@@ -56,7 +56,9 @@ async fn fixture() -> Result<(
             ddl.push('\n');
         }
     }
-    sqlx::raw_sql(&ddl).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*ddl))
+        .execute(&pool)
+        .await?;
     let resource = PgResourceStore::new(pool.clone());
     let now = resource.current_time().await?;
     let project = ProjectId::new();

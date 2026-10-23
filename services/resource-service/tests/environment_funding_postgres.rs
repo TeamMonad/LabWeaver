@@ -74,7 +74,9 @@ async fn fixture_with_approval_seconds(
         )?);
         ddl.push('\n');
     }
-    sqlx::raw_sql(&ddl).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*ddl))
+        .execute(&pool)
+        .await?;
     let store = PgResourceStore::new(pool.clone()).with_environment_credit_owner(OWNER.into());
     let credits = PgCreditStore::new(pool.clone());
     let now = store.current_time().await?;
@@ -179,6 +181,8 @@ async fn prices_with_cpu_quantity(
                     gpu_class: None,
                     gpu_mode: None,
                     builder_binding: None,
+                    model_binding: None,
+                    max_preauthorization: None,
                     unit_price: Money {
                         currency: "CREDITS".into(),
                         amount: money(value)?,
@@ -504,6 +508,8 @@ async fn renewal_uses_new_rate_version_and_keeps_total_continuous_coverage() -> 
                 gpu_class: None,
                 gpu_mode: None,
                 builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
                 unit_price: Money {
                     currency: "CREDITS".into(),
                     amount: money("3.000000")?,

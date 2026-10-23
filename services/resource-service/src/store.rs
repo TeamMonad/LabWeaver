@@ -1581,7 +1581,7 @@ impl PgResourceStore {
                 .bind(input.gpu_class.as_deref())
                 .bind(gpu_mode.as_deref())
                 .bind(input.builder_binding.as_deref())
-                .bind(None::<&str>)
+                .bind(input.model_binding.as_deref())
                 .fetch_one(&mut *transaction)
                 .await?;
                 let revision = Revision::new(u64::try_from(revision_i64)?)?;
@@ -1603,8 +1603,8 @@ impl PgResourceStore {
                 .bind(input.gpu_class.as_deref())
                 .bind(gpu_mode.as_deref())
                 .bind(input.effective_from.get())
-                .bind(None::<&str>)
-                .bind(None::<&str>)
+                .bind(input.builder_binding.as_deref())
+                .bind(input.model_binding.as_deref())
                 .fetch_optional(&mut *transaction)
                 .await?;
                 let previous_open = previous_open
@@ -1661,7 +1661,7 @@ impl PgResourceStore {
                 .bind(input.effective_until.map(UtcTimestamp::get))
                 .bind(previous_open.as_ref().map(|rate| rate.id.as_uuid()))
                 .bind(input.builder_binding.as_deref())
-                .bind(None::<&str>)
+                .bind(input.model_binding.as_deref())
                 .fetch_one(&mut *transaction)
                 .await?;
                 if overlap {
@@ -1684,8 +1684,8 @@ impl PgResourceStore {
                 }
                 let rate = ResourceRate {
                     builder_binding: input.builder_binding.clone(),
-                    model_binding: None,
-                    max_preauthorization: None,
+                    model_binding: input.model_binding.clone(),
+                    max_preauthorization: input.max_preauthorization.clone(),
                     id: RateId::new(),
                     revision,
                     unit: input.unit,
