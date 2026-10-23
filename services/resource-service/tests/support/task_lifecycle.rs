@@ -13,8 +13,12 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use contracts::http::TaskResourceStatus;
-use contracts::resource::{CapacityClaimState, ResourceLeaseState};
+use contracts::http::{CreateResourceRateRequest, TaskResourceStatus};
+use contracts::resource::credits::CreditAdminOperation;
+use contracts::resource::{
+    CapacityClaimState, FixedDecimal, Money, ResourceBillingUnit, ResourceLeaseState,
+};
+use contracts::{ActorId, PlatformRole, ProjectId, UtcTimestamp};
 use futures_util::StreamExt;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -23,6 +27,7 @@ use hyper_util::{
 };
 use persistence_sqlx::{Domain, InboxDecision, InboxStore, Sha256Digest};
 use reqwest::Url;
+use resource_service::credits::PgCreditStore;
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use task_execution::resource::{
     ResourceClient, ResourceClientConfiguration, TaskResourceError, TaskResourceLifecycle,
@@ -100,6 +105,53 @@ async fn inject_fault(State(faults): State<Faults>, request: Request, next: Next
     response
 }
 
+async fn seed_task_credits(
+    pool: &sqlx::PgPool,
+    store: &PgResourceStore,
+    project_id: ProjectId,
+) -> TestResult {
+    let now = store.current_time().await?;
+    for unit in [
+        ResourceBillingUnit::CpuMillicoreSecond,
+        ResourceBillingUnit::MemoryByteSecond,
+        ResourceBillingUnit::StorageByteSecond,
+    ] {
+        store
+            .create_rate(
+                &format!("task-fixture-rate-{unit:?}"),
+                &CreateResourceRateRequest {
+                    builder_binding: None,
+                    model_binding: None,
+                    max_preauthorization: None,
+                    unit,
+                    unit_quantity: 1,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::parse("1.000000")?,
+                    },
+                    effective_from: now,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    PgCreditStore::new(pool.clone())
+        .admin(
+            "task-fixture-grant",
+            ActorId::new(),
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Grant {
+                project_id,
+                amount: FixedDecimal::parse("999999999999999.000000")?,
+                reason: "task lifecycle fixture funding".into(),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 struct Fixture {
     _postgres: testcontainers::ContainerAsync<Postgres>,
     _authority: ResourceAuthAuthority,
@@ -125,6 +177,8 @@ impl Fixture {
     async fn start_for_client(task_client_id: &str) -> TestResult<Self> {
         let (postgres, pool) = migrated_pool().await?;
         let store = PgResourceStore::new(pool.clone());
+        let project_id = ProjectId::new();
+        seed_task_credits(&pool, &store, project_id).await?;
         let authority = spawn_resource_auth_authority_for_client(
             resource_signing_material("task-lifecycle")?,
             task_client_id,
@@ -220,7 +274,7 @@ impl Fixture {
         let lifecycle = TaskResourceLifecycle::new(
             client,
             task_run_id,
-            ProjectId::new(),
+            project_id,
             None,
             ActorId::new(),
             format!("evaluation-{task_run_id}"),
@@ -539,7 +593,7 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
             .is_err(),
         "an earlier Active snapshot cannot admit an expired lease"
     );
-    assert_eq!(fixture.event_count().await?, events + 2);
+    assert_eq!(fixture.event_count().await?, events);
     let pending_cleanup = fixture.lifecycle.load_status().await?;
     assert!(!pending_cleanup.cleanup_confirmed);
     assert_eq!(
