@@ -379,4 +379,17 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn archive_is_only_available_to_owner_or_platform_admin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut context, _, project) = context()?;
+        context.project_memberships[1].object_role = ProjectObjectRole::Manager;
+        assert!(authorize_project_action(&context, project, ObjectAction::Archive).is_err());
+        context.project_memberships[1].object_role = ProjectObjectRole::Owner;
+        assert!(authorize_project_action(&context, project, ObjectAction::Archive).is_ok());
+        context.actor.roles = vec![PlatformRole::PlatformAdmin];
+        context.project_memberships.clear();
+        assert!(authorize_project_action(&context, project, ObjectAction::Archive).is_ok());
+        Ok(())
+    }
 }

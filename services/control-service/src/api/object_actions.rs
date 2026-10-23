@@ -53,6 +53,7 @@ pub(super) async fn available_actions(
         contracts::object_authorization::ObjectAction::ViewCosts,
         contracts::object_authorization::ObjectAction::RequestRuntimePermissions,
         contracts::object_authorization::ObjectAction::ManageRuntimePolicy,
+        contracts::object_authorization::ObjectAction::Archive,
     ] {
         if auth::object_authorization::authorize_project_action(&context, project_id, action)
             .is_ok()
