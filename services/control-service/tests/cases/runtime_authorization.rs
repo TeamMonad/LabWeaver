@@ -45,8 +45,10 @@ async fn progress(
 ) -> TestResult<PlatformConfigurationStatus> {
     let apply = state.latest_apply.as_ref().ok_or("no apply")?;
     let desired = configuration::get_version(pool, apply.desired_revision).await?;
+    let loaded = synthetic_loaded(&desired, &apply.encrypted_bundle_sha256)?;
     Ok(configuration::report(
         pool,
+        Some(&loaded),
         "synthetic-runtime-policy-executor",
         apply.id,
         &ReportPlatformConfigurationApplyRequest {
@@ -57,11 +59,45 @@ async fn progress(
                 .then_some(desired.configuration_sha256),
             observed_encrypted_bundle_sha256: (apply_stage == Stage::Succeeded)
                 .then_some(apply.encrypted_bundle_sha256.clone()),
+            control_replica_observations: None,
         },
         &IdempotencyKey::parse(key)?,
         now,
     )
     .await?)
+}
+
+fn synthetic_loaded(
+    version: &contracts::platform_configuration::PlatformConfigurationVersion,
+    encrypted_bundle_sha256: &str,
+) -> TestResult<control_service::platform_configuration::LoadedConfiguration> {
+    let directory = tempfile::tempdir()?;
+    let version_file = directory.path().join("version.json");
+    let source_file = directory.path().join("source.json");
+    std::fs::write(&version_file, serde_json::to_vec(version)?)?;
+    std::fs::write(
+        &source_file,
+        serde_json::to_vec(&serde_json::json!({
+            "apiVersion":"deploy.labweaver.io/loaded-source/v1",
+            "desiredRevision":version.revision,
+            "configurationSha256":version.configuration_sha256,
+            "encryptedBundleSha256":encrypted_bundle_sha256,
+            "installation":{"namespace":"synthetic-control", "releaseName":"synthetic"}
+        }))?,
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for file in [&version_file, &source_file] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(
+        control_service::platform_configuration::LoadedConfiguration::load(
+            &version_file,
+            &source_file,
+        )?,
+    )
 }
 
 fn encrypted_fixture() -> TestResult<Vec<u8>> {
@@ -312,6 +348,7 @@ pub(super) async fn assert_bindings_after_publication(
             gpu_allocation: None,
             state: CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };

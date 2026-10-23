@@ -3419,6 +3419,7 @@ export type AcceptMembershipInvitationSchemaRevision = number;
  */
 export type AddProjectMembershipRequestSchema = {
     expiresAt?: AddProjectMembershipRequestSchemaUtcTimestamp | null;
+    objectRole: ProjectObjectRole;
     role: AddProjectMembershipRequestSchemaPlatformRole;
     /**
      * Exact issuer username resolved by Access before the membership
@@ -3432,6 +3433,11 @@ export type AddProjectMembershipRequestSchema = {
  * Base role asserted by the configured OIDC issuer.
  */
 export type AddProjectMembershipRequestSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type ProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -4399,14 +4405,14 @@ export type CreateProblemPackageUploadRequestSchemaRevision = number;
 export type CreateProjectMembershipInvitationSchema = {
     expiresAt: CreateProjectMembershipInvitationSchemaUtcTimestamp;
     membershipExpiresAt?: CreateProjectMembershipInvitationSchemaUtcTimestamp | null;
-    objectRole: ProjectObjectRole;
+    objectRole: CreateProjectMembershipInvitationSchemaProjectObjectRole;
     username: string;
 };
 
 /**
  * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
  */
-export type ProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
+export type CreateProjectMembershipInvitationSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.

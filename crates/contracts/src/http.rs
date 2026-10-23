@@ -36,6 +36,7 @@ pub struct AddProjectMembershipRequest {
     /// browser request.
     pub username: String,
     pub role: PlatformRole,
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 
@@ -47,6 +48,7 @@ pub struct AddProjectMembershipRequest {
 pub struct ResolvedProjectMembershipRequest {
     pub actor_id: ActorId,
     pub role: PlatformRole,
+    pub object_role: crate::object_authorization::ProjectObjectRole,
     pub expires_at: Option<UtcTimestamp>,
 }
 

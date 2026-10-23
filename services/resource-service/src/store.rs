@@ -5981,6 +5981,7 @@ fn safe_sqlstate_value(code: Option<&str>) -> String {
 pub enum ResourceStoreError {
     #[error(transparent)]
     Credits(#[from] crate::credits::CreditError),
+    #[error(transparent)]
     RuntimeBinding(#[from] crate::runtime_authorization::RuntimeBindingError),
     #[error("LW_RESOURCE_NOT_FOUND")]
     NotFound,
