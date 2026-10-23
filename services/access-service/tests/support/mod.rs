@@ -31,10 +31,10 @@ pub async fn apply_access_migrations(pool: &PgPool) -> Result<(), Box<dyn Error>
         .execute(&mut *control_connection)
         .await?;
     for migration in &control.migrations {
-        sqlx::raw_sql(&MigrationCatalog::read_verified_sql(
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*MigrationCatalog::read_verified_sql(
             &migration_root,
             migration,
-        )?)
+        )?))
         .execute(&mut *control_connection)
         .await?;
     }
