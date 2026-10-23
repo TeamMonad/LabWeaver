@@ -402,7 +402,7 @@ async function runTerminalCudaProbeFromWorkspace(page, environmentId) {
       'LW_GPU_CAPACITY_ACCESS_GRANT_ACTIVE_TIMEOUT',
       120_000,
     )
-    await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
+    await page.getByRole('tab', { name: 'Web 控制台', exact: true }).click()
     const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端|立即签发授权并连接终端/ })
     let consoleState = null
     await expect.poll(async () => {

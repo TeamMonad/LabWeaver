@@ -151,7 +151,7 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   await expect(environmentIdDetails).toBeVisible({ timeout: 120_000 })
   await environmentIdDetails.locator('summary').click()
   await expect(environmentIdDetails.locator('code')).toHaveText(environmentId, { timeout: 30_000 })
-  await expect(page.getByRole('button', { name: '概览与访问', exact: true })).toBeVisible()
+  await expect(page.getByRole('tab', { name: '概览与访问', exact: true })).toBeVisible()
   const grantButton = page.getByRole('button', { name: '签发访问授权', exact: true })
   const grantCard = page.locator('.grant-card')
   await expect.poll(
@@ -180,7 +180,7 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
       terminalFrames.push(typeof payload === 'string' ? payload : Buffer.from(payload).toString('utf8'))
     })
   })
-  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
+  await page.getByRole('tab', { name: 'Web 控制台', exact: true }).click()
   const consolePanel = page.locator('.console-panel')
   await expect(consolePanel).toBeVisible({ timeout: 120_000 })
   const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
@@ -194,7 +194,7 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
 }
 
 async function editThroughTerminal({ page, input, terminalFrames }) {
-  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
+  await page.getByRole('tab', { name: 'Web 控制台', exact: true }).click()
   const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端|立即签发授权并连接终端/ })
   if (await reconnect.count() > 0) {
     await expect(reconnect).toBeEnabled({ timeout: 120_000 })
@@ -266,6 +266,56 @@ async function closeExperimentEnvironment(page, projectId, environmentId) {
   })
 }
 
+const TASK_STAGES = ['queued', 'approval', 'running', 'result']
+
+/**
+ * While the submission has no result yet, the environment page links to it
+ * and a second tab ("leave and come back") shows the server stage of the same
+ * submission without a percentage. The environment page stays open so the
+ * freeze flow continues untouched.
+ */
+async function expectSubmissionProgressShown(page, projectId, submissionId) {
+  const tracking = page.locator('[data-testid="submission-tracking"]')
+  await expect(tracking).toBeVisible({ timeout: 120_000 })
+  await expect(tracking.locator('[aria-current="step"]')).toHaveCount(1, { timeout: 120_000 })
+  const href = await tracking.getByRole('link').getAttribute('href')
+  if (!href) throw new Error('REAL_EXPERIMENT_SUBMISSION_TRACKING_LINK_MISSING')
+  const target = new URL(href, page.url())
+  expect(target.searchParams.get('projectId')).toBe(projectId)
+  expect(target.searchParams.get('submissionId')).toBe(submissionId)
+
+  const progressPath = `/api/v1/projects/${projectId}/me/evaluation-tasks/submissions/${submissionId}`
+  const second = await page.context().newPage()
+  try {
+    const progressRead = second.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return response.request().method() === 'GET' && url.pathname === progressPath
+    }, { timeout: 120_000 })
+    await second.goto(`${target.pathname}${target.search}`, { waitUntil: 'domcontentloaded' })
+    const response = await progressRead
+    if (![200, 404].includes(response.status())) {
+      throw new Error(`REAL_EXPERIMENT_EVALUATION_TASK_PROGRESS_STATUS:${response.status()}`)
+    }
+    if (target.pathname.startsWith('/student/results/')) {
+      // The link names a run only after the server mapped the submission to it.
+      const body = await response.json()
+      expect(target.pathname).toBe(`/student/results/${body.runId}`)
+      await expect(second.locator('[data-testid="evaluation-in-progress"], [data-testid="evaluation-outcome"]'))
+        .toHaveCount(1, { timeout: 120_000 })
+    } else {
+      const card = second.locator(`[data-testid="pending-submissions"] [data-submission-id="${submissionId}"]`)
+      // The result may already have arrived; otherwise the waiting card shows a server stage.
+      if (await card.count() > 0) {
+        await expect(card).toHaveClass(/result-card--highlight/)
+        expect(TASK_STAGES).toContain(await card.locator('[aria-current="step"]').getAttribute('data-stage'))
+        await expect(card).not.toContainText('%')
+      }
+    }
+  } finally {
+    await second.close()
+  }
+}
+
 async function continueStudentAcceptance({ browser, teacherPage, baseURL, projectId, publication }) {
   let studentContext
   let studentPage
@@ -308,6 +358,9 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     await assertNoPendingEvaluationTaskResourceRequests(adminPage.request, projectId, studentActorId)
     const afterRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, projectId)
     const after = await freezeStudentSourceByUi(studentPage, projectId, environmentId)
+    // Before any approval: the environment page and the results page show the
+    // server stage of this submission, not a guess and not a percentage.
+    await expectSubmissionProgressShown(studentPage, projectId, after.id)
     const afterResult = await waitForProjectEvaluationResultWithResourceApproval({
       request: studentContext.request,
       adminPage,
@@ -318,6 +371,12 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     })
     expect(afterResult.awardedScore).toBeGreaterThan(beforeResult.awardedScore)
     expect(afterResult.awardedScore).toBe(afterResult.maxScore)
+    // The progress read for the submission resolves to the same run that produced the result.
+    const afterTask = await expectJson(
+      await studentContext.request.get(`/api/v1/projects/${projectId}/me/evaluation-tasks/submissions/${after.id}`),
+      'REAL_EXPERIMENT_EVALUATION_TASK_READ_FAILED',
+    )
+    expect(afterTask).toMatchObject({ runId: afterResult.runId, projectId, state: 'succeeded' })
     const advisory = afterResult.steps.find((step) => step.role === 'advisory')
     expect(advisory).toMatchObject({
       role: 'advisory',
@@ -341,19 +400,25 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
       (url) => url.pathname === '/student/results' && url.searchParams.get('projectId') === projectId,
     )
     await expect(studentPage.getByRole('heading', { name: '\u8bc4\u6d4b\u7ed3\u679c', exact: true })).toBeVisible()
-    const afterResultCard = studentPage.locator('.result-card').filter({ hasText: afterResult.runId })
+    // The submission has a result, so it is no longer listed as in progress.
+    const pendingCard = studentPage.locator(`[data-testid="pending-submissions"] [data-submission-id="${after.id}"]`)
+    await expect(pendingCard).toHaveCount(0, { timeout: 120_000 })
+    const afterResultCard = studentPage.locator(`.result-card[data-run-id="${afterResult.runId}"]`)
     await expect(afterResultCard).toHaveCount(1, { timeout: 120_000 })
-    await expect(afterResultCard.locator('.state-chip--succeeded')).toHaveCount(1)
+    await expect(afterResultCard.locator('.outcome-chip')).toHaveText('评测完成')
     await expect(afterResultCard.locator('.result-score')).toHaveText(`${afterResult.awardedScore} / ${afterResult.maxScore}`)
-    await expect(afterResultCard.locator('.result-time')).toBeVisible()
+    await expect(afterResultCard.locator('.result-card__meta')).toContainText('完成于')
     const resultLink = afterResultCard.locator('.result-link')
-    await expect(resultLink).toHaveText(afterResult.runId)
+    await expect(resultLink).not.toHaveText(afterResult.runId)
     await resultLink.click()
     await expect(studentPage).toHaveURL(
       (url) => url.pathname === `/student/results/${afterResult.runId}`
         && url.searchParams.get('projectId') === projectId,
     )
-    await expect(studentPage.getByRole('heading', { name: '\u8bc4\u6d4b\u8be6\u60c5', exact: true })).toBeVisible()
+    await expect(studentPage.locator('.eyebrow')).toHaveText('评测详情')
+    await expect(studentPage.locator('[data-testid="evaluation-outcome"] .outcome-card__score')).toHaveText(
+      `${afterResult.awardedScore} / ${afterResult.maxScore}`,
+    )
     await expect(studentPage.locator('.goal-review')).toBeVisible({ timeout: 120_000 })
     await studentPage.locator('a.back-link').click()
     await expect(studentPage).toHaveURL(

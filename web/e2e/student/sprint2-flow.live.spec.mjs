@@ -670,7 +670,7 @@ async function assertConnectionBlockedAfterLeaseRevoke(page, projectId, environm
 
   await expect(page.getByText('此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。', { exact: true })).toBeVisible({ timeout: 120_000 })
   await expect(createButton).toHaveCount(0)
-  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
+  await page.getByRole('tab', { name: 'Web 控制台', exact: true }).click()
   await expect(page.getByRole('button', { name: '立即签发授权并连接终端', exact: true })).toHaveCount(0)
   return authoritativeEnvironment
 }
@@ -1459,7 +1459,7 @@ test('student provisions a Work environment, configures it, and releases its cap
       state: 'succeeded',
     })
     await page.reload({ waitUntil: 'domcontentloaded' })
-    const operationsTab = page.getByRole('button', { name: '异步操作与诊断', exact: true })
+    const operationsTab = page.getByRole('tab', { name: '异步操作与诊断', exact: true })
     await expect(operationsTab).toBeVisible({ timeout: 120_000 })
     await operationsTab.click()
     const operationTimelineHeading = page.getByRole('heading', { name: '操作与诊断时间线', exact: true })

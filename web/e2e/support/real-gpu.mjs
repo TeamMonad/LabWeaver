@@ -164,7 +164,7 @@ export async function issueAccessGrantAndConnect(page, projectId, environmentId,
     'LAB_EXPERIMENT_ACCESS_GRANT_ACTIVE_TIMEOUT',
     120_000,
   )
-  const consoleTab = page.getByRole('button', { name: 'Web 控制台', exact: true })
+  const consoleTab = page.getByRole('tab', { name: 'Web 控制台', exact: true })
   await expect(consoleTab).toBeEnabled({ timeout: 120_000 })
   await consoleTab.click()
   const reconnect = page.getByRole('button', { name: /^(?:重新连接终端|重新签发授权并连接终端)$/ })
@@ -267,7 +267,7 @@ export async function typeTerminalCommand(page, input, frames, command, marker) 
   const firstFrame = frames.length
   const uniqueMarker = `${marker}-${uuidv7()}`
   const lines = terminalCommandLines(command, uniqueMarker)
-  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
+  await page.getByRole('tab', { name: 'Web 控制台', exact: true }).click()
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
   await host.click()

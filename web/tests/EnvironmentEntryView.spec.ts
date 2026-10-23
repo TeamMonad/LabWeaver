@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { h } from 'vue'
 import { createRouter, createWebHistory, RouterView } from 'vue-router'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
 import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
 import { useProjects } from '@/composables/useProjects'
+import { useAuth } from '@/composables/useAuth'
 import {
   listEnvironmentTemplateReleases,
   listProjects,
@@ -26,7 +27,10 @@ import {
   getFrozenSubmission,
   listConsoleCapabilities,
   createAccessGrant,
+  getOwnProjectEvaluationTaskForSubmission,
+  getOwnProjectEvaluationResult,
 } from '@/generated/contracts'
+import { rememberSubmission } from '@/utils/trackedSubmissions'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -46,6 +50,8 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     startEnvironment: vi.fn(),
     freezeSubmission: vi.fn(),
     getFrozenSubmission: vi.fn(),
+    getOwnProjectEvaluationTaskForSubmission: vi.fn(),
+    getOwnProjectEvaluationResult: vi.fn(),
     stopEnvironment: vi.fn(),
     restartEnvironment: vi.fn(),
     deleteEnvironment: vi.fn(),
@@ -236,6 +242,16 @@ async function mountAt(
 
 const mountedWrappers: Array<{ unmount: () => void }> = []
 
+/** Signs a student in (or out with `null`) through the real auth state. */
+function signIn(actorId: string | null) {
+  useAuth().user.value = actorId ? { expired: false, profile: { actor_id: actorId, roles: ['student'] } } : null
+}
+
+/** Opens a detail tab the way a pointer does: Reka tabs activate on the primary-button press. */
+async function openTab(wrapper: VueWrapper, label: string) {
+  await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes(label))!.trigger('mousedown', { button: 0 })
+}
+
 describe('EnvironmentEntryView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -248,7 +264,16 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined as never })
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
     vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['xterm']), error: undefined as never } as never)
-    window.localStorage.clear()
+    vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue({
+      data: undefined,
+      error: { status: 404, diagnosticCode: 'LW_EVALUATION_RUN_NOT_FOUND', detail: 'missing' },
+    } as never)
+    // resetAllMocks also resets the shared localStorage stubs; give each test a working store.
+    const stored = new Map<string, string>()
+    vi.mocked(window.localStorage.getItem).mockImplementation((key) => stored.get(key) ?? null)
+    vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => { stored.set(key, value) })
+    vi.mocked(window.localStorage.removeItem).mockImplementation((key) => { stored.delete(key) })
+    signIn('student-1')
   })
 
   afterEach(() => {
@@ -657,7 +682,7 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, true)
     await vi.waitFor(() => expect(wrapper.text()).toContain('教师可管理环境'))
 
-    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    await openTab(wrapper, 'Web 控制台')
     await vi.waitFor(() => expect(wrapper.text()).toContain('冻结提交处理中，终端已暂时断开'))
     expect(wrapper.find('.freeze-section').exists()).toBe(false)
     expect(wrapper.text()).toContain('查看操作状态')
@@ -916,7 +941,7 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    await openTab(wrapper, 'Web 控制台')
     const pane = wrapper.get('.console-unauthorized-pane')
     expect(pane.text()).toContain(hint)
     expect(pane.text()).not.toContain('一键签发')
@@ -1130,14 +1155,14 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
 
-    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await openTab(wrapper, '实验提交与凭据')
     await vi.waitFor(() => expect(wrapper.text()).toContain('冻结中'))
     expect(wrapper.text()).toContain('不可变快照')
     const resultsLink = wrapper.find('a[href^="/student/results"]')
     expect(resultsLink.exists()).toBe(true)
     expect(resultsLink.attributes('href')).toContain('/student/results?projectId=project-2')
 
-    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    await openTab(wrapper, 'Web 控制台')
     expect(wrapper.text()).toContain('冻结提交处理中，终端已暂时断开')
     expect(wrapper.text()).toContain('查看提交状态')
   })
@@ -1179,7 +1204,7 @@ describe('EnvironmentEntryView', () => {
 
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await openTab(wrapper, '实验提交与凭据')
 
     const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
     await vi.waitFor(() => expect(startButton.attributes('disabled')).toBeUndefined())
@@ -1193,7 +1218,7 @@ describe('EnvironmentEntryView', () => {
     await vi.waitFor(() => expect(vi.mocked(freezeSubmission)).toHaveBeenCalledTimes(1))
     await vi.waitFor(() => expect(wrapper.find('.evidence-card').exists()).toBe(true))
 
-    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    await openTab(wrapper, 'Web 控制台')
     expect(wrapper.text()).toContain('冻结完成，终端连接已断开')
     expect(wrapper.text()).toContain('重新签发授权并连接终端')
 
@@ -1222,7 +1247,7 @@ describe('EnvironmentEntryView', () => {
 
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await openTab(wrapper, '实验提交与凭据')
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('此版本未配置提交评测'))
     const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
@@ -1251,12 +1276,245 @@ describe('EnvironmentEntryView', () => {
 
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await openTab(wrapper, '实验提交与凭据')
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('当前环境所用版本已撤回'))
     const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
     expect(startButton.attributes('disabled')).toBeDefined()
     expect(freezeSubmission).not.toHaveBeenCalled()
+  })
+
+  function frozenSubmission(id: string, extra: Record<string, unknown> = {}) {
+    return {
+      data: {
+        id,
+        projectId: 'project-1',
+        actorId: 'student-1',
+        environment: { environmentId: 'env-1', environmentRevision: 12, releaseId: 'rel-1', releaseVersion: 1, runtimeKind: 'container' },
+        object: { artifactId: 'artifact-1', mediaType: 'application/tar', objectVersion: 'object-version-1', sizeBytes: 123, storeBinding: 'evaluation-store' },
+        contentSha256: 'b'.repeat(64),
+        frozenAt: '2026-07-11T10:10:00.000Z',
+        ...extra,
+      },
+      error: undefined,
+    } as never
+  }
+
+  function runProgress(state: string, phase: string, extra: Record<string, unknown> = {}) {
+    return {
+      data: {
+        runId: 'run-1', projectId: 'project-1', revision: 2, state, page: 1, pageSize: 20, hasMore: false, history: [],
+        current: [{ stepRunId: 'step-1', progress: { attempt: 1, phase, nextSteps: [], ...extra } }],
+      },
+      error: undefined,
+    } as never
+  }
+
+  it('remembers only the identifier of a new submission and shows its progress', async () => {
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [{ ...mockRelease, submissionManifest: mockSubmissionManifest }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(freezeSubmission).mockResolvedValue({
+      data: {
+        environmentId: 'env-1',
+        operationId: 'freeze-op-1',
+        revision: 12,
+        statusUrl: '/api/v1/projects/project-1/frozen-submissions/00000000-0000-7000-8000-000000000001',
+      },
+      error: undefined as never,
+    } as never)
+    vi.mocked(getFrozenSubmission).mockResolvedValue(frozenSubmission('00000000-0000-7000-8000-000000000001'))
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await openTab(wrapper, '实验提交与凭据')
+    const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
+    await vi.waitFor(() => expect(startButton.attributes('disabled')).toBeUndefined())
+    await startButton.trigger('click')
+    await wrapper.get('[role="dialog"]').findAll('button').find((button) => button.text() === '确认冻结')!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="submission-tracking"]').exists()).toBe(true))
+    const tracking = wrapper.get('[data-testid="submission-tracking"]')
+    await vi.waitFor(() => expect(tracking.text()).toContain('平台还没有为它创建评测'))
+    expect(getOwnProjectEvaluationTaskForSubmission).toHaveBeenCalledWith({
+      path: { projectId: 'project-1', submissionId: '00000000-0000-7000-8000-000000000001' },
+    })
+    expect(tracking.get('[aria-current="step"]').attributes('data-stage')).toBe('queued')
+    expect(tracking.get('a').attributes('href')).toBe('/student/results?projectId=project-1&submissionId=00000000-0000-7000-8000-000000000001')
+    // Only identifiers are stored, under the signed-in actor; names, times and states come from the server.
+    expect(JSON.parse(localStorage.getItem('labweaver_submissions:student-1') ?? '{}')).toEqual({
+      'project-1': ['00000000-0000-7000-8000-000000000001'],
+    })
+  })
+
+  it('shows the server stage of the latest submission and links to its evaluation', async () => {
+    rememberSubmission('student-1', 'project-1', 'submission-1')
+    mockEnvironmentInstance()
+    vi.mocked(getFrozenSubmission).mockResolvedValue(frozenSubmission('submission-1'))
+    vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue(runProgress('running', 'waiting_resource_approval', { resourceRequestId: 'request-1', resourceState: 'reviewing' }))
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await openTab(wrapper, '实验提交与凭据')
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="submission-tracking"]').text()).toContain('评测所需资源正在等待审批'))
+    const tracking = wrapper.get('[data-testid="submission-tracking"]')
+    expect(tracking.get('[aria-current="step"]').attributes('data-stage')).toBe('approval')
+    expect(tracking.get('[data-stage="submitted"]').text()).toContain('保存于')
+    expect(tracking.get('a').attributes('href')).toBe('/student/results/run-1?projectId=project-1&submissionId=submission-1')
+    expect(tracking.text()).not.toMatch(/%/)
+  })
+
+  it('shows nothing for a remembered submission until the server returns it to this student', async () => {
+    rememberSubmission('student-1', 'project-1', 'submission-1')
+    mockEnvironmentInstance()
+    vi.mocked(getFrozenSubmission).mockResolvedValue({ data: undefined, error: { status: 503, diagnosticCode: 'LW_X', detail: 'x', retryable: true } } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await openTab(wrapper, '实验提交与凭据')
+    await vi.waitFor(() => expect(getFrozenSubmission).toHaveBeenCalled())
+    await flushPromises()
+    expect(wrapper.find('[data-testid="submission-tracking"]').exists()).toBe(false)
+    expect(getOwnProjectEvaluationTaskForSubmission).not.toHaveBeenCalled()
+    // A failed read is not a refusal: the identifier stays for the next visit.
+    expect(JSON.parse(localStorage.getItem('labweaver_submissions:student-1') ?? '{}')).toEqual({ 'project-1': ['submission-1'] })
+  })
+
+  it('drops a remembered submission the server refuses or attributes to another student', async () => {
+    rememberSubmission('student-1', 'project-1', 'submission-foreign')
+    rememberSubmission('student-1', 'project-1', 'submission-refused')
+    mockEnvironmentInstance()
+    vi.mocked(getFrozenSubmission).mockImplementation(async (options) => (options.path.submissionId === 'submission-refused'
+      ? { data: undefined, error: { status: 403, diagnosticCode: 'LW_FORBIDDEN', detail: 'no' } }
+      : frozenSubmission('submission-foreign', { actorId: 'student-2' })) as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await openTab(wrapper, '实验提交与凭据')
+    await vi.waitFor(() => expect(localStorage.getItem('labweaver_submissions:student-1')).toBeNull())
+    expect(wrapper.find('[data-testid="submission-tracking"]').exists()).toBe(false)
+    expect(getOwnProjectEvaluationTaskForSubmission).not.toHaveBeenCalled()
+  })
+
+  it('does not show the previous student\'s submissions after another student signs in on the same browser', async () => {
+    rememberSubmission('student-1', 'project-1', 'submission-1')
+    signIn(null)
+    signIn('student-2')
+    mockEnvironmentInstance()
+    vi.mocked(getFrozenSubmission).mockResolvedValue(frozenSubmission('submission-1', { actorId: 'student-2' }))
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await openTab(wrapper, '实验提交与凭据')
+    await flushPromises()
+    expect(localStorage.getItem('labweaver_submissions:student-1')).toBeNull()
+    expect(getFrozenSubmission).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="submission-tracking"]').exists()).toBe(false)
+  })
+
+  it('keeps reading the result after the run ends until the result becomes visible', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    rememberSubmission('student-1', 'project-1', 'submission-1')
+    mockEnvironmentInstance()
+    vi.mocked(getFrozenSubmission).mockResolvedValue(frozenSubmission('submission-1'))
+    vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue(runProgress('succeeded', 'succeeded'))
+    vi.mocked(getOwnProjectEvaluationResult)
+      .mockResolvedValueOnce({ data: undefined, error: { status: 404, diagnosticCode: 'LW_EVALUATION_RUN_NOT_FOUND', detail: 'missing' } } as never)
+      .mockResolvedValueOnce({ data: undefined, error: { status: 503, diagnosticCode: 'LW_EVALUATION_UNAVAILABLE', detail: 'down', retryable: true } } as never)
+      .mockResolvedValue({
+        data: {
+          runId: 'run-1', projectId: 'project-1', courseId: null, releaseId: 'rel-1', frozenSubmissionId: 'submission-1', revision: 1,
+          state: 'succeeded', awardedScore: 8, maxScore: 10, createdAt: '2026-07-11T10:10:00.000Z', updatedAt: '2026-07-11T10:20:00.000Z',
+          completedAt: '2026-07-11T10:20:00.000Z', steps: [],
+        },
+        error: undefined,
+      } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await openTab(wrapper, '实验提交与凭据')
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="submission-tracking"]').text()).toContain('评测已结束，正在读取结果'))
+    expect(getOwnProjectEvaluationResult).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flushPromises()
+    expect(getOwnProjectEvaluationResult).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="submission-tracking"]').text()).toContain('评测已结束，正在读取结果')
+
+    await vi.advanceTimersByTimeAsync(15_000)
+    await flushPromises()
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="submission-tracking"]').text()).toContain('8'))
+    expect(wrapper.get('[data-testid="submission-tracking"]').text()).not.toContain('正在读取结果')
+    const calls = vi.mocked(getOwnProjectEvaluationResult).mock.calls.length
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(vi.mocked(getOwnProjectEvaluationResult).mock.calls.length).toBe(calls)
+  })
+
+  it.each([
+    ['a refusal', { status: 403, diagnosticCode: 'LW_EVALUATION_RESULT_FORBIDDEN', detail: '当前账号无权读取这次评测的结果。', retryable: false }],
+    ['a non-retryable server failure', { status: 500, diagnosticCode: 'LW_EVALUATION_RESULT_CORRUPT', detail: '评测结果记录损坏，无法读取。', retryable: false }],
+  ])('stops reading the result after %s and explains it before the code', async (_label, problem) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    rememberSubmission('student-1', 'project-1', 'submission-1')
+    mockEnvironmentInstance()
+    vi.mocked(getFrozenSubmission).mockResolvedValue(frozenSubmission('submission-1'))
+    vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue(runProgress('succeeded', 'succeeded'))
+    vi.mocked(getOwnProjectEvaluationResult)
+      .mockResolvedValueOnce({ data: undefined, error: { status: 404, diagnosticCode: 'LW_EVALUATION_RUN_NOT_FOUND', detail: 'missing' } } as never)
+      .mockResolvedValue({ data: undefined, error: problem } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await openTab(wrapper, '实验提交与凭据')
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="submission-tracking"]').text()).toContain('评测已结束，正在读取结果'))
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flushPromises()
+    const tracking = wrapper.get('[data-testid="submission-tracking"]')
+    await vi.waitFor(() => expect(tracking.find('[data-testid="submission-result-failure"]').exists()).toBe(true))
+    expect(tracking.text()).toContain('无法读取结果，页面已停止自动更新')
+    expect(tracking.text()).not.toContain('正在读取结果')
+    const banner = tracking.get('[data-testid="submission-result-failure"]').text()
+    expect(banner).toContain(problem.diagnosticCode)
+    expect(banner.indexOf(problem.detail)).toBeGreaterThanOrEqual(0)
+    expect(banner.indexOf(problem.detail)).toBeLessThan(banner.indexOf(problem.diagnosticCode))
+
+    const calls = vi.mocked(getOwnProjectEvaluationResult).mock.calls.length
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(vi.mocked(getOwnProjectEvaluationResult).mock.calls.length).toBe(calls)
+  })
+
+  it('exposes the detail sections as an accessible tab list', async () => {
+    mockEnvironmentInstance()
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    const tablist = wrapper.get('[role="tablist"]')
+    expect(tablist.attributes('aria-label')).toBe('环境资源详情')
+    const tabs = tablist.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toEqual(['概览与访问', 'Web 控制台', '异步操作与诊断', '实验提交与凭据'].map((label) => expect.stringContaining(label)))
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    const panel = wrapper.get(`#${tabs[0].attributes('aria-controls')}`)
+    expect(panel.attributes('role')).toBe('tabpanel')
+    await openTab(wrapper, '实验提交与凭据')
+    expect(tabs[3].attributes('aria-selected')).toBe('true')
+    // Inactive panels stay mounted so an open console session is not torn down.
+    expect(panel.attributes('hidden')).toBeDefined()
+    expect(wrapper.findAll('[role="tabpanel"]').length).toBe(4)
+  })
+
+  it('activates a detail tab from the keyboard', async () => {
+    mockEnvironmentInstance()
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    const tabs = () => wrapper.findAll('[role="tab"]')
+    await tabs()[2].trigger('keydown', { key: 'Enter' })
+    expect(tabs()[2].attributes('aria-selected')).toBe('true')
+    expect(wrapper.get(`#${tabs()[2].attributes('aria-controls')}`).attributes('hidden')).toBeUndefined()
+    await tabs()[1].trigger('keydown', { key: ' ' })
+    expect(tabs()[1].attributes('aria-selected')).toBe('true')
+    expect(tabs()[2].attributes('aria-selected')).toBe('false')
   })
 
   it('reuses the freeze idempotency key when a retryable submission error is retried', async () => {
@@ -1296,7 +1554,7 @@ describe('EnvironmentEntryView', () => {
 
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await openTab(wrapper, '实验提交与凭据')
     await vi.waitFor(() => expect(wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')?.attributes('disabled')).toBeUndefined())
     await wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!.trigger('click')
     await wrapper.get('[role="dialog"]').findAll('button').find((button) => button.text() === '确认冻结')!.trigger('click')
@@ -1522,7 +1780,7 @@ describe('EnvironmentEntryView', () => {
       await wrapper.get('[data-testid="connection-summary"]').findAll('button').find((button) => button.text() === '签发授权并连接')!.trigger('click')
 
       await vi.waitFor(() => expect(readiness(wrapper)).toBe('ready'))
-      await vi.waitFor(() => expect(wrapper.get('.detail-tab--active').text()).toContain('Web 控制台'))
+      await vi.waitFor(() => expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain('Web 控制台'))
       const panel = wrapper.findComponent({ name: 'ConsolePanel' })
       expect(panel.exists()).toBe(true)
       expect(panel.props('kind')).toBe('novnc')
@@ -1540,7 +1798,7 @@ describe('EnvironmentEntryView', () => {
       await wrapper.get('[data-testid="connection-summary"]').findAll('button').find((button) => button.text() === '签发授权并连接')!.trigger('click')
 
       await vi.waitFor(() => expect(wrapper.get('[data-testid="console-capability-hint"]').text()).toContain('没有浏览器终端或桌面'))
-      expect(wrapper.get('.detail-tab--active').text()).toContain('概览与访问')
+      expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain('概览与访问')
       expect(methodIds(wrapper)).toEqual(['ssh'])
     })
 

@@ -349,23 +349,13 @@ import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } fro
 import type { OrganizationUser, ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
 import { environmentStateLabel, membershipStateLabel, projectRoleLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
-import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
+import { actorIdFromProfile, hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const route = useRoute()
 const router = useRouter()
 const projects = useProjects()
 const auth = useAuth()
 const currentRoles = computed(() => rolesFromProfile(auth.user.value?.profile))
-
-function actorIdFromProfile(profile: unknown): string | null {
-  if (!profile || typeof profile !== 'object') return null
-  const claims = profile as Record<string, unknown>
-  for (const key of ['actor_id', 'actorId', 'sub']) {
-    const value = claims[key]
-    if (typeof value === 'string' && value.trim()) return value.trim()
-  }
-  return null
-}
 
 const currentActorId = computed(() => actorIdFromProfile(auth.user.value?.profile))
 const routeProjectId = computed(() => {
