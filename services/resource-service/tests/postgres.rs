@@ -3402,6 +3402,20 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
             .all(|request| request.requester_id == member)
     );
     assert!(member_first.next_cursor.is_some());
+    let mut tampered_cursor = member_first.next_cursor.clone().expect("cursor");
+    let last = tampered_cursor.pop().expect("non-empty cursor");
+    tampered_cursor.push(if last == 'A' { 'B' } else { 'A' });
+    let tampered = store
+        .list_project_requests_page(
+            project_id,
+            Some(member),
+            &ResourceRequestListQuery {
+                cursor: Some(tampered_cursor),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(tampered, Err(ResourceStoreError::InvalidCursor)));
 
     let non_member = store
         .list_project_requests_page(project_id, Some(ActorId::new()), &query)
@@ -4109,7 +4123,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}"
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -4130,7 +4144,8 @@ async fn migrated_pool()
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
-        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql")
+        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql"),
+        include_str!("../../../migrations/resource/0017_project_request_pagination_indexes.sql")
     )))
     .execute(&pool)
     .await?;

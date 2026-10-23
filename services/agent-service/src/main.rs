@@ -311,7 +311,10 @@ async fn run_agent_service() -> Result<(), StartupError> {
         .connect(&read_trimmed(&deployment.database_url_file)?)
         .await?;
     verify_schema(&pool).await?;
-    let store = PostgresAgentRunStore::new(pool.clone());
+    let cursor_signing_key =
+        read_secret_bytes(required_path("LABWEAVER_CURSOR_SIGNING_KEY_FILE")?)?;
+    let store =
+        PostgresAgentRunStore::new(pool.clone()).with_cursor_signing_key(cursor_signing_key);
     let generated_artifacts = GeneratedArtifactStore::new(pool.clone());
     let llm_reviews = LlmReviewStore::new(pool.clone());
     let build_store = PgBuildStore::new(pool);
@@ -1118,6 +1121,13 @@ fn read_trimmed(path: &str) -> Result<String, StartupError> {
         return Err(StartupError::Configuration);
     }
     Ok(value.to_owned())
+}
+fn read_secret_bytes(path: std::path::PathBuf) -> Result<Vec<u8>, StartupError> {
+    let value = std::fs::read(path)?;
+    if value.len() < 32 {
+        return Err(StartupError::Configuration);
+    }
+    Ok(value)
 }
 
 async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {

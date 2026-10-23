@@ -38,10 +38,13 @@ use persistence_sqlx::{
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::cmp::{max, min};
 use std::collections::BTreeSet;
 use std::str::FromStr;
+use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 use crate::capacity::GpuCatalogSeed;
 use crate::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
@@ -220,6 +223,7 @@ impl PendingAllocation {
 #[derive(Clone)]
 pub struct PgResourceStore {
     pool: PgPool,
+    cursor_signing_key: Arc<Vec<u8>>,
 }
 
 struct UsageAuthority<'a> {
@@ -243,6 +247,13 @@ struct ResourceRequestCursor {
     request_id: ResourceRequestId,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignedResourceRequestCursor {
+    cursor: ResourceRequestCursor,
+    signature: String,
+}
+
 fn request_state_wire(state: ResourceRequestState) -> Result<String, ResourceStoreError> {
     serde_json::to_value(state)
         .map_err(|_| ResourceStoreError::InvalidCursor)?
@@ -260,8 +271,47 @@ fn request_states(
     )
 }
 
-fn encode_request_cursor(cursor: &ResourceRequestCursor) -> Result<String, ResourceStoreError> {
-    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor)?);
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0_u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(Sha256::digest(key).as_slice());
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = [0x36_u8; 64];
+    let mut outer = [0x5c_u8; 64];
+    for index in 0..64 {
+        inner[index] ^= block[index];
+        outer[index] ^= block[index];
+    }
+    let mut inner_hash = Sha256::new();
+    inner_hash.update(inner);
+    inner_hash.update(message);
+    let mut result = Sha256::new();
+    result.update(outer);
+    result.update(inner_hash.finalize());
+    result.finalize().into()
+}
+
+fn encode_request_cursor(
+    cursor: &ResourceRequestCursor,
+    key: &[u8],
+) -> Result<String, ResourceStoreError> {
+    let payload = serde_json::to_vec(cursor)?;
+    let signed = SignedResourceRequestCursor {
+        cursor: ResourceRequestCursor {
+            version: cursor.version,
+            project_id: cursor.project_id,
+            course_id: cursor.course_id,
+            actor_id: cursor.actor_id,
+            states: cursor.states.clone(),
+            snapshot_at: cursor.snapshot_at,
+            created_at: cursor.created_at,
+            request_id: cursor.request_id,
+        },
+        signature: URL_SAFE_NO_PAD.encode(hmac_sha256(key, &payload)),
+    };
+    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&signed)?);
     if encoded.len() > MAX_CURSOR_LENGTH {
         return Err(ResourceStoreError::InvalidCursor);
     }
@@ -274,6 +324,7 @@ fn decode_request_cursor(
     course_id: Option<contracts::CourseId>,
     actor_id: Option<contracts::ActorId>,
     states: &[String],
+    key: &[u8],
 ) -> Result<ResourceRequestCursor, ResourceStoreError> {
     if value.is_empty() || value.len() > MAX_CURSOR_LENGTH {
         return Err(ResourceStoreError::InvalidCursor);
@@ -284,24 +335,46 @@ fn decode_request_cursor(
     if URL_SAFE_NO_PAD.encode(&bytes) != value {
         return Err(ResourceStoreError::InvalidCursor);
     }
-    let cursor: ResourceRequestCursor =
+    let signed: SignedResourceRequestCursor =
         serde_json::from_slice(&bytes).map_err(|_| ResourceStoreError::InvalidCursor)?;
-    if serde_json::to_vec(&cursor).map_err(|_| ResourceStoreError::InvalidCursor)? != bytes
-        || cursor.version != RESOURCE_REQUEST_CURSOR_VERSION
-        || cursor.project_id != project_id
-        || cursor.course_id != course_id
-        || cursor.actor_id != actor_id
-        || cursor.states != states
+    if serde_json::to_vec(&signed).map_err(|_| ResourceStoreError::InvalidCursor)? != bytes {
+        return Err(ResourceStoreError::InvalidCursor);
+    }
+    let payload =
+        serde_json::to_vec(&signed.cursor).map_err(|_| ResourceStoreError::InvalidCursor)?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(&signed.signature)
+        .map_err(|_| ResourceStoreError::InvalidCursor)?;
+    if signature.len() != 32
+        || !bool::from(
+            signature
+                .as_slice()
+                .ct_eq(hmac_sha256(key, &payload).as_slice()),
+        )
+        || signed.cursor.version != RESOURCE_REQUEST_CURSOR_VERSION
+        || signed.cursor.project_id != project_id
+        || signed.cursor.course_id != course_id
+        || signed.cursor.actor_id != actor_id
+        || signed.cursor.states != states
     {
         return Err(ResourceStoreError::InvalidCursor);
     }
-    Ok(cursor)
+    Ok(signed.cursor)
 }
 
 impl PgResourceStore {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            cursor_signing_key: Arc::new(b"labweaver-test-cursor-key".to_vec()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_cursor_signing_key(mut self, key: Vec<u8>) -> Self {
+        self.cursor_signing_key = Arc::new(key);
+        self
     }
 
     pub(crate) fn pool(&self) -> PgPool {
@@ -732,13 +805,28 @@ impl PgResourceStore {
             .cursor
             .as_deref()
             .map(|value| {
-                decode_request_cursor(value, project_id, query.course_id, actor_id, &states)
+                decode_request_cursor(
+                    value,
+                    project_id,
+                    query.course_id,
+                    actor_id,
+                    &states,
+                    self.cursor_signing_key.as_slice(),
+                )
             })
             .transpose()?;
         let limit = query.limit.unwrap_or(50);
         if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
             return Err(ResourceStoreError::InvalidCursor);
         }
+        let snapshot_at = match cursor.as_ref() {
+            Some(cursor) => cursor.snapshot_at,
+            None => {
+                sqlx::query_scalar::<_, time::OffsetDateTime>("SELECT clock_timestamp()")
+                    .fetch_one(&self.pool)
+                    .await?
+            }
+        };
         let rows = sqlx::query(
             "SELECT request_id, created_at, contract \
              FROM resource.resource_requests \
@@ -746,7 +834,7 @@ impl PgResourceStore {
                AND ($2::uuid IS NULL OR course_id=$2) \
                AND ($3::uuid IS NULL OR requester_id=$3) \
                AND ($4::text[] IS NULL OR state=ANY($4::text[])) \
-               AND ($5::timestamptz IS NULL OR created_at <= $5) \
+               AND created_at <= $5 \
                AND ($6::timestamptz IS NULL OR (created_at,request_id) < ($6,$7)) \
              ORDER BY created_at DESC, request_id DESC LIMIT $8",
         )
@@ -754,7 +842,7 @@ impl PgResourceStore {
         .bind(query.course_id.map(contracts::CourseId::as_uuid))
         .bind(actor_id.map(contracts::ActorId::as_uuid))
         .bind((!states.is_empty()).then_some(states.clone()))
-        .bind(cursor.as_ref().map(|value| value.snapshot_at))
+        .bind(snapshot_at)
         .bind(cursor.as_ref().map(|value| value.created_at))
         .bind(cursor.as_ref().map(|value| value.request_id.as_uuid()))
         .bind(i64::from(limit) + 1)
@@ -786,21 +874,20 @@ impl PgResourceStore {
             })
             .collect::<Result<Vec<_>, ResourceStoreError>>()?;
         let next_cursor = if has_more {
-            let snapshot_at = decoded
-                .first()
-                .map(|(_, created_at)| *created_at)
-                .ok_or(ResourceStoreError::InvalidCursor)?;
             let (last, created_at) = decoded.last().ok_or(ResourceStoreError::InvalidCursor)?;
-            Some(encode_request_cursor(&ResourceRequestCursor {
-                version: RESOURCE_REQUEST_CURSOR_VERSION,
-                project_id,
-                course_id: query.course_id,
-                actor_id,
-                states,
-                snapshot_at,
-                created_at: *created_at,
-                request_id: last.id,
-            })?)
+            Some(encode_request_cursor(
+                &ResourceRequestCursor {
+                    version: RESOURCE_REQUEST_CURSOR_VERSION,
+                    project_id,
+                    course_id: query.course_id,
+                    actor_id,
+                    states,
+                    snapshot_at,
+                    created_at: *created_at,
+                    request_id: last.id,
+                },
+                self.cursor_signing_key.as_slice(),
+            )?)
         } else {
             None
         };

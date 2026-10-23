@@ -40,6 +40,7 @@ const SERVICE_SCOPES: &str = "LABWEAVER_SERVICE_SCOPES";
 const SERVICE_TOKEN_REFRESH_SKEW_SECONDS: &str = "LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS";
 const ACCESS_SERVICE_CLIENT_ID: &str = "LABWEAVER_ACCESS_SERVICE_CLIENT_ID";
 const ENVIRONMENT_SERVICE_CLIENT_ID: &str = "LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID";
+const CURSOR_SIGNING_KEY_FILE: &str = "LABWEAVER_CURSOR_SIGNING_KEY_FILE";
 const TASK_SERVICE_CLIENT_IDS: &str = "LABWEAVER_TASK_SERVICE_CLIENT_IDS";
 const ENVIRONMENT_SERVICE_AUDIENCE: &str = "labweaver-environment";
 const OUTBOX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -53,6 +54,7 @@ pub struct ResourceProcessRuntime {
     access_service_client_id: String,
     environment_service_client_id: String,
     task_service_client_ids: BTreeSet<String>,
+    cursor_signing_key: Arc<Vec<u8>>,
     capacity_worker: CapacityReconcileWorker,
     outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
@@ -115,7 +117,8 @@ impl ResourceProcessRuntime {
         let access_service_client_id = required(ACCESS_SERVICE_CLIENT_ID)?;
         let environment_service_client_id = required(ENVIRONMENT_SERVICE_CLIENT_ID)?;
         let task_service_client_ids = required_set(TASK_SERVICE_CLIENT_IDS)?;
-        let store = PgResourceStore::new(pool);
+        let cursor_signing_key = read_secret_key(&required_path(CURSOR_SIGNING_KEY_FILE)?)?;
+        let store = PgResourceStore::new(pool).with_cursor_signing_key(cursor_signing_key.clone());
         seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
             .map_err(ResourceProcessRuntimeError::Outbox)?;
@@ -130,6 +133,7 @@ impl ResourceProcessRuntime {
             access_service_client_id,
             environment_service_client_id,
             task_service_client_ids,
+            cursor_signing_key: Arc::new(cursor_signing_key),
             capacity_worker,
             outbox,
             readiness: Arc::new(AtomicBool::new(true)),
@@ -149,7 +153,7 @@ impl ResourceProcessRuntime {
             .with_service_verifier(Arc::clone(&self.service_verifier))
             .with_access_service_client_id(self.access_service_client_id.clone())
             .with_environment_service_client_id(self.environment_service_client_id.clone())
-            .with_task_service_client_ids(self.task_service_client_ids.clone())
+            .with_cursor_signing_key(self.cursor_signing_key.as_ref().clone())
     }
 
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
@@ -163,6 +167,7 @@ impl ResourceProcessRuntime {
             service_verifier: _service_verifier,
             access_service_client_id: _access_service_client_id,
             environment_service_client_id: _environment_service_client_id,
+            cursor_signing_key: _cursor_signing_key,
             task_service_client_ids: _task_service_client_ids,
             _shutdown_sender,
             shutdown,
@@ -407,6 +412,14 @@ fn read_secret(path: &PathBuf) -> Result<String, ResourceProcessRuntimeError> {
         return Err(ResourceProcessRuntimeError::ServiceAuthConfiguration);
     }
     Ok(value.to_owned())
+}
+fn read_secret_key(path: &PathBuf) -> Result<Vec<u8>, ResourceProcessRuntimeError> {
+    let value =
+        std::fs::read(path).map_err(|_| ResourceProcessRuntimeError::ServiceAuthConfiguration)?;
+    if value.len() < 32 {
+        return Err(ResourceProcessRuntimeError::ServiceAuthConfiguration);
+    }
+    Ok(value)
 }
 
 #[derive(Debug, thiserror::Error)]

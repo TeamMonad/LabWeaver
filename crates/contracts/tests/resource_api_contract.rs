@@ -2,7 +2,10 @@
 
 use serde_json::{Value, json};
 
-use contracts::{PlatformRole, http::operation_contract};
+use contracts::{
+    PlatformRole,
+    http::{AgentRunListQuery, ResourceRequestListQuery, operation_contract},
+};
 
 #[test]
 fn resource_create_requires_project_scope() -> Result<(), Box<dyn std::error::Error>> {
@@ -353,4 +356,36 @@ fn resource_option_reads_allow_all_authenticated_platform_roles()
         assert_eq!(operation.allowed_roles, &[PlatformRole::PlatformAdmin]);
     }
     Ok(())
+}
+
+#[test]
+fn project_list_filters_validate_limits_and_repeated_states() {
+    let repeated = ResourceRequestListQuery {
+        course_id: None,
+        state: Some(vec![
+            contracts::resource::ResourceRequestState::Reviewing,
+            contracts::resource::ResourceRequestState::Reviewing,
+        ]),
+        cursor: None,
+        limit: Some(50),
+    };
+    assert!(repeated.validate().is_ok());
+    for limit in [0, 101] {
+        assert!(
+            ResourceRequestListQuery {
+                limit: Some(limit),
+                ..repeated.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AgentRunListQuery {
+                limit: Some(limit),
+                ..AgentRunListQuery::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }

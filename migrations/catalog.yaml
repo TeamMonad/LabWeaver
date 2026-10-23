@@ -172,6 +172,9 @@ domains:
       - id: 20
         file: agent/0020_unified_usage_payload_target.sql
         sha256: 8621e4c4ace464ed258103eb2bab16452b295667726f67e6cb43fe3e4cfa6329
+      - id: 21
+        file: agent/0021_project_run_pagination_index.sql
+        sha256: eff5e618d44ebdc00ec5f77852febc889be283b2e94e0b0cd44aa240e3137615
   - name: evaluation
     migrations:
       - id: 1
@@ -254,3 +257,6 @@ domains:
       - id: 16
         file: resource/0016_project_credits.sql
         sha256: 442e27c0dc2cfa7d554440fbfca6b94a6f0997cc23b2273edcb2bc46e73e4571
+      - id: 17
+        file: resource/0017_project_request_pagination_indexes.sql
+        sha256: 1f8ddb9c627110cdc8aaa754b9a2d72c13d60a10134d41eefaa8dc45a0a4eb02
