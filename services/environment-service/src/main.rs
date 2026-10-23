@@ -60,8 +60,8 @@ async fn main() -> Result<(), MainError> {
     }
     match arguments.next().as_deref() {
         Some("environment-service") => run_environment_service().await,
-        Some("container-executor") => run_runtime_executor(RuntimeKind::Container).await,
-        Some("kubevirt-executor") => run_runtime_executor(RuntimeKind::KubeVirt).await,
+        Some("container-executor") => Box::pin(run_runtime_executor(RuntimeKind::Container)).await,
+        Some("kubevirt-executor") => Box::pin(run_runtime_executor(RuntimeKind::KubeVirt)).await,
         Some("kubevirt-console-executor") => run_kubevirt_console_executor().await,
         _ => Err(MainError::Configuration),
     }
