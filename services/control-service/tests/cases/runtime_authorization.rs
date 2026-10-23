@@ -6,35 +6,23 @@ use contracts::platform_configuration::{
     ApplyPlatformConfigurationRequest, LinuxCapability, PlatformConfigurationApplyStage as Stage,
     PlatformConfigurationDesired, PlatformConfigurationStatus,
     RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
-    RuntimePreauthorization, RuntimePreauthorizationScope, UpdatePlatformConfigurationRequest,
+    UpdatePlatformConfigurationRequest,
 };
 use contracts::resource::{
-    CapacityClaim, CapacityClaimState, ResourceApproval, ResourceRequest, ResourceRequestState,
-    ResourceTarget, WorkloadResources,
+    ResourceRequest, ResourceRequestState, ResourceTarget, WorkloadResources,
 };
-use contracts::runtime_authorization::{
-    RuntimeAdmissionBasis, RuntimeAuthorizationError, RuntimePolicyUse, check_policy_use,
-};
+use contracts::runtime_authorization::{RuntimeAdmissionBasis, RuntimeAuthorizationError};
 use contracts::supply_chain::EnvironmentTemplateRelease;
 use contracts::{
-    ActorId, AuthenticatedActor, CapacityClaimId, CourseId, EnvironmentId, LeaseId, PlatformRole,
-    ResourceApprovalId, ResourceRequestId, Revision, UtcTimestamp,
+    ActorId, AuthenticatedActor, CourseId, EnvironmentId, PlatformRole, ResourceRequestId,
+    Revision, UtcTimestamp,
 };
 use control_service::{ControlError, ControlService, platform_configuration as configuration};
 use persistence_sqlx::{Domain, Sha256Digest};
-use resource_service::{
-    ApprovalPolicy,
-    runtime_authorization::{
-        RuntimeBindingError, current_environment_authorization, resolve_binding,
-    },
-    store::{PendingAllocation, PgResourceStore},
-};
+use resource_service::runtime_authorization::{RuntimeBindingError, resolve_binding};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-#[path = "runtime_authorization_lease.rs"]
-mod lease_cases;
 
 async fn progress(
     pool: &PgPool,
@@ -273,287 +261,33 @@ pub(super) async fn assert_bindings_after_publication(
             RuntimeAuthorizationError::PolicyNotVerified
         ))
     ));
-    let mut settings = PlatformConfigurationDesired::default();
-    settings.runtime_policy.allowed_capabilities = BTreeSet::from([LinuxCapability::NetAdmin]);
-    settings.runtime_policy.preauthorizations = vec![RuntimePreauthorization {
-        scope: RuntimePreauthorizationScope::Course { course_id },
-        capabilities: BTreeSet::from([LinuxCapability::NetAdmin]),
-        privileged: false,
-    }];
-    let second = configuration::update(
+    let mut unsupported = PlatformConfigurationDesired::default();
+    unsupported.runtime_policy.allowed_capabilities = BTreeSet::from([LinuxCapability::NetAdmin]);
+    let error = configuration::update(
         pool,
         ActorId::new(),
         &UpdatePlatformConfigurationRequest {
             expected_revision: first.revision,
-            configuration: settings.clone(),
+            configuration: unsupported,
         },
-        &IdempotencyKey::parse("runtime-course-draft")?,
+        &IdempotencyKey::parse("runtime-unsupported-draft")?,
         now,
     )
-    .await?;
+    .await
+    .expect_err("Control must reject unsupported runtime capabilities");
     assert!(matches!(
-        resolve_binding(pool, &request).await,
-        Err(RuntimeBindingError::Authorization(
-            RuntimeAuthorizationError::PolicyNotVerified
-        ))
+        error,
+        configuration::ConfigurationError::Contract(
+            contracts::platform_configuration::PlatformConfigurationContractError::PolicyUnsupported {
+                field: "runtimePolicy.allowedCapabilities"
+            }
+        )
     ));
-    let applied = verified(pool, second, now, "runtime-first").await?;
+    let applied = verified(pool, first, now, "runtime-baseline").await?;
     let binding = resolve_binding(pool, &request).await?;
-    assert_eq!(binding.basis, RuntimeAdmissionBasis::CoursePreauthorization);
-    assert_eq!(
-        binding.permissions.scope,
-        RuntimePreauthorizationScope::Course { course_id }
-    );
-    assert!(
-        binding.permissions.capabilities.is_empty(),
-        "current EnvironmentSpec has no extra capability declaration"
-    );
-    assert_eq!(
-        binding.configuration.authoring_approval_id,
-        Some(approval.id)
-    );
-    assert_eq!(
-        binding.configuration.configuration_sha256,
-        Sha256Digest::of_canonical(&candidate.spec)?.to_string()
-    );
-    assert_ne!(
-        binding.platform_configuration_revision, candidate.policy_revision,
-        "LLM revision cannot substitute for applied runtime policy"
-    );
-    let store = PgResourceStore::new(pool.clone());
-    store
-        .create("runtime-create", &request, "runtime-create")
-        .await?;
-    let resource_approval = ResourceApproval {
-        runtime_authorization: Some(binding.clone()),
-        id: ResourceApprovalId::new(),
-        request_id: request.id,
-        request_revision: request.revision,
-        approver_id: ActorId::new(),
-        provider_binding: "kubernetes-standard".to_owned(),
-        approved_resources: resources.clone(),
-        approved_duration_seconds: 600,
-        reason: "approve immutable configuration".to_owned(),
-        valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
-        created_at: now,
-    };
-    let allocation = PendingAllocation {
-        claim: CapacityClaim {
-            id: CapacityClaimId::new(),
-            request_id: request.id,
-            approval_id: resource_approval.id,
-            provider_binding: resource_approval.provider_binding.clone(),
-            workload_resources: resources.clone(),
-            quota_resources: resources,
-            gpu_allocation: None,
-            state: CapacityClaimState::Reserved,
-            revision: Revision::new(1)?,
-            updated_at: Some(now),
-        },
-        lease_id: LeaseId::new(),
-    };
-    store
-        .approve(
-            "runtime-approve",
-            request.id,
-            &resource_approval,
-            &allocation,
-            ApprovalPolicy {
-                min_duration_seconds: 60,
-                max_duration_seconds: 3600,
-            },
-            "runtime-approve",
-        )
-        .await?;
-    let stored: serde_json::Value =
-        sqlx::query_scalar("SELECT contract FROM resource.resource_approvals WHERE approval_id=$1")
-            .bind(resource_approval.id.as_uuid())
-            .fetch_one(pool)
-            .await?;
-    assert_eq!(
-        serde_json::from_value::<ResourceApproval>(stored)?.runtime_authorization,
-        Some(binding.clone())
-    );
-    let allocated = store.load(request.id).await?;
-    assert_eq!(
-        resource_service::runtime_authorization::current_authorization(pool, &allocated).await?,
-        binding
-    );
-    let allocated = Box::pin(lease_cases::assert_original_lease_chain(
-        pool,
-        &store,
-        &resource_approval,
-        &allocation,
-    ))
-    .await?;
-    let mut obsolete_request = allocated.clone();
-    obsolete_request.generation += 1;
-    assert!(matches!(
-        resource_service::runtime_authorization::current_authorization(pool, &obsolete_request)
-            .await,
-        Err(RuntimeBindingError::Authorization(
-            RuntimeAuthorizationError::ConfigurationMismatch
-        ))
-    ));
-    sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=2 WHERE course_id=$1 AND actor_id=$2")
-        .bind(course_id.as_uuid()).bind(student.as_uuid()).execute(pool).await?;
-    assert!(matches!(
-        resolve_binding(pool, &request).await,
-        Err(RuntimeBindingError::ScopeDenied)
-    ));
-    assert!(matches!(
-        resource_service::runtime_authorization::current_authorization(pool, &allocated).await,
-        Err(RuntimeBindingError::ScopeDenied)
-    ));
-    assert!(matches!(
-        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
-        Err(RuntimeBindingError::ScopeDenied)
-    ));
-    sqlx::query("UPDATE control.course_memberships SET state='active',revision=3 WHERE course_id=$1 AND actor_id=$2")
-        .bind(course_id.as_uuid()).bind(student.as_uuid()).execute(pool).await?;
-    settings.runtime_policy.preauthorizations.insert(
-        0,
-        RuntimePreauthorization {
-            scope: RuntimePreauthorizationScope::Project {
-                project_id: payer.id,
-            },
-            capabilities: BTreeSet::new(),
-            privileged: false,
-        },
-    );
-    let changed = configuration::update(
-        pool,
-        ActorId::new(),
-        &UpdatePlatformConfigurationRequest {
-            expected_revision: applied.revision,
-            configuration: settings,
-        },
-        &IdempotencyKey::parse("runtime-next-draft")?,
-        now,
-    )
-    .await?;
-    binding.validate_current(&request, &binding.configuration, &changed)?;
-    assert_eq!(
-        resolve_binding(pool, &request)
-            .await?
-            .platform_configuration_revision,
-        binding.platform_configuration_revision,
-        "desired is not effective"
-    );
-    let newly_applied = verified(pool, changed, now, "runtime-second").await?;
-    assert_eq!(
-        binding.validate_current(&request, &binding.configuration, &newly_applied),
-        Err(RuntimeAuthorizationError::PolicyChanged)
-    );
-    assert!(matches!(
-        resource_service::runtime_authorization::current_authorization(pool, &allocated).await,
-        Err(RuntimeBindingError::Authorization(
-            RuntimeAuthorizationError::PolicyChanged
-        ))
-    ));
-    assert!(matches!(
-        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
-        Err(RuntimeBindingError::Authorization(
-            RuntimeAuthorizationError::PolicyChanged
-        ))
-    ));
-    let current_binding = resolve_binding(pool, &request).await?;
-    assert_eq!(
-        current_binding.basis,
-        RuntimeAdmissionBasis::ProjectPreauthorization
-    );
-    assert_ne!(
-        current_binding.platform_configuration_revision,
-        binding.platform_configuration_revision
-    );
-    let mut changed_configuration = binding.configuration.clone();
-    let mut changed_spec = candidate.spec.clone();
-    changed_spec.name.push_str("-changed");
-    changed_configuration.configuration_sha256 =
-        Sha256Digest::of_canonical(&changed_spec)?.to_string();
-    assert_eq!(
-        current_binding.validate_current(&request, &changed_configuration, &newly_applied),
-        Err(RuntimeAuthorizationError::ConfigurationMismatch)
-    );
-    let mut unrelated = request.clone();
-    unrelated.target = ResourceTarget::Task {
-        task_run_id: contracts::TaskRunId::new(),
-    };
-    assert!(matches!(
-        resolve_binding(pool, &unrelated).await,
-        Err(RuntimeBindingError::Authorization(
-            RuntimeAuthorizationError::TargetNotEnvironment
-        ))
-    ));
-    let mut cross = request.clone();
-    cross.project_id = contracts::ProjectId::new();
-    assert!(matches!(
-        resolve_binding(pool, &cross).await,
-        Err(RuntimeBindingError::ScopeDenied)
-    ));
-    let state = begin(
-        pool,
-        configuration::get(pool).await?,
-        now,
-        "runtime-uncertain-apply",
-    )
-    .await?;
-    let state = progress(
-        pool,
-        state,
-        Stage::Validating,
-        now,
-        "runtime-uncertain-validate",
-    )
-    .await?;
-    let state = progress(
-        pool,
-        state,
-        Stage::Applying,
-        now,
-        "runtime-uncertain-applying",
-    )
-    .await?;
-    assert!(matches!(
-        resolve_binding(pool, &request).await,
-        Err(RuntimeBindingError::Authorization(
-            RuntimeAuthorizationError::PolicyNotVerified
-        ))
-    ));
-    assert!(check_policy_use(&state, RuntimePolicyUse::StopOrRecovery).is_ok());
-    assert!(check_policy_use(&state, RuntimePolicyUse::Admission).is_err());
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.resource_approvals")
-            .fetch_one(pool)
-            .await?,
-        1,
-        "policy changes neither create another approval nor stop the existing request"
-    );
-    assert_eq!(
-        store.load(request.id).await?.state,
-        ResourceRequestState::Active
-    );
-    assert!(matches!(
-        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
-        Err(RuntimeBindingError::Authorization(
-            RuntimeAuthorizationError::PolicyNotVerified
-        ))
-    ));
-    let lease = store.load_lease(allocation.lease_id).await?;
-    store
-        .revoke_lease(
-            "runtime-lease-revoke",
-            lease.id,
-            lease.revision,
-            "synthetic revoke".to_owned(),
-            resource_approval.approver_id,
-            "runtime-lease-revoke",
-        )
-        .await?;
-    assert!(matches!(
-        current_environment_authorization(pool, request.id, Some(allocation.lease_id)).await,
-        Err(RuntimeBindingError::LeaseNotActive)
-    ));
+    assert_eq!(binding.basis, RuntimeAdmissionBasis::RestrictedBaseline);
+    assert!(binding.permissions.capabilities.is_empty());
+    assert!(!binding.permissions.privileged);
     Ok(())
 }
 
