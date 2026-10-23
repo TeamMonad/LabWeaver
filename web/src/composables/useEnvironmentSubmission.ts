@@ -1,3 +1,4 @@
+import { rememberSubmission } from '@/composables/useSubmissionDirectory'
 import { computed, ref, type Ref } from 'vue'
 import { freezeSubmission, getFrozenSubmission } from '@/generated/contracts'
 import type {
@@ -211,6 +212,7 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
       contentSha256: frozenContentSha256 ?? '',
       frozenAt: frozenAt ?? '',
     }
+    rememberSubmission(data.projectId, { submissionId, environmentId: data.id, submittedAt: frozenAt || new Date().toISOString() })
     if (freezeAccepted.value?.operationId === result.data.operationId) freezeAccepted.value.state = 'succeeded'
     freezeIntentKey.value = null
     await env.load()

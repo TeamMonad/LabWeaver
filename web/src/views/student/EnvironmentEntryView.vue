@@ -125,14 +125,18 @@
           <EnvironmentLifecycleBar />
 
           <!-- GCP Detail Tabs -->
-          <nav
-            class="gcp-detail-tabs"
-            aria-label="环境资源详情导航"
+          <TabsRoot
+            v-model="activeTab"
+            :unmount-on-hide="false"
+            class="detail-tabs-root"
           >
-            <button
-              type="button"
+          <TabsList
+            class="gcp-detail-tabs"
+            aria-label="环境资源详情"
+          >
+            <TabsTrigger
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'overview' }"
+              value="overview"
               @click="activeTab = 'overview'"
             >
               <SvgIcon
@@ -141,11 +145,10 @@
                 aria-hidden="true"
               />
               <span>概览与访问</span>
-            </button>
-            <button
-              type="button"
+            </TabsTrigger>
+            <TabsTrigger
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'terminal' }"
+              value="terminal"
               @click="activeTab = 'terminal'"
             >
               <SvgIcon
@@ -154,11 +157,10 @@
                 aria-hidden="true"
               />
               <span>Web 控制台</span>
-            </button>
-            <button
-              type="button"
+            </TabsTrigger>
+            <TabsTrigger
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'operations' }"
+              value="operations"
               @click="activeTab = 'operations'"
             >
               <SvgIcon
@@ -167,12 +169,11 @@
                 aria-hidden="true"
               />
               <span>异步操作与诊断</span>
-            </button>
-            <button
+            </TabsTrigger>
+            <TabsTrigger
               v-if="!isWorkConnection && !teacherMode"
-              type="button"
               class="detail-tab"
-              :class="{ 'detail-tab--active': activeTab === 'freeze' }"
+              value="freeze"
               @click="activeTab = 'freeze'"
             >
               <SvgIcon
@@ -181,8 +182,8 @@
                 aria-hidden="true"
               />
               <span>实验提交与凭据</span>
-            </button>
-          </nav>
+            </TabsTrigger>
+          </TabsList>
 
           <AsyncStateView
             :state="env.instance"
@@ -190,39 +191,40 @@
           >
             <template #success="{ data }">
               <!-- TAB 1: Overview & Endpoints -->
-              <div
-                v-show="activeTab === 'overview'"
+              <TabsContent
+                value="overview"
                 class="tab-pane"
               >
                 <EnvironmentOverviewTab :data="data" />
-              </div>
+              </TabsContent>
 
               <!-- TAB 2: Web Terminal -->
-              <div
-                v-show="activeTab === 'terminal'"
+              <TabsContent
+                value="terminal"
                 class="tab-pane"
               >
                 <EnvironmentConsoleTab :data="data" />
-              </div>
+              </TabsContent>
 
               <!-- TAB 3: Operations & Timeline -->
-              <div
-                v-show="activeTab === 'operations'"
+              <TabsContent
+                value="operations"
                 class="tab-pane"
               >
                 <EnvironmentOperationsTab :data="data" />
-              </div>
+              </TabsContent>
 
               <!-- TAB 4: Freeze & Submission -->
-              <div
+              <TabsContent
                 v-if="!isWorkConnection && !teacherMode"
-                v-show="activeTab === 'freeze'"
+                value="freeze"
                 class="tab-pane"
               >
                 <EnvironmentSubmissionTab :data="data" />
-              </div>
+              </TabsContent>
             </template>
           </AsyncStateView>
+          </TabsRoot>
         </div>
       </template>
     </section>
@@ -232,6 +234,7 @@
 <script setup lang="ts">
 import { toRef } from 'vue'
 import { RouterLink } from 'vue-router'
+import { TabsContent, TabsList, TabsRoot, TabsTrigger } from 'reka-ui'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
@@ -395,12 +398,12 @@ const {
   color: var(--md-sys-color-on-surface);
 }
 
-.detail-tab--active {
+.detail-tab[data-state='active'] {
   color: var(--md-sys-color-primary);
   font-weight: 600;
 }
 
-.detail-tab--active::after {
+.detail-tab[data-state='active']::after {
   content: '';
   position: absolute;
   bottom: -1px;
@@ -409,6 +412,16 @@ const {
   height: 3px;
   background: var(--md-sys-color-primary);
   border-radius: 3px 3px 0 0;
+}
+
+.tab-pane[hidden] {
+  display: none;
+}
+
+.detail-tab:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -2px;
+  border-radius: var(--md-sys-shape-small);
 }
 
 .tab-pane {

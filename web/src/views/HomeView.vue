@@ -119,7 +119,21 @@
                       <GcpStatusPill :state="run.state" domain="agent" size="sm" />
                     </div>
                     <p class="item-sub">创建于 {{ formatTimestamp(run.createdAt) }} · 更新于 {{ formatTimestamp(run.updatedAt) }}</p>
-                    <p v-if="run.state === 'awaiting_approval'" class="item-attention">等待人工审核。审核通过后才会继续。</p>
+                    <ul
+                      v-if="runTracks(run.id).length"
+                      class="track-list"
+                      :aria-label="`${agentRunPurposeLabel(run)}的执行进度`"
+                    >
+                      <li v-for="track in runTracks(run.id)" :key="track.track" class="track-chip" :data-track="track.track">
+                        <span class="track-chip__name">{{ track.trackLabel }}</span>
+                        <GcpStatusPill :state="toneState(track.tone)" domain="custom" :label="track.phaseLabel" size="sm" />
+                        <span v-if="track.attempt" class="track-chip__attempt">第 {{ track.attempt }} 次尝试</span>
+                      </li>
+                    </ul>
+                    <p v-else-if="inProgress.agentProgress[run.id]?.kind === 'loading'" class="track-loading" aria-hidden="true">
+                      <span class="track-skeleton" /><span class="track-skeleton" />
+                    </p>
+                    <p v-if="runAttention(run)" class="item-attention">{{ runAttention(run) }}</p>
                   </div>
                   <RouterLink v-if="agentRunLink(run)" class="outlined-button" :to="agentRunLink(run)!">
                     {{ run.state === 'awaiting_approval' ? '去审核' : '查看进度' }}
@@ -188,6 +202,7 @@ import { useProjectInProgress } from '@/composables/useProjectInProgress'
 import { useProjects } from '@/composables/useProjects'
 import { OIDC_ENABLED } from '@/config'
 import type { AgentRunHistoryItem, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
+import { agentProgressAttention, readAgentTaskProgress, toneState, type AgentTrackReading } from '@/utils/agentTaskProgress'
 import { formatBytes, formatTimestamp } from '@/utils/format'
 import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 import { environmentOperationKindLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
@@ -224,6 +239,18 @@ function environmentLink(env: EnvironmentSummary): RouteLocationRaw {
 function agentRunPurposeLabel(run: AgentRunHistoryItem): string {
   if (run.purpose.kind === 'work_configuration') return 'Work 配置'
   return run.purpose.environmentClass === 'work' ? 'Work 模板生成' : '实验生成'
+}
+
+function runTracks(runId: string): AgentTrackReading[] {
+  const state = inProgress.agentProgress[runId]
+  return state?.kind === 'ready' ? readAgentTaskProgress(state.progress) : []
+}
+
+/** What a person has to do next; the per-track reading wins over the aggregate run state. */
+function runAttention(run: AgentRunHistoryItem): string | null {
+  const fromTracks = agentProgressAttention(runTracks(run.id))
+  if (fromTracks) return fromTracks
+  return run.state === 'awaiting_approval' ? '等待人工审核。审核通过后才会继续。' : null
 }
 
 /** The page that owns the run; awaiting approval opens the review entry directly. */
@@ -272,6 +299,14 @@ const routeReason = computed(() => {
 </script>
 
 <style scoped>
+.track-list { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin: var(--space-2) 0 0; padding: 0; list-style: none; }
+.track-chip { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 28px; padding: 0 var(--space-2) 0 var(--space-3); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.track-chip__name { color: var(--md-sys-color-on-surface); font: var(--md-sys-label-medium); }
+.track-chip__attempt { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.track-loading { display: flex; gap: var(--space-2); margin: var(--space-2) 0 0; }
+.track-skeleton { width: 120px; height: 28px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-high); animation: track-pulse 1.4s ease-in-out infinite; }
+@keyframes track-pulse { 50% { opacity: 0.5; } }
+@media (prefers-reduced-motion: reduce) { .track-skeleton { animation: none; } }
 .home-view {
   display: flex;
   flex-direction: column;

@@ -1,12 +1,21 @@
 import { onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
-import { listEnvironments, listProjectAgentRuns, listProjectResourceRequests } from '@/generated/contracts'
-import type { AgentRunHistoryItem, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
+import { getProjectAgentTaskProgress, listEnvironments, listProjectAgentRuns, listProjectResourceRequests } from '@/generated/contracts'
+import type { AgentRunHistoryItem, AgentRunTaskProgress, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
 import { diagnosticFromError, extractProblemDetails, type AsyncState } from '@/types/async'
 
 /** Section state; `hidden` means the server denied this read for the account, so the section is not shown. */
 export type InProgressSection<T> = AsyncState<T[]> | { kind: 'hidden' }
 
 const OPEN_AGENT_RUN_STATES = new Set<AgentRunHistoryItem['state']>(['requested', 'running', 'awaiting_approval', 'cancelling'])
+/** Track progress of one open run; `unavailable` keeps the row usable without progress detail. */
+export type AgentRunProgressState =
+  | { kind: 'loading' }
+  | { kind: 'ready'; progress: AgentRunTaskProgress }
+  | { kind: 'unavailable' }
+
+/** Progress is read for at most this many open runs per load, to bound fan-out. */
+export const AGENT_PROGRESS_LIMIT = 10
+
 const OPEN_RESOURCE_REQUEST_STATES = new Set<ResourceRequestSchema['state']>(['reviewing', 'allocating', 'expiring'])
 
 export function isOpenAgentRun(item: AgentRunHistoryItem): boolean {
@@ -34,6 +43,7 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
   const environments = ref<InProgressSection<EnvironmentSummary>>({ kind: 'idle' })
   const agentRuns = ref<InProgressSection<AgentRunHistoryItem>>({ kind: 'idle' })
   const resourceRequests = ref<InProgressSection<ResourceRequestSchema>>({ kind: 'idle' })
+  const agentProgress = ref<Record<string, AgentRunProgressState>>({})
   /** The server has more rows than the first page read here; the section says so instead of implying completeness. */
   const environmentsTruncated = ref(false)
   const agentRunsTruncated = ref(false)
@@ -71,6 +81,20 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
     agentRunsTruncated.value = result.data.hasMore
     const items = result.data.items.filter((item) => item.projectId === id && isOpenAgentRun(item))
     agentRuns.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
+    await loadAgentProgress(id, items.slice(0, AGENT_PROGRESS_LIMIT), current)
+  }
+
+  /** Current attempt per track from the owning Agent service; history stays on the run's own page. */
+  async function loadAgentProgress(id: string, runs: AgentRunHistoryItem[], current: number) {
+    agentProgress.value = Object.fromEntries(runs.map((run) => [run.id, { kind: 'loading' } as const]))
+    await Promise.all(runs.map(async (run) => {
+      const result = await getProjectAgentTaskProgress({ path: { projectId: id, runId: run.id }, query: { page: 1, pageSize: 1 } })
+      if (current !== generation) return
+      agentProgress.value = {
+        ...agentProgress.value,
+        [run.id]: result.error || result.data.runId !== run.id ? { kind: 'unavailable' } : { kind: 'ready', progress: result.data },
+      }
+    }))
   }
 
   async function loadResourceRequests(id: string, current: number) {
@@ -93,6 +117,7 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
     if (!id) {
       environments.value = { kind: 'idle' }
       agentRuns.value = { kind: 'idle' }
+      agentProgress.value = {}
       resourceRequests.value = { kind: 'idle' }
       loadedAt.value = null
       return
@@ -125,5 +150,5 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
   })
 
-  return reactive({ environments, agentRuns, resourceRequests, environmentsTruncated, agentRunsTruncated, loadedAt, loading, load })
+  return reactive({ environments, agentRuns, agentProgress, resourceRequests, environmentsTruncated, agentRunsTruncated, loadedAt, loading, load })
 }
