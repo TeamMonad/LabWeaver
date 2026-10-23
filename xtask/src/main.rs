@@ -373,6 +373,9 @@ fn contracts_generate() -> Result<(), AppError> {
 
 fn contracts_check() -> Result<(), AppError> {
     let root = repository_root();
+    require_internal_schema(
+        &root.join("schemas/contracts/v1/internal/labweaver-log-v1.schema.json"),
+    )?;
     let artifacts = contracts::schema::generate_all().map_err(|error| AppError::Io {
         role: "generate contracts",
         detail: error.to_string(),
@@ -409,6 +412,17 @@ fn contracts_check() -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+fn require_internal_schema(path: &Path) -> Result<(), AppError> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(AppError::Io {
+            role: "read required telemetry contract",
+            detail: format!("{} is missing", path.display()),
+        })
+    }
 }
 
 fn is_registered_generated_path(relative: &str, generated_paths: &BTreeSet<&str>) -> bool {
@@ -1035,6 +1049,25 @@ mod tests {
             "schemas/contracts/v1/internal/other.schema.json",
             &registered,
         ));
+    }
+    #[test]
+    fn required_telemetry_schema_accepts_existing_file() -> Result<(), String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = directory.path().join("labweaver-log-v1.schema.json");
+        std::fs::write(&path, b"{}").map_err(|error| error.to_string())?;
+        super::require_internal_schema(&path).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn required_telemetry_schema_rejects_missing_file() -> Result<(), String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = directory.path().join("labweaver-log-v1.schema.json");
+        let error = super::require_internal_schema(&path)
+            .expect_err("missing telemetry schema must fail closed");
+        if !error.to_string().contains("missing") {
+            return Err("missing telemetry schema diagnostic is not readable".into());
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
