@@ -4,6 +4,8 @@ import { reactive, ref } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
 import { getProjectAvailableActions } from '@/generated/contracts'
+import { makeDiagnostic } from '@/types/async'
+import { GRANTABLE_PROJECT_OBJECT_ROLES } from '@/utils/stateLabels'
 
 const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
@@ -55,7 +57,7 @@ const membersState = reactive({
     ],
   },
   acting: null as string | null,
-  outcome: null,
+  outcome: null as null | { kind: 'success' | 'error'; diagnostic: ReturnType<typeof makeDiagnostic> },
   load: vi.fn(),
   add: mocks.add,
   remove: mocks.remove,
@@ -156,6 +158,7 @@ describe('WorkspaceListView', () => {
         { actorId: 'student-1', username: 'student-1', displayName: '学生一', role: 'student', state: 'active', revision: 2 },
       ],
     }
+    membersState.outcome = null
     directoryState.users = { kind: 'idle' }
   })
 
@@ -254,9 +257,10 @@ describe('WorkspaceListView', () => {
     expect(wrapper.find('.directory-selection').exists()).toBe(false)
     expect(mocks.directoryClear).toHaveBeenCalled()
     await wrapper.find('.directory-result').trigger('click')
+    await wrapper.get('select[aria-label="项目职责"]').setValue('editor')
     await wrapper.get('.member-form').trigger('submit')
     await flushPromises()
-    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-2', role: 'student', objectRole: 'viewer' })
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-2', role: 'student', objectRole: 'editor' })
     expect(mocks.directoryClear).toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -330,14 +334,70 @@ describe('WorkspaceListView', () => {
     const rows = wrapper.findAll('.member-row')
     expect(rows[0].text()).toContain('项目职责：负责人')
     expect(rows[1].text()).toContain('项目职责：操作者')
-    expect(wrapper.text()).toContain('只能查看项目、成员和环境。')
+    const guide = wrapper.get('[data-testid="member-object-role-guide"]').text()
+    expect(guide).toContain('查看者只能查看项目、成员和环境。')
+    expect(guide).toContain('管理者拥有编辑者的全部权限，并可以管理成员。')
+    expect(guide).not.toContain('负责人')
     const readsAfterMount = vi.mocked(getProjectAvailableActions).mock.calls.length
     await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-3')
+    await wrapper.get('select[aria-label="项目职责"]').setValue('operator')
     await wrapper.get('.member-form').trigger('submit')
     await flushPromises()
-    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-3', role: 'student', objectRole: 'viewer' })
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-3', role: 'student', objectRole: 'operator' })
     // The actor's own responsibility may have changed with the member list: read it again.
     expect(vi.mocked(getProjectAvailableActions).mock.calls.length).toBe(readsAfterMount + 1)
+    // The next member starts without a responsibility again.
+    expect(wrapper.get('[role="combobox"][aria-label="项目职责"]').text()).toContain('请选择项目职责')
+    wrapper.unmount()
+  })
+
+  it('preselects no responsibility and keeps adding disabled until one is chosen', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper } = await mountView()
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-3')
+
+    expect(wrapper.get('[role="combobox"][aria-label="项目职责"]').text()).toContain('请选择项目职责')
+    expect(wrapper.text()).toContain('选择项目职责后才能添加成员。')
+    const submit = wrapper.findAll('button').find((button) => button.text() === '添加成员')!
+    expect(submit.attributes('disabled')).toBeDefined()
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).not.toHaveBeenCalled()
+
+    await wrapper.get('select[aria-label="项目职责"]').setValue('viewer')
+    expect(submit.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it.each(GRANTABLE_PROJECT_OBJECT_ROLES.map((role) => [role]))('submits the %s responsibility with its contract value', async (role) => {
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
+    const { wrapper } = await mountView()
+    await wrapper.get('input[placeholder="输入完整用户名"]').setValue('student-4')
+    await wrapper.get('select[aria-label="项目职责"]').setValue(role)
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-4', role: 'student', objectRole: role })
+    wrapper.unmount()
+  })
+
+  it('never offers the owner responsibility', async () => {
+    const { wrapper } = await mountView()
+    const values = wrapper.get('select[aria-label="项目职责"]').findAll('option').map((option) => option.attributes('value'))
+    expect(values).toEqual(['', 'viewer', 'operator', 'editor', 'manager'])
+    wrapper.unmount()
+  })
+
+  it('shows the Chinese reason before the code when the server refuses the member', async () => {
+    membersState.outcome = {
+      kind: 'error',
+      diagnostic: makeDiagnostic('LW_PROJECT_GOVERNANCE_DENIED', 'The request was rejected by a fail-closed control-plane boundary.', false, { status: 403, requestId: 'req-member-1' }),
+    }
+    const { wrapper } = await mountView()
+    const text = wrapper.text()
+    const reason = '不能添加该成员：项目负责人职责不能通过成员管理授予'
+    expect(text).toContain(reason)
+    expect(text).not.toContain('fail-closed control-plane boundary')
+    expect(text.indexOf(reason)).toBeLessThan(text.indexOf('LW_PROJECT_GOVERNANCE_DENIED'))
     wrapper.unmount()
   })
 

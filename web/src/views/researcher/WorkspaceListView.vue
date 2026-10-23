@@ -196,13 +196,20 @@
                   <option value="teacher">教师</option>
                 </AppSelect>
               </label>
-              <label>
+              <label class="member-object-role">
                 <span>项目职责</span>
-                <AppSelect v-model="memberObjectRole" aria-label="项目职责" aria-describedby="member-object-role-hint">
-                  <option v-for="option in MEMBER_OBJECT_ROLE_OPTIONS" :key="option" :value="option">{{ projectObjectRoleLabel(option) }}</option>
+                <AppSelect v-model="memberObjectRole" aria-label="项目职责" aria-describedby="member-object-role-hint" required>
+                  <option value="" disabled>请选择项目职责</option>
+                  <option v-for="option in GRANTABLE_PROJECT_OBJECT_ROLES" :key="option" :value="option">{{ projectObjectRoleLabel(option) }}</option>
                 </AppSelect>
-                <small id="member-object-role-hint" class="field-hint">{{ projectObjectRoleDescription(memberObjectRole) }}</small>
               </label>
+              <dl id="member-object-role-hint" class="member-object-role-guide" data-testid="member-object-role-guide">
+                <template v-for="option in GRANTABLE_PROJECT_OBJECT_ROLES" :key="option">
+                  <dt>{{ projectObjectRoleLabel(option) }}</dt>
+                  <dd>{{ projectObjectRoleDescription(option) }}</dd>
+                </template>
+              </dl>
+              <p v-if="!memberObjectRole" class="field-hint member-object-role-required" role="note">选择项目职责后才能添加成员。</p>
               <button type="submit" class="outlined-button" :disabled="!canAddMember">添加成员</button>
             </form>
             <DiagnosticBanner
@@ -355,9 +362,9 @@ import { useProjectResources } from '@/composables/useProjectResources'
 import { useAuth } from '@/composables/useAuth'
 import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } from '@/composables/useProjects'
-import type { OrganizationUser, ProjectMembershipSchema, ProjectObjectRole, ProjectSchema } from '@/generated/contracts'
+import type { OrganizationUser, ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
-import { environmentStateLabel, membershipStateLabel, projectObjectRoleDescription, projectObjectRoleLabel, projectRoleLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
+import { environmentStateLabel, GRANTABLE_PROJECT_OBJECT_ROLES, membershipStateLabel, projectObjectRoleDescription, projectObjectRoleLabel, projectRoleLabel, resourceAllocationFailureMessage, type GrantableProjectObjectRole } from '@/utils/stateLabels'
 import { actorIdFromProfile, hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const route = useRoute()
@@ -413,14 +420,14 @@ const memberUsername = ref('')
 const directoryQuery = ref('')
 const selectedDirectoryUser = ref<OrganizationUser | null>(null)
 const memberRole = ref<'student' | 'teacher'>('student')
-/** Owner is created with the project and cannot be granted through the member API. */
-const MEMBER_OBJECT_ROLE_OPTIONS: readonly Exclude<ProjectObjectRole, 'owner'>[] = ['viewer', 'operator', 'editor', 'manager']
-const memberObjectRole = ref<Exclude<ProjectObjectRole, 'owner'>>('viewer')
+/** No responsibility is preselected: the manager chooses one explicitly for every new member. */
+const memberObjectRole = ref<GrantableProjectObjectRole | ''>('')
 const canSave = computed(() => Boolean(canEditProject.value && editName.value.trim()))
 const canAddMember = computed(() => Boolean(
   canManageMembers.value
   && selectedProject.value?.state === 'active'
   && members.acting === null
+  && memberObjectRole.value
   && (canSearchOrganizationDirectory.value ? selectedDirectoryUser.value?.enabled && memberUsername.value.trim() : memberUsername.value.trim()),
 ))
 type WorkspaceConfirmation =
@@ -551,10 +558,12 @@ function refreshMembers() {
 async function addMember() {
   if (!canManageMembers.value) return
   const username = memberUsername.value.trim()
-  if (!canAddMember.value || !username) return
-  const ok = await members.add({ username, role: memberRole.value, objectRole: memberObjectRole.value })
+  const objectRole = memberObjectRole.value
+  if (!canAddMember.value || !username || !objectRole) return
+  const ok = await members.add({ username, role: memberRole.value, objectRole })
   if (ok) {
     memberUsername.value = ''
+    memberObjectRole.value = ''
     selectedDirectoryUser.value = null
     directory.clear()
   }
@@ -641,6 +650,10 @@ async function confirmDestructiveAction() {
 .member-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .member-row { display: flex; justify-content: space-between; gap: var(--space-3); align-items: center; padding: 11px var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
 .member-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; }
+.member-object-role-guide { grid-column: 1 / -1; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-3); margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.member-object-role-guide dt { color: var(--md-sys-color-on-surface); font: var(--md-sys-label-medium); }
+.member-object-role-guide dd { margin: 0; }
+.member-object-role-required { grid-column: 1 / -1; margin: 0; }
 .directory-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); grid-column: 1 / -1; align-items: end; }
 .directory-picker > .async-state-view, .directory-selection { grid-column: 1 / -1; }
 .directory-results { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }

@@ -1,3 +1,5 @@
+import type { ProjectObjectRole } from '@/generated/contracts'
+
 /**
  * 中文状态/枚举标签映射。
  *
@@ -148,8 +150,12 @@ export function projectRoleLabel(value: string | null | undefined): string {
   return labelOf(PROJECT_ROLE, value)
 }
 
-/** Project responsibility (`objectRole`), independent of the teaching identity above. */
-const PROJECT_OBJECT_ROLE: Record<string, string> = {
+/**
+ * Project responsibility (`objectRole`), independent of the teaching identity
+ * above. Keyed by the generated `ProjectObjectRole` union, so a role added to
+ * the contract fails the type check until it is labelled and described here.
+ */
+const PROJECT_OBJECT_ROLE: Record<ProjectObjectRole, string> = {
   viewer: '查看者',
   operator: '操作者',
   editor: '编辑者',
@@ -162,10 +168,10 @@ export function projectObjectRoleLabel(value: string | null | undefined): string
 }
 
 /** What each responsibility permits, matching Control's `ProjectObjectRole::actions`. */
-const PROJECT_OBJECT_ROLE_DESCRIPTION: Record<string, string> = {
+const PROJECT_OBJECT_ROLE_DESCRIPTION: Record<ProjectObjectRole, string> = {
   viewer: '只能查看项目、成员和环境。',
-  operator: '可以查看，并启动或停止项目环境。',
-  editor: '可以编辑项目、创建和删除环境、签发访问授权、配置 Agent 和查看费用；不能管理成员。',
+  operator: '可以查看，并启动、停止和重启项目环境。',
+  editor: '可以编辑或归档项目、新建 Work、创建和删除环境、签发访问授权、提交评测、配置 Agent 和查看费用；不能管理成员。',
   manager: '拥有编辑者的全部权限，并可以管理成员。',
   owner: '项目负责人，拥有管理者的全部权限；创建项目时确定，不能通过成员管理授予。',
 }
@@ -173,6 +179,12 @@ const PROJECT_OBJECT_ROLE_DESCRIPTION: Record<string, string> = {
 export function projectObjectRoleDescription(value: string | null | undefined): string {
   return labelOf(PROJECT_OBJECT_ROLE_DESCRIPTION, value)
 }
+
+export type GrantableProjectObjectRole = Exclude<ProjectObjectRole, 'owner'>
+
+/** Responsibilities the member API can grant: every contract role except `owner`, which Control sets at project creation. */
+export const GRANTABLE_PROJECT_OBJECT_ROLES = (Object.keys(PROJECT_OBJECT_ROLE) as ProjectObjectRole[])
+  .filter((role): role is GrantableProjectObjectRole => role !== 'owner')
 
 const MEMBERSHIP_STATE: Record<string, string> = {
   active: '生效中',
