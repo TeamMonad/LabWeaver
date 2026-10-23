@@ -1758,6 +1758,11 @@ mod tests {
                 "LW_RESOURCE_REQUEST_CURSOR_INVALID",
             ),
             (
+                ResourceApiError::Store(ResourceStoreError::InvalidCursor),
+                StatusCode::BAD_REQUEST,
+                "LW_RESOURCE_REQUEST_CURSOR_INVALID",
+            ),
+            (
                 ResourceApiError::Invalid,
                 StatusCode::BAD_REQUEST,
                 "LW_RESOURCE_REQUEST_INVALID",
