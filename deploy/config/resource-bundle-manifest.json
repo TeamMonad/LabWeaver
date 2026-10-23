@@ -16,6 +16,7 @@
       "nats-client.key",
       "nats.creds",
       "mtls-ca.pem",
+      "oidc-ca.pem",
       "service-client-secret",
       "cursor-signing-key-current",
       "tls.crt",

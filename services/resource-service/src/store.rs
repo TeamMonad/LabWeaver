@@ -31,7 +31,8 @@ use contracts::{
     BudgetId, ChargeId, EventId, GpuCatalogEntryId, LeaseId, OperationId, ProjectId, RateId,
     ResourceRequestId, Revision, Sequence, TaskRunId, UsageRecordId, UtcTimestamp,
 };
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use persistence_sqlx::Sha256Digest;
+use persistence_sqlx::cursor_key_id;
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };
@@ -235,11 +236,6 @@ struct UsageAuthority<'a> {
 
 const RESOURCE_REQUEST_CURSOR_VERSION: u8 = 2;
 
-fn cursor_key_id(key: &[u8]) -> String {
-    let digest = format!("{:x}", Sha256::digest(key));
-    digest[..8].to_owned()
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ResourceRequestCursor {
@@ -349,10 +345,10 @@ fn decode_request_cursor(
     if serde_json::to_vec(&signed).map_err(|_| ResourceStoreError::InvalidCursor)? != bytes {
         return Err(ResourceStoreError::InvalidCursor);
     }
-    let current_id = cursor_key_id(current);
+    let current_id = cursor_key_id("resource", current);
     let key = if signed.cursor.key_id == current_id {
         Some(current)
-    } else if previous.is_some_and(|key| signed.cursor.key_id == cursor_key_id(key)) {
+    } else if previous.is_some_and(|key| signed.cursor.key_id == cursor_key_id("resource", key)) {
         previous
     } else {
         None
@@ -901,7 +897,7 @@ impl PgResourceStore {
             Some(encode_request_cursor(
                 &ResourceRequestCursor {
                     version: RESOURCE_REQUEST_CURSOR_VERSION,
-                    key_id: cursor_key_id(self.cursor_signing_key_current.as_slice()),
+                    key_id: cursor_key_id("resource", self.cursor_signing_key_current.as_slice()),
                     project_id,
                     course_id: query.course_id,
                     actor_id,

@@ -69,6 +69,7 @@
       "nats-client.key",
       "nats.creds",
       "nats-client.crt",
+      "service-client-secret",
       "cursor-signing-key-current",
       "tls.crt",
       "tls.key",

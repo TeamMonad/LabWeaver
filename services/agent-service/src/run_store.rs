@@ -1,7 +1,8 @@
 //! Durable idempotent `AgentRun` orchestration over the Agent-owned `PostgreSQL` schema.
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use persistence_sqlx::Sha256Digest;
+use persistence_sqlx::cursor_key_id;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -249,11 +250,6 @@ pub struct PostgresAgentRunStore {
 
 const AGENT_HISTORY_CURSOR_VERSION: u8 = 2;
 
-fn cursor_key_id(key: &[u8]) -> String {
-    let digest = format!("{:x}", Sha256::digest(key));
-    digest[..8].to_owned()
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentHistoryCursor {
@@ -357,10 +353,10 @@ fn decode_history_cursor(
     if serde_json::to_vec(&signed).map_err(|_| AgentRunStoreError::InvalidHistoryCursor)? != bytes {
         return Err(AgentRunStoreError::InvalidHistoryCursor);
     }
-    let current_id = cursor_key_id(current);
+    let current_id = cursor_key_id("agent", current);
     let key = if signed.cursor.key_id == current_id {
         Some(current)
-    } else if previous.is_some_and(|key| signed.cursor.key_id == cursor_key_id(key)) {
+    } else if previous.is_some_and(|key| signed.cursor.key_id == cursor_key_id("agent", key)) {
         previous
     } else {
         None
@@ -1716,7 +1712,7 @@ impl PostgresAgentRunStore {
             Some(encode_history_cursor(
                 &AgentHistoryCursor {
                     version: AGENT_HISTORY_CURSOR_VERSION,
-                    key_id: cursor_key_id(self.cursor_signing_key_current.as_slice()),
+                    key_id: cursor_key_id("agent", self.cursor_signing_key_current.as_slice()),
                     project_id,
                     states,
                     snapshot_at,
