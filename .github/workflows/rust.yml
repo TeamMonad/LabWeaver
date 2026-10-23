@@ -2,7 +2,6 @@ name: Rust
 
 on:
   pull_request:
-    branches: [main, develop]
   push:
     branches: [main, develop]
 
@@ -14,8 +13,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: ci-scope
+    runs-on: ubuntu-latest
+    outputs:
+      rust_required: ${{ steps.scope.outputs.rust_required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test CI scope selection
+        run: python3 -m unittest discover -s tests/ci
+      - name: Select affected checks
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: python3 tools/ci_scope.py >> "$GITHUB_OUTPUT"
+      - name: Describe selection
+        env:
+          RUST_REQUIRED: ${{ steps.scope.outputs.rust_required }}
+          SCOPE_REASON: ${{ steps.scope.outputs.scope_reason }}
+        run: echo "Rust required=$RUST_REQUIRED reason=$SCOPE_REASON"
   postgres-persistence:
     name: postgres-persistence-gate
+    needs: scope
+    if: needs.scope.outputs.rust_required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +53,8 @@ jobs:
       - run: cargo test -p persistence-sqlx --locked
   rust:
     name: rust-gate
+    needs: scope
+    if: needs.scope.outputs.rust_required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,3 +97,44 @@ jobs:
       - name: Run Agent retry PostgreSQL regression
         run: cargo test -p agent-service --test claude_code_runtime postgres_authoring_retry_starts_a_new_fenced_attempt --locked -- --ignored
       - run: cargo test --workspace --locked --no-fail-fast
+  rust-merge-gate:
+    name: rust-merge-gate
+    if: always()
+    needs: [scope, postgres-persistence, rust]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a completed Rust decision
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          RUST_REQUIRED: ${{ needs.scope.outputs.rust_required }}
+          POSTGRES_RESULT: ${{ needs.postgres-persistence.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$SCOPE_RESULT" != success ]]; then
+            echo "ci-scope result=$SCOPE_RESULT; refusing a skipped Rust decision" >&2
+            exit 1
+          fi
+          case "$RUST_REQUIRED" in
+            true)
+              [[ "$POSTGRES_RESULT" == success ]] || {
+                echo "postgres-persistence-gate result=$POSTGRES_RESULT" >&2
+                exit 1
+              }
+              [[ "$RUST_RESULT" == success ]] || {
+                echo "rust-gate result=$RUST_RESULT" >&2
+                exit 1
+              }
+              ;;
+            false)
+              [[ "$POSTGRES_RESULT" == skipped && "$RUST_RESULT" == skipped ]] || {
+                echo "Rust gates must be skipped only when scope selects no Rust checks" >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "ci-scope produced no valid rust_required output: $RUST_REQUIRED" >&2
+              exit 1
+              ;;
+          esac
