@@ -311,10 +311,13 @@ async fn run_agent_service() -> Result<(), StartupError> {
         .connect(&read_trimmed(&deployment.database_url_file)?)
         .await?;
     verify_schema(&pool).await?;
-    let cursor_signing_key =
-        read_secret_bytes(required_path("LABWEAVER_CURSOR_SIGNING_KEY_FILE")?)?;
-    let store =
-        PostgresAgentRunStore::new(pool.clone()).with_cursor_signing_key(cursor_signing_key);
+    let cursor_current =
+        read_secret_bytes(required_path("LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE")?)?;
+    let cursor_previous = optional_path("LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE")?
+        .map(read_secret_bytes)
+        .transpose()?;
+    let store = PostgresAgentRunStore::new(pool.clone())
+        .with_cursor_signing_keys(cursor_current, cursor_previous);
     let generated_artifacts = GeneratedArtifactStore::new(pool.clone());
     let llm_reviews = LlmReviewStore::new(pool.clone());
     let build_store = PgBuildStore::new(pool);
@@ -1016,6 +1019,16 @@ fn required_path(name: &'static str) -> Result<std::path::PathBuf, StartupError>
         return Err(StartupError::Configuration);
     }
     Ok(path)
+}
+fn optional_path(name: &'static str) -> Result<Option<std::path::PathBuf>, StartupError> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(StartupError::Configuration);
+    }
+    Ok(Some(path))
 }
 
 fn required_set(name: &'static str) -> Result<BTreeSet<String>, StartupError> {

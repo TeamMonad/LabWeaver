@@ -121,6 +121,20 @@ Bundle 静态 inventory 可通过原 `identity_service_role_assignments` 传递�
 
 Agent→Control 的实际授权和消费者测试属于 #216/#207，不在本 PR 内实现。当前 PR 只从同一 Bundle 派生 HTTPS origin、CA、audience、timeout、caller 和 scope 输入，并在 Bundle/Helm 边界拒绝独立覆盖。渲染这些输入不会证明 Keycloak 已存在该授权，也不会签发凭据；维护者必须在目标 owner PR 和批准窗口中验证真实 role assignment、issuer、client、audience、CA、网络和服务镜像。
 
+
+### 项目列表游标签名 Secret
+
+Agent 与 Resource 服务分别挂载独立的游标签名 Secret，不复用 service client secret：
+
+```text
+/etc/labweaver/secrets/cursor-signing-key-current
+/etc/labweaver/secrets/cursor-signing-key-previous   # 可选，轮换窗口保留
+```
+
+`LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE` 必须指向至少 32 字节的 current 文件；
+`LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE` 可选，存在时用于验证轮换前签发的游标。新游标只使用
+current 签名并携带 key id；服务验证 current 或 previous，缺少 current 或密钥长度不足时启动失败。
+该 Secret 不得放进 ConfigMap、Bundle 明文或 service client secret 文件。
 ## 同一目录中的 Resource profile
 
 在 `config/bundle.yaml` 中添加 `resource`。该字段不建立第二个配置目录或秘密仓库。

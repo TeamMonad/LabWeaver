@@ -243,15 +243,19 @@ pub fn container_execution_request_value(
 #[derive(Clone, Debug)]
 pub struct PostgresAgentRunStore {
     pool: PgPool,
-    cursor_signing_key: Arc<Vec<u8>>,
+    cursor_signing_key_current: Arc<Vec<u8>>,
+    cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
 }
 
-const AGENT_HISTORY_CURSOR_VERSION: u8 = 1;
+const AGENT_HISTORY_CURSOR_VERSION: u8 = 2;
+const CURRENT_CURSOR_KEY_ID: &str = "current";
+const PREVIOUS_CURSOR_KEY_ID: &str = "previous";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentHistoryCursor {
     version: u8,
+    key_id: String,
     project_id: ProjectId,
     states: Vec<String>,
     snapshot_at: OffsetDateTime,
@@ -312,6 +316,7 @@ fn encode_history_cursor(
     let signed = SignedAgentHistoryCursor {
         cursor: AgentHistoryCursor {
             version: cursor.version,
+            key_id: cursor.key_id.clone(),
             project_id: cursor.project_id,
             states: cursor.states.clone(),
             snapshot_at: cursor.snapshot_at,
@@ -332,7 +337,8 @@ fn decode_history_cursor(
     value: &str,
     project_id: ProjectId,
     states: &[String],
-    key: &[u8],
+    current: &[u8],
+    previous: Option<&[u8]>,
 ) -> Result<AgentHistoryCursor, AgentRunStoreError> {
     if value.is_empty() || value.len() > MAX_CURSOR_LENGTH {
         return Err(AgentRunStoreError::InvalidHistoryCursor);
@@ -348,6 +354,12 @@ fn decode_history_cursor(
     if serde_json::to_vec(&signed).map_err(|_| AgentRunStoreError::InvalidHistoryCursor)? != bytes {
         return Err(AgentRunStoreError::InvalidHistoryCursor);
     }
+    let key = match signed.cursor.key_id.as_str() {
+        CURRENT_CURSOR_KEY_ID => Some(current),
+        PREVIOUS_CURSOR_KEY_ID => previous,
+        _ => None,
+    }
+    .ok_or(AgentRunStoreError::InvalidHistoryCursor)?;
     let payload =
         serde_json::to_vec(&signed.cursor).map_err(|_| AgentRunStoreError::InvalidHistoryCursor)?;
     let signature = URL_SAFE_NO_PAD
@@ -369,19 +381,20 @@ fn decode_history_cursor(
 }
 
 impl PostgresAgentRunStore {
-    /// Creates a repository with the test-only default cursor key. Production startup must replace
-    /// it with `with_cursor_signing_key` loaded from the mounted Secret file.
+    /// Creates a repository with test-only cursor keys.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            cursor_signing_key: Arc::new(b"labweaver-test-cursor-key".to_vec()),
+            cursor_signing_key_current: Arc::new(b"labweaver-test-cursor-key".to_vec()),
+            cursor_signing_key_previous: None,
         }
     }
 
     #[must_use]
-    pub fn with_cursor_signing_key(mut self, key: Vec<u8>) -> Self {
-        self.cursor_signing_key = Arc::new(key);
+    pub fn with_cursor_signing_keys(mut self, current: Vec<u8>, previous: Option<Vec<u8>>) -> Self {
+        self.cursor_signing_key_current = Arc::new(current);
+        self.cursor_signing_key_previous = previous.map(Arc::new);
         self
     }
 
@@ -1604,7 +1617,10 @@ impl PostgresAgentRunStore {
                     value,
                     project_id,
                     &states,
-                    self.cursor_signing_key.as_slice(),
+                    self.cursor_signing_key_current.as_slice(),
+                    self.cursor_signing_key_previous
+                        .as_deref()
+                        .map(Vec::as_slice),
                 )
             })
             .transpose()?;
@@ -1694,13 +1710,14 @@ impl PostgresAgentRunStore {
             Some(encode_history_cursor(
                 &AgentHistoryCursor {
                     version: AGENT_HISTORY_CURSOR_VERSION,
+                    key_id: CURRENT_CURSOR_KEY_ID.to_owned(),
                     project_id,
                     states,
                     snapshot_at,
                     created_at: *created_at,
                     run_id: last.id,
                 },
-                self.cursor_signing_key.as_slice(),
+                self.cursor_signing_key_current.as_slice(),
             )?)
         } else {
             None

@@ -104,10 +104,10 @@ impl ResourceApiState {
         self.task_service_client_ids = Some(client_ids);
         self
     }
-    /// Installs the mounted Secret used to authenticate pagination cursors.
+    /// Installs the current and optional previous mounted Secrets used to authenticate cursors.
     #[must_use]
-    pub fn with_cursor_signing_key(mut self, key: Vec<u8>) -> Self {
-        self.store = self.store.with_cursor_signing_key(key);
+    pub fn with_cursor_signing_keys(mut self, current: Vec<u8>, previous: Option<Vec<u8>>) -> Self {
+        self.store = self.store.with_cursor_signing_keys(current, previous);
         self
     }
 }

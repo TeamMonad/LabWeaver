@@ -40,7 +40,8 @@ const SERVICE_SCOPES: &str = "LABWEAVER_SERVICE_SCOPES";
 const SERVICE_TOKEN_REFRESH_SKEW_SECONDS: &str = "LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS";
 const ACCESS_SERVICE_CLIENT_ID: &str = "LABWEAVER_ACCESS_SERVICE_CLIENT_ID";
 const ENVIRONMENT_SERVICE_CLIENT_ID: &str = "LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID";
-const CURSOR_SIGNING_KEY_FILE: &str = "LABWEAVER_CURSOR_SIGNING_KEY_FILE";
+const CURSOR_SIGNING_KEY_CURRENT_FILE: &str = "LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE";
+const CURSOR_SIGNING_KEY_PREVIOUS_FILE: &str = "LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE";
 const TASK_SERVICE_CLIENT_IDS: &str = "LABWEAVER_TASK_SERVICE_CLIENT_IDS";
 const ENVIRONMENT_SERVICE_AUDIENCE: &str = "labweaver-environment";
 const OUTBOX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -54,7 +55,8 @@ pub struct ResourceProcessRuntime {
     access_service_client_id: String,
     environment_service_client_id: String,
     task_service_client_ids: BTreeSet<String>,
-    cursor_signing_key: Arc<Vec<u8>>,
+    cursor_signing_key_current: Arc<Vec<u8>>,
+    cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
     capacity_worker: CapacityReconcileWorker,
     outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
@@ -117,8 +119,12 @@ impl ResourceProcessRuntime {
         let access_service_client_id = required(ACCESS_SERVICE_CLIENT_ID)?;
         let environment_service_client_id = required(ENVIRONMENT_SERVICE_CLIENT_ID)?;
         let task_service_client_ids = required_set(TASK_SERVICE_CLIENT_IDS)?;
-        let cursor_signing_key = read_secret_key(&required_path(CURSOR_SIGNING_KEY_FILE)?)?;
-        let store = PgResourceStore::new(pool).with_cursor_signing_key(cursor_signing_key.clone());
+        let cursor_current = read_secret_key(&required_path(CURSOR_SIGNING_KEY_CURRENT_FILE)?)?;
+        let cursor_previous = optional_path(CURSOR_SIGNING_KEY_PREVIOUS_FILE)?
+            .map(|path| read_secret_key(&path))
+            .transpose()?;
+        let store = PgResourceStore::new(pool)
+            .with_cursor_signing_keys(cursor_current.clone(), cursor_previous.clone());
         seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
             .map_err(ResourceProcessRuntimeError::Outbox)?;
@@ -133,7 +139,8 @@ impl ResourceProcessRuntime {
             access_service_client_id,
             environment_service_client_id,
             task_service_client_ids,
-            cursor_signing_key: Arc::new(cursor_signing_key),
+            cursor_signing_key_current: Arc::new(cursor_current),
+            cursor_signing_key_previous: cursor_previous.map(Arc::new),
             capacity_worker,
             outbox,
             readiness: Arc::new(AtomicBool::new(true)),
@@ -153,7 +160,12 @@ impl ResourceProcessRuntime {
             .with_service_verifier(Arc::clone(&self.service_verifier))
             .with_access_service_client_id(self.access_service_client_id.clone())
             .with_environment_service_client_id(self.environment_service_client_id.clone())
-            .with_cursor_signing_key(self.cursor_signing_key.as_ref().clone())
+            .with_cursor_signing_keys(
+                self.cursor_signing_key_current.as_ref().clone(),
+                self.cursor_signing_key_previous
+                    .as_deref()
+                    .map(|value| value.to_vec()),
+            )
     }
 
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
@@ -167,7 +179,8 @@ impl ResourceProcessRuntime {
             service_verifier: _service_verifier,
             access_service_client_id: _access_service_client_id,
             environment_service_client_id: _environment_service_client_id,
-            cursor_signing_key: _cursor_signing_key,
+            cursor_signing_key_current: _cursor_signing_key_current,
+            cursor_signing_key_previous: _cursor_signing_key_previous,
             task_service_client_ids: _task_service_client_ids,
             _shutdown_sender,
             shutdown,
@@ -377,6 +390,16 @@ fn required_path(name: &'static str) -> Result<PathBuf, ResourceProcessRuntimeEr
         return Err(ResourceProcessRuntimeError::PathConfiguration(name));
     }
     Ok(path)
+}
+fn optional_path(name: &'static str) -> Result<Option<PathBuf>, ResourceProcessRuntimeError> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(ResourceProcessRuntimeError::PathConfiguration(name));
+    }
+    Ok(Some(path))
 }
 
 fn required_set(name: &'static str) -> Result<BTreeSet<String>, ResourceProcessRuntimeError> {

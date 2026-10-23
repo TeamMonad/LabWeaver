@@ -223,7 +223,8 @@ impl PendingAllocation {
 #[derive(Clone)]
 pub struct PgResourceStore {
     pool: PgPool,
-    cursor_signing_key: Arc<Vec<u8>>,
+    cursor_signing_key_current: Arc<Vec<u8>>,
+    cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
 }
 
 struct UsageAuthority<'a> {
@@ -232,12 +233,15 @@ struct UsageAuthority<'a> {
     task_service_client_ids: &'a BTreeSet<String>,
 }
 
-const RESOURCE_REQUEST_CURSOR_VERSION: u8 = 1;
+const RESOURCE_REQUEST_CURSOR_VERSION: u8 = 2;
+const CURRENT_CURSOR_KEY_ID: &str = "current";
+const PREVIOUS_CURSOR_KEY_ID: &str = "previous";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ResourceRequestCursor {
     version: u8,
+    key_id: String,
     project_id: ProjectId,
     course_id: Option<contracts::CourseId>,
     actor_id: Option<contracts::ActorId>,
@@ -301,6 +305,7 @@ fn encode_request_cursor(
     let signed = SignedResourceRequestCursor {
         cursor: ResourceRequestCursor {
             version: cursor.version,
+            key_id: cursor.key_id.clone(),
             project_id: cursor.project_id,
             course_id: cursor.course_id,
             actor_id: cursor.actor_id,
@@ -324,7 +329,8 @@ fn decode_request_cursor(
     course_id: Option<contracts::CourseId>,
     actor_id: Option<contracts::ActorId>,
     states: &[String],
-    key: &[u8],
+    current: &[u8],
+    previous: Option<&[u8]>,
 ) -> Result<ResourceRequestCursor, ResourceStoreError> {
     if value.is_empty() || value.len() > MAX_CURSOR_LENGTH {
         return Err(ResourceStoreError::InvalidCursor);
@@ -340,6 +346,12 @@ fn decode_request_cursor(
     if serde_json::to_vec(&signed).map_err(|_| ResourceStoreError::InvalidCursor)? != bytes {
         return Err(ResourceStoreError::InvalidCursor);
     }
+    let key = match signed.cursor.key_id.as_str() {
+        CURRENT_CURSOR_KEY_ID => Some(current),
+        PREVIOUS_CURSOR_KEY_ID => previous,
+        _ => None,
+    }
+    .ok_or(ResourceStoreError::InvalidCursor)?;
     let payload =
         serde_json::to_vec(&signed.cursor).map_err(|_| ResourceStoreError::InvalidCursor)?;
     let signature = URL_SAFE_NO_PAD
@@ -367,13 +379,15 @@ impl PgResourceStore {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            cursor_signing_key: Arc::new(b"labweaver-test-cursor-key".to_vec()),
+            cursor_signing_key_current: Arc::new(b"labweaver-test-cursor-key".to_vec()),
+            cursor_signing_key_previous: None,
         }
     }
 
     #[must_use]
-    pub fn with_cursor_signing_key(mut self, key: Vec<u8>) -> Self {
-        self.cursor_signing_key = Arc::new(key);
+    pub fn with_cursor_signing_keys(mut self, current: Vec<u8>, previous: Option<Vec<u8>>) -> Self {
+        self.cursor_signing_key_current = Arc::new(current);
+        self.cursor_signing_key_previous = previous.map(Arc::new);
         self
     }
 
@@ -811,7 +825,10 @@ impl PgResourceStore {
                     query.course_id,
                     actor_id,
                     &states,
-                    self.cursor_signing_key.as_slice(),
+                    self.cursor_signing_key_current.as_slice(),
+                    self.cursor_signing_key_previous
+                        .as_deref()
+                        .map(Vec::as_slice),
                 )
             })
             .transpose()?;
@@ -878,6 +895,7 @@ impl PgResourceStore {
             Some(encode_request_cursor(
                 &ResourceRequestCursor {
                     version: RESOURCE_REQUEST_CURSOR_VERSION,
+                    key_id: CURRENT_CURSOR_KEY_ID.to_owned(),
                     project_id,
                     course_id: query.course_id,
                     actor_id,
@@ -886,7 +904,7 @@ impl PgResourceStore {
                     created_at: *created_at,
                     request_id: last.id,
                 },
-                self.cursor_signing_key.as_slice(),
+                self.cursor_signing_key_current.as_slice(),
             )?)
         } else {
             None
