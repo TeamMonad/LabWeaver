@@ -6,7 +6,6 @@
       "config.yaml"
     ],
     "agent-service-config": [
-      "anthropic-base-url",
       "anthropic-model",
       "config.yaml"
     ],
@@ -54,9 +53,10 @@
       "tls.key"
     ],
     "agent-service-secrets": [
-      "anthropic-auth-token",
       "database-url",
-      "harbor-ca.crt",
+      "model-gateway-upstream-url",
+      "model-gateway-upstream-key",
+      "model-gateway-signing-key",
       "harbor-password",
       "harbor-username",
       "minio-access-key",

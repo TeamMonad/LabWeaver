@@ -25,6 +25,7 @@ use agent_service::llm_review::{LlmReviewStore, LlmReviewWorker};
 use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
+use agent_service::model_gateway::{GatewayState, ModelGatewayRuntime, ScopedTokenIssuer};
 use agent_service::oci_registry::RegistryCredentials;
 use agent_service::platform_image_jobs::{PlatformImageImportJobStore, PlatformImageImportWorker};
 use agent_service::platform_images::{
@@ -41,7 +42,8 @@ use auth::{
     ServerTlsFileConfig, ServiceAuthConfig, ServiceAuthError, ServiceTokenClient,
     ServiceTokenClientConfig, ServiceTokenVerifier, TransportSecurityMode,
 };
-use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
+use contracts::{ArtifactId, ArtifactRef, ProjectId, Revision, UtcTimestamp};
+use reqwest::Url;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use task_execution::kubernetes::parse_egress_destination;
@@ -52,17 +54,8 @@ mod http_transport;
 #[path = "../../service_runtime.rs"]
 mod service_runtime;
 
-/// The exact provider environment the env-cleared Claude Code worker receives.
-///
-/// Issue #152 generalizes the provider binding to the three standard Anthropic
-/// fields. The set is closed: operator-specific names such as `ECNU_API_KEY`
-/// are not read, and no compatibility alias, ambient credential, or fallback
-/// provider route may enter this map.
-const REQUIRED_WORKER_ENVIRONMENT: [&str; 3] = [
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_MODEL",
-];
+/// The only static model setting passed into a worker. Endpoint and credential are issued per attempt by the gateway.
+const REQUIRED_WORKER_ENVIRONMENT: [&str; 1] = ["ANTHROPIC_MODEL"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +74,7 @@ struct DeploymentFile {
     track_lease_seconds: u64,
     poll_interval_milliseconds: u64,
     worker_environment_files: BTreeMap<String, String>,
+    model_gateway: ModelGatewayFileConfig,
     work_execution: WorkExecutionFileConfig,
     build: BuildFileConfig,
     nats: NatsFileConfig,
@@ -140,6 +134,16 @@ struct SandboxFileConfig {
     /// Reviewed object-store trust root the attempt reads signed URLs with; absent means the
     /// object store is trusted by the sandbox image trust store.
     object_store_ca_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelGatewayFileConfig {
+    bind_addr: String,
+    public_base_url: String,
+    upstream_url_file: String,
+    upstream_key_file: String,
+    signing_key_file: String,
 }
 
 impl SandboxFileConfig {
@@ -404,6 +408,18 @@ async fn run_agent_service() -> Result<(), StartupError> {
         .map_err(|_| StartupError::Configuration)?,
     );
     let worker_environment = read_worker_environment(&deployment.worker_environment_files)?;
+    let gateway_upstream = Url::parse(&read_trimmed(&deployment.model_gateway.upstream_url_file)?)
+        .map_err(|_| StartupError::Configuration)?;
+    let gateway_public_url = Url::parse(&deployment.model_gateway.public_base_url)
+        .map_err(|_| StartupError::Configuration)?;
+    let gateway_key = read_trimmed(&deployment.model_gateway.upstream_key_file)?;
+    let signing_key = read_trimmed(&deployment.model_gateway.signing_key_file)?;
+    let gateway_issuer = ScopedTokenIssuer::new(signing_key.into_bytes(), Duration::from_mins(5))
+        .ok_or(StartupError::Configuration)?;
+    let gateway_runtime = ModelGatewayRuntime {
+        base_url: gateway_public_url,
+        issuer: gateway_issuer.clone(),
+    };
     let local_process = Arc::new(TokioClaudeCodeProcess::new(worker_environment.clone()));
     let review_process: Arc<dyn ClaudeCodeProcess> = local_process.clone();
     let sandbox = &deployment.sandbox;
@@ -428,6 +444,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
             request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
             object_store_ca_file: sandbox.object_store_ca_file.clone().map(Into::into),
             worker_environment: worker_environment.clone(),
+            model_gateway: Some(gateway_runtime.clone()),
         },
         resource_client.clone(),
         store.clone(),
@@ -449,7 +466,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let platform_images = PgPlatformImageCatalog::new(store.pool().clone());
     let platform_image_import_jobs = PlatformImageImportJobStore::new(store.pool().clone());
     let state = Arc::new(AgentApiState {
-        resource: Some(resource_client),
+        resource: Some(resource_client.clone()),
         store: store.clone(),
         build_store: build_store.clone(),
         generated_artifacts: generated_artifacts.clone(),
@@ -467,6 +484,25 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let bind = SocketAddr::from_str(&deployment.control_tls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    let gateway_bind = deployment
+        .model_gateway
+        .bind_addr
+        .parse::<SocketAddr>()
+        .map_err(|_| StartupError::Configuration)?;
+    let gateway_listener = tokio::net::TcpListener::bind(gateway_bind).await?;
+    let gateway_state = GatewayState {
+        upstream: gateway_upstream,
+        upstream_key: gateway_key,
+        token: String::new(),
+        expires_at: std::time::SystemTime::UNIX_EPOCH,
+        project_id: ProjectId::new(),
+        agent_run_id: uuid::Uuid::nil(),
+        attempt: 0,
+        resource: resource_client,
+        sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        http: reqwest::Client::new(),
+        issuer: Some(gateway_issuer),
+    };
     let work_execution_store = store.clone();
     let work_execution_objects = Arc::clone(&objects);
     let work_execution_artifacts = generated_artifacts.clone();
@@ -489,6 +525,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         worker_id: format!("{}:llm-review", deployment.worker_id),
         lease_duration: Duration::from_secs(deployment.track_lease_seconds),
         poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
+        model_gateway: Some(gateway_runtime.clone()),
     };
     let work_execution_worker = WorkExecutionWorker::new(
         work_execution_store,
@@ -515,6 +552,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
             with_service_auth(router(state), service_verifier),
             tls,
         ) => result?,
+        result = agent_service::model_gateway::serve(gateway_state, gateway_listener) => result?,
         result = worker.run() => result?,
         result = review_worker.run() => result?,
         result = work_execution_worker.run() => result?,
@@ -1125,6 +1163,7 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
             .environment_scopes
             .contains("environment:resolve_work_execution_binding")
         || !worker_environment_contract_holds(deployment)
+        || !model_gateway_contract_holds(deployment)
     {
         return Err(StartupError::Configuration);
     }
@@ -1145,6 +1184,20 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
         return Err(StartupError::Configuration);
     }
     Ok(())
+}
+
+fn model_gateway_contract_holds(deployment: &DeploymentFile) -> bool {
+    let gateway = &deployment.model_gateway;
+    gateway.bind_addr.parse::<SocketAddr>().is_ok()
+        && Url::parse(&gateway.public_base_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        && [
+            &gateway.upstream_url_file,
+            &gateway.upstream_key_file,
+            &gateway.signing_key_file,
+        ]
+        .iter()
+        .all(|path| std::path::Path::new(path).is_absolute())
 }
 
 fn worker_environment_contract_holds(deployment: &DeploymentFile) -> bool {
@@ -1295,21 +1348,32 @@ mod deployment_contract_tests {
         assert!(deployment.build.provider_subject.ends_with(".v1"));
         assert_eq!(
             deployment.worker_environment_files,
-            BTreeMap::from([
-                (
-                    "ANTHROPIC_AUTH_TOKEN".to_owned(),
-                    "/etc/labweaver/secrets/anthropic-auth-token".to_owned(),
-                ),
-                (
-                    "ANTHROPIC_BASE_URL".to_owned(),
-                    "/etc/labweaver/config/anthropic-base-url".to_owned(),
-                ),
-                (
-                    "ANTHROPIC_MODEL".to_owned(),
-                    "/etc/labweaver/config/anthropic-model".to_owned(),
-                ),
-            ])
+            BTreeMap::from([(
+                "ANTHROPIC_MODEL".to_owned(),
+                "/etc/labweaver/config/anthropic-model".to_owned(),
+            )])
         );
+        assert_eq!(deployment.model_gateway.bind_addr, "0.0.0.0:9460");
+        assert!(
+            deployment
+                .model_gateway
+                .upstream_url_file
+                .contains("secrets")
+        );
+        assert!(
+            deployment
+                .model_gateway
+                .upstream_key_file
+                .contains("secrets")
+        );
+        assert!(
+            deployment
+                .model_gateway
+                .signing_key_file
+                .contains("secrets")
+        );
+        assert!(!example.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!example.contains("anthropic-auth-token"));
         assert!(!example.contains(".v2"));
         assert!(!example.contains("ECNU_API_KEY"));
         assert!(super::worker_environment_contract_holds(&deployment));

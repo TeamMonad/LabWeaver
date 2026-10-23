@@ -3122,7 +3122,6 @@ def make_app_input(
              "kubevirt-console-executor-config/config.yaml":"kubevirt-console-executor.yaml.example",
              "web-config/deployment.json":"web-deployment.json.example"}
     generated_config_targets = {
-        "agent-service-config/anthropic-base-url",
         "agent-service-config/anthropic-model",
     }
     for target, source in sources.items():
@@ -3167,17 +3166,15 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("agent configuration has no sandbox.image")
-            # Per-attempt NetworkPolicies name exact destinations, so the local
-            # stack renders the run's real Service CIDR with the reviewed object
-            # store port and the Kind network with the local model endpoint port
-            # instead of the production placeholders.
+            # Per-attempt NetworkPolicies allow the object store and Agent model gateway only;
+            # the provider endpoint is never inserted into sandbox egress.
             object_store_port = local_object_store_port(data)
-            model_port = local_provider_port(provider_environment["ANTHROPIC_BASE_URL"])
-            egress_pattern = re.compile(r'(?m)^(\s*allowed_egress:\s*)\[[^\]]*\]$')
+            gateway_port = 9460
+            egress_pattern = re.compile(r'(?m)^([?25l\s*allowed_egress:[?25h\s*)\[[^\]]*\]$')
             data, replacements = egress_pattern.subn(
                 rf'\g<1>["{service_cidr}:{object_store_port}", '
                 rf'"{pod_cidr}:{object_store_port}", '
-                rf'"{kind_network_cidr}:{model_port}"]',
+                rf'"{service_cidr}:{gateway_port}"]',
                 data,
                 count=1,
             )
@@ -3266,7 +3263,6 @@ def make_app_input(
             data=json.dumps(providers, indent=2) + "\n"
         write(root/"configmaps"/target,data)
     for target, environment_key in {
-        "agent-service-config/anthropic-base-url": "ANTHROPIC_BASE_URL",
         "agent-service-config/anthropic-model": "ANTHROPIC_MODEL",
     }.items():
         object_name, _key = target.split("/", 1)
@@ -3322,7 +3318,9 @@ def make_app_input(
             elif key=="oidc-client-secret": values[key]=clients["web-service"]
             elif key=="resource-delegation-key": values[key]=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
             elif key=="session-keyring.json": values[key]=keyring
-            elif key=="anthropic-auth-token": values[key]=provider_environment["ANTHROPIC_AUTH_TOKEN"]
+            elif key=="model-gateway-upstream-url": values[key]=provider_environment["ANTHROPIC_BASE_URL"]
+            elif key=="model-gateway-upstream-key": values[key]=provider_environment["ANTHROPIC_AUTH_TOKEN"]
+            elif key=="model-gateway-signing-key": values[key]=secrets.token_bytes(32)
             elif key=="minio-access-key": values[key]="labweaver-root"
             elif key=="minio-secret-key": values[key]=(foundation/"render-input/secrets/minio-secrets/root-password").read_bytes()
             elif key=="registry-pull-config.json":

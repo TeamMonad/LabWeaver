@@ -14,14 +14,22 @@ Control and Agent read one reviewed YAML document from
 NATS credentials and private keys are file locators; secret values do not belong in YAML, logs,
 reports or Git.
 
-The Claude Code worker has one deployment owned provider binding that uses only the
-three generic Anthropic fields. Reviewed ConfigMap files supply the base URL from
-`agent-service-config/anthropic-base-url` and the model from
-`agent-service-config/anthropic-model`; the operator-provided auth token is mounted as
-`agent-service-secrets/anthropic-auth-token`. The env-cleared child receives exactly
-`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_MODEL`. Missing, empty or extra
-input blocks startup; operator-specific variable names are not read, and the worker does not
-inherit an ambient provider credential or have a fallback endpoint.
+The Agent service owns the model gateway. Its upstream URL, upstream key and HMAC signing key are
+mounted from `model-gateway-upstream-url`, `model-gateway-upstream-key` and
+`model-gateway-signing-key` Secret files. Workers receive only `ANTHROPIC_MODEL` statically and
+per-attempt `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY` values. Missing, empty or extra worker
+environment input blocks startup; no ambient provider credential or fallback route exists.
+
+## Agent model gateway
+
+Agent 启动时必须从 Secret 文件读取 `model-gateway-upstream-url`、
+`model-gateway-upstream-key` 和 `model-gateway-signing-key`；任一缺失、为空或不是绝对路径都
+导致 fail-closed。网关监听 Agent Service 的内部 `9460` 端口，Worker 只获得静态模型名和
+每次 run/attempt 签发的短期 `ANTHROPIC_API_KEY`，不能配置提供商 URL 或长期 key。
+
+沙箱命名空间的 Cilium NetworkPolicy 只允许到 `agent-service:9460`（以及其已批准的对象存储），
+不允许 host、FQDN 或提供商 CIDR。更新 upstream 时只替换 Secret 并重启 Agent；不把 key 写入
+YAML、命令参数、日志或 bundle 报告。
 
 The deployment must provision these identities before either service starts:
 

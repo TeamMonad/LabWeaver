@@ -81,6 +81,19 @@ Resource 内部分工保持具体函数和唯一真源：`pricing` 查询版本�
 
 Outbox 与账务维护使用独立循环，仍在同一个 Resource 进程。真实 PG/NATS 故障场景中，Broker 接收事件但不回 ACK 时，资金到期处理继续；未确认的 Outbox 事件仍保持未发布。没有新增 Billing 服务、消息框架或虚假发布成功。
 
+## 模型调用的计量
+
+Agent 的所有 Claude/Anthropic Messages 请求必须先经过 Agent model gateway。Worker 不接收提供商
+URL 或长期 API key；每个 run/attempt 取得限定 project、run、attempt 且短期过期的 HMAC capability。
+Gateway 在转发前调用 Resource model admission，余额不足或缺少完整费率配置时返回
+`LW_CREDITS_INSUFFICIENT`/`LW_MODEL_ADMISSION_UNAVAILABLE`，不会接触上游。
+
+模型费率是四个独立的 CREDITS 单价：input、output、cache-read、cache-write，并各自使用配置的
+token 基数；cache read 和 cache write 不折算成 input，也不从 USD 推导。准入按单次最大预占额
+冻结，结算使用上游 usage 快照和相同 callId。上游无 usage、请求失败、客户端取消或 SSE 中断均
+记为 Unknown，保留预占并进入既有未知用量核实流程，绝不按零 token 结算。重复 callId 由
+Resource 幂等处理，不能重复预占或产生第二条账目。
+
 ## BuildKit 构建
 
 Dockerfile 构建在 BuildKit 调用前以真实 BuildRequest/attempt 预占最大构建时长。计价单位为 builder 专属 `build_second`；未执行的 CPU/内存上限不是用量。Resource 校验 Agent 的真实命令与租约，在自身事务内提交预占和执行 grant，Agent 再在本地事务核对取消与执行 fence。跨进程请求不被描述为一个远端原子事务。

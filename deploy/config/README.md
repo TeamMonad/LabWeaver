@@ -64,10 +64,9 @@ Copy and specialize the examples as follows:
 
 - `control-plane.yaml.example` → `control-service-config/config.yaml`
 - `access-auth.yaml.example` → `access-service-config/config.yaml`
-- `agent-control-plane.yaml.example` → `agent-service-config/config.yaml`
-- `anthropic-base-url` → `agent-service-config/anthropic-base-url` (copy exactly)
-- `anthropic-model` → `agent-service-config/anthropic-model` (copy exactly)
-- `build-executor.yaml.example` → `build-executor-config/config.yaml`
+ - `agent-control-plane.yaml.example` → `agent-service-config/config.yaml`
+ - `anthropic-model` → `agent-service-config/anthropic-model` (copy exactly)
+ - `model-gateway-upstream-url`, `model-gateway-upstream-key`, `model-gateway-signing-key` → `agent-service-secrets/` (mode `0600`)
 - `environment-providers.json.example` → `environment-service-config/providers.json`
 - `runtime-executor.yaml.example` → both runtime executor `config.yaml` files
 - `evaluation-service.yaml.example` → `evaluation-service-config/config.yaml`
@@ -89,14 +88,11 @@ Actor and role HTTP headers are not an identity mechanism. Internal Resource rou
 service JWT with the route permission; Task resource routes additionally require a configured task
 owner client ID (Evaluation and Agent authoring share the one-shot Task boundary).
 
-The deployment binds the pinned Claude Code CLI to the reviewed Anthropic-compatible endpoint using
-only the three generic provider fields. Put the operator-provided auth token value in
-`secrets/agent-service-secrets/anthropic-auth-token` with mode `0600`; never put it in YAML, a
-command argument, a log or a report. The Agent process receives exactly
-`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_MODEL` from the three mounted
-files. Operator-specific variable names are not read, and there is no compatibility alias,
-ambient credential fallback or alternate provider route; startup fails closed when the
-mounted set differs from these three fields.
+The Agent service owns the Anthropic-compatible egress gateway. Put its upstream URL, upstream API
+key and HMAC signing key only in the three mounted Secret files named above. The worker receives
+only `ANTHROPIC_MODEL` statically; each run/attempt receives a short-lived scoped
+`ANTHROPIC_API_KEY` and the gateway URL. Missing files fail startup. The authoring sandbox
+NetworkPolicy permits the gateway Service and does not permit the provider endpoint directly.
 
 The administrator image catalog binds exactly one platform registry. Put the operator-provided CA,
 robot username and robot password values in

@@ -95,6 +95,8 @@ pub struct SandboxProcessConfiguration {
     /// from the service environment. Entries are rendered into the per-attempt Secret, which the
     /// attempt owns and deletes with its bundle.
     pub worker_environment: BTreeMap<String, String>,
+    /// Shared gateway endpoint and signer used to mint one capability per attempt.
+    pub model_gateway: Option<crate::model_gateway::ModelGatewayRuntime>,
 }
 
 /// Admitted Kubernetes execution backend for authoring attempts.
@@ -514,10 +516,18 @@ impl SandboxAuthoringProcess {
             ownership,
             trace_id: scope.trace_id.clone(),
             command: command_argv(&command),
-            command_environment: attempt_environment(
-                &self.configuration.worker_environment,
-                command.env(),
-            ),
+            command_environment: {
+                let mut environment =
+                    attempt_environment(&self.configuration.worker_environment, command.env());
+                if let Some(gateway) = &self.configuration.model_gateway {
+                    environment.extend(gateway.environment(
+                        scope.project_id,
+                        scope.run_id.as_uuid(),
+                        scope.attempt,
+                    ));
+                }
+                environment
+            },
             expected_claude_version: scope.claude_code_version.clone(),
             material_download_url: material_download.url,
             material_sha256: command.stdin_sha256().to_string(),

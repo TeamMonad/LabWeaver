@@ -37,7 +37,12 @@ HTTPS 证书由本次运行的本地 CA 签发。命令不自动修改宿主机�
 
 普通 `up` 默认不启用沙箱内镜像构建；需要验证 authoring sandbox 的 rootless BuildKit sidecar 时显式加 `--authoring-buildkit-sidecar`。该开关把锁定的 rootless BuildKit 镜像和 `authoring-buildkit-config` ConfigMap（`buildkitd.toml` 与 Harbor CA）写入沙箱配置，只在真实 Harbor 与 BuildKit 就绪的普通 `up` 中可用，`--external-fixtures` 不支持。
 
-普通 `up` 在创建 Kind 资源前读取仓库根目录 `.env` 中的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和 `ANTHROPIC_MODEL`；也可以通过 `--provider-env <path>` 指定同样只包含这三个字段的 dotenv 文件。三项会分别进入 Agent 的 ConfigMap 和 Secret，缺失、空值、额外字段或非 HTTPS 地址会直接阻止启动。Agent 的持久化 LLM policy 仍由管理员显式创建；它的 `binding.model` 必须选择当前 Provider 支持的模型，不会从 `.env` 静默改写。
+普通 `up` 在创建 Kind 资源前读取仓库根目录 `.env`（或 `--provider-env` 指定文件）中的
+`ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和 `ANTHROPIC_MODEL`，仅将前两项写入
+model-gateway Secret，将模型名写入 Agent ConfigMap。Agent worker 不接收 provider URL 或
+长期 key；启动时 gateway 缺任一 Secret 文件会失败。沙箱 NetworkPolicy 只允许 Agent gateway
+端口，不允许直接访问 provider。Agent 的持久化 LLM policy 仍由管理员显式创建；其
+`binding.model` 必须选择当前 provider 支持的模型，不会从 `.env` 静默改写。
 
 管理员批准不含 GPU 的资源申请时，填写当前 Environment 配置中的执行后端绑定。本地配置使用 `kubernetes-work-local-hostpath`，来自 `deploy/config/environment-providers.local-hostpath.example.json` 中容器条目的 `binding`。该文件与其他部署共用 Provider 配置数组格式，本地只配置容器后端；GPU 目录为空不会阻止 CPU 申请。其他部署应使用自己的实际绑定。
 

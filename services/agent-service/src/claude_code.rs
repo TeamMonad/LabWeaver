@@ -604,6 +604,14 @@ impl ClaudeCodeCommand {
         &self.env
     }
 
+    pub(crate) fn with_environment(
+        mut self,
+        values: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.env.extend(values);
+        self
+    }
+
     /// Returns the immutable stdin hash without exposing input bytes.
     #[must_use]
     pub const fn stdin_sha256(&self) -> Sha256Digest {
@@ -1365,11 +1373,13 @@ pub struct ClaudeCodeRuntime {
     version_check: Arc<OnceCell<Result<(), ClaudeCodeRuntimeError>>>,
     in_flight: Arc<Semaphore>,
     /// Container provider bindings the deployment actually registers.
-    ///
-    /// The model has no other way to learn them, and a candidate that names an
-    /// unregistered binding can never be provisioned, so the authoring prompt
-    /// states them explicitly.
     provider_bindings: Vec<String>,
+    model_gateway: Option<(
+        crate::model_gateway::ModelGatewayRuntime,
+        ProjectId,
+        uuid::Uuid,
+        u32,
+    )>,
 }
 
 /// Validated advisory review returned by one Claude Code invocation.
@@ -1443,7 +1453,21 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
+            model_gateway: None,
         })
+    }
+
+    /// Installs the shared gateway and the advisory run identity used for signed capabilities.
+    #[must_use]
+    pub fn with_model_gateway(
+        mut self,
+        gateway: crate::model_gateway::ModelGatewayRuntime,
+        project_id: ProjectId,
+        run_id: uuid::Uuid,
+        attempt: u32,
+    ) -> Self {
+        self.model_gateway = Some((gateway, project_id, run_id, attempt));
+        self
     }
 
     /// Declares the container provider bindings this deployment registers.
@@ -1479,6 +1503,7 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
+            model_gateway: None,
         })
     }
 
@@ -1751,6 +1776,20 @@ impl ClaudeCodeRuntime {
                     &current_prompt,
                     authoring,
                 );
+                if let Some((gateway, advisory_project, advisory_run, advisory_attempt)) =
+                    &self.model_gateway
+                {
+                    let (project_id, run_id, attempt) = match &invocation_scope {
+                        ExecutionScope::Authoring(scope) => {
+                            (scope.project_id, scope.run_id.as_uuid(), scope.attempt)
+                        }
+                        ExecutionScope::Advisory => {
+                            (*advisory_project, *advisory_run, *advisory_attempt)
+                        }
+                    };
+                    command =
+                        command.with_environment(gateway.environment(project_id, run_id, attempt));
+                }
                 command.deadline = tokio::time::Instant::now() + remaining_time();
                 self.process
                     .execute(&invocation_scope, command, cancellation.clone())

@@ -670,6 +670,7 @@ pub struct LlmReviewWorker {
     pub worker_id: String,
     pub lease_duration: Duration,
     pub poll_interval: Duration,
+    pub model_gateway: Option<crate::model_gateway::ModelGatewayRuntime>,
 }
 
 impl LlmReviewWorker {
@@ -858,6 +859,16 @@ impl LlmReviewWorker {
         }
         let runtime = ClaudeCodeRuntime::new(request.policy.clone(), Arc::clone(&self.process))
             .map_err(|error| review_execution_failure(error.diagnostic_code(), None))?;
+        let runtime = if let Some(gateway) = self.model_gateway.clone() {
+            runtime.with_model_gateway(
+                gateway,
+                request.project_id,
+                request.task_run_id.as_uuid(),
+                0,
+            )
+        } else {
+            runtime
+        };
         // Keep the runtime future alive after cancellation is requested. It owns the provider
         // invocation and must let the process boundary perform its cancellation cleanup before
         // returning the cumulative usage observed by earlier repair envelopes.
@@ -1343,6 +1354,7 @@ mod tests {
             worker_id: "test-worker".to_owned(),
             lease_duration: Duration::from_secs(1),
             poll_interval: Duration::from_millis(10),
+            model_gateway: None,
         };
         let started = Instant::now();
         let failure = worker
@@ -1387,6 +1399,7 @@ mod tests {
             worker_id: "test-worker".to_owned(),
             lease_duration: Duration::from_secs(1),
             poll_interval: Duration::from_millis(10),
+            model_gateway: None,
         };
 
         let failure = worker
