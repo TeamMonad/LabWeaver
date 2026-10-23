@@ -3061,6 +3061,13 @@ def _local_platform_manifest(
             for object_name, values in platform_objects.items()
             if object_name in object_names and object_name not in resource_objects
         }
+    optional = manifest.get("optionalSecrets", {})
+    if isinstance(optional, dict):
+        manifest["optionalSecrets"] = {
+            object_name: values
+            for object_name, values in optional.items()
+            if object_name in referenced["secrets"]
+        }
     return manifest
 
 
@@ -3071,6 +3078,7 @@ def make_app_input(
     provider_environment: dict[str, str],
     real_build_provider: local_dev_build.RealBuildProvider | None = None,
     *,
+    cursor_rotation: bool = False,
     authoring_buildkit_sidecar: bool = False,
     service_cidr: str | None = None,
     pod_cidr: str | None = None,
@@ -3098,6 +3106,10 @@ def make_app_input(
     for section, manifest_key in (("configmaps", "configMaps"), ("secrets", "secrets")):
         for name in manifest[manifest_key]:
             (root/section/name).mkdir(parents=True,exist_ok=True)
+    if cursor_rotation:
+        for name, keys in manifest.get("optionalSecrets", {}).items():
+            if name in manifest["secrets"]:
+                (root / "secrets" / name).mkdir(parents=True, exist_ok=True)
     sources={"control-service-config/config.yaml":"control-plane.yaml.example",
              "access-service-config/config.yaml":"access-auth.yaml.example",
              "agent-service-config/config.yaml":"agent-control-plane.yaml.example",
@@ -3273,7 +3285,8 @@ def make_app_input(
         service=object_name.removesuffix("-secrets")
         nats_name=service if service in names else ("environment-service" if service=="container-executor" else service)
         values:dict[str,bytes|str]={}
-        for key in keys:
+        optional_keys = manifest.get("optionalSecrets", {}).get(object_name, []) if cursor_rotation else []
+        for key in [*keys, *optional_keys]:
             if key=="database-url":
                 db_service = {
                     "build-executor": "agent-service",
@@ -3404,9 +3417,11 @@ def make_app_input(
     )
     write(resource_root / "configmaps/resource-service-config/http.yaml", http_config)
     write(resource_root / "configmaps/resource-service-config/capacity.json", capacity_config)
-    resource_keys = json.loads((ROOT / "deploy/config/resource-bundle-manifest.json").read_text())["secrets"]["resource-service-secrets"]
+    resource_manifest = json.loads((ROOT / "deploy/config/resource-bundle-manifest.json").read_text())
+    resource_keys = resource_manifest["secrets"]["resource-service-secrets"]
+    resource_optional_keys = resource_manifest.get("optionalSecrets", {}).get("resource-service-secrets", []) if cursor_rotation else []
     resource_values: dict[str, bytes | str] = {}
-    for key in resource_keys:
+    for key in [*resource_keys, *resource_optional_keys]:
         if key == "database-url":
             resource_values[key] = f"postgresql://lw_resource_runtime:{db_passwords['resource-service']}@postgres.{DATA_NAMESPACE}.svc:5432/labweaver?sslmode=disable"
         elif key == "nats-server": resource_values[key] = (root / "secrets/environment-service-secrets" / key).read_bytes()
