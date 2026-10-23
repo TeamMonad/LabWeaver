@@ -1374,7 +1374,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
                 "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
                 "LW_IDEMPOTENCY_CONFLICT",
-                "LW_OPERATION_IN_PROGRESS"
+                "LW_OPERATION_IN_PROGRESS",
+                "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED"
             ]);
         }
         if operation.operation_id == "resolveEnvironmentOwner" {

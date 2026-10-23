@@ -117,7 +117,7 @@ test('platform administrator edits, conflicts and fails closed on platform confi
     const yaml = page.getByTestId('pc-yaml')
     await yaml.fill((await yaml.inputValue()).replace('allowedCapabilities: []', 'allowedCapabilities:\n      - NET_ADMIN'))
     await page.getByTestId('pc-save').click()
-    await expect(page.getByTestId('pc-save-failure').locator('.diagnostic-code')).toHaveText('LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED')
+    await expect(page.getByTestId('pc-save-failure').locator('.diagnostic-code')).toHaveText('LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED')
     expect(patchCount, 'LW_PLATFORM_CONFIGURATION_UNSUPPORTED_SENT').toBe(0)
     page.off('request', countPatches)
     await page.reload()
