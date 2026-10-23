@@ -305,12 +305,14 @@
               "description": "Independently configured builder range. Runtime requests cannot change these fields.",
               "properties": {
                 "allowPrivilegeEscalation": {
+                  "const": false,
                   "type": "boolean"
                 },
                 "capabilities": {
                   "items": {
                     "$ref": "#/definitions/LinuxCapability"
                   },
+                  "maxItems": 0,
                   "type": "array",
                   "uniqueItems": true
                 },
@@ -318,6 +320,7 @@
                   "items": {
                     "$ref": "#/definitions/BuilderEntitlement"
                   },
+                  "maxItems": 0,
                   "type": "array",
                   "uniqueItems": true
                 }
@@ -382,19 +385,19 @@
                   "items": {
                     "$ref": "#/definitions/LinuxCapability"
                   },
+                  "maxItems": 0,
                   "type": "array",
                   "uniqueItems": true
                 },
                 "defaultContainerUid": {
-                  "description": "Zero means guest/container root, without host privileges.",
-                  "format": "uint32",
-                  "minimum": 0,
+                  "const": 0,
                   "type": "integer"
                 },
                 "preauthorizations": {
                   "items": {
                     "$ref": "#/definitions/RuntimePreauthorization"
                   },
+                  "maxItems": 0,
                   "type": "array"
                 },
                 "privilegedAllowed": {
@@ -403,10 +406,10 @@
                 "privilegedExecutionLocation": {
                   "anyOf": [
                     {
-                      "$ref": "#/definitions/PrivilegedExecutionLocation"
+                      "type": "null"
                     },
                     {
-                      "type": "null"
+                      "$ref": "#/definitions/PrivilegedExecutionLocation"
                     }
                   ]
                 }

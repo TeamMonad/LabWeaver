@@ -325,6 +325,27 @@ describe('usePlatformConfiguration', () => {
     expect(getApplyMock).toHaveBeenCalledWith({ path: { applyId: 'apply-1' } })
     expect(config.applyHistory.map((item) => item.id)).toEqual(['apply-2', 'apply-1'])
   })
+  it('sends registration to Control and preserves the selected file on policy rejection', async () => {
+    getMock.mockResolvedValue(ok(configured(3, 60), '"rev-3"') as never)
+    registerMock.mockResolvedValue(problem(422, POLICY_UNSUPPORTED_CODE) as never)
+    const config = usePlatformConfiguration()
+    await config.load()
+    const file = ageFile()
+    config.selectBundleFile(file)
+
+    expect(await config.registerBundle()).toBe(false)
+    expect(registerMock).toHaveBeenCalledTimes(1)
+    expect(config.selectedBundleFile).toBe(file)
+    expect(config.actionFailure).toMatchObject({
+      action: 'register',
+      diagnostic: {
+        code: POLICY_UNSUPPORTED_CODE,
+        message: LOCALIZED,
+        nextStep: expect.stringContaining('#207'),
+      },
+    })
+    expect(config.notice).toBeNull()
+  })
 
   it('reuses the register idempotency key for the same file and keeps the file on a revision conflict', async () => {
     getMock

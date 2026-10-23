@@ -1138,7 +1138,7 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         }),
     )?);
     output.push(json_artifact(
-        "deploy/helm/labweaver/files/platform-configuration-policy-schema.json",
+        "deploy/helm/labweaver/values.schema.json",
         platform_values_schema()?,
     )?);
     output.push(json_artifact(
@@ -1184,6 +1184,20 @@ fn platform_values_schema() -> Result<Value, GenerationError> {
     lifecycle["properties"]["expiryReminderSeconds"]["uniqueItems"] = json!(true);
     lifecycle["properties"]["expiryReminderSeconds"]["items"]["minimum"] = json!(1);
     lifecycle["properties"]["expiryReminderSeconds"]["items"]["maximum"] = json!(31_536_000);
+    let runtime = &mut policy["properties"]["runtimePolicy"];
+    runtime["properties"]["defaultContainerUid"] = json!({"const": 0, "type": "integer"});
+    runtime["properties"]["allowedCapabilities"]["maxItems"] = json!(0);
+    runtime["properties"]["preauthorizations"]["maxItems"] = json!(0);
+    runtime["properties"]["privilegedExecutionLocation"] = json!({
+        "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/PrivilegedExecutionLocation"}
+        ]
+    });
+    let builder = &mut policy["properties"]["builderPolicy"];
+    builder["properties"]["capabilities"]["maxItems"] = json!(0);
+    builder["properties"]["entitlements"]["maxItems"] = json!(0);
+    builder["properties"]["allowPrivilegeEscalation"] = json!({"const": false, "type": "boolean"});
     let mut defs = desired["$defs"].clone();
     if defs.is_null() {
         defs = json!({});

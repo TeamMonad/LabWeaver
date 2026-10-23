@@ -502,7 +502,7 @@ class DeploymentBundleTests(unittest.TestCase):
                 ("runtimePolicy", "preauthorizations", 0),
                 ("runtimePolicy", "preauthorizations", [{}]),
                 ("runtimePolicy", "defaultContainerUid", {}),
-                ("runtimePolicy", "defaultContainerUid", "1.0"),
+                ("runtimePolicy", "defaultContainerUid", 1.0),
                 ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"pool": "privileged"}}),
                 ("lifecycle", "expiryReminderSeconds", [1] * 17),
                 ("lifecycle", "expiryReminderSeconds", [1, 1]),
