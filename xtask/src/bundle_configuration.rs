@@ -18,8 +18,8 @@ fn invalid(code: &'static str) -> AppError {
 
 fn policy_error(error: PlatformConfigurationContractError) -> AppError {
     match error {
-        PlatformConfigurationContractError::PolicyUnsupported { .. } => {
-            invalid("LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED")
+        PlatformConfigurationContractError::PolicyUnsupported { field } => {
+            AppError::BundlePolicyUnsupported { field }
         }
         _ => invalid("LW_BUNDLE_CONFIGURATION_INVALID"),
     }

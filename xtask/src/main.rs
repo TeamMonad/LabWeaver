@@ -169,6 +169,9 @@ enum AppError {
     BundleConfiguration {
         code: &'static str,
     },
+    BundlePolicyUnsupported {
+        field: &'static str,
+    },
     ExternalCommand {
         role: &'static str,
         code: Option<i32>,
@@ -209,6 +212,7 @@ impl AppError {
     const fn diagnostic_code(&self) -> &'static str {
         match self {
             Self::BundleConfiguration { code } => code,
+            Self::BundlePolicyUnsupported { .. } => "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED",
             Self::ExternalCommand { .. } => "XTASK_EXTERNAL_COMMAND_FAILED",
             Self::InfrastructureRequired { .. } => "XTASK_INFRASTRUCTURE_REQUIRED",
             Self::ConfirmationRequired { .. } => "XTASK_CONFIRMATION_REQUIRED",
@@ -227,6 +231,12 @@ impl Display for AppError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BundleConfiguration { code } => formatter.write_str(code),
+            Self::BundlePolicyUnsupported { field } => {
+                write!(
+                    formatter,
+                    "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:{field}"
+                )
+            }
             Self::ExternalCommand { role, code, detail } => {
                 write!(
                     formatter,

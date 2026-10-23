@@ -427,21 +427,28 @@ class DeploymentBundleTests(unittest.TestCase):
         self.assertNotIn(self.secret.decode(), stderr.getvalue())
 
     def test_policy_without_an_execution_consumer_fails_before_seal(self) -> None:
+        configurations = []
         for group, field, value in (
             ("runtimePolicy", "defaultContainerUid", 1000),
             ("runtimePolicy", "allowedCapabilities", ["NET_ADMIN"]),
+            ("runtimePolicy", "preauthorizations", [{"scope": {"kind": "project", "projectId": "0197f0e0-0000-7000-8000-000000000013"}, "capabilities": [], "privileged": False}]),
+            ("runtimePolicy", "privilegedExecutionLocation", {"kind": "virtual_machine_guest", "providerBinding": "kubevirt"}),
             ("builderPolicy", "capabilities", ["NET_ADMIN"]),
             ("builderPolicy", "entitlements", ["network.host"]),
+            ("builderPolicy", "allowPrivilegeEscalation", True),
         ):
+            configurations.append((group, field, value))
+        for group, field, value in configurations:
             original = self.configuration[group][field]
+            original_privileged = self.configuration["runtimePolicy"]["privilegedAllowed"]
             self.configuration[group][field] = value
+            if field == "privilegedExecutionLocation":
+                self.configuration["runtimePolicy"]["privilegedAllowed"] = True
             self.save_version()
-            with self.assertRaisesRegex(
-                bundle.BundleError,
-                "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED",
-            ):
+            with self.assertRaisesRegex(bundle.BundleError, f"LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:{group}.{field}"):
                 bundle.load_bundle(self.root)
             self.configuration[group][field] = original
+            self.configuration["runtimePolicy"]["privilegedAllowed"] = original_privileged
             self.save_version()
 
     def test_plain_helm_rejects_policy_without_authenticated_source(self) -> None:
@@ -480,6 +487,33 @@ class DeploymentBundleTests(unittest.TestCase):
             "platformConfigurationPolicy requires authenticated managedControlConfiguration",
             result.stderr,
         )
+    def test_real_helm_rejects_policy_artifact_wrong_types(self) -> None:
+        helm = shutil.which("helm")
+        self.assertIsNotNone(helm, "The pinned Helm renderer is required for Bundle input tests.")
+        self.save_version()
+        recipient = self.key()
+        bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+            values_path = loaded / "helm-policy-types.yaml"
+            original = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
+            for group, field, value in (
+                ("runtimePolicy", "allowedCapabilities", {}),
+                ("runtimePolicy", "preauthorizations", 0),
+                ("runtimePolicy", "defaultContainerUid", {}),
+                ("builderPolicy", "allowPrivilegeEscalation", 0),
+            ):
+                values = copy.deepcopy(original)
+                values["platformConfigurationPolicy"][group][field] = value
+                write(values_path, yaml.safe_dump(values, sort_keys=False).encode())
+                result = subprocess.run(
+                    [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0, field)
+                self.assertIn(field, result.stderr)
+
+        self.clean_runtime()
     def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(
         self,
     ) -> None:

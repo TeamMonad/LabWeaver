@@ -61,22 +61,6 @@
             <span v-if="config.draftDirty" class="state-chip">有未保存修改</span>
           </div>
 
-          <DiagnosticBanner
-            v-if="config.draftUnsupported.length && editorMode === 'form'"
-            severity="warning"
-            :message="`草稿含尚无执行侧实现的设置：${config.draftUnsupported.map((field) => field.label).join('、')}。`"
-            next-step="这些设置会被 Bundle 导出与部署渲染拒绝（见 #207）。恢复为可部署值后才能保存。"
-            data-testid="pc-draft-unsupported"
-          />
-          <button
-            v-if="config.draftUnsupported.length && editorMode === 'form'"
-            type="button"
-            class="tonal-button small"
-            data-testid="pc-reset-unsupported"
-            @click="resetUnsupported"
-          >
-            恢复为可部署值
-          </button>
 
           <TabsRoot v-model="editorMode" class="tabs" @update:model-value="onModeChange">
             <TabsList class="tabs__list" aria-label="编辑方式">
@@ -92,7 +76,7 @@
                 <textarea v-model="yamlText" class="text-input yaml-input" rows="22" spellcheck="false" data-testid="pc-yaml" />
               </label>
               <DiagnosticBanner v-if="yamlError" severity="warning" :message="yamlError" />
-              <p class="muted">YAML 原文直接提交给服务端校验：未知字段、重复键和非法权限声明会被拒绝，错误不会回显输入。非 0 默认容器 UID、runtime capabilities、预授权、VM guest 位置和 builder 权限尚无执行侧实现，提交前会在本地拒绝。</p>
+              <p class="muted">YAML 原文直接提交给服务端校验：未知字段、重复键和非法权限声明会被拒绝，错误不会回显输入。</p>
             </TabsContent>
           </TabsRoot>
 
@@ -116,13 +100,6 @@
               <p v-else>尚无已保存的 desired 版本；请先保存配置后再登记 Bundle。</p>
             </div>
           </div>
-          <DiagnosticBanner
-            v-if="config.desiredUnsupported.length"
-            severity="warning"
-            :message="`当前 desired 含尚无执行侧实现的设置：${config.desiredUnsupported.map((field) => field.label).join('、')}。`"
-            next-step="Bundle 导出与部署渲染会拒绝此版本（见 #207），因此不能登记或应用。请在编辑器中恢复为可部署值并保存新的 desired。"
-            data-testid="pc-desired-unsupported"
-          />
           <p v-if="config.draftDirty" class="muted">编辑器中有未保存修改；登记与应用只针对已保存的 desired。保存新 desired 会清空现有登记。</p>
           <label class="file-field">
             <span>加密 Bundle 文件（.age）</span>
@@ -131,7 +108,7 @@
               type="file"
               accept=".age,application/octet-stream"
               data-testid="pc-bundle-file"
-              :disabled="!config.status.desired || config.desiredUnsupported.length > 0 || config.registering || config.conflict !== null"
+              :disabled="!config.status.desired || config.registering || config.conflict !== null"
               @change="onBundleSelected"
             />
           </label>
@@ -226,7 +203,7 @@ import { usePlatformConfiguration, type PlatformConfigurationAction } from '@/co
 import type { PlatformConfigurationVersionSchema } from '@/generated/contracts'
 import type { AsyncState, DiagnosticViewModel } from '@/types/async'
 import { formatBytes, formatTimestamp } from '@/utils/format'
-import { diffConfigurations, parseRequestYaml, requestToYaml, withoutUnsupportedPolicy } from '@/utils/platformConfiguration'
+import { diffConfigurations, parseRequestYaml, requestToYaml } from '@/utils/platformConfiguration'
 
 interface ConflictRow { key: string; path: string; draft: string; latest: string; theirs: boolean }
 
@@ -262,7 +239,7 @@ function failureFor(action: PlatformConfigurationAction): DiagnosticViewModel | 
 const canSave = computed(() => {
   if (config.saving || config.conflict || !config.draft) return false
   if (editorMode.value === 'yaml') return yamlText.value.trim().length > 0
-  return config.draftUnsupported.length === 0 && (config.draftDirty || !config.status?.desired)
+  return config.draftDirty || !config.status?.desired
 })
 
 const conflictColumns: DataTableColumn<ConflictRow>[] = [
@@ -318,9 +295,6 @@ function resetDraft() {
   if (editorMode.value === 'yaml') syncYamlFromDraft()
 }
 
-function resetUnsupported() {
-  if (config.draft) config.draft = withoutUnsupportedPolicy(config.draft)
-}
 
 function discardDraft() {
   config.discardDraftForLatest()

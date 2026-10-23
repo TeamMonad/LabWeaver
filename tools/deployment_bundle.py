@@ -43,10 +43,6 @@ DEFAULT_MANIFEST = (
 WORKLOADS_FILE = (
     Path(__file__).resolve().parents[1] / "deploy/helm/labweaver/values.yaml"
 )
-UNSUPPORTED_POLICY_MANIFEST = (
-    Path(__file__).resolve().parents[1]
-    / "schemas/contracts/v1/platform-configuration-unsupported-fields.json"
-)
 RESOURCE_MANIFEST = (
     Path(__file__).resolve().parents[1] / "deploy/config/resource-bundle-manifest.json"
 )
@@ -499,6 +495,7 @@ def _configuration_version(
     except (OSError, subprocess.SubprocessError) as error:
         raise BundleError("LW_BUNDLE_CONFIGURATION_INVALID") from error
     if result.returncode:
+        stderr = result.stderr.decode(errors="replace")
         code = "LW_BUNDLE_CONFIGURATION_INVALID"
         for diagnostic in (
             "LW_BUNDLE_CONFIGURATION_DIGEST_MISMATCH",
@@ -507,14 +504,20 @@ def _configuration_version(
             "LW_BUNDLE_INITIAL_REVISION_INVALID",
             "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED",
         ):
-            if diagnostic.encode() in result.stderr:
+            if diagnostic in stderr:
                 code = diagnostic
+                break
+        if code == "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED":
+            field = re.search(r"LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:([A-Za-z0-9_.]+)", stderr)
+            if field:
+                code = f"{code}:{field.group(1)}"
         raise BundleError(code)
+
+
     try:
         return json.loads(result.stdout)
     except (ValueError, UnicodeError) as error:
         raise BundleError("LW_BUNDLE_CONFIGURATION_INVALID") from error
-
 
 def _workload_inputs(
     application: dict[str, Any], manifest: dict[str, Any], names: set[str] | None = None
@@ -624,85 +627,15 @@ def _settings(model: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
     if document["revision"] != model["revision"]:
         raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
     return dict(document, configurationMode=mode)
-def _unsupported_policy_fields() -> tuple[str, ...]:
-    try:
-        manifest = json.loads(UNSUPPORTED_POLICY_MANIFEST.read_bytes())
-    except (OSError, ValueError) as error:
-        raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_MANIFEST_INVALID") from error
-    fields = manifest.get("unsupportedFields")
-    if (
-        manifest.get("apiVersion") != "platform-configuration-policy/v1"
-        or not isinstance(fields, list)
-        or not fields
-        or len(fields) != len(set(fields))
-        or not all(isinstance(field, str) and field for field in fields)
-    ):
-        raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_MANIFEST_INVALID")
-    return tuple(fields)
-
 
 def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
-    """Return the non-secret policy projection from the validated Rust model."""
+    """Project the configuration already validated by the Rust Control contract."""
     configuration = version.get("configuration")
     digest = version.get("configurationSha256")
     if not isinstance(configuration, dict):
         raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_INVALID: configuration")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_INVALID: configurationSha256")
-    required_groups = {
-        "lifecycle": {
-            "readOnlyRetentionSeconds",
-            "detailedLogRetentionSeconds",
-            "expiryReminderSeconds",
-            "preemptionGraceSeconds",
-        },
-        "runtimePolicy": {
-            "defaultContainerUid",
-            "allowedCapabilities",
-            "preauthorizations",
-            "privilegedAllowed",
-            "privilegedExecutionLocation",
-        },
-        "builderPolicy": {
-            "capabilities",
-            "allowPrivilegeEscalation",
-            "entitlements",
-        },
-    }
-    for group, fields in required_groups.items():
-        value = configuration.get(group)
-        if not isinstance(value, dict):
-            raise BundleError(
-                f"LW_BUNDLE_CONFIGURATION_POLICY_INVALID: missing {group}"
-            )
-        missing = sorted(fields - set(value))
-        if missing:
-            raise BundleError(
-                "LW_BUNDLE_CONFIGURATION_POLICY_INVALID: "
-                f"{group} missing {','.join(missing)}"
-            )
-    runtime = configuration["runtimePolicy"]
-    builder = configuration["builderPolicy"]
-    location = runtime["privilegedExecutionLocation"]
-    unsupported_values = {
-        "runtimePolicy.defaultContainerUid": runtime["defaultContainerUid"] != 0,
-        "runtimePolicy.allowedCapabilities": bool(runtime["allowedCapabilities"]),
-        "runtimePolicy.preauthorizations": bool(runtime["preauthorizations"]),
-        "runtimePolicy.privilegedExecutionLocation": (
-            location is not None and location.get("kind") != "dedicated_node_pool"
-        ),
-        "builderPolicy.capabilities": bool(builder["capabilities"]),
-        "builderPolicy.allowPrivilegeEscalation": bool(builder["allowPrivilegeEscalation"]),
-        "builderPolicy.entitlements": bool(builder["entitlements"]),
-    }
-    for field in _unsupported_policy_fields():
-        if field not in unsupported_values:
-            raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_MANIFEST_INVALID")
-        if unsupported_values[field]:
-            raise BundleError(
-                "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
-                f"{field} has no execution-side consumer (see #207)"
-            )
     return {
         "apiVersion": "deploy.labweaver.io/platform-policy/v1",
         "configurationSha256": digest,

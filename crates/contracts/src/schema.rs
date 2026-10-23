@@ -1125,11 +1125,16 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::AuthoringApprovalCompleted>
     );
 
+    let unsupported_fields: Vec<_> =
+        crate::platform_configuration::PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.field)
+            .collect();
     output.push(json_artifact(
         "schemas/contracts/v1/platform-configuration-unsupported-fields.json",
         json!({
             "apiVersion": "platform-configuration-policy/v1",
-            "unsupportedFields": crate::platform_configuration::PLATFORM_CONFIGURATION_UNSUPPORTED_FIELDS,
+            "unsupportedFields": unsupported_fields,
         }),
     )?);
     output.push(json_artifact(

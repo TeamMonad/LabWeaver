@@ -52,59 +52,6 @@ export function nextStepLabel(step: PlatformConfigurationNextStep): string {
   } satisfies Record<PlatformConfigurationNextStep, string>)[step]
 }
 
-/**
- * Settings rejected by the Rust Control policy validator because no execution-side
- * consumer enforces them yet. The generated manifest test keeps this list aligned
- * with the Bundle and Helm boundaries.
- */
-export interface UnsupportedPolicyField {
-  path: string
-  label: string
-  /** The only value the deployment path accepts, as shown to the administrator. */
-  accepted: string
-}
-
-export function unsupportedPolicyFields(configuration: PlatformConfigurationDesired): UnsupportedPolicyField[] {
-  const runtime = configuration.runtimePolicy
-  const builder = configuration.builderPolicy
-  const fields: UnsupportedPolicyField[] = []
-  if (runtime.defaultContainerUid !== 0) {
-    fields.push({ path: 'runtimePolicy.defaultContainerUid', label: '默认容器 UID', accepted: '0' })
-  }
-  if (runtime.allowedCapabilities.length > 0) {
-    fields.push({ path: 'runtimePolicy.allowedCapabilities', label: '普通容器 capabilities 允许清单', accepted: '空' })
-  }
-  if (runtime.preauthorizations.length > 0) {
-    fields.push({ path: 'runtimePolicy.preauthorizations', label: '项目/课程预授权', accepted: '空' })
-  }
-  if (runtime.privilegedExecutionLocation?.kind === 'virtual_machine_guest') {
-    fields.push({ path: 'runtimePolicy.privilegedExecutionLocation', label: 'VM guest 执行位置', accepted: '专用节点池或不允许特权' })
-  }
-  if (builder.capabilities.length > 0) {
-    fields.push({ path: 'builderPolicy.capabilities', label: 'builder capabilities', accepted: '空' })
-  }
-  if (builder.allowPrivilegeEscalation) {
-    fields.push({ path: 'builderPolicy.allowPrivilegeEscalation', label: 'builder 提权', accepted: '关闭' })
-  }
-  if (builder.entitlements.length > 0) {
-    fields.push({ path: 'builderPolicy.entitlements', label: 'builder entitlements', accepted: '空' })
-  }
-  return fields
-}
-
-/** Copy of `configuration` with every unsupported setting reset to the accepted value; lifecycle and supported privileged placement are kept. */
-export function withoutUnsupportedPolicy(configuration: PlatformConfigurationDesired): PlatformConfigurationDesired {
-  const next = cloneConfiguration(configuration)
-  next.runtimePolicy.defaultContainerUid = 0
-  next.runtimePolicy.allowedCapabilities = []
-  next.runtimePolicy.preauthorizations = []
-  if (next.runtimePolicy.privilegedExecutionLocation?.kind === 'virtual_machine_guest') {
-    next.runtimePolicy.privilegedExecutionLocation = null
-    next.runtimePolicy.privilegedAllowed = false
-  }
-  next.builderPolicy = { capabilities: [], allowPrivilegeEscalation: false, entitlements: [] }
-  return next
-}
 
 const DAY = 86_400
 const HOUR = 3_600

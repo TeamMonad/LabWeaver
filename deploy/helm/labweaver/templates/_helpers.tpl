@@ -29,9 +29,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "labweaver.platformPolicy" -}}
-{{- $policy := required "platformConfigurationPolicy is required when a Bundle is rendered" .Values.platformConfigurationPolicy -}}
+{{- $policy := required "platformConfigurationPolicy artifact is required when a Bundle is rendered" .Values.platformConfigurationPolicy -}}
 {{- if not (kindIs "map" $policy) -}}
-{{- fail "platformConfigurationPolicy must be a mapping" -}}
+{{- fail "platformConfigurationPolicy artifact must be a mapping" -}}
+{{- end -}}
+{{- if or (not (hasKey $policy "apiVersion")) (not (kindIs "string" $policy.apiVersion)) (ne $policy.apiVersion "deploy.labweaver.io/platform-policy/v1") -}}
+{{- fail "platformConfigurationPolicy artifact has an invalid apiVersion" -}}
+{{- end -}}
+{{- $digest := required "platformConfigurationPolicy.configurationSha256 is required" (index $policy "configurationSha256") -}}
+{{- if or (not (kindIs "string" $digest)) (not (regexMatch "^[0-9a-f]{64}$" $digest)) -}}
+{{- fail "platformConfigurationPolicy.configurationSha256 must be a lowercase SHA-256" -}}
 {{- end -}}
 {{- range $group := list "lifecycle" "runtimePolicy" "builderPolicy" -}}
   {{- if not (hasKey $policy $group) -}}
@@ -41,42 +48,63 @@ app.kubernetes.io/instance: {{ .Release.Name }}
     {{- fail (printf "platformConfigurationPolicy.%s must be a mapping" $group) -}}
   {{- end -}}
 {{- end -}}
+{{- $lifecycle := index $policy "lifecycle" -}}
+{{- range $field := list "readOnlyRetentionSeconds" "detailedLogRetentionSeconds" "preemptionGraceSeconds" -}}
+  {{- $value := index $lifecycle $field -}}
+  {{- $integer := or (kindIs "int" $value) (kindIs "int64" $value) (and (kindIs "float64" $value) (eq (float64 (int $value)) $value)) -}}
+  {{- if or (not (hasKey $lifecycle $field)) (not $integer) -}}
+    {{- fail (printf "platformConfigurationPolicy.lifecycle.%s must be an integer" $field) -}}
+  {{- end -}}
+{{- end -}}
+{{- $reminders := index $lifecycle "expiryReminderSeconds" -}}
+{{- if or (not (hasKey $lifecycle "expiryReminderSeconds")) (not (kindIs "slice" $reminders)) -}}
+{{- fail "platformConfigurationPolicy.lifecycle.expiryReminderSeconds must be a list" -}}
+{{- end -}}
+{{- if or (lt (int (index $lifecycle "readOnlyRetentionSeconds")) 1) (gt (int (index $lifecycle "readOnlyRetentionSeconds")) 31536000) (lt (int (index $lifecycle "detailedLogRetentionSeconds")) 1) (gt (int (index $lifecycle "detailedLogRetentionSeconds")) 31536000) (lt (int (index $lifecycle "preemptionGraceSeconds")) 1) (gt (int (index $lifecycle "preemptionGraceSeconds")) 300) -}}
+{{- fail "platformConfigurationPolicy.lifecycle integer is outside the allowed range" -}}
+{{- end -}}
 {{- $runtime := index $policy "runtimePolicy" -}}
-{{- if not (hasKey $runtime "privilegedAllowed") -}}
-{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedAllowed is required" -}}
+{{- range $value := $reminders -}}
+  {{- $integer := or (kindIs "int" $value) (kindIs "int64" $value) (and (kindIs "float64" $value) (eq (float64 (int $value)) $value)) -}}
+  {{- if or (not $integer) (lt (int $value) 1) (gt (int $value) 31536000) -}}
+    {{- fail "platformConfigurationPolicy.lifecycle.expiryReminderSeconds entries must be integers in range" -}}
+  {{- end -}}
+{{- end -}}
+{{- range $field := list "defaultContainerUid" -}}
+  {{- $value := index $runtime $field -}}
+  {{- $integer := or (kindIs "int" $value) (kindIs "int64" $value) (and (kindIs "float64" $value) (eq (float64 (int $value)) $value)) -}}
+  {{- if or (not (hasKey $runtime $field)) (not $integer) (lt (int $value) 0) (gt (int $value) 4294967295) -}}
+    {{- fail (printf "platformConfigurationPolicy.runtimePolicy.%s must be an integer in range" $field) -}}
+  {{- end -}}
+{{- end -}}
+{{- range $field := list "allowedCapabilities" "preauthorizations" -}}
+  {{- if or (not (hasKey $runtime $field)) (not (kindIs "slice" (index $runtime $field))) -}}
+    {{- fail (printf "platformConfigurationPolicy.runtimePolicy.%s must be a list" $field) -}}
+  {{- end -}}
+{{- end -}}
+{{- if or (not (hasKey $runtime "privilegedAllowed")) (not (kindIs "bool" (index $runtime "privilegedAllowed"))) -}}
+{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedAllowed must be boolean" -}}
 {{- end -}}
 {{- if not (hasKey $runtime "privilegedExecutionLocation") -}}
 {{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation is required" -}}
 {{- end -}}
-{{- if and (index $runtime "privilegedAllowed") (not (index $runtime "privilegedExecutionLocation")) -}}
-{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation is required when privilegedAllowed is true" -}}
-{{- end -}}
-{{- if ne (int (index $runtime "defaultContainerUid")) 0 -}}
-{{- fail "platformConfigurationPolicy.runtimePolicy.defaultContainerUid has no execution-side consumer (see #207)" -}}
-{{- end -}}
-{{- if index $runtime "allowedCapabilities" -}}
-{{- fail "platformConfigurationPolicy.runtimePolicy.allowedCapabilities has no execution-side consumer (see #207)" -}}
-{{- end -}}
-{{- if index $runtime "preauthorizations" -}}
-{{- fail "platformConfigurationPolicy.runtimePolicy.preauthorizations has no execution-side consumer (see #207)" -}}
+{{- $location := index $runtime "privilegedExecutionLocation" -}}
+{{- if not (kindIs "invalid" $location) -}}
+  {{- if not (kindIs "map" $location) -}}
+    {{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation must be null or a mapping" -}}
+  {{- end -}}
+  {{- if or (not (hasKey $location "kind")) (not (kindIs "string" $location.kind)) -}}
+    {{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation.kind must be a string" -}}
+  {{- end -}}
 {{- end -}}
 {{- $builder := index $policy "builderPolicy" -}}
-{{- if index $builder "capabilities" -}}
-{{- fail "platformConfigurationPolicy.builderPolicy.capabilities has no execution-side consumer (see #207)" -}}
+{{- range $field := list "capabilities" "entitlements" -}}
+  {{- if or (not (hasKey $builder $field)) (not (kindIs "slice" (index $builder $field))) -}}
+    {{- fail (printf "platformConfigurationPolicy.builderPolicy.%s must be a list" $field) -}}
+  {{- end -}}
 {{- end -}}
-{{- if index $builder "entitlements" -}}
-{{- fail "platformConfigurationPolicy.builderPolicy.entitlements has no execution-side consumer (see #207)" -}}
-{{- end -}}
-{{- if index $builder "allowPrivilegeEscalation" -}}
-{{- fail "platformConfigurationPolicy.builderPolicy.allowPrivilegeEscalation has no execution-side consumer (see #207)" -}}
-{{- end -}}
-{{- $location := index $runtime "privilegedExecutionLocation" -}}
-{{- if and $location (ne (index $location "kind") "dedicated_node_pool") -}}
-{{- fail "platformConfigurationPolicy.runtimePolicy.privilegedExecutionLocation has no execution-side consumer (see #207)" -}}
-{{- end -}}
-{{- $digest := required "platformConfigurationPolicy.configurationSha256 is required" (index $policy "configurationSha256") -}}
-{{- if not (regexMatch "^[0-9a-f]{64}$" $digest) -}}
-{{- fail "platformConfigurationPolicy.configurationSha256 must be a lowercase SHA-256" -}}
+{{- if or (not (hasKey $builder "allowPrivilegeEscalation")) (not (kindIs "bool" (index $builder "allowPrivilegeEscalation"))) -}}
+{{- fail "platformConfigurationPolicy.builderPolicy.allowPrivilegeEscalation must be boolean" -}}
 {{- end -}}
 {{- toJson $policy -}}
 {{- end -}}
