@@ -231,6 +231,10 @@ async fn cancelled_plain_begin_returns_the_same_idle_connection_and_commits_new_
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this test intentionally covers fresh and nested transaction boundaries"
+)]
 #[tokio::test]
 async fn nested_begin_is_rejected_until_upstream_4445_is_fixed() -> TestResult {
     let fixture = Fixture::start().await?;
@@ -240,11 +244,8 @@ async fn nested_begin_is_rejected_until_upstream_4445_is_fixed() -> TestResult {
         .execute(&mut *outer)
         .await?;
 
-    // Production source is checked by `cargo xtask check-nested-transactions`.
-    // SQLx 0.9 cannot distinguish nested `Acquire::begin` from pool begin in
-    // Clippy's disallowed_methods, so the static gate rejects the receiver
-    // form before upstream #4445 is fixed. This runtime assertion covers the
-    // only supported nested-entry rejection exposed by SQLx today.
+    // Production source uses clippy.toml to reject nested transaction methods.
+    // This test intentionally exercises the boundary and documents SQLx #4445.
     assert!(matches!(
         (*outer).begin_with("BEGIN").await,
         Err(sqlx::Error::InvalidSavePointStatement)
@@ -259,6 +260,10 @@ async fn nested_begin_is_rejected_until_upstream_4445_is_fixed() -> TestResult {
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this test intentionally covers fresh and nested transaction boundaries"
+)]
 #[tokio::test]
 async fn failed_begin_normal_commit_and_cancellation_boundaries_remain_usable() -> TestResult {
     let fixture = Fixture::start().await?;
@@ -382,9 +387,9 @@ async fn tls_h2_rst_drops_cancel_handler_during_plain_begin_without_poisoning_po
         build_store: PgBuildStore::new(fixture.writer.clone()),
         generated_artifacts: GeneratedArtifactStore::new(fixture.writer.clone()),
         llm_reviews: LlmReviewStore::new(fixture.writer.clone()),
-        platform_images: PgPlatformImageCatalog::new(fixture.writer.clone()),
-        platform_image_import_jobs: writer_jobs.clone(),
         platform_registry: None,
+        platform_image_import_jobs: writer_jobs.clone(),
+        resource: None,
         objects: Arc::new(support::FakeObjects::new(Vec::new())),
     });
     let identity = auth::ServiceIdentity {

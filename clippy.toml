@@ -1,0 +1,5 @@
+disallowed-methods = [
+    "sqlx::Acquire::begin",
+    "sqlx::Connection::begin",
+    "sqlx::Connection::begin_with",
+]

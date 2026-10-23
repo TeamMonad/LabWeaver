@@ -164,6 +164,10 @@ pub struct MigrationCoordinator {
 
 impl MigrationCoordinator {
     /// Bootstraps fixed roles and schemas through an explicitly supplied provisioner pool.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the acquired connection is fresh, not a nested transaction"
+    )]
     pub async fn bootstrap(
         provisioner: &PgPool,
         catalog: &MigrationCatalog,
@@ -382,6 +386,10 @@ impl MigrationCoordinator {
         Ok(())
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the acquired connection is fresh, not a nested transaction"
+    )]
     async fn apply_domain(
         &self,
         catalog: &crate::CatalogDomain,
