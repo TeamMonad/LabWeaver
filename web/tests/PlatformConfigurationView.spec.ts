@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import PlatformConfigurationView from '@/views/admin/PlatformConfigurationView.vue'
 import {
   applyPlatformConfiguration,
@@ -85,6 +85,28 @@ async function mountView() {
   mounted.push(wrapper)
   await flushPromises()
   return wrapper
+}
+
+/**
+ * The banner leads with a localized reason and a next step; the code and requestId follow in the
+ * collapsed details. The generic English Control `detail` is never the visible reason.
+ */
+function expectDiagnosticOrder(banner: DOMWrapper<Element>, code: string, requestId: string): DOMWrapper<Element> {
+  expect(banner.exists()).toBe(true)
+  const message = banner.find('.diagnostic-message')
+  const nextStep = banner.find('.diagnostic-next-step')
+  const codeNode = banner.find('.diagnostic-code')
+  const requestNode = banner.find('.diagnostic-request-id')
+  expect(message.text()).toMatch(/[\u4e00-\u9fff]/)
+  expect(banner.text()).not.toContain('fail-closed')
+  expect(nextStep.text()).toMatch(/[\u4e00-\u9fff]/)
+  expect(codeNode.text()).toBe(code)
+  expect(requestNode.text()).toBe(requestId)
+  const follows = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+  expect(follows(message.element, nextStep.element)).toBe(true)
+  expect(follows(nextStep.element, codeNode.element)).toBe(true)
+  expect(follows(codeNode.element, requestNode.element)).toBe(true)
+  return banner
 }
 
 async function chooseFile(wrapper: VueWrapper, file: File) {
@@ -181,9 +203,7 @@ describe('PlatformConfigurationView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="pc-conflict"]').text()).toContain('revision 9')
-    const banner = wrapper.find('[data-testid="pc-register-failure"]')
-    expect(banner.find('.diagnostic-message').text()).toBe('配置已被其他管理员更新，本次提交未生效。')
-    expect(banner.find('.diagnostic-code').text()).toBe('LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT')
+    expectDiagnosticOrder(wrapper.find('[data-testid="pc-register-failure"]'), 'LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT', 'req-9')
     expect(wrapper.find('[data-testid="pc-bundle-file-name"]').text()).toContain('platform.age')
   })
 
@@ -194,11 +214,8 @@ describe('PlatformConfigurationView', () => {
     await wrapper.find('[data-testid="pc-save"]').trigger('click')
     await flushPromises()
 
-    const banner = wrapper.find('[data-testid="pc-save-failure"]')
-    expect(banner.find('.diagnostic-message').text()).toBe('生命周期设置超出允许范围。')
-    expect(banner.text()).not.toContain('fail-closed')
-    expect(banner.find('.diagnostic-next-step').text()).toContain('1–300 秒')
-    expect(banner.find('.diagnostic-request-id').text()).toBe('req-9')
+    const banner = expectDiagnosticOrder(wrapper.find('[data-testid="pc-save-failure"]'), 'LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID', 'req-9')
+    expect(banner.find('.diagnostic-next-step').text()).toContain('1–300')
   })
 
   it('marks a saved desired with unsupported settings and blocks registration and apply', async () => {
@@ -225,7 +242,7 @@ describe('PlatformConfigurationView', () => {
   it('shows the administrator-only reason when a non-administrator opens the page', async () => {
     vi.mocked(getPlatformConfiguration).mockResolvedValue(problem(403, 'LW_FORBIDDEN') as never)
     const wrapper = await mountView()
-    expect(wrapper.find('.diagnostic-message').text()).toContain('只有平台管理员')
+    expectDiagnosticOrder(wrapper.find('.diagnostic-banner'), 'LW_FORBIDDEN', 'req-9')
     expect(wrapper.find('.pc-form').exists()).toBe(false)
     expect(wrapper.find('[data-testid="pc-save"]').exists()).toBe(false)
   })

@@ -202,41 +202,60 @@ export function usePlatformConfiguration() {
     baseEtag.value = etag.value
   }
 
-  /** Accept server facts unless they are older than facts already shown (idempotent replay). */
-  function acceptStatus(next: PlatformConfigurationStatusSchema, nextEtag: string): boolean {
+  // Every status read takes a generation. A read response is accepted only if no newer read was
+  // issued and no mutation response was accepted after it was issued; every response must also
+  // not be older (by aggregate revision) than the facts already shown.
+  let issuedRead = 0
+  let staleReadsUpTo = 0
+
+  type StatusSource = { read: number } | 'mutation' | 'conflict-snapshot'
+
+  function readIsCurrent(generation: number): boolean {
+    return generation === issuedRead && generation > staleReadsUpTo
+  }
+
+  /** The only writer of status, ETag and apply history. Returns false when the response is discarded. */
+  function acceptStatus(next: PlatformConfigurationStatusSchema, nextEtag: string, source: StatusSource): boolean {
+    if (typeof source === 'object' && !readIsCurrent(source.read)) return false
     if (status.value && next.revision < status.value.revision) return false
     status.value = next
     etag.value = nextEtag
+    // A newer mutation result makes every read still in flight stale.
+    if (source === 'mutation') staleReadsUpTo = issuedRead
+    // Keep the loaded previousApplyId chain while its head is still the latest attempt.
     const latest = next.latestApply
-    if (latest && !applyHistory.value.some((item) => item.id === latest.id)) {
-      applyHistory.value = [latest]
-    } else if (latest) {
-      applyHistory.value = applyHistory.value.map((item) => (item.id === latest.id ? latest : item))
-    }
+    if (!latest) applyHistory.value = []
+    else if (applyHistory.value[0]?.id === latest.id) applyHistory.value = [latest, ...applyHistory.value.slice(1)]
+    else applyHistory.value = [latest]
     return true
   }
 
-  async function fetchStatus(): Promise<{ data: PlatformConfigurationStatusSchema; etag: string } | { failure: DiagnosticViewModel }> {
+  async function fetchStatus(): Promise<{ generation: number } & ({ data: PlatformConfigurationStatusSchema; etag: string } | { failure: DiagnosticViewModel })> {
+    const generation = ++issuedRead
     const result = await getPlatformConfiguration()
     if (result.error || !result.data) {
-      return { failure: failureFrom(result.error, '读取平台配置失败。', '稍后刷新重试。') }
+      return { generation, failure: failureFrom(result.error, '读取平台配置失败。', '稍后刷新重试。') }
     }
-    return { data: result.data, etag: readEtag(result as ResponseLike, result.data.revision) }
+    return { generation, data: result.data, etag: readEtag(result as ResponseLike, result.data.revision) }
   }
 
   async function load(options: { keepDraft?: boolean } = {}): Promise<void> {
     loadState.value = 'loading'
-    loadFailure.value = null
     const outcome = await fetchStatus()
+    if (!readIsCurrent(outcome.generation)) {
+      // Superseded by a newer read (which owns loadState) or by an accepted mutation result.
+      if (outcome.generation === issuedRead) loadState.value = status.value ? 'ready' : 'error'
+      return
+    }
     if ('failure' in outcome) {
       loadFailure.value = outcome.failure
       loadState.value = status.value ? 'ready' : 'error'
       return
     }
-    status.value = null
-    acceptStatus(outcome.data, outcome.etag)
-    applyHistory.value = outcome.data.latestApply ? [outcome.data.latestApply] : []
-    if (!options.keepDraft || draft.value === null) resetDraftFromServer()
+    if (acceptStatus(outcome.data, outcome.etag, { read: outcome.generation })) {
+      loadFailure.value = null
+      if (!options.keepDraft || draft.value === null) resetDraftFromServer()
+    }
     loadState.value = 'ready'
   }
 
@@ -251,7 +270,11 @@ export function usePlatformConfiguration() {
       return
     }
     fail(action, diagnostic)
-    conflict.value = { latest: outcome.data, etag: outcome.etag, base: draftBase.value ? cloneConfiguration(draftBase.value) : null }
+    // A superseded or older read never becomes the comparison target; the newer shown facts do.
+    const fresh = readIsCurrent(outcome.generation) && (!status.value || outcome.data.revision >= status.value.revision)
+    const latest = fresh ? { data: outcome.data, etag: outcome.etag } : status.value ? { data: status.value, etag: etag.value } : null
+    if (!latest) return
+    conflict.value = { latest: latest.data, etag: latest.etag, base: draftBase.value ? cloneConfiguration(draftBase.value) : null }
   }
 
   /** Handle a rejected mutation: revision conflicts open the comparison, idempotency conflicts drop the key. */
@@ -316,7 +339,7 @@ export function usePlatformConfiguration() {
       }
       keys.save = null
       conflict.value = null
-      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision))
+      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision), 'mutation')
       if (!accepted) {
         notice.value = '收到的是较早请求的回放结果，已保留更新的服务端事实。'
         await load({ keepDraft: true })
@@ -335,11 +358,12 @@ export function usePlatformConfiguration() {
   /** Keep the draft and edit on top of the newer server revision after a conflict. */
   function rebaseDraftOnLatest(): void {
     if (!conflict.value) return
-    acceptStatus(conflict.value.latest, conflict.value.etag)
+    // The snapshot is accepted only if nothing newer arrived meanwhile; the base is whatever is now shown.
+    acceptStatus(conflict.value.latest, conflict.value.etag, 'conflict-snapshot')
     const source = serverConfiguration.value
     draftBase.value = source ? cloneConfiguration(source) : null
-    baseRevision.value = conflict.value.latest.revision
-    baseEtag.value = conflict.value.etag
+    baseRevision.value = status.value?.revision ?? 0
+    baseEtag.value = etag.value
     conflict.value = null
     actionFailure.value = null
     keys.save = null
@@ -349,7 +373,7 @@ export function usePlatformConfiguration() {
   /** Drop the draft and continue from the newer server configuration. */
   function discardDraftForLatest(): void {
     if (!conflict.value) return
-    acceptStatus(conflict.value.latest, conflict.value.etag)
+    acceptStatus(conflict.value.latest, conflict.value.etag, 'conflict-snapshot')
     conflict.value = null
     actionFailure.value = null
     keys.save = null
@@ -422,7 +446,7 @@ export function usePlatformConfiguration() {
       }
       keys.register = null
       conflict.value = null
-      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision))
+      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision), 'mutation')
       if (!accepted) {
         notice.value = '收到的是较早登记请求的回放结果，已保留更新的服务端事实。'
         await load({ keepDraft: true })
@@ -444,6 +468,15 @@ export function usePlatformConfiguration() {
     if (!current?.desired || applying.value) return false
     actionFailure.value = null
     notice.value = null
+    if (desiredUnsupported.value.length > 0) {
+      const diagnostic = makeDiagnostic(
+        POLICY_UNSUPPORTED_CODE,
+        `当前 desired 含尚无执行侧实现的设置：${desiredUnsupported.value.map((field) => field.label).join('、')}，部署路径会拒绝此版本。`,
+        false,
+      )
+      diagnostic.nextStep = '应用请求未发送。先在编辑器中恢复为可部署值并保存新的 desired，再导出、登记并提交应用（见 #207）。'
+      return fail('apply', diagnostic)
+    }
     if (!current.registeredBundle || current.registeredBundle.desiredRevision !== current.desired.revision) {
       const diagnostic = makeDiagnostic('LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED', '当前 desired 尚无有效的 Bundle 登记。', false)
       diagnostic.nextStep = NEXT_STEPS.LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED
@@ -463,7 +496,7 @@ export function usePlatformConfiguration() {
         return await rejectMutation('apply', result.error, '记录应用请求失败。', '草稿与所选文件已保留。比较最新 desired 与登记后重新提交。')
       }
       keys.apply = null
-      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision))
+      const accepted = acceptStatus(result.data, readEtag(result as ResponseLike, result.data.revision), 'mutation')
       if (!accepted) {
         notice.value = '收到的是较早应用请求的回放结果，已保留更新的服务端事实。'
         await load({ keepDraft: true })
@@ -487,6 +520,8 @@ export function usePlatformConfiguration() {
         historyFailure.value = failureFrom(result.error, '读取上一次应用尝试失败。', '稍后重试。')
         return
       }
+      // The chain may have been replaced (new latest attempt) while this read was in flight.
+      if (applyHistory.value[applyHistory.value.length - 1]?.id !== last.id) return
       applyHistory.value = [...applyHistory.value, result.data]
     } finally {
       historyLoading.value = false
@@ -501,7 +536,8 @@ export function usePlatformConfiguration() {
       return
     }
     const fresh = result.data
-    applyHistory.value = applyHistory.value.map((item) => (item.id === applyId ? fresh : item))
+    // Attempt revisions only grow; an older response never replaces a newer attempt fact.
+    applyHistory.value = applyHistory.value.map((item) => (item.id === applyId && fresh.revision >= item.revision ? fresh : item))
   }
 
   async function readVersion(revision: number): Promise<{ data: PlatformConfigurationVersionSchema } | { failure: DiagnosticViewModel }> {

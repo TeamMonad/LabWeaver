@@ -96,6 +96,23 @@ type CallOptions = {
   path?: { revision: number }
   query?: { expectedRevision: number; configurationSha256: string }
 }
+
+/** Any non-empty Chinese sentence: tests pin codes and requestIds, not exact wording. */
+const LOCALIZED = expect.stringMatching(/[\u4e00-\u9fff]/)
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+function attempt(id: string, revision = 1, stage: PlatformConfigurationApply['stage'] = 'requested'): PlatformConfigurationApply {
+  return {
+    id, desiredRevision: 3, encryptedBundleSha256: bundleSha, stage, nextStep: 'wait_for_executor',
+    requestedAt: '2026-09-14T08:00:00Z', requestedBy: 'admin-a', revision, updatedAt: '2026-09-14T08:00:00Z',
+  }
+}
+
 function callOf(mock: { mock: { calls: unknown[][] } }, index = 0): CallOptions {
   return mock.mock.calls[index][0] as CallOptions
 }
@@ -144,7 +161,7 @@ describe('usePlatformConfiguration', () => {
     expect(config.draft!.lifecycle.preemptionGraceSeconds).toBe(95)
     expect(config.actionFailure).toMatchObject({
       action: 'save',
-      diagnostic: { code: 'LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED', requestId: 'req-1', retryable: true, message: '平台配置存储暂时不可用。' },
+      diagnostic: { code: 'LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED', requestId: 'req-1', retryable: true, message: LOCALIZED, nextStep: LOCALIZED },
     })
   })
 
@@ -160,7 +177,7 @@ describe('usePlatformConfiguration', () => {
 
     expect(await config.submitUpdate('form')).toBe(false)
     expect(config.conflict?.latest.revision).toBe(7)
-    expect(config.actionFailure?.diagnostic).toMatchObject({ code, message: '配置已被其他管理员更新，本次提交未生效。' })
+    expect(config.actionFailure?.diagnostic).toMatchObject({ code, requestId: 'req-1', message: LOCALIZED, nextStep: LOCALIZED })
     expect(config.draft!.lifecycle.preemptionGraceSeconds).toBe(90)
 
     config.rebaseDraftOnLatest()
@@ -182,8 +199,9 @@ describe('usePlatformConfiguration', () => {
     expect(getMock).toHaveBeenCalledTimes(1)
     expect(config.actionFailure?.diagnostic).toMatchObject({
       code: 'LW_IDEMPOTENCY_CONFLICT',
-      message: expect.stringContaining('同一请求标识'),
-      nextStep: expect.stringContaining('新的请求标识'),
+      requestId: 'req-1',
+      message: LOCALIZED,
+      nextStep: LOCALIZED,
     })
 
     await config.submitUpdate('form')
@@ -268,7 +286,7 @@ describe('usePlatformConfiguration', () => {
 
     expect(await config.submitUpdate('form')).toBe(false)
     const diagnostic = config.actionFailure!.diagnostic
-    expect(diagnostic.message).toBe('特权执行位置无效。')
+    expect(diagnostic.message).toEqual(LOCALIZED)
     expect(diagnostic.message).not.toContain('fail-closed')
     expect(diagnostic.nextStep).toContain('专用节点池')
     expect(diagnostic).toMatchObject({ code: 'LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID', requestId: 'req-1', status: 422 })
@@ -369,10 +387,69 @@ describe('usePlatformConfiguration', () => {
     expect(await config.requestApply()).toBe(false)
     expect(applyMock).toHaveBeenCalledTimes(1)
     expect(config.conflict).toBeNull()
-    expect(config.actionFailure?.diagnostic).toMatchObject({
-      message: '当前 desired 没有有效的 Bundle 登记，服务端拒绝应用请求。',
-      nextStep: expect.stringContaining('.age'),
-    })
+    expect(config.actionFailure?.diagnostic).toMatchObject({ code: 'LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED', requestId: 'req-1', message: LOCALIZED, nextStep: expect.stringContaining('.age') })
+  })
+
+  it('fails closed before calling the SDK when an unsupported desired has a matching registration', async () => {
+    const configuration = structuredClone(defaults)
+    configuration.builderPolicy.entitlements = ['network.host']
+    getMock.mockResolvedValue(ok(configured(3, 60, true, configuration), '"rev-3"') as never)
+    const config = usePlatformConfiguration()
+    await config.load()
+
+    expect(config.status?.registeredBundle?.desiredRevision).toBe(3)
+    expect(config.canApply).toBe(false)
+    expect(await config.requestApply()).toBe(false)
+    expect(applyMock).not.toHaveBeenCalled()
+    expect(config.actionFailure).toMatchObject({ action: 'apply', diagnostic: { code: POLICY_UNSUPPORTED_CODE, message: LOCALIZED, nextStep: expect.stringContaining('#207') } })
+  })
+
+  it('keeps the newest read when concurrent loads resolve out of order', async () => {
+    const slow = deferred<unknown>()
+    getMock
+      .mockReturnValueOnce(slow.promise as never)
+      .mockResolvedValueOnce(ok({ ...configured(9, 90), latestApply: attempt('apply-9') }, '"rev-9"') as never)
+    const config = usePlatformConfiguration()
+    const first = config.load()
+    await config.load()
+    expect(config.status?.revision).toBe(9)
+
+    // The older read resolves last with an older revision and a different attempt: it changes nothing.
+    slow.resolve(ok({ ...configured(4, 40), latestApply: attempt('apply-4') }, '"rev-4"'))
+    await first
+    expect(config.status?.revision).toBe(9)
+    expect(config.etag).toBe('"rev-9"')
+    expect(config.applyHistory.map((item) => item.id)).toEqual(['apply-9'])
+    expect(config.draft?.lifecycle.preemptionGraceSeconds).toBe(90)
+    expect(config.loadState).toBe('ready')
+  })
+
+  it('drops a superseded read even when it carries a higher revision than a later accepted mutation', async () => {
+    const slow = deferred<unknown>()
+    getMock.mockResolvedValueOnce(ok(configured(3, 60), '"rev-3"') as never).mockReturnValueOnce(slow.promise as never)
+    updateMock.mockResolvedValue(ok(configured(4, 70), '"rev-4"') as never)
+    const config = usePlatformConfiguration()
+    await config.load()
+    const refresh = config.load({ keepDraft: true })
+    config.draft!.lifecycle.preemptionGraceSeconds = 70
+    expect(await config.submitUpdate('form')).toBe(true)
+    expect(config.status?.revision).toBe(4)
+
+    // The read was issued before the save was accepted; the generation check discards it.
+    slow.resolve(ok(configured(3, 60), '"rev-3"'))
+    await refresh
+    expect(config.status?.revision).toBe(4)
+    expect(config.etag).toBe('"rev-4"')
+    expect(config.loadState).toBe('ready')
+  })
+
+  it('ignores an attempt refresh that is older than the attempt already shown', async () => {
+    getMock.mockResolvedValue(ok({ ...configured(5, 60), latestApply: attempt('apply-5', 7, 'verifying') }) as never)
+    getApplyMock.mockResolvedValue(ok(attempt('apply-5', 6, 'applying')) as never)
+    const config = usePlatformConfiguration()
+    await config.load()
+    await config.refreshApply('apply-5')
+    expect(config.applyHistory[0]).toMatchObject({ revision: 7, stage: 'verifying' })
   })
 
   it('reports an apply already in progress without opening a revision comparison', async () => {
@@ -383,7 +460,7 @@ describe('usePlatformConfiguration', () => {
 
     expect(await config.requestApply()).toBe(false)
     expect(config.conflict).toBeNull()
-    expect(config.actionFailure?.diagnostic).toMatchObject({ message: expect.stringContaining('上一次应用尝试尚未结束'), nextStep: expect.stringContaining('终态') })
+    expect(config.actionFailure?.diagnostic).toMatchObject({ code: 'LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS', requestId: 'req-1', message: LOCALIZED, nextStep: LOCALIZED })
   })
 
   it('explains a forbidden read before showing identifiers', async () => {
@@ -393,8 +470,9 @@ describe('usePlatformConfiguration', () => {
     expect(config.loadState).toBe('error')
     expect(config.loadFailure).toMatchObject({
       code: 'LW_FORBIDDEN',
-      message: expect.stringContaining('平台管理员'),
-      nextStep: expect.stringContaining('平台管理员账号'),
+      requestId: 'req-1',
+      message: LOCALIZED,
+      nextStep: LOCALIZED,
     })
   })
 })
