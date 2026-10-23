@@ -3413,7 +3413,7 @@ impl PgResourceStore {
             )
             .await?;
             transaction.commit().await?;
-            return Err(ResourceStoreError::CapacityClaimStateConflict);
+            return Err(ResourceStoreError::ApprovalInvalid);
         }
         let duration = approved_duration_seconds;
         let expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(duration))
