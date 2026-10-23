@@ -178,6 +178,12 @@
                       />
                     </div>
 
+                    <SubmissionTrackingCard
+                      :project-id="data.projectId"
+                      :environment-id="data.id"
+                      :fresh-submission-id="freezeEvidenceFor(data)?.submissionId ?? null"
+                    />
+
                     <div
                       v-if="freezeEvidenceFor(data)"
                       class="evidence-card"
@@ -212,6 +218,7 @@
 
 <script setup lang="ts">
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import SubmissionTrackingCard from '@/components/evaluation/SubmissionTrackingCard.vue'
 import type { EnvironmentInstanceSchema } from '@/generated/contracts'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 import { freezeStatusDescription, freezeStatusLabel, manifestRuleLabel } from '@/utils/environmentLifecycle'

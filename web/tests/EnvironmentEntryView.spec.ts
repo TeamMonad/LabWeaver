@@ -26,6 +26,7 @@ import {
   getFrozenSubmission,
   listConsoleCapabilities,
   createAccessGrant,
+  getOwnProjectEvaluationTaskForSubmission,
 } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
@@ -46,6 +47,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     startEnvironment: vi.fn(),
     freezeSubmission: vi.fn(),
     getFrozenSubmission: vi.fn(),
+    getOwnProjectEvaluationTaskForSubmission: vi.fn(),
     stopEnvironment: vi.fn(),
     restartEnvironment: vi.fn(),
     deleteEnvironment: vi.fn(),
@@ -248,6 +250,10 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined as never })
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
     vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['xterm']), error: undefined as never } as never)
+    vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue({
+      data: undefined,
+      error: { status: 404, diagnosticCode: 'LW_EVALUATION_RUN_NOT_FOUND', detail: 'missing' },
+    } as never)
     window.localStorage.clear()
   })
 
@@ -1259,6 +1265,104 @@ describe('EnvironmentEntryView', () => {
     expect(freezeSubmission).not.toHaveBeenCalled()
   })
 
+  it('remembers a new submission and shows its progress until a result arrives', async () => {
+    const stored = new Map<string, string>()
+    vi.mocked(window.localStorage.getItem).mockImplementation((key) => stored.get(key) ?? null)
+    vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => { stored.set(key, value) })
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [{ ...mockRelease, submissionManifest: mockSubmissionManifest }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(freezeSubmission).mockResolvedValue({
+      data: {
+        environmentId: 'env-1',
+        operationId: 'freeze-op-1',
+        revision: 12,
+        statusUrl: '/api/v1/projects/project-1/frozen-submissions/00000000-0000-7000-8000-000000000001',
+      },
+      error: undefined as never,
+    } as never)
+    vi.mocked(getFrozenSubmission).mockResolvedValue({
+      data: {
+        id: '00000000-0000-7000-8000-000000000001',
+        projectId: 'project-1',
+        environment: { environmentId: 'env-1', environmentRevision: 12, releaseId: 'rel-1', releaseVersion: 1, runtimeKind: 'container' },
+        object: { artifactId: 'artifact-1', mediaType: 'application/tar', objectVersion: 'object-version-1', sizeBytes: 123, storeBinding: 'evaluation-store' },
+        contentSha256: 'b'.repeat(64),
+        frozenAt: '2026-07-11T10:10:00.000Z',
+      },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
+    await vi.waitFor(() => expect(startButton.attributes('disabled')).toBeUndefined())
+    await startButton.trigger('click')
+    await wrapper.get('[role="dialog"]').findAll('button').find((button) => button.text() === '确认冻结')!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="submission-tracking"]').exists()).toBe(true))
+    const tracking = wrapper.get('[data-testid="submission-tracking"]')
+    await vi.waitFor(() => expect(tracking.text()).toContain('平台还没有为它创建评测'))
+    expect(getOwnProjectEvaluationTaskForSubmission).toHaveBeenCalledWith({
+      path: { projectId: 'project-1', submissionId: '00000000-0000-7000-8000-000000000001' },
+    })
+    expect(tracking.get('[aria-current="step"]').attributes('data-stage')).toBe('queued')
+    expect(tracking.get('a').attributes('href')).toBe('/student/results?projectId=project-1&submissionId=00000000-0000-7000-8000-000000000001')
+    expect(JSON.parse(stored.get('labweaver_submissions:project-1') ?? '[]')).toEqual([
+      expect.objectContaining({ submissionId: '00000000-0000-7000-8000-000000000001', environmentId: 'env-1' }),
+    ])
+    // Only identifiers are stored; state always comes from the server.
+    expect(stored.get('labweaver_submissions:project-1')).not.toContain('succeeded')
+  })
+
+  it('shows the server stage of the latest submission and links to its evaluation', async () => {
+    const stored = new Map<string, string>([[
+      'labweaver_submissions:project-1',
+      JSON.stringify([{ submissionId: 'submission-1', environmentId: 'env-1', submittedAt: new Date().toISOString() }]),
+    ]])
+    vi.mocked(window.localStorage.getItem).mockImplementation((key) => stored.get(key) ?? null)
+    vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => { stored.set(key, value) })
+    mockEnvironmentInstance()
+    vi.mocked(getFrozenSubmission).mockResolvedValue({ data: undefined, error: { status: 503, diagnosticCode: 'LW_X', detail: 'x' } } as never)
+    vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue({
+      data: {
+        runId: 'run-1', projectId: 'project-1', revision: 2, state: 'running', page: 1, pageSize: 20, hasMore: false, history: [],
+        current: [{ stepRunId: 'step-1', progress: { attempt: 1, phase: 'waiting_resource_approval', resourceRequestId: 'request-1', resourceState: 'reviewing', nextSteps: [] } }],
+      },
+      error: undefined,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="submission-tracking"]').text()).toContain('评测所需资源正在等待审批'))
+    const tracking = wrapper.get('[data-testid="submission-tracking"]')
+    expect(tracking.get('[aria-current="step"]').attributes('data-stage')).toBe('approval')
+    expect(tracking.get('a').attributes('href')).toBe('/student/results/run-1?projectId=project-1&submissionId=submission-1')
+    expect(tracking.text()).not.toMatch(/%/)
+  })
+
+  it('exposes the detail sections as an accessible tab list', async () => {
+    mockEnvironmentInstance()
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    const tablist = wrapper.get('[role="tablist"]')
+    expect(tablist.attributes('aria-label')).toBe('环境资源详情')
+    const tabs = tablist.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toEqual(['概览与访问', 'Web 控制台', '异步操作与诊断', '实验提交与凭据'].map((label) => expect.stringContaining(label)))
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    const panel = wrapper.get(`#${tabs[0].attributes('aria-controls')}`)
+    expect(panel.attributes('role')).toBe('tabpanel')
+    await tabs[3].trigger('click')
+    expect(tabs[3].attributes('aria-selected')).toBe('true')
+    // Inactive panels stay mounted so an open console session is not torn down.
+    expect(panel.attributes('hidden')).toBeDefined()
+    expect(wrapper.findAll('[role="tabpanel"]').length).toBe(4)
+  })
+
   it('reuses the freeze idempotency key when a retryable submission error is retried', async () => {
     mockEnvironmentInstance()
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
@@ -1522,7 +1626,7 @@ describe('EnvironmentEntryView', () => {
       await wrapper.get('[data-testid="connection-summary"]').findAll('button').find((button) => button.text() === '签发授权并连接')!.trigger('click')
 
       await vi.waitFor(() => expect(readiness(wrapper)).toBe('ready'))
-      await vi.waitFor(() => expect(wrapper.get('.detail-tab--active').text()).toContain('Web 控制台'))
+      await vi.waitFor(() => expect(wrapper.get('.detail-tab[data-state="active"]').text()).toContain('Web 控制台'))
       const panel = wrapper.findComponent({ name: 'ConsolePanel' })
       expect(panel.exists()).toBe(true)
       expect(panel.props('kind')).toBe('novnc')
@@ -1540,7 +1644,7 @@ describe('EnvironmentEntryView', () => {
       await wrapper.get('[data-testid="connection-summary"]').findAll('button').find((button) => button.text() === '签发授权并连接')!.trigger('click')
 
       await vi.waitFor(() => expect(wrapper.get('[data-testid="console-capability-hint"]').text()).toContain('没有浏览器终端或桌面'))
-      expect(wrapper.get('.detail-tab--active').text()).toContain('概览与访问')
+      expect(wrapper.get('.detail-tab[data-state="active"]').text()).toContain('概览与访问')
       expect(methodIds(wrapper)).toEqual(['ssh'])
     })
 

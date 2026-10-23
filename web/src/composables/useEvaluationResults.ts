@@ -107,6 +107,34 @@ export function useEvaluationResults(projectId: Ref<string | undefined>) {
     }
   }
 
+  let refreshing = false
+  /**
+   * Re-read the first page without clearing what is shown, so a waiting page
+   * can pick up new terminal results without flicker. Rows are matched by run.
+   */
+  async function refresh() {
+    const project = projectId.value
+    if (!project || refreshing || results.value.kind === 'loading') return
+    const generation = loadGeneration
+    refreshing = true
+    try {
+      const response = await listOwnProjectEvaluationResults({ path: { projectId: project }, query: { limit: 50 } })
+      if (generation !== loadGeneration || projectId.value !== project || response.error) return
+      const incoming = response.data.items.filter((item) => item.projectId === project)
+      const current = results.value.kind === 'success' ? results.value.data : []
+      const byRun = new Map(incoming.map((item) => [item.runId, item]))
+      const kept = current.filter((item) => !byRun.has(item.runId))
+      const items = [...incoming, ...kept]
+      if (results.value.kind !== 'success' && results.value.kind !== 'empty') return
+      if (!current.length) nextCursor.value = response.data.nextCursor ?? null
+      results.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
+    } catch {
+      // A failed background refresh keeps the last confirmed rows; the next tick retries.
+    } finally {
+      refreshing = false
+    }
+  }
+
   watch(
     projectId,
     () => {
@@ -125,10 +153,17 @@ export function useEvaluationResults(projectId: Ref<string | undefined>) {
     loadingMore,
     loadMoreError,
     load,
+    refresh,
     loadMore: () => (nextCursor.value ? load(nextCursor.value) : Promise.resolve()),
   })
 }
 
+/**
+ * One terminal result. The server answers 404 / LW_EVALUATION_RUN_NOT_FOUND
+ * both for a run that has not ended and for one this account cannot read; that
+ * answer becomes `empty`, and the caller asks the run's task progress which of
+ * the two it is.
+ */
 export function useEvaluationResult(
   projectId: Ref<string | undefined>,
   runId: Ref<string | undefined>,
@@ -136,23 +171,29 @@ export function useEvaluationResult(
   const result = ref<AsyncState<StudentEvaluationResultSchema>>({ kind: 'idle' })
   let loadGeneration = 0
 
-  async function load() {
+  /** `quiet` keeps what is shown while re-reading, for automatic refreshes. */
+  async function load(options: { quiet?: boolean } = {}) {
     const project = projectId.value
     const run = runId.value
     const generation = ++loadGeneration
     if (!project || !run) {
       result.value = {
         kind: 'blocked',
-        diagnostic: makeDiagnostic('EVALUATION_RESULT_ID_REQUIRED', '缺少项目或 EvaluationRun 标识。'),
+        diagnostic: makeDiagnostic('EVALUATION_RESULT_ID_REQUIRED', '缺少项目或评测标识。'),
       }
       return
     }
-    result.value = { kind: 'loading', message: '加载评测详情…' }
+    if (!options.quiet) result.value = { kind: 'loading', message: '加载评测详情…' }
     try {
       const response = await getOwnProjectEvaluationResult({ path: { projectId: project, runId: run } })
       if (generation !== loadGeneration || projectId.value !== project || runId.value !== run) return
       if (response.error) {
-        result.value = resultError(response.error, 'EVALUATION_RESULT_LOAD_FAILED', '加载评测详情失败')
+        const problem = extractProblemDetails(response.error)
+        if (problem?.status === 404 && problem.diagnosticCode === 'LW_EVALUATION_RUN_NOT_FOUND') {
+          result.value = { kind: 'empty' }
+        } else if (!options.quiet) {
+          result.value = resultError(response.error, 'EVALUATION_RESULT_LOAD_FAILED', '加载评测详情失败')
+        }
       } else if (response.data.projectId !== project || response.data.runId !== run) {
         result.value = {
           kind: 'error',
@@ -167,10 +208,12 @@ export function useEvaluationResult(
       }
     } catch (error) {
       if (generation !== loadGeneration || projectId.value !== project || runId.value !== run) return
-      result.value = resultError(error, 'EVALUATION_RESULT_LOAD_FAILED', '加载评测详情失败')
+      if (!options.quiet) {
+        result.value = resultError(error, 'EVALUATION_RESULT_LOAD_FAILED', '加载评测详情失败')
+      }
     }
   }
 
-  watch([projectId, runId], load, { immediate: true })
+  watch([projectId, runId], () => load(), { immediate: true })
   return reactive({ result, load })
 }
