@@ -370,6 +370,25 @@ async fn enqueue_import(
     Ok(initial)
 }
 
+fn assert_safe_diagnostic(case: &str, status: &InternalPlatformImageImportJobStatus) {
+    let Some(diagnostic) = status.diagnostic.as_deref() else {
+        return;
+    };
+    assert!(
+        diagnostic.starts_with("LW_")
+            && diagnostic
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit()),
+        "diagnostic must be a stable code only: case={case} diagnostic={diagnostic}"
+    );
+    for forbidden in ["secret", "robot$platform", "staged.tar"] {
+        assert!(
+            !diagnostic.contains(forbidden),
+            "diagnostic leaked fixture secret or object identity: case={case}"
+        );
+    }
+}
+
 async fn run_import(
     api: &ImportApi,
     case: &'static str,
@@ -393,7 +412,9 @@ async fn run_import(
         initial.upload_id,
         started.elapsed().as_millis()
     );
-    wait_for_import(api, case, initial).await
+    let result = wait_for_import(api, case, initial).await?;
+    assert_safe_diagnostic(case, &result.0);
+    Ok(result)
 }
 
 async fn wait_for_import(

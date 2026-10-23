@@ -37,7 +37,7 @@ class ImageEventCoverageTests(unittest.TestCase):
 
     def covered(self, event, branch, path):
         """Inspect this workflow's exact branches and positive path filters only."""
-        filters = self.workflow["on"][event]
+        filters = self.workflow["on"][event] or {}
         self.assertNotIn("branches-ignore", filters)
         self.assertNotIn("paths-ignore", filters)
         patterns = filters["paths"]
@@ -46,9 +46,33 @@ class ImageEventCoverageTests(unittest.TestCase):
             any(any(char in pattern for char in "?+[]{}") for pattern in patterns),
             "path-glob syntax beyond literal segments, * and ** needs explicit review",
         )
-        return branch in filters["branches"] and any(
-            path_matches(path, pattern) for pattern in patterns
-        )
+        branches = filters.get("branches")
+        return (
+            branches is None
+            or any(fnmatch.fnmatchcase(branch, pattern) for pattern in branches)
+        ) and any(path_matches(path, pattern) for pattern in patterns)
+
+    def test_automated_workflows_check_stacked_pr_targets(self):
+        for workflow_name in (
+            "rust.yml",
+            "web-ci.yml",
+            "playwright-ci.yml",
+            "ansible.yml",
+            "platform-images.yml",
+        ):
+            with self.subTest(workflow=workflow_name):
+                workflow = yaml.load(
+                    (ROOT / ".github/workflows" / workflow_name).read_text(),
+                    Loader=yaml.BaseLoader,
+                )
+                pull_request = workflow["on"].get("pull_request") or {}
+                self.assertNotIn(
+                    "branches",
+                    pull_request,
+                    "stacked PRs must not lose required checks because of their target branch",
+                )
+                push = workflow["on"].get("push") or {}
+                self.assertEqual(push.get("branches"), ["main", "develop"])
 
     def test_single_star_does_not_hide_nested_path_gaps(self):
         self.assertTrue(path_matches("crates/auth/src/lib.rs", "crates/**"))

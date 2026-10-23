@@ -3,7 +3,6 @@ name: Ansible
 on:
   workflow_dispatch:
   pull_request:
-    branches: [main, develop]
     paths: ["deploy/ansible/**", "deploy/versions.lock.yml", "tests/ansible/**", "tools/*.py", "tools/requirements-local-dev.txt", "xtask/**", "Cargo.lock", ".github/workflows/ansible.yml"]
   push:
     branches: [main, develop]

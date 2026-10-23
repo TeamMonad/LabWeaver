@@ -63,6 +63,8 @@ Rust 工作流先运行 `ci-scope` 及其真实 Git 差异测试。仅根 README
 
 生成 SDK、Rust、共享契约、权限、计费、持久化、迁移、部署输入、工作流、scope 工具或测试发生变化时，仍运行原完整 Rust 检查。未知路径、未知文件类型、缺少比较提交、空差异、首次 push 或 Git 读取失败也选择完整检查。
 
+选择器不按 crate 或反向依赖图缩小 Rust 检查范围，也不调用 `cargo metadata`。任何 Cargo、共享 crate、契约、权限、计量、持久化、迁移、部署输入、工作流、选择器及其测试改动都直接选择完整 workspace；因此不会因依赖图不完整而漏掉传递依赖。只有上文列明的安全路径可以跳过 Rust 工作区，无法明确归类时一律选择完整检查。
+
 PR 比较 merge-base 到 head。push 比较 before 到 after，包含中间所有提交。删除和跨目录重命名保留旧路径，不能通过把 Rust 文件移入 Web 目录跳过检查。
 
 本地验证选择器：
@@ -72,11 +74,11 @@ python3 -m unittest discover -s tests/ci
 EVENT_NAME=pull_request BASE_SHA=$(git rev-parse origin/develop) HEAD_SHA=$(git rev-parse HEAD) python3 tools/ci_scope.py
 ```
 
-Rust、Web、Playwright 检查覆盖面向 main/develop 的 PR 和两分支 push。Platform Images 在其已有影响路径命中时，也为 main/develop 生成并验证 OCI 构建产物。镜像 CI 不推送运行镜像、不创建 Release，也不部署。Local Integration 保留人工触发。
+Rust、Web、Playwright、Ansible 和 Platform Images 对所有目标分支的 PR 检查；push 仅覆盖 main/develop。Platform Images 仍按其影响路径触发，在命中时为 main/develop 以及堆叠 PR 生成并验证 OCI 构建产物。镜像 CI 不推送运行镜像、不创建 Release，也不部署。Local Integration 保留人工触发。
 
 Platform Images 的路径范围还包括 Rust builder 复制的 `.cargo/`、`migrations/`、`vendor/`、`rust-toolchain.toml`、`rustfmt.toml` 和影响构建上下文的 `.dockerignore`。仅修改这些输入时仍需检查镜像构建。
 
-使用已有 Ansible 测试依赖，在本地检查 main/develop 的分支和构建输入路径覆盖：
+使用已有 Ansible 测试依赖，在本地检查所有 PR 目标和 main/develop push 的构建输入路径覆盖：
 
 ```sh
 python3 -m unittest discover -s tests/ansible -p test_ci_image_events.py
@@ -84,7 +86,7 @@ python3 -m unittest discover -s tests/ansible -p test_ci_image_events.py
 
 该测试读取实际 Containerfile 的 Rust builder 输入和工作流过滤条件。它不执行 GitHub 事件、不构建或推送镜像，也不能替代真实 main 事件验收。
 
-功能经维护者评审进入 develop。阶段稳定后，维护者决定向 main 发布。CI 成功不表示 Sprint5 最终发布前置已完成，也不授权停止服务、清空数据或切换真实环境。
+功能 PR（包括以功能分支为目标的堆叠 PR）必须有对应检查，并经维护者评审后进入 develop。阶段稳定后，维护者决定向 main 发布。CI 成功不表示 Sprint5 最终发布前置已完成，也不授权停止服务、清空数据或切换真实环境。
 
 ### Agent 镜像导入测试超时
 
