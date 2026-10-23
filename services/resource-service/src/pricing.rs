@@ -274,7 +274,7 @@ async fn select_rate_segments(
     Ok(segments)
 }
 
-fn multiply_money(
+pub(crate) fn multiply_money(
     unit_price: &Money,
     quantity: u64,
     unit_quantity: u64,

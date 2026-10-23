@@ -1,4 +1,5 @@
 //! Resource request, capacity claim, and Lease contracts.
+pub mod model_costing;
 
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;

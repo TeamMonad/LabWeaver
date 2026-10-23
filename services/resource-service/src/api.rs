@@ -41,6 +41,7 @@ mod build_costing;
 mod costing;
 mod credits;
 mod environment_funding;
+mod model_costing;
 
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 mod runtime_authorization;
@@ -202,6 +203,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .merge(credits::internal_routes())
         .merge(costing::internal_routes())
         .merge(build_costing::internal_routes())
+        .merge(model_costing::internal_routes())
         .route(
             "/internal/v1/environment-credit-grants/{lease_id}",
             get(environment_funding::record),
