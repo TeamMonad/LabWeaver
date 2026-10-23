@@ -51,3 +51,4 @@ Resource `0018_cost_estimates.sql` 保存预占的不可变估价快照，并为
 Resource `0019_unknown_usage_deadline.sql` 增加首次未知、1小时到期与处理时刻；只从既有不可变unknown条目的最早时刻恢复元数据，不改账户或原账目。到期资金释放由Resource账务事务执行并追加记录。测试仅运行隔离合成数据库，未在生产执行迁移。
 
 Resource `0020_build_metering.sql` 增加构建专属计量和独立目标；Resource `0021_environment_funding.sql` 保存原环境租约的资金窗口。Agent `0022_resource_build_authority_read.sql` 只授予Resource读取构建权威的最小列，0021预留给#278。
+Resource `0022_model_token_rates.sql` 扩展四类 LLM token 费率、模型绑定和单次最大预占额。所有值必须由管理员费率版本显式配置；不创建默认价格、不从 USD 换算。

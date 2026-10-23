@@ -11,6 +11,10 @@ export const rateDisplayUnits = {
   storage_byte_second: { base: '存储字节秒', label: 'GiB 小时', quantity: 1024n ** 3n * 3600n },
   gpu_unit_second: { base: 'GPU 分配单位秒', label: 'GPU 分配单位秒', quantity: 1n },
   build_second: { base: '构建秒', label: '构建秒', quantity: 1n },
+  llm_input_token: { base: 'LLM 输入 token', label: 'LLM 输入 token', quantity: 1n },
+  llm_output_token: { base: 'LLM 输出 token', label: 'LLM 输出 token', quantity: 1n },
+  llm_cache_read_token: { base: 'LLM cache-read token', label: 'LLM cache-read token', quantity: 1n },
+  llm_cache_write_token: { base: 'LLM cache-write token', label: 'LLM cache-write token', quantity: 1n },
 } as const satisfies Record<string, { readonly base: string; readonly label: string; readonly quantity: bigint }>
 
 export type RateDisplayBillingUnit = keyof typeof rateDisplayUnits

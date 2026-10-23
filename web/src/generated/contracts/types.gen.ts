@@ -1375,7 +1375,7 @@ export type RateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+export type ResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
 
 /**
  * One immutable line in a calculated charge.
@@ -1505,7 +1505,7 @@ export type BuildCostRecordSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type BuildCostRecordSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+export type BuildCostRecordSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
 
 /**
  * One immutable line in a calculated charge.
@@ -4462,7 +4462,7 @@ export type CreateResourceRateRequestSchemaMoney = {
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type CreateResourceRateRequestSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+export type CreateResourceRateRequestSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -11218,7 +11218,7 @@ export type ResourceChargeSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+export type ResourceChargeSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
 
 /**
  * One immutable line in a calculated charge.
@@ -11341,7 +11341,7 @@ export type ResourceCostEstimateSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+export type ResourceCostEstimateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
 
 /**
  * One immutable line in a calculated charge.
@@ -11448,11 +11448,19 @@ export type ResourceRateSchema = {
     gpuClass?: string | null;
     gpuMode?: ResourceRateSchemaGpuAllocationMode | null;
     id: ResourceRateSchemaRateId;
+    /**
+     * Maximum Credits that one model invocation may preauthorize.
+     */
+    maxPreauthorization?: ResourceRateSchemaFixedDecimal | null;
+    /**
+     * Exact model/provider identity for LLM token rates.
+     */
+    modelBinding?: string | null;
     revision: ResourceRateSchemaRevision;
     unit: ResourceRateSchemaResourceBillingUnit;
     unitPrice: ResourceRateSchemaMoney;
     /**
-     * Number of base units represented by `unit_price`.
+     * Number of base usage units represented by `unit_price`.
      */
     unitQuantity: number;
 };
@@ -11491,7 +11499,7 @@ export type ResourceRateSchemaRateId = string;
 /**
  * Resource dimension used by a versioned rate card.
  */
-export type ResourceRateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second';
+export type ResourceRateSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.

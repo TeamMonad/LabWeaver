@@ -588,6 +588,10 @@ pub enum ResourceBillingUnit {
     StorageByteSecond,
     GpuUnitSecond,
     BuildSecond,
+    LlmInputToken,
+    LlmOutputToken,
+    LlmCacheReadToken,
+    LlmCacheWriteToken,
 }
 
 /// Metering scope for one usage interval.
@@ -611,7 +615,7 @@ pub struct ResourceRate {
     pub id: RateId,
     pub revision: Revision,
     pub unit: ResourceBillingUnit,
-    /// Number of base units represented by `unit_price`.
+    /// Number of base usage units represented by `unit_price`.
     pub unit_quantity: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_class: Option<String>,
@@ -619,6 +623,12 @@ pub struct ResourceRate {
     pub gpu_mode: Option<GpuAllocationMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builder_binding: Option<String>,
+    /// Exact model/provider identity for LLM token rates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding: Option<String>,
+    /// Maximum Credits that one model invocation may preauthorize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_preauthorization: Option<FixedDecimal>,
     pub unit_price: Money,
     pub effective_from: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -627,10 +637,26 @@ pub struct ResourceRate {
 
 impl ResourceRate {
     pub fn validate(&self) -> Result<(), ResourceError> {
-        if (self.unit == ResourceBillingUnit::BuildSecond) != self.builder_binding.is_some()
+        let model_unit = matches!(
+            self.unit,
+            ResourceBillingUnit::LlmInputToken
+                | ResourceBillingUnit::LlmOutputToken
+                | ResourceBillingUnit::LlmCacheReadToken
+                | ResourceBillingUnit::LlmCacheWriteToken
+        );
+        if self.builder_binding.is_some() != (self.unit == ResourceBillingUnit::BuildSecond)
             || self.builder_binding.as_ref().is_some_and(|b| {
                 b.trim().is_empty() || b.len() > 128 || b.bytes().any(|c| c.is_ascii_whitespace())
             })
+            || self.model_binding.is_some() != model_unit
+            || self.model_binding.as_ref().is_some_and(|b| {
+                b.trim().is_empty() || b.len() > 256 || b.bytes().any(|c| c.is_ascii_whitespace())
+            })
+            || self.max_preauthorization.is_some() != model_unit
+            || self
+                .max_preauthorization
+                .as_ref()
+                .is_some_and(|amount| amount.scaled() <= 0)
             || self.revision.get() == 0
             || self.unit_quantity == 0
             || self
@@ -650,6 +676,9 @@ impl ResourceRate {
             .validate()?;
         }
         self.unit_price.validate()?;
+        if model_unit && self.unit_price.currency != "CREDITS" {
+            return Err(ResourceError::InvalidRate);
+        }
         if self.unit_price.amount.scaled() < 0 {
             return Err(ResourceError::InvalidRate);
         }

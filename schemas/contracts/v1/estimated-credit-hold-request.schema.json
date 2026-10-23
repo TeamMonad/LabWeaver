@@ -57,7 +57,11 @@
         "memory_byte_second",
         "storage_byte_second",
         "gpu_unit_second",
-        "build_second"
+        "build_second",
+        "llm_input_token",
+        "llm_output_token",
+        "llm_cache_read_token",
+        "llm_cache_write_token"
       ],
       "type": "string"
     },
