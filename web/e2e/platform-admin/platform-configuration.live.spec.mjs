@@ -126,12 +126,12 @@ test('platform administrator edits, conflicts and fails closed on platform confi
     // A stale second tab cannot overwrite a newer desired version: the fence fails and the draft is kept.
     stale = await context.newPage()
     await openPage(stale)
-    const changed = original === 300 ? 299 : original + 1
+    // Two values distinct from the original and from each other, both within the contract range [1, 300].
+    const [changed, staleGrace] = [original + 1, original - 1, original + 2, original - 2].filter((value) => value >= 1 && value <= 300)
     const saved = await expectJson(await saveGraceByUi(page, changed), 'LW_PLATFORM_CONFIGURATION_SAVE_FAILED')
     expect(saved.desired.configuration.lifecycle.preemptionGraceSeconds).toBe(changed)
     expect(saved.registeredBundle).toBeNull()
 
-    const staleGrace = changed === 299 ? 298 : changed + 1
     const rejected = await saveGraceByUi(stale, staleGrace)
     expect([409, 412]).toContain(rejected.status())
     await expect(stale.getByTestId('pc-conflict')).toContainText(`revision ${saved.revision}`)
