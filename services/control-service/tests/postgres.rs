@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
+use artifact_store::{
+    ImmutableObjectStore, ObjectStoreError, PresignedUpload, S3Credential, S3ImmutableObjectStore,
+    S3StoreConfig, VerifiedObject,
+};
 use async_trait::async_trait;
 use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
@@ -40,7 +43,8 @@ use control_service::{
 };
 use persistence_sqlx::{Domain, Sha256Digest};
 use sqlx::{Row, postgres::PgPoolOptions};
-use testcontainers::{ImageExt, runners::AsyncRunner};
+use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
@@ -154,6 +158,28 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
     for replay in replays {
         assert_eq!(replay.await??, package);
     }
+    // A lost completion response still resolves to the same upload, even with a new retry key.
+    assert_eq!(
+        service
+            .complete_upload(
+                course,
+                session.id,
+                session.revision,
+                &IdempotencyKey::parse("issue-197-completion-new-key")?,
+                now
+            )
+            .await?,
+        package
+    );
+    let status = service
+        .project_upload(request.project_id, session.id, now)
+        .await?;
+    assert_eq!(status.completed_package, Some(package.clone()));
+    assert!(status.upload_targets.is_empty());
+    assert_eq!(
+        package.files[0].sha256,
+        Sha256Digest::of_bytes(b"xxxxxxx").to_string()
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.problem_packages")
             .fetch_one(&pool)
@@ -520,7 +546,8 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         "projectId": project_id,
         "courseId": course_id,
         "revision": 1,
-        "files": [{"path": "context.tar.gz", "object": build_context}],
+        "files": [{"path": "context.tar.gz", "object": build_context,
+                   "sha256": Sha256Digest::of_bytes(b"context").to_string()}],
         "retention": {
             "policyId": PolicyId::new(),
             "policyRevision": 1,
@@ -926,6 +953,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
         course_id: Some(course_id),
         revision: Revision::new(1)?,
         files: vec![PackageFile {
+            sha256: "0".repeat(64),
             path: "README.md".to_owned(),
             object: ArtifactRef {
                 artifact_id: ArtifactId::new(),
@@ -3186,6 +3214,27 @@ impl ImmutableObjectStore for FixtureObjects {
                 .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
         })
     }
+    async fn presign_upload_exact(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.presign_upload(key, size, media_type, now).await
+    }
+    async fn presign_upload_exact_until(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let mut signed = self.presign_upload(key, size, media_type, now).await?;
+        signed.expires_at = expires_at;
+        Ok(signed)
+    }
 
     async fn read_verified(
         &self,
@@ -3194,8 +3243,31 @@ impl ImmutableObjectStore for FixtureObjects {
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Ok(VerifiedObject {
             reference: expected.clone(),
-            bytes: Vec::new(),
+            bytes: vec![
+                b'x';
+                usize::try_from(expected.size_bytes)
+                    .map_err(|_| ObjectStoreError::ObjectTooLarge)?
+            ],
         })
+    }
+
+    async fn read_verified_file(
+        &self,
+        key: &str,
+        expected: &ArtifactRef,
+    ) -> Result<artifact_store::VerifiedObjectFile, ObjectStoreError> {
+        let object = self.read_verified(key, expected).await?;
+        artifact_store::VerifiedObjectFile::from_bytes(object.reference, &object.bytes)
+    }
+
+    async fn freeze_current_file(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+    ) -> Result<artifact_store::VerifiedObjectFile, ObjectStoreError> {
+        let object = self.freeze_current(key, size, media_type).await?;
+        artifact_store::VerifiedObjectFile::from_bytes(object.reference, &object.bytes)
     }
 
     async fn freeze_current(
@@ -3210,9 +3282,437 @@ impl ImmutableObjectStore for FixtureObjects {
         Ok(verified(key, "version-1", size, media_type))
     }
 
+    async fn freeze_current_reference(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+    ) -> Result<ArtifactRef, ObjectStoreError> {
+        if self.fail_second && key.ends_with("00001") {
+            return Err(ObjectStoreError::ObjectNotFound);
+        }
+        Ok(self.freeze_current(key, size, media_type).await?.reference)
+    }
+
+    async fn presign_upload_until(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let mut signed = self.presign_upload(key, size, media_type, now).await?;
+        signed.expires_at = expires_at;
+        Ok(signed)
+    }
+
+    async fn list_key_versions(&self, _: &str) -> Result<Vec<String>, ObjectStoreError> {
+        Ok(vec!["version-1".to_owned()])
+    }
+
     async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
         Ok(())
     }
+}
+
+async fn local_minio_image() -> Result<GenericImage, Box<dyn std::error::Error>> {
+    let descriptor = std::env::var("LABWEAVER_TEST_MINIO_IMAGE")
+        .map_err(|_| "LABWEAVER_TEST_MINIO_IMAGE must name a locally prepared image")?;
+    let (name, tag) = descriptor
+        .rsplit_once(':')
+        .filter(|(name, tag)| !name.is_empty() && !tag.is_empty() && !tag.contains('/'))
+        .ok_or("LABWEAVER_TEST_MINIO_IMAGE must be a local name:tag reference")?;
+    let docker = testcontainers::bollard::Docker::connect_with_local_defaults()?;
+    docker.inspect_image(&descriptor).await?;
+    Ok(GenericImage::new(name.to_owned(), tag.to_owned()))
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn material_upload_real_minio_and_postgres_bind_versions_and_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let minio = local_minio_image()
+        .await?
+        .with_exposed_port(9000.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("API:"))
+        .with_env_var("MINIO_ROOT_USER", "labweaver-test")
+        .with_env_var("MINIO_ROOT_PASSWORD", "labweaver-test-secret")
+        .with_cmd(["server", "/data"])
+        .start()
+        .await?;
+    let endpoint = format!(
+        "http://127.0.0.1:{}",
+        minio.get_host_port_ipv4(9000.tcp()).await?
+    );
+    let objects = S3ImmutableObjectStore::new_for_test(
+        S3StoreConfig {
+            binding: "minio-control-materials-v1".to_owned(),
+            endpoint: endpoint.parse()?,
+            bucket: "issue-197-control-materials".to_owned(),
+            region: "labweaver-test-1".to_owned(),
+            object_prefix: "problem-packages".to_owned(),
+            upload_ttl_seconds: 900,
+            max_object_bytes: 1_048_576,
+            force_path_style: true,
+            ca_bundle_file: None,
+        },
+        S3Credential {
+            access_key_id: "labweaver-test".to_owned(),
+            secret_access_key: "labweaver-test-secret".to_owned(),
+            session_token: None,
+        },
+    )
+    .await?;
+    objects.ensure_bucket_for_test().await?;
+
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let service = ControlService::new(pool.clone(), Arc::new(objects.clone()), control_config()?)?;
+    let course = CourseId::new();
+    let request = upload_request(course)?;
+    let now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    let session = service
+        .create_upload(
+            course,
+            &request,
+            &IdempotencyKey::parse("issue-197-real-create")?,
+            now,
+        )
+        .await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    for target in &session.upload_targets {
+        let bytes = match target.path.as_str() {
+            "statement.md" => b"statement".as_slice(),
+            "starter/main.rs" => b"main.rs".as_slice(),
+            path => return Err(format!("unexpected upload target {path}").into()),
+        };
+        let mut upload = client.put(&target.upload_url);
+        for (name, value) in &target.required_headers {
+            upload = upload.header(name, value);
+        }
+        let response = upload.body(bytes.to_vec()).send().await?;
+        assert!(
+            response.status().is_success(),
+            "PUT failed: {}",
+            response.status()
+        );
+    }
+    let first_target = session
+        .upload_targets
+        .first()
+        .ok_or("material upload returned no target")?;
+    let mut overwrite = client.put(&first_target.upload_url);
+    for (name, value) in &first_target.required_headers {
+        overwrite = overwrite.header(name, value);
+    }
+    assert_eq!(
+        overwrite.body(b"statement".to_vec()).send().await?.status(),
+        reqwest::StatusCode::PRECONDITION_FAILED
+    );
+
+    let package = service
+        .complete_upload(
+            course,
+            session.id,
+            session.revision,
+            &IdempotencyKey::parse("issue-197-real-complete")?,
+            now,
+        )
+        .await?;
+    assert_eq!(package.files.len(), 2);
+    assert_eq!(
+        package.files[0].sha256,
+        Sha256Digest::of_bytes(b"main.rs").to_string()
+    );
+    assert_eq!(
+        package.files[1].sha256,
+        Sha256Digest::of_bytes(b"statement").to_string()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.problem_package_upload_files \
+             WHERE upload_id=$1 AND sha256 IS NOT NULL AND object_version IS NOT NULL",
+        )
+        .bind(session.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    assert_eq!(
+        service
+            .complete_upload(
+                course,
+                session.id,
+                session.revision,
+                &IdempotencyKey::parse("issue-197-real-complete-retry")?,
+                now,
+            )
+            .await?,
+        package
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.problem_packages")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+
+    let cancelled = service
+        .create_upload(
+            course,
+            &request,
+            &IdempotencyKey::parse("issue-197-real-cancel-create")?,
+            now,
+        )
+        .await?;
+    let cancel_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT object_key FROM control.problem_package_upload_files WHERE upload_id=$1 ORDER BY ordinal",
+    )
+    .bind(cancelled.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    for target in &cancelled.upload_targets {
+        let bytes = if target.path == "statement.md" {
+            b"statement".as_slice()
+        } else {
+            b"main.rs".as_slice()
+        };
+        let mut upload = client.put(&target.upload_url);
+        for (name, value) in &target.required_headers {
+            upload = upload.header(name, value);
+        }
+        assert!(
+            upload
+                .body(bytes.to_vec())
+                .send()
+                .await?
+                .status()
+                .is_success()
+        );
+    }
+    let cancelled = service
+        .cancel_project_upload(
+            request.project_id,
+            cancelled.id,
+            cancelled.revision,
+            &IdempotencyKey::parse("issue-197-real-cancel")?,
+            now,
+        )
+        .await?;
+    assert_eq!(
+        cancelled.state,
+        contracts::http::ProblemPackageUploadState::Cancelled
+    );
+    sqlx::query(
+        "UPDATE control.problem_package_upload_sessions \
+         SET expires_at=$2-interval '1 second',cleanup_versions_next_attempt_at=$2-interval '1 second' \
+         WHERE upload_id=$1",
+    )
+    .bind(cancelled.id.as_uuid())
+    .bind(now.get())
+    .execute(&pool)
+    .await?;
+    let cleanup_now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    service.reconcile_material_uploads(cleanup_now).await?;
+    let cleanup_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    for index in 0..2 {
+        loop {
+            let poll_now = UtcTimestamp::from_utc(
+                sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+                    .fetch_one(&pool)
+                    .await?,
+            )?;
+            match service.cleanup_one_object(poll_now).await? {
+                control_service::CleanupOutcome::Deleted => break,
+                control_service::CleanupOutcome::Idle
+                    if tokio::time::Instant::now() < cleanup_deadline =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                outcome => {
+                    return Err(
+                        format!("cleanup item {index} did not reach Deleted: {outcome:?}").into(),
+                    );
+                }
+            }
+        }
+    }
+    for key in cancel_keys {
+        assert!(objects.list_key_versions(&key).await?.is_empty());
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.object_cleanup_ledger WHERE upload_id=$1 AND completed_at IS NOT NULL",
+        )
+        .bind(cancelled.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn material_upload_query_cancel_expiry_and_cleanup_are_project_scoped()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::http::ProblemPackageUploadState;
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?,
+        ))
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+    let course = CourseId::new();
+    let request = upload_request(course)?;
+    let key = IdempotencyKey::parse("197-create")?;
+    let session = service.create_upload(course, &request, &key, now).await?;
+    assert_eq!(
+        service.create_upload(course, &request, &key, now).await?,
+        session
+    );
+    assert!(matches!(
+        service
+            .project_upload(ProjectId::new(), session.id, now)
+            .await
+            .err(),
+        Some(ControlError::UploadNotFound)
+    ));
+    let pending = service
+        .project_upload(request.project_id, session.id, now)
+        .await?;
+    assert_eq!(pending.uploaded_paths.len(), 2);
+    assert!(pending.upload_targets.is_empty());
+    let interrupted_service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: true }),
+        control_config()?,
+    )?;
+    let resumed = interrupted_service
+        .project_upload(
+            request.project_id,
+            session.id,
+            UtcTimestamp::from_utc(now.get() + time::Duration::seconds(30))?,
+        )
+        .await?;
+    assert_eq!(resumed.uploaded_paths, vec!["starter/main.rs"]);
+    assert_eq!(resumed.upload_targets.len(), 1);
+    assert_eq!(resumed.upload_targets[0].path, "statement.md");
+    assert_eq!(resumed.upload_targets[0].expires_at, session.expires_at);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM control.problem_package_upload_files WHERE upload_id=$1 AND sha256 IS NOT NULL")
+        .bind(session.id.as_uuid()).fetch_one(&pool).await?,0);
+    let cancel_key = IdempotencyKey::parse("197-cancel")?;
+    assert!(matches!(
+        service
+            .cancel_project_upload(
+                ProjectId::new(),
+                session.id,
+                session.revision,
+                &cancel_key,
+                now
+            )
+            .await
+            .err(),
+        Some(ControlError::UploadStateConflict)
+    ));
+    let cancelled = service
+        .cancel_project_upload(
+            request.project_id,
+            session.id,
+            session.revision,
+            &cancel_key,
+            now,
+        )
+        .await?;
+    assert_eq!(cancelled.state, ProblemPackageUploadState::Cancelled);
+    assert_eq!(
+        service
+            .cancel_project_upload(
+                request.project_id,
+                session.id,
+                session.revision,
+                &cancel_key,
+                now
+            )
+            .await?,
+        cancelled
+    );
+    assert!(matches!(
+        service
+            .complete_upload(
+                course,
+                session.id,
+                session.revision,
+                &IdempotencyKey::parse("197-cancelled-complete")?,
+                now
+            )
+            .await
+            .err(),
+        Some(ControlError::UploadStateConflict)
+    ));
+    assert!(
+        service
+            .project_upload(request.project_id, session.id, now)
+            .await?
+            .upload_targets
+            .is_empty()
+    );
+    service.reconcile_material_uploads(now).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.object_cleanup_ledger")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    sqlx::query("UPDATE control.problem_package_upload_sessions \
+        SET expires_at=$2-interval '1 second',cleanup_versions_next_attempt_at=$2-interval '1 second' WHERE upload_id=$1")
+        .bind(session.id.as_uuid()).bind(now.get()).execute(&pool).await?;
+    service.reconcile_material_uploads(now).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.object_cleanup_ledger")
+            .fetch_one(&pool)
+            .await?,
+        2
+    );
+    let expired = service
+        .create_upload(course, &request, &IdempotencyKey::parse("197-expiry")?, now)
+        .await?;
+    sqlx::query("UPDATE control.problem_package_upload_sessions SET expires_at=$2-interval '1 second' WHERE upload_id=$1")
+        .bind(expired.id.as_uuid()).bind(now.get()).execute(&pool).await?;
+    let expired = service
+        .project_upload(request.project_id, expired.id, now)
+        .await?;
+    assert_eq!(expired.state, ProblemPackageUploadState::Expired);
+    assert!(expired.upload_targets.is_empty());
+    Ok(())
 }
 
 fn verified(_: &str, version: &str, size: u64, media_type: &str) -> VerifiedObject {
@@ -3224,6 +3724,209 @@ fn verified(_: &str, version: &str, size: u64, media_type: &str) -> VerifiedObje
             size_bytes: size,
             media_type: media_type.to_owned(),
         },
-        bytes: Vec::new(),
+        bytes: vec![b'x'; usize::try_from(size).unwrap_or_default()],
     }
+}
+
+struct RecoveryObjects {
+    fail_once: std::sync::atomic::AtomicBool,
+    block: std::sync::atomic::AtomicBool,
+    started: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ImmutableObjectStore for RecoveryObjects {
+    fn binding(&self) -> &'static str {
+        "fixture-v1"
+    }
+
+    async fn delete_orphan(&self, key: &str, version: &str) -> Result<(), ObjectStoreError> {
+        FixtureObjects { fail_second: false }
+            .delete_orphan(key, version)
+            .await
+    }
+
+    async fn presign_upload(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        FixtureObjects { fail_second: false }
+            .presign_upload(key, size, media_type, now)
+            .await
+    }
+    async fn presign_upload_exact(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.presign_upload(key, size, media_type, now).await
+    }
+    async fn presign_upload_exact_until(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        let mut signed = self.presign_upload(key, size, media_type, now).await?;
+        signed.expires_at = expires_at;
+        Ok(signed)
+    }
+
+    async fn read_verified(
+        &self,
+        key: &str,
+        expected: &ArtifactRef,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        FixtureObjects { fail_second: false }
+            .read_verified(key, expected)
+            .await
+    }
+
+    async fn freeze_current(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        FixtureObjects { fail_second: false }
+            .freeze_current(key, size, media_type)
+            .await
+    }
+
+    async fn freeze_current_file(
+        &self,
+        key: &str,
+        size: u64,
+        media_type: &str,
+    ) -> Result<artifact_store::VerifiedObjectFile, ObjectStoreError> {
+        use std::sync::atomic::Ordering;
+        if self.fail_once.swap(false, Ordering::SeqCst) {
+            return Err(ObjectStoreError::ObjectUnavailable);
+        }
+        if self.block.load(Ordering::SeqCst) {
+            self.started.notify_one();
+            self.resume.notified().await;
+        }
+        FixtureObjects { fail_second: false }
+            .freeze_current_file(key, size, media_type)
+            .await
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn transient_completion_recovers_original_intent_and_cancel_fences_an_inflight_read()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?,
+        ))
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    let objects = Arc::new(RecoveryObjects {
+        fail_once: AtomicBool::new(true),
+        block: AtomicBool::new(false),
+        started: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    });
+    let service = ControlService::new(pool.clone(), objects.clone(), control_config()?)?;
+    let course = CourseId::new();
+    let request = upload_request(course)?;
+    let session = service
+        .create_upload(
+            course,
+            &request,
+            &IdempotencyKey::parse("197-transient-create")?,
+            now,
+        )
+        .await?;
+    let key = IdempotencyKey::parse("197-transient-complete")?;
+    assert!(matches!(
+        service
+            .complete_upload(course, session.id, session.revision, &key, now)
+            .await,
+        Err(ControlError::ObjectStore(
+            ObjectStoreError::ObjectUnavailable
+        ))
+    ));
+    let status = service
+        .project_upload(request.project_id, session.id, now)
+        .await?;
+    assert_eq!(
+        status.completion_idempotency_key.as_deref(),
+        Some(key.as_str())
+    );
+    assert_eq!(status.completion_expected_revision, Some(session.revision));
+    let result = service
+        .complete_upload(course, session.id, session.revision, &key, now)
+        .await?;
+    assert_eq!(
+        result.files[0].sha256,
+        Sha256Digest::of_bytes(b"xxxxxxx").to_string()
+    );
+
+    let cancelled = service
+        .create_upload(
+            course,
+            &request,
+            &IdempotencyKey::parse("197-inflight-create")?,
+            now,
+        )
+        .await?;
+    objects.block.store(true, Ordering::SeqCst);
+    let worker = service.clone();
+    let task = tokio::spawn(async move {
+        worker
+            .complete_upload(
+                course,
+                cancelled.id,
+                cancelled.revision,
+                &IdempotencyKey::parse("197-inflight-complete")
+                    .map_err(|_| ControlError::ContractInvalid)?,
+                now,
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        objects.started.notified(),
+    )
+    .await?;
+    let status = service
+        .project_upload(request.project_id, cancelled.id, now)
+        .await?;
+    service
+        .cancel_project_upload(
+            request.project_id,
+            cancelled.id,
+            status.revision,
+            &IdempotencyKey::parse("197-inflight-cancel")?,
+            now,
+        )
+        .await?;
+    objects.resume.notify_one();
+    assert!(matches!(task.await?, Err(ControlError::OperationLeaseLost)));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.problem_packages")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    Ok(())
 }

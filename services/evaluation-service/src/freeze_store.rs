@@ -61,6 +61,110 @@ impl PgFreezeStore {
         Self { pool }
     }
 
+    /// Reads ledger metadata for Control's model-input authorization without reading objects.
+    ///
+    /// The owner selector is distinct from the requesting user's authorization. The projection
+    /// grants no visibility or egress permission. Legacy commands return a null original session.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incomplete or differently scoped facts and any inconsistent ledger identity.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one read binds the exact owner, freeze and release without independent mutable lookups"
+    )]
+    pub async fn model_input_facts(
+        &self,
+        submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        owner_id: contracts::ActorId,
+        release_id: contracts::EvaluationReleaseId,
+        release_revision: Revision,
+    ) -> Result<Value, FreezeStoreError> {
+        let release_revision_db =
+            i64::try_from(release_revision.get()).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let row = sqlx::query(
+            "SELECT (f.contract || jsonb_build_object('systemFacts','{}'::jsonb)) AS frozen, \
+                    (c.contract - 'workerDispatch') AS command, \
+                    f.manifest_sha256 AS frozen_manifest_sha256, c.manifest_sha256 AS command_manifest_sha256, \
+                    f.content_sha256, f.object_version, f.environment_id, r.contract AS release \
+             FROM evaluation.frozen_submissions f \
+             JOIN evaluation.submission_freeze_commands c ON c.frozen_submission_id=f.frozen_submission_id \
+               AND c.project_id=f.project_id AND c.course_id IS NOT DISTINCT FROM f.course_id \
+               AND c.environment_id=f.environment_id AND c.actor_id=$4 \
+             JOIN evaluation.submission_freeze_requests q ON q.frozen_submission_id=f.frozen_submission_id \
+               AND q.project_id=f.project_id AND q.course_id IS NOT DISTINCT FROM f.course_id \
+               AND q.environment_id=f.environment_id AND q.state='completed' \
+               AND (q.contract || jsonb_build_object('systemFacts','{}'::jsonb)) = (f.contract || jsonb_build_object('systemFacts','{}'::jsonb)) \
+             JOIN evaluation.evaluation_releases r ON r.release_id=$5 AND r.project_id=f.project_id \
+               AND r.course_id IS NOT DISTINCT FROM f.course_id AND r.revision=$6 AND r.state='active' \
+             WHERE f.frozen_submission_id=$1 AND f.project_id=$2 AND f.course_id IS NOT DISTINCT FROM $3 \
+               AND f.contract->>'actorId'=$7",
+        )
+        .bind(submission_id.as_uuid()).bind(project_id.as_uuid())
+        .bind(course_id.map(CourseId::as_uuid)).bind(owner_id.as_uuid())
+        .bind(release_id.as_uuid()).bind(release_revision_db)
+        .bind(owner_id.to_string()).fetch_optional(&self.pool).await?
+        .ok_or(FreezeStoreError::NotFound)?;
+        let frozen: FrozenSubmission = serde_json::from_value(row.try_get("frozen")?)
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let command: crate::SubmissionFreezeCommand =
+            serde_json::from_value(row.try_get("command")?)
+                .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let release: contracts::evaluation::EvaluationRelease =
+            serde_json::from_value(row.try_get("release")?)
+                .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        frozen
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        command
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        release
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        let manifest_sha256 = Sha256Digest::of_canonical(&command.manifest)
+            .map_err(|_| FreezeStoreError::ContractInvalid)?
+            .to_string();
+        if frozen.id != submission_id
+            || frozen.project_id != project_id
+            || frozen.course_id != course_id
+            || frozen.actor_id != owner_id
+            || command.frozen_submission_id != frozen.id
+            || command.project_id != project_id
+            || command.course_id != course_id
+            || command.actor_id != owner_id
+            || command.environment_id != frozen.environment.environment_id
+            || frozen.environment.environment_id.as_uuid()
+                != row.try_get::<Uuid, _>("environment_id")?
+            || command.environment_revision != frozen.environment.environment_revision
+            || command.manifest_revision != frozen.manifest_revision
+            || manifest_sha256 != row.try_get::<String, _>("frozen_manifest_sha256")?
+            || manifest_sha256 != row.try_get::<String, _>("command_manifest_sha256")?
+            || frozen.content_sha256 != row.try_get::<String, _>("content_sha256")?
+            || frozen.object.object_version != row.try_get::<String, _>("object_version")?
+            || release.id != release_id
+            || release.revision != release_revision
+            || release.project_id != project_id
+            || release.course_id != course_id
+            || release.state != contracts::evaluation::EvaluationReleaseState::Active
+        {
+            return Err(FreezeStoreError::ContractInvalid);
+        }
+        Ok(serde_json::json!({
+            "frozenSubmissionId": frozen.id, "projectId": frozen.project_id,
+            "courseId": frozen.course_id, "ownerActorId": frozen.actor_id,
+            "manifestRevision": frozen.manifest_revision, "manifestSha256": manifest_sha256,
+            "manifest": command.manifest, "archive": frozen.object,
+            "contentSha256": frozen.content_sha256, "files": frozen.files,
+            "environment": frozen.environment,
+            "evaluationRelease": {"id": release.id, "revision": release.revision, "state": release.state},
+            "inputAuthorizationContext": command.input_authorization_context,
+        }))
+    }
+
     /// Reads the database authority clock.
     ///
     /// # Errors

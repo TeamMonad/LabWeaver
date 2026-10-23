@@ -1307,6 +1307,13 @@ mod tests {
                 && script.contains("MATERIAL_SIZE_BYTES")
                 && script.contains("/materials")
         }));
+        let run_script = job.document["spec"]["template"]["spec"]["containers"][0]["command"][2]
+            .as_str()
+            .ok_or(SandboxBundleError::Invalid)?;
+        let size_guard = "if [ \"$size\" -gt \"$RESULT_MAX_BYTES\" ]; then";
+        assert!(run_script.contains(size_guard));
+        assert!(run_script.contains("LW_AGENT_SANDBOX_RESULT_TOO_LARGE"));
+        assert!(run_script.contains("curl --fail --silent --show-error"));
         assert_eq!(
             job.document
                 .pointer("/metadata/annotations/labweaver.io~1request-sha256"),

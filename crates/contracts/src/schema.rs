@@ -1687,7 +1687,11 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listOrganizationUsers" => contract_ref("organization-user-page"),
         "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
         "addProjectMembership" | "removeProjectMembership" => contract_ref("project-membership"),
-        "createProjectProblemPackageUpload" => contract_ref("http/problem-package-upload-session"),
+        "createProjectProblemPackageUpload"
+        | "getProjectProblemPackageUpload"
+        | "cancelProjectProblemPackageUpload" => {
+            contract_ref("http/problem-package-upload-session")
+        }
         "getProjectProblemPackage" | "completeProjectProblemPackageUpload" => {
             contract_ref("problem-package")
         }

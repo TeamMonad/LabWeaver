@@ -227,6 +227,8 @@ pub struct FrozenFile {
     pub path: String,
     pub size_bytes: u64,
     pub media_type: String,
+    /// SHA-256 of the selected file bytes observed during collection.
+    pub sha256: String,
 }
 
 /// Frozen build and runtime identity used to reproduce collection.
@@ -337,7 +339,7 @@ impl FrozenSubmission {
         for file in &self.files {
             crate::validate_relative_path(&file.path)
                 .map_err(|error| SubmissionError::UnsafePath(error.to_string()))?;
-            if file.media_type.trim().is_empty() {
+            if file.media_type.trim().is_empty() || !is_sha256(&file.sha256) {
                 return Err(SubmissionError::IncompleteFreeze);
             }
             if previous.is_some_and(|path| path >= file.path.as_str())

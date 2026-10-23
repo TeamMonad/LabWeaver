@@ -435,6 +435,7 @@ async fn collect_snapshot(
             path: path.clone(),
             size_bytes,
             media_type: "application/octet-stream".to_owned(),
+            sha256: Sha256Digest::of_bytes(&bytes).to_string(),
         });
         contents.insert(path, bytes);
     }
