@@ -463,22 +463,7 @@ const {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-.text-input {
-  flex: 1;
-  min-width: 0;
-  height: 40px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: var(--md-sys-shape-medium);
-  background: var(--md-sys-color-surface-container-low);
-  color: var(--md-sys-color-on-surface);
-  font: var(--md-sys-body-medium);
-}
 
-.text-input:focus-visible {
-  outline: 2px solid var(--md-sys-color-primary);
-  outline-offset: 2px;
-}
 
 .placeholder-pane {
   display: flex;

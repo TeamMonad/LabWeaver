@@ -20,6 +20,9 @@ importers:
       '@hey-api/client-axios':
         specifier: 0.9.1
         version: 0.9.1(@hey-api/openapi-ts@0.99.0(typescript@5.5.3))(axios@1.18.1)
+      '@internationalized/date':
+        specifier: ^3.12.4
+        version: 3.12.4
       '@novnc/novnc':
         specifier: 1.5.0
         version: 1.5.0
