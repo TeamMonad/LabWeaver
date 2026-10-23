@@ -98,6 +98,17 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
     )))
     .execute(&pool)
     .await?;
+    for migration in [
+        include_str!("../../../migrations/resource/0016_project_credits.sql"),
+        include_str!("../../../migrations/resource/0017_project_request_pagination_indexes.sql"),
+        include_str!("../../../migrations/resource/0018_cost_estimates.sql"),
+        include_str!("../../../migrations/resource/0019_unknown_usage_deadline.sql"),
+        include_str!("../../../migrations/resource/0020_build_metering.sql"),
+        include_str!("../../../migrations/resource/0021_environment_funding.sql"),
+        include_str!("../../../migrations/resource/0022_model_token_rates.sql"),
+    ] {
+        sqlx::raw_sql(migration).execute(&pool).await?;
+    }
 
     let request_id = Uuid::now_v7();
     let approval_id = Uuid::now_v7();
@@ -2285,6 +2296,11 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0022_model_token_rates.sql"
+    ))
+    .execute(&pool)
+    .await?;
     let store = PgResourceStore::new(pool.clone());
     let resolve_request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
@@ -3723,7 +3739,7 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
     Ok(())
 }
 
-async fn create_active_request(
+async fn create_allocating_request(
     store: &PgResourceStore,
     now: UtcTimestamp,
     project_id: ProjectId,
@@ -4582,6 +4598,11 @@ async fn migrated_pool()
     .await?;
     sqlx::raw_sql(include_str!(
         "../../../migrations/resource/0021_environment_funding.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0022_model_token_rates.sql"
     ))
     .execute(&pool)
     .await?;

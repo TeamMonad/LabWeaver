@@ -129,7 +129,7 @@ impl ResourceProcessRuntime {
             .filter(|v| !v.trim().is_empty());
         let store = PgResourceStore::new(pool)
             .with_cursor_signing_keys(cursor_current.clone(), cursor_previous.clone())
-            .with_environment_credit_owner(environment_service_client_id.clone())
+            .with_environment_credit_owner(environment_service_client_id.clone());
         seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
             .map_err(ResourceProcessRuntimeError::Outbox)?;

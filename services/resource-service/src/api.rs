@@ -1578,28 +1578,18 @@ impl IntoResponse for ResourceApiError {
             | Self::InvalidCursor
             | Self::Store(
                 ResourceStoreError::RateEndInvalid
-                    | ResourceStoreError::InvalidCursor
-                    | ResourceStoreError::Credits(
-                        crate::credits::CreditError::Invalid
-                            | crate::credits::CreditError::Precision(_),
-                    ),
-            ) => {
-                StatusCode::BAD_REQUEST
-            }
+                | ResourceStoreError::InvalidCursor
+                | ResourceStoreError::Credits(
+                    crate::credits::CreditError::Invalid
+                    | crate::credits::CreditError::Precision(_),
+                ),
+            ) => StatusCode::BAD_REQUEST,
             Self::ServiceConfiguration
             | Self::Store(ResourceStoreError::Credits(
                 crate::credits::CreditError::Storage(_)
                 | crate::credits::CreditError::Persistence(_)
                 | crate::credits::CreditError::Wire(_),
             )) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Invalid
-            | Self::Store(
-                ResourceStoreError::RateEndInvalid
-                | ResourceStoreError::Credits(
-                    crate::credits::CreditError::Invalid
-                    | crate::credits::CreditError::Precision(_),
-                ),
-            ) => StatusCode::BAD_REQUEST,
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
             Self::Store(
                 ResourceStoreError::NotFound
