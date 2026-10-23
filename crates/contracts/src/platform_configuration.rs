@@ -156,6 +156,30 @@ pub struct PlatformConfigurationDesired {
     pub builder_policy: BuilderSecurityPolicy,
 }
 
+/// Shared Kubernetes placement limits consumed by both Control validation and generated Helm schema.
+pub const DEDICATED_NODE_SELECTOR_MIN_PROPERTIES: usize = 1;
+pub const DEDICATED_NODE_SELECTOR_MAX_PROPERTIES: usize = 16;
+pub const LABEL_PREFIX_MAX_LENGTH: usize = 253;
+pub const LABEL_NAME_MAX_LENGTH: usize = 63;
+pub const LABEL_VALUE_MAX_LENGTH: usize = 63;
+pub const LABEL_KEY_MAX_LENGTH: usize = LABEL_PREFIX_MAX_LENGTH + 1 + LABEL_NAME_MAX_LENGTH;
+pub const LABEL_KEY_PATTERN: &str = r"^([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$";
+pub const LABEL_PREFIX_PATTERN: &str =
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$";
+pub const LABEL_NAME_PATTERN: &str = r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$";
+pub const LABEL_VALUE_PATTERN: &str = r"^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$";
+
+/// Fields with no execution-side consumer in the current platform deployment.
+pub const PLATFORM_CONFIGURATION_UNSUPPORTED_FIELDS: &[&str] = &[
+    "runtimePolicy.defaultContainerUid",
+    "runtimePolicy.allowedCapabilities",
+    "runtimePolicy.preauthorizations",
+    "runtimePolicy.privilegedExecutionLocation",
+    "builderPolicy.capabilities",
+    "builderPolicy.allowPrivilegeEscalation",
+    "builderPolicy.entitlements",
+];
+
 /// A policy field whose execution-side support is decided by the Control validator.
 #[derive(Clone, Copy)]
 pub struct PlatformConfigurationPolicyDescriptor {
@@ -331,8 +355,8 @@ impl PlatformConfigurationDesired {
                     taint_key,
                     taint_value,
                 } => {
-                    if node_selector.is_empty()
-                        || node_selector.len() > 16
+                    if node_selector.len() < DEDICATED_NODE_SELECTOR_MIN_PROPERTIES
+                        || node_selector.len() > DEDICATED_NODE_SELECTOR_MAX_PROPERTIES
                         || node_selector
                             .iter()
                             .any(|(k, v)| !valid_label_key(k) || !valid_label_value(v))
@@ -371,7 +395,7 @@ impl PlatformConfigurationDesired {
 }
 fn valid_binding(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 63
+        && value.len() <= LABEL_VALUE_MAX_LENGTH
         && value
             .bytes()
             .all(|v| v.is_ascii_alphanumeric() || b"-_.".contains(&v))
@@ -383,7 +407,7 @@ fn valid_label_key(value: &str) -> bool {
         .map_or((None, value), |(prefix, name)| (Some(prefix), name));
     prefix.is_none_or(|v| {
         !v.is_empty()
-            && v.len() <= 253
+            && v.len() <= LABEL_PREFIX_MAX_LENGTH
             && v.split('.').all(|label| {
                 valid_label_value(label)
                     && label
@@ -395,6 +419,7 @@ fn valid_label_key(value: &str) -> bool {
 
 fn valid_label_value(value: &str) -> bool {
     valid_binding(value)
+        && value.len() <= LABEL_NAME_MAX_LENGTH
         && value.starts_with(|c: char| c.is_ascii_alphanumeric())
         && value.ends_with(|c: char| c.is_ascii_alphanumeric())
 }
@@ -696,6 +721,72 @@ mod tests {
             .preauthorizations
             .push(configuration.runtime_policy.preauthorizations[0].clone());
         assert!(configuration.validate().is_err());
+    }
+
+    #[test]
+    fn dedicated_node_pool_constraints_match_deployment_samples() {
+        fn configuration(
+            node_selector: BTreeMap<String, String>,
+            taint_key: &str,
+            taint_value: &str,
+        ) -> PlatformConfigurationDesired {
+            let mut configuration = PlatformConfigurationDesired::default();
+            configuration.runtime_policy.privileged_allowed = true;
+            configuration.runtime_policy.privileged_execution_location =
+                Some(PrivilegedExecutionLocation::DedicatedNodePool {
+                    node_selector,
+                    taint_key: taint_key.to_owned(),
+                    taint_value: taint_value.to_owned(),
+                });
+            configuration
+        }
+
+        let valid = configuration(
+            BTreeMap::from([(String::from("pool"), String::from("privileged"))]),
+            "labweaver.io/taint",
+            "reserved",
+        );
+        assert!(valid.validate().is_ok());
+        for invalid in [
+            configuration(BTreeMap::new(), "labweaver.io/taint", "reserved"),
+            configuration(
+                (0..17)
+                    .map(|i| (format!("pool{i}"), String::from("x")))
+                    .collect(),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("INVALID KEY"), String::from("x"))]),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("pool"), String::from("bad value"))]),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(format!("{}/name", "a".repeat(254)), String::from("x"))]),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("pool"), String::from("x"))]),
+                "",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("pool"), String::from("x"))]),
+                "labweaver.io/taint",
+                "bad value",
+            ),
+        ] {
+            assert!(matches!(
+                invalid.validate(),
+                Err(PlatformConfigurationContractError::ExecutionLocationInvalid)
+            ));
+        }
     }
 
     #[test]

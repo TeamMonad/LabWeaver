@@ -462,14 +462,29 @@
                         },
                         "nodeSelector": {
                           "additionalProperties": {
+                            "maxLength": 63,
+                            "minLength": 1,
+                            "pattern": "^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$",
                             "type": "string"
+                          },
+                          "maxProperties": 16,
+                          "minProperties": 1,
+                          "propertyNames": {
+                            "maxLength": 317,
+                            "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
                           },
                           "type": "object"
                         },
                         "taintKey": {
+                          "maxLength": 317,
+                          "minLength": 1,
+                          "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$",
                           "type": "string"
                         },
                         "taintValue": {
+                          "maxLength": 63,
+                          "minLength": 1,
+                          "pattern": "^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$",
                           "type": "string"
                         }
                       },

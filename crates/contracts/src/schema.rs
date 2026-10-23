@@ -1188,7 +1188,35 @@ fn platform_values_schema() -> Result<Value, GenerationError> {
     runtime["properties"]["defaultContainerUid"] = json!({"const": 0, "type": "integer"});
     runtime["properties"]["allowedCapabilities"]["maxItems"] = json!(0);
     runtime["properties"]["preauthorizations"]["maxItems"] = json!(0);
-    let dedicated_location = desired["$defs"]["PrivilegedExecutionLocation"]["oneOf"][0].clone();
+    let mut dedicated_location =
+        desired["$defs"]["PrivilegedExecutionLocation"]["oneOf"][0].clone();
+    let node_selector = &mut dedicated_location["properties"]["nodeSelector"];
+    node_selector["minProperties"] =
+        json!(crate::platform_configuration::DEDICATED_NODE_SELECTOR_MIN_PROPERTIES);
+    node_selector["maxProperties"] =
+        json!(crate::platform_configuration::DEDICATED_NODE_SELECTOR_MAX_PROPERTIES);
+    node_selector["propertyNames"] = json!({
+        "pattern": crate::platform_configuration::LABEL_KEY_PATTERN,
+        "maxLength": crate::platform_configuration::LABEL_KEY_MAX_LENGTH
+    });
+    node_selector["additionalProperties"] = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": crate::platform_configuration::LABEL_VALUE_MAX_LENGTH,
+        "pattern": crate::platform_configuration::LABEL_VALUE_PATTERN
+    });
+    dedicated_location["properties"]["taintKey"] = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": crate::platform_configuration::LABEL_KEY_MAX_LENGTH,
+        "pattern": crate::platform_configuration::LABEL_KEY_PATTERN
+    });
+    dedicated_location["properties"]["taintValue"] = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": crate::platform_configuration::LABEL_VALUE_MAX_LENGTH,
+        "pattern": crate::platform_configuration::LABEL_VALUE_PATTERN
+    });
     runtime["properties"]["privilegedExecutionLocation"] = json!({
         "anyOf": [
             {"type": "null"},
