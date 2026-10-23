@@ -871,7 +871,9 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         include_str!("../../../migrations/environment/0004_work_configuration_executions.sql"),
         include_str!("../../../migrations/environment/0005_kubevirt_execution_owner.sql")
     );
-    sqlx::raw_sql(&old_schema).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*old_schema))
+        .execute(&pool)
+        .await?;
 
     let resources = WorkloadResources {
         cpu_millicores: 250,
@@ -1713,7 +1715,9 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
         include_str!("../../../migrations/environment/0002_project_ownership.sql"),
         include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+        .execute(&pool)
+        .await?;
     let store = PgEnvironmentStore::new(pool);
 
     let timed_out = requested_instance();
@@ -1834,7 +1838,9 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
         include_str!("../../../migrations/environment/0002_project_ownership.sql"),
         include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+        .execute(&pool)
+        .await?;
 
     let consumer = "environment-release-v1";
     let release_id = ReleaseId::new();
@@ -1990,7 +1996,9 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         include_str!("../../../migrations/environment/0002_project_ownership.sql"),
         include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
+        .execute(&pool)
+        .await?;
     let authority_now = container_database_now(&pool).await?;
     let deadline = container_add_time(authority_now, time::Duration::minutes(1))?;
     let environment_id = EnvironmentId::new();
@@ -2465,7 +2473,9 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         include_str!("../../../migrations/environment/0002_project_ownership.sql"),
         include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
-    sqlx::raw_sql(&migration).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*migration))
+        .execute(&pool)
+        .await?;
     let store = PgKubeVirtObservationStore::new(pool.clone());
     let environment_id = EnvironmentId::new();
     let plan = KubeVirtResourcePlan {

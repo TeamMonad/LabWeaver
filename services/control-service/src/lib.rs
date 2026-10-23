@@ -8248,7 +8248,7 @@ async fn load_contract<T>(pool: &PgPool, query: &str, id: Uuid) -> Result<T, Con
 where
     T: serde::de::DeserializeOwned,
 {
-    let row = sqlx::query(query)
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -8267,7 +8267,7 @@ async fn load_contract_two<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    let row = sqlx::query(query)
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(first)
         .bind(second)
         .fetch_optional(pool)
@@ -8706,7 +8706,7 @@ async fn load_build_view(
            AND candidates.state='validated' AND candidates.revision=$3 \
            AND candidates.content_sha256=$4",
     );
-    let row = sqlx::query(&query)
+    let row = sqlx::query(sqlx::AssertSqlSafe(&*query))
         .bind(scope_id)
         .bind(candidate_id.as_uuid())
         .bind(i64_revision(candidate_revision)?)
@@ -8790,7 +8790,7 @@ async fn load_contract_tx<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    let row = sqlx::query(query)
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(first)
         .bind(second)
         .fetch_optional(&mut **transaction)

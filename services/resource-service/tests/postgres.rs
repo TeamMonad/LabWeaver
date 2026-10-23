@@ -72,7 +72,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .max_connections(4)
         .connect(&url)
         .await?;
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
@@ -95,7 +95,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
         include_str!("../../../migrations/resource/0015_task_approval_deadline.sql"),
-    ))
+    )))
     .execute(&pool)
     .await?;
 
@@ -2074,7 +2074,9 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
         include_str!("../../../migrations/environment/0002_project_ownership.sql")
     );
-    sqlx::raw_sql(&environment_schema).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*environment_schema))
+        .execute(&pool)
+        .await?;
     sqlx::query(
         "INSERT INTO environment.release_projections \
          (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
@@ -2136,7 +2138,9 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
         include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql")
     );
-    sqlx::raw_sql(&resource_schema).execute(&pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*resource_schema))
+        .execute(&pool)
+        .await?;
     let migration = include_str!(
         "../../../migrations/resource/0013_environment_resource_usage_attribution.sql"
     );
@@ -3986,7 +3990,7 @@ async fn migrated_pool()
         .max_connections(4)
         .connect(&url)
         .await?;
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
@@ -4009,7 +4013,7 @@ async fn migrated_pool()
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
         include_str!("../../../migrations/resource/0015_task_approval_deadline.sql")
-    ))
+    )))
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(

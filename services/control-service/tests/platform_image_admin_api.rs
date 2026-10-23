@@ -2681,10 +2681,9 @@ async fn import_migration_preserves_pending_running_and_terminal_rows()
         .ok_or("control migrations absent")?
         .migrations;
     for migration in migrations.iter().filter(|migration| migration.id < 11) {
-        sqlx::raw_sql(&persistence_sqlx::MigrationCatalog::read_verified_sql(
-            &migration_root,
-            migration,
-        )?)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            persistence_sqlx::MigrationCatalog::read_verified_sql(&migration_root, migration)?,
+        ))
         .execute(&mut *connection)
         .await?;
     }
@@ -2699,10 +2698,9 @@ async fn import_migration_preserves_pending_running_and_terminal_rows()
         .iter()
         .find(|migration| migration.id == 11)
         .ok_or("new import migration absent")?;
-    sqlx::raw_sql(&persistence_sqlx::MigrationCatalog::read_verified_sql(
-        &migration_root,
-        migration,
-    )?)
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        persistence_sqlx::MigrationCatalog::read_verified_sql(&migration_root, migration)?,
+    ))
     .execute(&mut *connection)
     .await?;
     let states = sqlx::query_as::<_, (String, i64, bool)>("SELECT state,revision,cancel_requested FROM control.platform_image_upload_sessions ORDER BY state").fetch_all(&mut *connection).await?;

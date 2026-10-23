@@ -2319,7 +2319,9 @@ spec:
             .ok_or("evaluation migration domain missing")?;
         for migration in &domain.migrations {
             let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
-            sqlx::raw_sql(&sql).execute(&mut *connection).await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *connection)
+                .await?;
         }
         Ok(())
     }

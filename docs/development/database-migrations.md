@@ -33,3 +33,13 @@ Resource 0015 由 #200 的 `0015_task_approval_deadline.sql` 占用。组合时�
 迁移后验证账户约束、双边操作提交约束、账目 UPDATE/DELETE/TRUNCATE 拒绝，以及并发预占。运行时账号沿用现有领域边界，不增加生产凭据权限。
 
 有真实账目后优先前滚修复。不要删除新表或覆盖历史账目。需要回退应用时先停止新增消费，保留三张表与幂等记录，再由维护者核对未结算预占。回滚不能让旧的费用计算路径继续接受付费消费。
+
+## SQLx 版本固定
+
+仓库暂时将 SQLx 全部子 crate 固定到上游提交 `f1e94ec34dd5f11ad6488a3a8ac7988439a3f757`。该提交包含 PostgreSQL 取消 `BEGIN` 时的事务回滚修复（上游 #4394）；当前 crates.io 的 0.9.x 发布版尚未包含此修复。Cargo workspace 使用同一个 git revision，避免 `sqlx`、`sqlx-core` 和各数据库 driver 版本分裂。
+
+上游发布确实包含 #4394 的正式 SQLx 0.9.x 版本，并且该版本通过 `cancelled_begin_postgres` 真实 PostgreSQL 回归后，维护者才可以将根 `Cargo.toml` 的 git 依赖切回对应的 crates.io `version`，重新生成 `Cargo.lock`；不得仅因版本号发布就切回。
+
+在上游 #4445 修复发布前，生产代码禁止在已有 `Transaction` 上再次调用 `begin()` 或 `begin_with()` 创建嵌套事务。SQLx 0.9 的 PostgreSQL driver 虽已包含 #4394，但嵌套 begin 取消仍可能回滚外层事务。根目录 `clippy.toml` 通过 `disallowed_methods` 拦截 `sqlx::Acquire::begin`、`sqlx::Connection::begin` 和 `sqlx::Connection::begin_with`；`sqlx::Pool::begin_with` 是从 Pool 获取新连接并开启事务的固有入口，不属于嵌套事务。新获取的 PoolConnection/PgConnection 开始事务的审计例外必须用 `#[expect(clippy::disallowed_methods, reason = "fresh connection, not nested")]` 标注。上游修复 #4445 并完成回归验证后，才可以解除这些限制。
+
+git 依赖扩大了供应链风险：构建必须固定完整 commit，不得改用可变分支或 tag；更新前必须复核上游 commit、依赖源码、许可证和 Cargo.lock 的 source/revision，并重新运行取消 BEGIN 的真实 PostgreSQL 回归及 workspace 门禁。维护者应在 PR 中记录复核结果。

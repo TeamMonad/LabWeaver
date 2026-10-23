@@ -3767,9 +3767,11 @@ async fn isolated_agent_database(
         .connect(database_url)
         .await?;
     let database_name = format!("labweaver_agent_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!(r#"CREATE DATABASE "{database_name}""#))
-        .execute(&admin_pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{database_name}""#
+    )))
+    .execute(&admin_pool)
+    .await?;
     let options = database_url
         .parse::<PgConnectOptions>()?
         .database(&database_name);
@@ -3791,7 +3793,7 @@ async fn isolated_agent_database(
         .ok_or_else(|| std::io::Error::other("migration catalog has no agent domain"))?;
     for migration in &agent_migrations.migrations {
         let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
-        sqlx::raw_sql(&sql)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
             .execute(&mut *migration_connection)
             .await
             .map_err(|error| {
@@ -3811,9 +3813,11 @@ async fn remove_isolated_database(
     database_name: &str,
 ) -> Result<(), sqlx::Error> {
     pool.close().await;
-    sqlx::query(&format!(r#"DROP DATABASE "{database_name}" WITH (FORCE)"#))
-        .execute(&admin_pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE "{database_name}" WITH (FORCE)"#
+    )))
+    .execute(&admin_pool)
+    .await?;
     admin_pool.close().await;
     Ok(())
 }

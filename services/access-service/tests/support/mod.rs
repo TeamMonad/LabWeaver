@@ -17,14 +17,17 @@ pub async fn apply_access_migrations(pool: &PgPool) -> Result<(), Box<dyn Error>
     .execute(pool)
     .await?;
     let domain = Domain::Access;
-    sqlx::query(&format!("CREATE SCHEMA {}", domain.schema()))
-        .execute(pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE SCHEMA {}",
+        domain.schema()
+    )))
+    .execute(pool)
+    .await?;
     let mut connection = pool.acquire().await?;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "SET search_path = {}, pg_catalog",
         domain.schema()
-    ))
+    )))
     .execute(&mut *connection)
     .await?;
     let migration_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
@@ -36,7 +39,9 @@ pub async fn apply_access_migrations(pool: &PgPool) -> Result<(), Box<dyn Error>
         .ok_or_else(|| std::io::Error::other("migration catalog has no access domain"))?;
     for migration in &migrations.migrations {
         let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
-        sqlx::raw_sql(&sql).execute(&mut *connection).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *connection)
+            .await?;
     }
     Ok(())
 }

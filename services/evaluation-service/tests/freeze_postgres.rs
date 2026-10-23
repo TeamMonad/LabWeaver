@@ -985,5 +985,7 @@ fn manifest() -> Result<SubmissionManifest, Box<dyn std::error::Error>> {
 
 async fn count(pool: &sqlx::PgPool, table: &str) -> Result<i64, sqlx::Error> {
     let query = format!("SELECT count(*) FROM {table}");
-    sqlx::query_scalar(&query).fetch_one(pool).await
+    sqlx::query_scalar(sqlx::AssertSqlSafe(&*query))
+        .fetch_one(pool)
+        .await
 }

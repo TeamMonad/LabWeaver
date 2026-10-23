@@ -49,6 +49,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+h2 = "=0.4.15"
+http.workspace = true
 jsonschema.workspace = true
 jsonwebtoken.workspace = true
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }

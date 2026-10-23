@@ -2917,7 +2917,7 @@ async fn duplicate_step_revision_events(pool: &sqlx::PgPool) -> Result<i64, sqlx
 }
 
 async fn count(pool: &sqlx::PgPool, table: &str) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
         .fetch_one(pool)
         .await
 }

@@ -183,7 +183,9 @@ impl MigrationCoordinator {
             ));
         }
         let mut transaction = connection.begin().await?;
-        sqlx::raw_sql(&sql).execute(&mut *transaction).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -418,7 +420,7 @@ impl MigrationCoordinator {
             "SELECT count(*)::bigint AS count FROM {}.schema_migrations",
             catalog.name.schema()
         );
-        let applied_count: i64 = sqlx::query(&count_query)
+        let applied_count: i64 = sqlx::query(sqlx::AssertSqlSafe(&*count_query))
             .fetch_one(&mut *connection)
             .await?
             .try_get("count")?;
@@ -430,8 +432,12 @@ impl MigrationCoordinator {
             let sql = MigrationCatalog::read_verified_sql(root, migration)?;
             let mut transaction = connection.begin().await?;
             let set_role = format!("SET LOCAL ROLE {}", catalog.name.owner_role());
-            sqlx::query(&set_role).execute(&mut *transaction).await?;
-            sqlx::raw_sql(&sql).execute(&mut *transaction).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*set_role))
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *transaction)
+                .await?;
             sqlx::query("RESET ROLE").execute(&mut *transaction).await?;
             let history = format!(
                 "INSERT INTO {}.schema_migrations \
@@ -451,7 +457,7 @@ impl MigrationCoordinator {
                 },
                 |h| Ok(h.to_string()),
             )?;
-            sqlx::query(&history)
+            sqlx::query(sqlx::AssertSqlSafe(&*history))
                 .bind(migration_id)
                 .bind(&migration.file)
                 .bind(observed_sha256)
