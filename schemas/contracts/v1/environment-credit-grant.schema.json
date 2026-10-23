@@ -55,6 +55,22 @@
         "measurementUnknown": {
           "type": "boolean"
         },
+        "modelCallId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelRateSnapshot": {
+          "items": {
+            "$ref": "#/$defs/ModelRateSnapshot"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "ownerClientId": {
           "type": "string"
         },
@@ -154,6 +170,26 @@
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
+    },
+    "ModelRateSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "unit": {
+          "$ref": "#/$defs/ResourceBillingUnit"
+        }
+      },
+      "required": [
+        "unit",
+        "rateId",
+        "rateRevision"
+      ],
+      "type": "object"
     },
     "Money": {
       "additionalProperties": false,

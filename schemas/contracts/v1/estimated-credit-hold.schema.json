@@ -51,6 +51,22 @@
         "measurementUnknown": {
           "type": "boolean"
         },
+        "modelCallId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelRateSnapshot": {
+          "items": {
+            "$ref": "#/$defs/ModelRateSnapshot"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "ownerClientId": {
           "type": "string"
         },
@@ -144,6 +160,26 @@
       "required": [
         "class",
         "count"
+      ],
+      "type": "object"
+    },
+    "ModelRateSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "unit": {
+          "$ref": "#/$defs/ResourceBillingUnit"
+        }
+      },
+      "required": [
+        "unit",
+        "rateId",
+        "rateRevision"
       ],
       "type": "object"
     },

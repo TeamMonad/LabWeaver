@@ -18,3 +18,6 @@ ALTER TABLE resource.resource_rates ADD CONSTRAINT resource_rates_model_limit_ch
  CHECK (max_preauthorization IS NULL OR max_preauthorization::numeric > 0);
 CREATE INDEX resource_rates_model_window_idx ON resource.resource_rates(model_binding,effective_from)
  WHERE model_binding IS NOT NULL;
+ALTER TABLE resource.credit_holds ADD COLUMN model_call_id uuid;
+ALTER TABLE resource.credit_holds ADD COLUMN model_rate_snapshot jsonb CHECK(model_rate_snapshot IS NULL OR jsonb_typeof(model_rate_snapshot)='array');
+CREATE UNIQUE INDEX credit_holds_model_call_idx ON resource.credit_holds(model_call_id) WHERE model_call_id IS NOT NULL;

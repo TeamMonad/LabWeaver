@@ -1462,6 +1462,8 @@ export type CreditHold = {
     expiredUnknownAt?: BuildCostRecordSchemaUtcTimestamp | null;
     id: string;
     measurementUnknown: boolean;
+    modelCallId?: string | null;
+    modelRateSnapshot?: Array<ModelRateSnapshot> | null;
     ownerClientId: string;
     projectId: BuildCostRecordSchemaProjectId;
     reason?: string | null;
@@ -1483,6 +1485,12 @@ export type CreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
  * introducing a database-specific decimal dependency into the contracts crate.
  */
 export type BuildCostRecordSchemaFixedDecimal = string;
+
+export type ModelRateSnapshot = {
+    rateId: BuildCostRecordSchemaRateId;
+    rateRevision: BuildCostRecordSchemaRevision;
+    unit: BuildCostRecordSchemaResourceBillingUnit;
+};
 
 /**
  * A fixed-precision amount with an explicit ISO-4217-like currency code.
@@ -1837,6 +1845,8 @@ export type CreditHoldPageSchemaCreditHold = {
     expiredUnknownAt?: CreditHoldPageSchemaUtcTimestamp | null;
     id: string;
     measurementUnknown: boolean;
+    modelCallId?: string | null;
+    modelRateSnapshot?: Array<CreditHoldPageSchemaModelRateSnapshot> | null;
     ownerClientId: string;
     projectId: CreditHoldPageSchemaProjectId;
     reason?: string | null;
@@ -1859,15 +1869,36 @@ export type CreditHoldPageSchemaCreditHoldState = 'pending' | 'unknown' | 'settl
  */
 export type CreditHoldPageSchemaFixedDecimal = string;
 
+export type CreditHoldPageSchemaModelRateSnapshot = {
+    rateId: CreditHoldPageSchemaRateId;
+    rateRevision: CreditHoldPageSchemaRevision;
+    unit: CreditHoldPageSchemaResourceBillingUnit;
+};
+
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type CreditHoldPageSchemaProjectId = string;
 
 /**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type CreditHoldPageSchemaRateId = string;
+
+/**
+ * Resource dimension used by a versioned rate card.
+ */
+export type CreditHoldPageSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
+
+/**
  * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
  */
 export type CreditHoldPageSchemaResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CreditHoldPageSchemaRevision = number;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.

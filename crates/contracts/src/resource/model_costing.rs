@@ -19,6 +19,13 @@ impl ModelTokenQuantities {
         Ok(())
     }
 }
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelRateSnapshot {
+    pub unit: super::ResourceBillingUnit,
+    pub rate_id: crate::RateId,
+    pub rate_revision: crate::Revision,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

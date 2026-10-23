@@ -44,6 +44,11 @@ pub struct CreditHold {
     pub build_request_id: Option<crate::BuildRequestId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>", extend("format" = "uuid"))]
+    pub model_call_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_rate_snapshot: Option<Vec<crate::resource::model_costing::ModelRateSnapshot>>,
     pub business_key: String,
     pub owner_client_id: String,
     pub amount: FixedDecimal,

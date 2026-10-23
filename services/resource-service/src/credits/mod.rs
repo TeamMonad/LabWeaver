@@ -281,6 +281,12 @@ pub(crate) fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, Cre
             .map(|id| id.to_string().parse())
             .transpose()
             .map_err(|_| CreditError::Invalid)?,
+        model_call_id: row.try_get("model_call_id")?,
+        model_rate_snapshot: row
+            .try_get::<Option<serde_json::Value>, _>("model_rate_snapshot")?
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
         build_attempt: row
             .try_get::<Option<i32>, _>("build_attempt")?
             .map(u32::try_from)
@@ -962,8 +968,13 @@ async fn stage_target_hold(
         project_id: project,
         request_id: request,
         build_request_id: build,
-        build_attempt: attempt,
         business_key: business.into(),
+        model_call_id: None,
+        model_rate_snapshot: None,
+        build_attempt: attempt
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
         owner_client_id: owner.into(),
         amount: amount.clone(),
         remaining: amount.clone(),
@@ -975,8 +986,8 @@ async fn stage_target_hold(
         reconciliation_due_at: None,
         expired_unknown_at: None,
     };
-    sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,build_request_id,build_attempt,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::numeric,$8::text::numeric,'pending',$9)")
-      .bind(hold.id).bind(project.as_uuid()).bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(business).bind(owner).bind(amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,build_request_id,build_attempt,model_call_id,model_rate_snapshot,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::text::numeric,$10::text::numeric,'pending',$11)")
+      .bind(hold.id).bind(project.as_uuid()).bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(hold.model_call_id).bind(hold.model_rate_snapshot.as_ref().map(serde_json::to_value).transpose()?).bind(business).bind(owner).bind(amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut **tx).await?;
     let mut e = entry(
         Uuid::now_v7(),
         Some(project),
