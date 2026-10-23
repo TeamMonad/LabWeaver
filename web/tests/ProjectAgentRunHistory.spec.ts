@@ -66,9 +66,7 @@ describe('ProjectAgentRunHistory', () => {
           createdAt: '2026-07-11T00:00:00.000Z',
           updatedAt: '2026-07-11T00:01:00.000Z',
         }],
-        page: 1,
-        pageSize: 100,
-        hasMore: false,
+        nextCursor: null,
       } as never,
       error: undefined as never,
     })

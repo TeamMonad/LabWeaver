@@ -211,7 +211,7 @@ describe('SoftwareConfigView', () => {
       return true
     })
     vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
-    vi.mocked(listProjectAgentRuns).mockResolvedValue({ data: { items: [], page: 1, pageSize: 25, hasMore: false } as never, error: undefined as never })
+    vi.mocked(listProjectAgentRuns).mockResolvedValue({ data: { items: [], nextCursor: null } as never, error: undefined as never })
     vi.mocked(listEnvironments).mockResolvedValue({
       data: { items: [environment], nextCursor: null } as never,
       error: undefined as never,
@@ -557,7 +557,7 @@ describe('SoftwareConfigView', () => {
 
   it('lists project task history and opens a Work template run with its mode', async () => {
     vi.mocked(listProjectAgentRuns).mockResolvedValue({
-      data: { items: [historyExperiment, historyTemplate, historyConfiguration], page: 1, pageSize: 25, hasMore: false } as never,
+      data: { items: [historyExperiment, historyTemplate, historyConfiguration], nextCursor: null } as never,
       error: undefined as never,
     })
     const replace = vi.fn()
@@ -616,7 +616,7 @@ describe('SoftwareConfigView', () => {
     vi.mocked(listProjectAgentRuns).mockImplementation((options) => {
       const projectId = (options as { path: { projectId: string } }).path.projectId
       if (projectId === 'project-1') return new Promise((resolve) => { resolveFirst = resolve }) as never
-      return Promise.resolve({ data: { items: [historyConfiguration], page: 1, pageSize: 25, hasMore: false }, error: undefined }) as never
+      return Promise.resolve({ data: { items: [historyConfiguration], nextCursor: null }, error: undefined }) as never
     })
 
     const wrapper = mount(SoftwareConfigView, {
@@ -624,7 +624,7 @@ describe('SoftwareConfigView', () => {
     })
     await vi.waitFor(() => expect(listProjectAgentRuns).toHaveBeenCalledWith(expect.objectContaining({ path: { projectId: 'project-1' } })))
     await wrapper.find('.project-strip select').setValue('project-2')
-    resolveFirst({ data: { items: [historyTemplate], page: 1, pageSize: 25, hasMore: false }, error: undefined })
+    resolveFirst({ data: { items: [historyTemplate], nextCursor: null }, error: undefined })
     await Promise.resolve()
 
     expect(wrapper.text()).not.toContain('Work 模板生成')

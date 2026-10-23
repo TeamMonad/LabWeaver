@@ -299,7 +299,7 @@ describe('CandidateApprovalView (审核与发布)', () => {
   })
 
   it('explains the empty queue instead of asking for an ID', async () => {
-    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ page: 1, pageSize: 50, hasMore: false, items: [] }))
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: [], nextCursor: null }))
     const { wrapper } = await mountAt()
     expect(wrapper.get('[data-testid="review-placeholder"]').text()).toContain('还没有可以审核的版本')
     expect(getProjectAgentRun).not.toHaveBeenCalled()

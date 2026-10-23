@@ -117,7 +117,7 @@ describe('MaterialUploadView', () => {
     setActivePinia(createPinia())
     vi.resetAllMocks()
     vi.mocked(listProjectAgentRuns).mockResolvedValue({
-      data: { items: [], page: 1, pageSize: 100, hasMore: false } as never,
+      data: { items: [], nextCursor: null } as never,
       error: undefined as never,
     })
   })
@@ -186,7 +186,7 @@ describe('MaterialUploadView', () => {
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
     vi.mocked(listProjectAgentRuns).mockResolvedValue({
-      data: { items: [experimentHistoryItem], page: 1, pageSize: 100, hasMore: false } as never,
+      data: { items: [experimentHistoryItem], nextCursor: null } as never,
       error: undefined as never,
     })
     vi.mocked(getProjectAgentRun).mockResolvedValue({ data: experimentRun as never, error: undefined as never })
@@ -218,7 +218,7 @@ describe('MaterialUploadView', () => {
     vi.mocked(listProjectAgentRuns).mockImplementation((options) => {
       const projectId = (options as { path: { projectId: string } }).path.projectId
       if (projectId === 'project-1') return new Promise((resolve) => { resolveFirst = resolve }) as never
-      return Promise.resolve({ data: { items: [], page: 1, pageSize: 100, hasMore: false }, error: undefined }) as never
+      return Promise.resolve({ data: { items: [], nextCursor: null }, error: undefined }) as never
     })
 
     const router = createRouter({
@@ -232,7 +232,7 @@ describe('MaterialUploadView', () => {
 
     await router.replace({ query: { projectId: 'project-2' } })
     await vi.waitFor(() => expect(listProjectAgentRuns).toHaveBeenCalledWith(expect.objectContaining({ path: { projectId: 'project-2' } })))
-    resolveFirst({ data: { items: [experimentHistoryItem], page: 1, pageSize: 100, hasMore: false }, error: undefined })
+    resolveFirst({ data: { items: [experimentHistoryItem], nextCursor: null }, error: undefined })
     await Promise.resolve()
 
     expect(wrapper.find('[data-testid="project-agent-run-history"] .run-history-item').exists()).toBe(false)
@@ -243,7 +243,7 @@ describe('MaterialUploadView', () => {
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
     vi.mocked(listProjectAgentRuns).mockResolvedValue({
-      data: { items: [experimentHistoryItem], page: 1, pageSize: 100, hasMore: false } as never,
+      data: { items: [experimentHistoryItem], nextCursor: null } as never,
       error: undefined as never,
     })
     vi.mocked(getProjectAgentRun).mockResolvedValue({

@@ -83,8 +83,7 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
         : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_RESOURCE_REQUESTS_LOAD_FAILED', '加载资源申请失败。') }
       return
     }
-    const resourceItems = Array.isArray(result.data) ? result.data : result.data.items
-    const items = resourceItems.filter((item) => item.projectId === id && isOpenResourceRequest(item))
+    const items = result.data.items.filter((item) => item.projectId === id && isOpenResourceRequest(item))
     resourceRequests.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 

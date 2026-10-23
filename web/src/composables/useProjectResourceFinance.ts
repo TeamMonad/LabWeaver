@@ -234,7 +234,6 @@ function environmentData(result: unknown): EnvironmentSummary[] {
 
 function requestData(result: unknown): ResourceRequestSchema[] {
   if (!isRecord(result) || result.error) throw new Error('资源申请列表返回了无法识别的数据。')
-  if (Array.isArray(result.data)) return result.data as ResourceRequestSchema[]
   if (!isRecord(result.data) || !Array.isArray(result.data.items)) throw new Error('资源申请列表返回了无法识别的数据。')
   return result.data.items as ResourceRequestSchema[]
 }

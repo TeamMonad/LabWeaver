@@ -84,9 +84,7 @@ const headingId = computed(() => `project-agent-run-history-${props.scope}`)
 const emptyText = computed(() => props.scope === 'work'
   ? '当前项目还没有可恢复的 Work 任务。'
   : '当前项目还没有可恢复的实验任务。')
-const hasNextPage = computed(() => history.value.kind === 'success' && Boolean(
-  history.value.data.nextCursor || (history.value.data as AgentRunHistoryPageSchema & { hasMore?: boolean }).hasMore,
-))
+const hasNextPage = computed(() => history.value.kind === 'success' && Boolean(history.value.data.nextCursor))
 const filteredEmptyText = computed(() => {
   if (hasNextPage.value) {
     const taskText = props.scope === 'work' ? '本页没有可恢复的 Work 任务' : '本页没有可恢复的实验任务'

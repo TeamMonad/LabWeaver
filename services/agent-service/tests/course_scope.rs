@@ -147,8 +147,8 @@ async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn 
         .await?;
     assert_eq!(first.items.len(), 2);
     assert!(first.next_cursor.is_some());
-    let mut tampered_cursor = first.next_cursor.clone().expect("cursor");
-    let last = tampered_cursor.pop().expect("non-empty cursor");
+    let mut tampered_cursor = first.next_cursor.clone().ok_or("cursor missing")?;
+    let last = tampered_cursor.pop().ok_or("cursor empty")?;
     tampered_cursor.push(if last == 'A' { 'B' } else { 'A' });
     let tampered = store
         .list_project_runs_filtered(

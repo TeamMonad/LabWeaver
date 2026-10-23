@@ -3402,8 +3402,8 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
             .all(|request| request.requester_id == member)
     );
     assert!(member_first.next_cursor.is_some());
-    let mut tampered_cursor = member_first.next_cursor.clone().expect("cursor");
-    let last = tampered_cursor.pop().expect("non-empty cursor");
+    let mut tampered_cursor = member_first.next_cursor.clone().ok_or("cursor missing")?;
+    let last = tampered_cursor.pop().ok_or("cursor empty")?;
     tampered_cursor.push(if last == 'A' { 'B' } else { 'A' });
     let tampered = store
         .list_project_requests_page(

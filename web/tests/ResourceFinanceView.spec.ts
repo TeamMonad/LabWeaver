@@ -173,7 +173,7 @@ describe('ResourceFinanceView', () => {
     vi.mocked(listResourceGpuCatalog).mockResolvedValue({ data: gpuCatalog as never, error: undefined as never })
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [], nextCursor: null } as never, error: undefined as never })
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [] as never, error: undefined as never })
-    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [] as never, error: undefined as never })
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [] as never[], nextCursor: null }, error: undefined as never })
     api.get.mockImplementation(({ url }: { url: string }) => Promise.resolve(
       url.endsWith('/resource-budget')
         ? { error: 'LW_RESOURCE_BUDGET_NOT_FOUND' }
@@ -222,7 +222,7 @@ describe('ResourceFinanceView', () => {
       return Promise.resolve({ data: { items: [knownUsage, unknownUsage], page: 1, pageSize: 25, hasMore: false } })
     })
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [{ id: 'env-course', displayLabel: '课程实验环境' }] } as never, error: undefined as never })
-    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [{ id: 'request-work', state: 'active', target: { kind: 'task', taskRunId: 'task-work' } }] as never, error: undefined as never })
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [{ id: 'request-work', state: 'active', target: { kind: 'task', taskRunId: 'task-work' } }], nextCursor: null } as never, error: undefined as never })
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [{ id: 'lease-work', requestId: 'request-work', state: 'active' }] as never, error: undefined as never })
 
     const wrapper = mountView()
