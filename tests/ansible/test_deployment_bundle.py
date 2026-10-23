@@ -498,8 +498,14 @@ class DeploymentBundleTests(unittest.TestCase):
             original = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
             for group, field, value in (
                 ("runtimePolicy", "allowedCapabilities", {}),
+                ("runtimePolicy", "allowedCapabilities", ["MADE_UP"]),
                 ("runtimePolicy", "preauthorizations", 0),
+                ("runtimePolicy", "preauthorizations", [{}]),
                 ("runtimePolicy", "defaultContainerUid", {}),
+                ("runtimePolicy", "defaultContainerUid", "1.0"),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"pool": "privileged"}}),
+                ("lifecycle", "expiryReminderSeconds", [1] * 17),
+                ("lifecycle", "expiryReminderSeconds", [1, 1]),
                 ("builderPolicy", "allowPrivilegeEscalation", 0),
             ):
                 values = copy.deepcopy(original)

@@ -24,7 +24,7 @@ import {
 /** Maximum encrypted Bundle upload accepted by Control (70 MiB). */
 export const PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES = 73_400_320
 
-/** Local fail-closed code; mirrors the Bundle/Helm rejection of settings without an execution-side consumer. */
+/** Control diagnostic code shown when the server rejects an unsupported policy field. */
 export const POLICY_UNSUPPORTED_CODE = 'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED'
 
 export interface PlatformConfigurationConflict {

@@ -1138,6 +1138,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         }),
     )?);
     output.push(json_artifact(
+        "deploy/helm/labweaver/files/platform-configuration-policy-schema.json",
+        platform_values_schema()?,
+    )?);
+    output.push(json_artifact(
         "schemas/openapi/labweaver-public.v1.json",
         openapi(ApiSurface::Public)?,
     )?);
@@ -1147,6 +1151,65 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     )?);
     output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(output)
+}
+
+fn platform_values_schema() -> Result<Value, GenerationError> {
+    let desired = serde_json::to_value(schema_for!(
+        crate::platform_configuration::PlatformConfigurationDesired
+    ))?;
+    let mut policy = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["apiVersion", "configurationSha256", "lifecycle", "runtimePolicy", "builderPolicy"],
+        "properties": desired["properties"].clone(),
+    });
+    policy["properties"]["lifecycle"] = desired["$defs"]["PlatformLifecycleDefaults"].clone();
+    policy["properties"]["runtimePolicy"] = desired["$defs"]["PlatformRuntimePolicy"].clone();
+    policy["properties"]["builderPolicy"] = desired["$defs"]["BuilderSecurityPolicy"].clone();
+    policy["properties"]["apiVersion"] = json!({
+        "const": "deploy.labweaver.io/platform-policy/v1"
+    });
+    policy["properties"]["configurationSha256"] = json!({
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+    });
+    let lifecycle = &mut policy["properties"]["lifecycle"];
+    for field in ["readOnlyRetentionSeconds", "detailedLogRetentionSeconds"] {
+        lifecycle["properties"][field]["minimum"] = json!(1);
+        lifecycle["properties"][field]["maximum"] = json!(31_536_000);
+    }
+    lifecycle["properties"]["preemptionGraceSeconds"]["minimum"] = json!(1);
+    lifecycle["properties"]["preemptionGraceSeconds"]["maximum"] = json!(300);
+    lifecycle["properties"]["expiryReminderSeconds"]["maxItems"] = json!(16);
+    lifecycle["properties"]["expiryReminderSeconds"]["uniqueItems"] = json!(true);
+    lifecycle["properties"]["expiryReminderSeconds"]["items"]["minimum"] = json!(1);
+    lifecycle["properties"]["expiryReminderSeconds"]["items"]["maximum"] = json!(31_536_000);
+    let mut defs = desired["$defs"].clone();
+    if defs.is_null() {
+        defs = json!({});
+    }
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$defs": defs,
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "platformConfigurationPolicy": {
+                "oneOf": [
+                    {"type": "object", "maxProperties": 0},
+                    policy
+                ]
+            }
+        }
+    });
+    let normalized = serde_json::to_string(&schema)?.replace("#/$defs/", "#/definitions/");
+    let mut schema: Value = serde_json::from_str(&normalized)?;
+    let definitions = schema["$defs"].take();
+    schema["definitions"] = definitions;
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$defs");
+    }
+    Ok(schema)
 }
 
 fn schema_artifact(path: &str, schema: Schema) -> Result<GeneratedArtifact, GenerationError> {
