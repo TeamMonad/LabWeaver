@@ -169,7 +169,7 @@ impl PgResourceStore {
     )]
     pub async fn settle_model_cost(
         &self,
-        key: &str,
+        _key: &str,
         owner: &str,
         hold_id: uuid::Uuid,
         call_id: uuid::Uuid,

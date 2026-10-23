@@ -495,6 +495,7 @@ async fn approve_request(
     let approver = principal.actor_id;
     let idempotency = required_header(&headers, "idempotency-key")?;
     let now = state.store.current_time().await?;
+    let request = state.store.load(request_id).await?;
     let valid_until = UtcTimestamp::from_utc(
         now.get()
             + time::Duration::seconds(
@@ -1560,13 +1561,13 @@ pub enum ResourceApiError {
 }
 
 impl IntoResponse for ResourceApiError {
+    #[allow(clippy::too_many_lines)]
     fn into_response(self) -> Response {
         let diagnostic_code = resource_diagnostic_code(&self.to_string());
         let status = match &self {
             Self::Store(ResourceStoreError::RuntimeBinding(error)) => {
                 runtime_authorization::status(error)
             }
-            Self::ServiceConfiguration => StatusCode::SERVICE_UNAVAILABLE,
             Self::CallerDenied
             | Self::IdentityInvalid
             | Self::ScopeDenied

@@ -1,4 +1,4 @@
-//! Real PostgreSQL model admission and settlement scenarios.
+//! Real `PostgreSQL` model admission and settlement scenarios.
 #![allow(clippy::expect_used, clippy::too_many_lines)]
 use contracts::http::CreateResourceRateRequest;
 use contracts::resource::credits::CreditAdminOperation;

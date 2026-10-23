@@ -460,6 +460,7 @@ async fn pending_task_with_resources(
         .create(&id.to_string(), &req, "synthetic-task-cost")
         .await?;
     let approval = ResourceApproval {
+        runtime_authorization: None,
         id: ResourceApprovalId::new(),
         request_id: id,
         request_revision: req.revision,
