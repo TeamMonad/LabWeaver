@@ -23,6 +23,7 @@ pub mod capacity;
 pub mod costing;
 pub mod credits;
 pub mod messaging;
+pub mod model_costing;
 pub mod outbox;
 mod pricing;
 pub mod process;
