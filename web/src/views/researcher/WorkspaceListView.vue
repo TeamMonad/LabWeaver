@@ -465,6 +465,8 @@ watch(
   () => {
     directoryQuery.value = ''
     memberUsername.value = ''
+    // A responsibility chosen for one project is never carried into another.
+    memberObjectRole.value = ''
     selectedDirectoryUser.value = null
     directory.clear()
   },
@@ -540,7 +542,13 @@ async function saveProject() {
   if (!canEditProject.value) return
   const project = projects.selectedProject
   if (!project) return
-  await projects.update(project, { name: editName.value.trim(), description: editDescription.value.trim() || null })
+  const ok = await projects.update(project, { name: editName.value.trim(), description: editDescription.value.trim() || null })
+  if (!ok) refreshActionsAfterProjectRefusal()
+}
+
+/** A 403 on a project write means the page's answer is stale; the diagnostic banner stays as reported. */
+function refreshActionsAfterProjectRefusal() {
+  if (projects.outcome?.kind === 'error' && projects.outcome.diagnostic.status === 403) void availableActions.refresh()
 }
 
 function openArchiveConfirmation() {
@@ -593,7 +601,7 @@ async function confirmDestructiveAction() {
   if (!confirmation) return
   if (confirmation.kind === 'archive') {
     if (!canEditProject.value) return
-    if (projects.selectedProjectId === confirmation.project.id) await projects.archive(confirmation.project)
+    if (projects.selectedProjectId === confirmation.project.id && !await projects.archive(confirmation.project)) refreshActionsAfterProjectRefusal()
   } else {
     if (!canManageMembers.value) return
     if (projects.selectedProjectId === confirmation.projectId) {

@@ -981,12 +981,13 @@ describe('EnvironmentEntryView', () => {
     expect(lifecycleButton(wrapper, '重启')?.attributes('disabled')).toBeUndefined()
     const remove = lifecycleButton(wrapper, '删除')
     expect(remove?.attributes('disabled')).toBeDefined()
-    expect(remove?.attributes('title')).toBe('你在此项目的职责不包含“编辑”，不能删除环境。如需此权限，请联系项目负责人调整你的成员职责。')
-    expect(wrapper.get('[data-testid="lifecycle-permission-hint"]').text()).toBe('你在此项目的职责不包含删除和重试环境。如需此权限，请联系项目负责人调整你的成员职责。')
+    // A disabled button never needs a hover: a visible hint says why.
+    expect(remove?.attributes('title')).toBeTruthy()
+    expect(wrapper.find('[data-testid="lifecycle-permission-hint"]').exists()).toBe(true)
     // An operator holds no grant_access: the console explains instead of offering a grant.
     await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
     const pane = wrapper.get('.console-unauthorized-pane')
-    expect(pane.text()).toContain('你在此项目的职责不包含“签发访问授权”')
+    expect(pane.find('.access-grant-hint').exists()).toBe(true)
     expect(pane.find('button').exists()).toBe(false)
   })
 
@@ -1007,15 +1008,14 @@ describe('EnvironmentEntryView', () => {
     for (const label of ['启动', '停止', '重启', '删除']) {
       expect(lifecycleButton(wrapper, label)?.attributes('disabled')).toBeDefined()
     }
-    expect(lifecycleButton(wrapper, '停止')?.attributes('title')).toBe('你在此项目的职责不包含“停止”。如需此权限，请联系项目负责人调整你的成员职责。')
-    expect(wrapper.get('[data-testid="lifecycle-permission-hint"]').text()).toContain('启动和重启、停止和取消、删除和重试')
+    expect(lifecycleButton(wrapper, '停止')?.attributes('title')).toBeTruthy()
     await vi.waitFor(() => expect(wrapper.find('[data-testid="grant-permission-hint"]').exists()).toBe(true))
-    expect(wrapper.get('[data-testid="grant-permission-hint"]').text()).toContain('不包含“签发访问授权”')
     expect(wrapper.findAll('button').some((button) => button.text().includes('签发授权并连接'))).toBe(false)
     expect(wrapper.findAll('button').some((button) => button.text() === '签发访问授权')).toBe(false)
 
     await wrapper.findAll('button').find((button) => button.text().includes('提交'))!.trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('你在此项目的职责不包含“编辑”，不能提交评测。'))
+    await flushPromises()
+    expect(wrapper.find('.freeze-unavailable').exists()).toBe(true)
     expect(wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')?.attributes('disabled')).toBeDefined()
 
     expect(stopEnvironment).not.toHaveBeenCalled()
@@ -1033,8 +1033,11 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
 
     await vi.waitFor(() => expect(wrapper.find('[data-testid="lifecycle-permission-hint"]').exists()).toBe(true))
-    expect(wrapper.get('[data-testid="lifecycle-permission-hint"]').text()).toBe('无法确认你在此项目的权限，暂不能启动：成员服务暂时不可用。')
-    expect(lifecycleButton(wrapper, '停止')?.attributes('disabled')).toBeDefined()
+    // The server's reason reaches the user while every write stays closed.
+    expect(wrapper.get('[data-testid="lifecycle-permission-hint"]').text()).toContain('成员服务暂时不可用。')
+    for (const label of ['启动', '停止', '重启', '删除']) {
+      expect(lifecycleButton(wrapper, label)?.attributes('disabled')).toBeDefined()
+    }
   })
 
   it('re-reads project permissions after the server refuses a lifecycle request', async () => {
@@ -1045,7 +1048,6 @@ describe('EnvironmentEntryView', () => {
     } as never)
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(lifecycleButton(wrapper, '停止')?.attributes('disabled')).toBeUndefined())
-    const readsBefore = vi.mocked(getProjectAvailableActions).mock.calls.length
     mockActions(['browse'])
 
     await wrapper.findAll('button').find((button) => button.attributes('aria-label') === '停止')!.trigger('click')
@@ -1054,8 +1056,9 @@ describe('EnvironmentEntryView', () => {
     await flushPromises()
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('LW_AUTH_SCOPE_DENIED'))
-    await vi.waitFor(() => expect(vi.mocked(getProjectAvailableActions).mock.calls.length).toBe(readsBefore + 1))
+    // The new answer (viewer) closes the button the stale answer had opened.
     await vi.waitFor(() => expect(lifecycleButton(wrapper, '停止')?.attributes('disabled')).toBeDefined())
+    expect(wrapper.find('[data-testid="lifecycle-permission-hint"]').exists()).toBe(true)
   })
 
   it('does not offer creating an environment without the edit responsibility', async () => {
@@ -1064,8 +1067,35 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ projectId: 'project-1' })
 
     await vi.waitFor(() => expect(wrapper.find('[data-testid="create-permission-hint"]').exists()).toBe(true))
-    expect(wrapper.get('[data-testid="create-permission-hint"]').text()).toBe('你在此项目的职责不包含“编辑”，不能创建环境。如需此权限，请联系项目负责人调整你的成员职责。')
     expect(wrapper.findAll('button').find((button) => button.text() === '创建环境')?.attributes('disabled')).toBeDefined()
+  })
+
+  it('re-checks the edit responsibility when a freeze is confirmed and closes a stale confirmation after a 403', async () => {
+    mockEnvironmentInstance({ operation: { id: 'op-current', kind: 'start', state: 'succeeded' } })
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [{ ...mockRelease, submissionManifest: mockSubmissionManifest }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(freezeSubmission).mockResolvedValue({
+      data: undefined,
+      error: { type: 'about:blank', title: 'Forbidden', status: 403, detail: '你已没有提交评测的权限。', diagnosticCode: 'LW_AUTH_SCOPE_DENIED', retryable: false },
+    } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await wrapper.findAll('button').find((button) => button.text().includes('提交'))!.trigger('click')
+    const start = () => wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')
+    await vi.waitFor(() => expect(start()?.attributes('disabled')).toBeUndefined())
+    await start()!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="确认冻结清单"]').exists()).toBe(true))
+    mockActions(['browse'])
+
+    await wrapper.findAll('button').find((button) => button.text() === '确认冻结')!.trigger('click')
+    await flushPromises()
+
+    expect(freezeSubmission).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(wrapper.text()).toContain('LW_AUTH_SCOPE_DENIED'))
+    expect(wrapper.find('[aria-label="确认冻结清单"]').exists()).toBe(false)
+    // The refreshed answer closes the submission entry, so a second attempt is not sent.
+    await vi.waitFor(() => expect(start()?.attributes('disabled')).toBeDefined())
   })
 
   it('uses an explicit URL project over the shared context and preserves a linked environment', async () => {

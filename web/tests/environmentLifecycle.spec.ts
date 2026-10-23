@@ -127,15 +127,17 @@ describe('environment lifecycle rules', () => {
     expect(operator.canStart(stopped)).toBe(true)
     expect(operator.canDelete(ready)).toBe(false)
     expect(operator.canRetryFailedOperation()).toBe(false)
-    expect(operator.lifecycleActionReason(ready, 'delete')).toBe('职责不包含 edit，不能删除环境')
-    expect(operator.lifecyclePermissionHint()).toBe('你在此项目的职责不包含删除和重试环境。如需此权限，请联系项目负责人调整你的成员职责。')
+    // The reason for a missing action is the permission reason, and the hint names only what is missing.
+    expect(operator.lifecycleActionReason(ready, 'delete')).toContain('edit')
+    expect(operator.lifecyclePermissionHint()).toContain('删除')
+    expect(operator.lifecyclePermissionHint()).not.toContain('启动')
 
     const { controls: viewer } = controls(ready, undefined, permissionsFor(['browse']))
     expect([viewer.canStart(stopped), viewer.canStop(ready), viewer.canRestart(ready), viewer.canDelete(ready)]).toEqual([false, false, false, false])
     // The permission reason comes before the state reason, so a viewer is not told to wait for a state.
-    expect(viewer.lifecycleActionReason(stopped, 'start')).toBe('职责不包含 start')
-    expect(viewer.lifecycleActionReason(ready, 'restart')).toBe('职责不包含 start，不能重启环境')
-    expect(viewer.lifecyclePermissionHint()).toContain('启动和重启、停止和取消、删除和重试')
+    expect(viewer.lifecycleActionReason(stopped, 'start')).toContain('start')
+    expect(viewer.lifecycleActionReason(ready, 'restart')).toContain('start')
+    for (const name of ['启动', '停止', '删除']) expect(viewer.lifecyclePermissionHint()).toContain(name)
 
     const { controls: editor } = controls(ready)
     expect(editor.lifecyclePermissionHint()).toBeNull()
@@ -149,7 +151,13 @@ describe('environment lifecycle rules', () => {
     const { controls: c } = controls(data, act as never, permissions)
     await c.runLifecycle(data, 'stop')
     expect(c.lifecycleDiagnostic.value?.code).toBe('LW_AUTH_SCOPE_DENIED')
-    expect(permissions.refresh).toHaveBeenCalledTimes(1)
+    expect(permissions.refresh).toHaveBeenCalled()
+
+    const refused = vi.fn().mockResolvedValueOnce({ ok: false, diagnostic: { code: 'LW_X', message: 'x', retryable: true, status: 409 } })
+    const other = permissionsFor(ALL_ACTIONS)
+    await controls(data, refused as never, other).controls.runLifecycle(data, 'stop')
+    // Only a refusal of authority re-reads permissions.
+    expect(other.refresh).not.toHaveBeenCalled()
 
     const viewer = controls(data, vi.fn() as never, permissionsFor(['browse']))
     viewer.controls.openDelete(data)

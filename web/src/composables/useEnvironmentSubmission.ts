@@ -23,8 +23,8 @@ export interface EnvironmentSubmissionDeps {
   releases: { releases: ReleasesState }
   selectedEnvironmentId: Ref<string | undefined>
   isWorkConnection: Ref<boolean>
-  /** Freezing a submission is checked as the project's `edit` action. */
-  permissions: Pick<ProjectAvailableActions, 'allows' | 'denialReason'>
+  /** Freezing a submission is checked as the project's `edit` action; a 403 re-reads it. */
+  permissions: Pick<ProjectAvailableActions, 'allows' | 'denialReason' | 'refresh'>
 }
 
 interface FreezeAcceptance {
@@ -139,6 +139,13 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
 
   async function freeze(data: EnvironmentInstanceSchema) {
     freezeDiagnostic.value = null
+    // The confirmation may have been opened before the responsibility changed: check it again before sending.
+    const denied = permissions.denialReason('edit', '提交评测')
+    if (denied) {
+      fail('FREEZE_NOT_PERMITTED', denied, false)
+      freezeConfirmVisible.value = false
+      return
+    }
     const previousFreezeEnvironmentId = lastFreezeEnvironmentId.value
     const manifest = selectedSubmissionManifestFor(data)
     if (!manifest) {
@@ -172,6 +179,12 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
       }
       freezeDiagnostic.value = freezeState.value.diagnostic
       if (!(problem?.retryable ?? true)) freezeIntentKey.value = null
+      if (problem?.status === 403) {
+        // The responsibility changed since the page read it: drop the stale confirmation and read it again.
+        freezeConfirmVisible.value = false
+        freezeIntentKey.value = null
+        void permissions.refresh()
+      }
       return
     }
     freezeState.value = { kind: 'success', data: result.data }
