@@ -39,7 +39,7 @@ use contracts::http::{
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalPlatformImageDisableRequest, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalWithdrawEvaluationReleaseRequest, OperationAccepted,
-    PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
+    PageQuery, PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
     RegisterPlatformImageRequest, RemoveProjectMembershipRequest, RepinPlatformImageRequest,
     ResolvedProjectMembershipRequest, StrongEtag, WithdrawEnvironmentTemplateReleaseRequest,
     WithdrawEvaluationReleaseRequest, WorkConfigurationAdmissionQuery, WorkConfigurationPlanView,

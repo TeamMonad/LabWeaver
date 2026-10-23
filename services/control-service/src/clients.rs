@@ -29,7 +29,7 @@ use contracts::http::{
     InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
     InternalPlatformImageImportJobStatus, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalPublishEvaluationReleaseRequest,
-    InternalWithdrawEvaluationReleaseRequest, PlatformImageCatalog, PlatformImageEntry,
+    InternalWithdrawEvaluationReleaseRequest, PageQuery, PlatformImageCatalog, PlatformImageEntry,
 };
 use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,

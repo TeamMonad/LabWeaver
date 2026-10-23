@@ -17,7 +17,7 @@ use contracts::http::{
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
     InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
-    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
+    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest, PageQuery,
     PlatformImageCatalog,
 };
 use contracts::{
