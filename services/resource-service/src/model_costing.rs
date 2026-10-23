@@ -73,9 +73,6 @@ async fn estimate_in_transaction(
         } else {
             max_hold = Some(configured_max);
         }
-        if quantity == 0 {
-            continue;
-        }
         let amount = pricing::multiply_money(&rate.unit_price, quantity, rate.unit_quantity, 1)?;
         total = total
             .checked_add(amount.amount.scaled())
@@ -252,9 +249,13 @@ impl PgResourceStore {
             Some(event_id),
         )
         .await?;
-        credits::complete(&mut tx, "model_cost_event", &event_id.to_string(), &hold).await?;
-        credits::complete(&mut tx, "model_cost_settle", key, &hold).await?;
-        tx.commit().await?;
+        credits::complete(
+            &mut tx,
+            "model_cost_event",
+            &format!("{call_id}:{event_id}"),
+            &hold,
+        )
+        .await?;
         Ok(hold)
     }
 }

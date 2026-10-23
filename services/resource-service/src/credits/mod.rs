@@ -901,6 +901,7 @@ pub(crate) async fn hold_in_transaction(
         Some(input.request_id),
         None,
         None,
+        None,
         &input.business_key,
         &input.amount,
     )
@@ -925,6 +926,7 @@ pub(crate) async fn build_hold_in_transaction(
         None,
         Some(build),
         Some(attempt),
+        None,
         "build-metered",
         amount,
     )
@@ -947,6 +949,7 @@ pub(crate) async fn model_hold_in_transaction(
         None,
         None,
         None,
+        Some(call_id),
         &format!("llm-usage:{call_id}"),
         amount,
     )
@@ -962,6 +965,7 @@ async fn stage_target_hold(
     request: Option<contracts::ResourceRequestId>,
     build: Option<contracts::BuildRequestId>,
     attempt: Option<u32>,
+    model_call: Option<uuid::Uuid>,
     business: &str,
     amount: &FixedDecimal,
 ) -> Result<CreditHold, CreditError> {
@@ -970,8 +974,8 @@ async fn stage_target_hold(
         return Err(CreditError::Invalid);
     }
     lock_account(tx, project).await?;
-    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id IS NOT DISTINCT FROM $1 AND build_request_id IS NOT DISTINCT FROM $2 AND build_attempt IS NOT DISTINCT FROM $3 AND business_key=$4")
-      .bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(business).fetch_optional(&mut **tx).await?;
+    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id IS NOT DISTINCT FROM $1 AND build_request_id IS NOT DISTINCT FROM $2 AND build_attempt IS NOT DISTINCT FROM $3 AND model_call_id IS NOT DISTINCT FROM $4 AND business_key=$5")
+      .bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(model_call).bind(business).fetch_optional(&mut **tx).await?;
     if let Some(row) = row {
         let existing = decode_hold(&row)?;
         if existing.owner_client_id != owner
@@ -991,7 +995,7 @@ async fn stage_target_hold(
         request_id: request,
         build_request_id: build,
         business_key: business.into(),
-        model_call_id: None,
+        model_call_id: model_call,
         model_rate_snapshot: None,
         build_attempt: attempt
             .map(u32::try_from)

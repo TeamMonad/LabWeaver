@@ -21,3 +21,10 @@ CREATE INDEX resource_rates_model_window_idx ON resource.resource_rates(model_bi
 ALTER TABLE resource.credit_holds ADD COLUMN model_call_id uuid;
 ALTER TABLE resource.credit_holds ADD COLUMN model_rate_snapshot jsonb CHECK(model_rate_snapshot IS NULL OR jsonb_typeof(model_rate_snapshot)='array');
 CREATE UNIQUE INDEX credit_holds_model_call_idx ON resource.credit_holds(model_call_id) WHERE model_call_id IS NOT NULL;
+
+-- Model calls are the third legitimate CreditHold target. Preserve the invariant that exactly one
+-- business target is present; model_call_id is unique so retries cannot create another hold.
+ALTER TABLE resource.credit_holds DROP CONSTRAINT credit_holds_target_check;
+ALTER TABLE resource.credit_holds ADD CONSTRAINT credit_holds_target_check CHECK (
+    num_nonnulls(request_id, build_request_id, model_call_id) = 1
+);
