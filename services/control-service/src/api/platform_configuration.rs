@@ -490,7 +490,9 @@ impl From<ConfigurationError> for ApiError {
             error,
             ConfigurationError::Persistence | ConfigurationError::OperationInProgress
         );
-        Self::new(status, &error.to_string(), retryable).with_detail(detail)
+        let diagnostic = error.to_string();
+        let diagnostic = diagnostic.split(':').next().unwrap_or(&diagnostic);
+        Self::new(status, diagnostic, retryable).with_detail(detail)
     }
 }
 

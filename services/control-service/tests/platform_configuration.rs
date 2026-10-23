@@ -2,7 +2,7 @@
 
 use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
-    ApplyPlatformConfigurationRequest, BuilderEntitlement,
+    ApplyPlatformConfigurationRequest, BuilderEntitlement, LinuxCapability,
     PlatformConfigurationApplyStage as Stage, PlatformConfigurationDesired,
     PlatformConfigurationFailureReason as Failure, PlatformConfigurationNextStep as Next,
     PlatformConfigurationStatus, PrivilegedExecutionLocation,
@@ -10,6 +10,7 @@ use contracts::platform_configuration::{
     RuntimePreauthorization, RuntimePreauthorizationScope, UpdatePlatformConfigurationRequest,
 };
 use contracts::{ActorId, OperationId, ProblemDetails, ProjectId, Revision, UtcTimestamp};
+use control_service::platform_configuration::{self as configuration, ConfigurationError};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -783,6 +784,10 @@ async fn newer_desired_during_execution_does_not_change_the_applied_snapshot() -
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one HTTP matrix covers every unsupported policy field"
+)]
 async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> TestResult {
     use axum::{
         body::{Body, to_bytes},
@@ -794,8 +799,10 @@ async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> Test
     let fixture = http_fixture::HttpFixture::new(pool).await?;
     let gateway = fixture.token("labweaver-access", "access.control.forward")?;
     let session = contracts::BffSessionId::new();
-    let request = |configuration: PlatformConfigurationDesired, key: &str| {
-        Request::builder()
+    let request = |configuration: PlatformConfigurationDesired,
+                   key: &str|
+     -> Result<Request<Body>, Box<dyn std::error::Error>> {
+        Ok(Request::builder()
             .method("PATCH")
             .uri("/api/v1/admin/platform-configuration")
             .header("Authorization", format!("Bearer {gateway}"))
@@ -809,7 +816,7 @@ async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> Test
                     expected_revision: 0,
                     configuration,
                 },
-            )?))
+            )?))?)
     };
     let mut uid = PlatformConfigurationDesired::default();
     uid.runtime_policy.default_container_uid = 1000;
@@ -826,7 +833,7 @@ async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> Test
             scope: RuntimePreauthorizationScope::Project {
                 project_id: ProjectId::new(),
             },
-            capabilities: Default::default(),
+            capabilities: std::collections::BTreeSet::new(),
             privileged: false,
         });
     let mut guest = PlatformConfigurationDesired::default();
@@ -871,7 +878,9 @@ async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> Test
             serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
         assert_eq!(
             problem.diagnostic_code.as_str(),
-            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED"
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED",
+            "{field}: {}",
+            problem.detail
         );
         assert!(
             problem.detail.contains(field),

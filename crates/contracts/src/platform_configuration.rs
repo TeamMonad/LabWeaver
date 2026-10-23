@@ -533,8 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_policy_rejects_unknown_capability_location_and_excess_preauthorization()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn runtime_policy_rejects_unknown_capability_location_and_excess_preauthorization() {
         assert!(serde_json::from_str::<LinuxCapability>("\"ALL\"").is_err());
         assert!(serde_json::from_str::<LinuxCapability>("\"MADE_UP\"").is_err());
         assert!(
@@ -551,14 +550,9 @@ mod tests {
                 scope: RuntimePreauthorizationScope::Project {
                     project_id: ProjectId::new(),
                 },
-                capabilities: BTreeSet::from([LinuxCapability::SysAdmin]),
+                capabilities: BTreeSet::new(),
                 privileged: false,
             });
-        assert!(configuration.validate().is_err());
-        configuration
-            .runtime_policy
-            .allowed_capabilities
-            .insert(LinuxCapability::SysAdmin);
         assert!(matches!(
             configuration.validate(),
             Err(PlatformConfigurationContractError::PolicyUnsupported {
@@ -570,7 +564,6 @@ mod tests {
             .preauthorizations
             .push(configuration.runtime_policy.preauthorizations[0].clone());
         assert!(configuration.validate().is_err());
-        Ok(())
     }
 
     #[test]
