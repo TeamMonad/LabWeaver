@@ -7,9 +7,9 @@ mod directory;
 mod grants;
 #[path = "../../http_transport.rs"]
 mod http_transport;
-mod oidc_login;
 mod membership_governance;
 mod object_authorization;
+mod oidc_login;
 mod proxy;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
