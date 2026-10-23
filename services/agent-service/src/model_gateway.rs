@@ -644,4 +644,29 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 3);
         assert_eq!(usage.cache_write_tokens, 4);
     }
+    #[test]
+    fn scoped_environment_contains_gateway_only_credentials() {
+        let runtime = ModelGatewayRuntime {
+            base_url: Url::parse("http://agent-service:9460/").expect("gateway URL"),
+            issuer: ScopedTokenIssuer::new(vec![9; 32], Duration::from_secs(300)).expect("signer"),
+        };
+        let environment = runtime.environment(ProjectId::new(), Uuid::new_v4(), 2);
+        assert!(environment.contains_key("ANTHROPIC_BASE_URL"));
+        assert!(environment.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!environment.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!environment.contains_key("MODEL_GATEWAY_UPSTREAM_KEY"));
+    }
+
+    #[test]
+    fn sse_usage_aggregates_message_and_terminal_usage() {
+        let usage = extract_usage(
+            b"data: {\"message\":{\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":7}}}\n\ndata: {\"usage\":{\"output_tokens\":11,\"cache_creation_input_tokens\":13}}\n",
+            "text/event-stream",
+        )
+        .expect("SSE usage");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 11);
+        assert_eq!(usage.cache_read_tokens, 7);
+        assert_eq!(usage.cache_write_tokens, 13);
+    }
 }
