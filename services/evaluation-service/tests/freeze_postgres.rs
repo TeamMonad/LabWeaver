@@ -168,7 +168,7 @@ async fn model_input_facts_are_scoped_metadata_and_pin_first_session()
     let release = metadata_release(&fixture).await?;
     // A DB system-fact value must not become model content merely because facts were requested.
     for table in ["frozen_submissions", "submission_freeze_requests"] {
-        sqlx::query(&format!("UPDATE evaluation.{table} SET contract=jsonb_set(contract,'{{systemFacts}}','{{\"synthetic\":\"UNSELECTED_FACT_MARKER\"}}'::jsonb) WHERE frozen_submission_id=$1"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE evaluation.{table} SET contract=jsonb_set(contract,'{{systemFacts}}','{{\"synthetic\":\"UNSELECTED_FACT_MARKER\"}}'::jsonb) WHERE frozen_submission_id=$1")))
             .bind(frozen.id.as_uuid()).execute(&fixture.pool).await?;
     }
     let store = PgFreezeStore::new(fixture.pool.clone());
