@@ -25,6 +25,7 @@ class PlatformBundleTests(unittest.TestCase):
                     "namespace": "labweaver-system",
                     "configMaps": {"service-config": ["config.yaml"]},
                     "secrets": {"service-secrets": ["token"]},
+                    "optionalSecrets": {"service-secrets": ["previous"]},
                 }
             ),
             encoding="utf-8",
@@ -47,6 +48,13 @@ class PlatformBundleTests(unittest.TestCase):
         self.assertNotIn(b"not-logged", first)
         self.assertIn(b"bm90LWxvZ2dlZA==", first)
         self.assertEqual(first.count(b"---\n"), 2)
+
+    def test_optional_previous_secret_may_be_missing_or_present(self) -> None:
+        without_previous = MODULE.render_bundle(self.manifest, self.root / "input")
+        self.assertNotIn(b"cHJldmlvdXM=", without_previous)
+        (self.root / "input/secrets/service-secrets/previous").write_bytes(b"previous")
+        with_previous = MODULE.render_bundle(self.manifest, self.root / "input")
+        self.assertIn(b"cHJldmlvdXM=", with_previous)
 
     def test_extra_file_is_rejected(self) -> None:
         extra = self.root / "input" / "secrets" / "service-secrets" / "unexpected"

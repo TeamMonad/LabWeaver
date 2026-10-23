@@ -1,8 +1,9 @@
 import { getCurrentScope, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import { getEnvironment, listProjectResourceLeases, listProjectResourceRequests } from '@/generated/contracts'
-import type { EnvironmentInstanceSchema } from '@/generated/contracts'
+import type { EnvironmentInstanceSchema, ResourceRequestSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { resourceLeaseStateLabel, resourceRequestStateLabel } from '@/utils/stateLabels'
+import { collectCursorPages } from '@/utils/cursorPagination'
 
 const ENVIRONMENT_HANDOFF_TIMEOUT_MS = 240_000
 const RESOURCE_HANDOFF_STATES = new Set(['allocating', 'active', 'expiring'])
@@ -21,7 +22,10 @@ function resourceReadDiagnostic(error: unknown, code: string, message: string): 
 
 async function readHandoffResourceState(projectId: string, environmentId: string): Promise<HandoffResourceState> {
   const [requestResult, leaseResult] = await Promise.allSettled([
-    listProjectResourceRequests({ path: { projectId } }),
+    collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({
+      path: { projectId },
+      query: { limit: 100, ...(cursor ? { cursor } : {}) },
+    })),
     listProjectResourceLeases({ path: { projectId } }),
   ])
   if (requestResult.status === 'rejected') {
@@ -36,26 +40,13 @@ async function readHandoffResourceState(projectId: string, environmentId: string
       diagnostic: resourceReadDiagnostic(leaseResult.reason, 'ENVIRONMENT_RESOURCE_LEASES_READ_FAILED', '无法核对资源授权状态，请返回资源申请页检查。'),
     }
   }
-  if (requestResult.value.error) {
-    return {
-      kind: 'error',
-      diagnostic: resourceReadDiagnostic(requestResult.value.error, 'ENVIRONMENT_RESOURCE_REQUESTS_READ_FAILED', '无法核对资源申请状态，请返回资源申请页检查。'),
-    }
-  }
   if (leaseResult.value.error) {
     return {
       kind: 'error',
       diagnostic: resourceReadDiagnostic(leaseResult.value.error, 'ENVIRONMENT_RESOURCE_LEASES_READ_FAILED', '无法核对资源授权状态，请返回资源申请页检查。'),
     }
   }
-  if (!Array.isArray(requestResult.value.data) || !Array.isArray(leaseResult.value.data)) {
-    return {
-      kind: 'error',
-      diagnostic: makeDiagnostic('ENVIRONMENT_RESOURCE_CONTEXT_INVALID', '资源申请状态返回了无法识别的响应，请返回资源申请页检查。', false),
-    }
-  }
-
-  const matchingRequests = requestResult.value.data.filter((request) => (
+  const matchingRequests = requestResult.value.items.filter((request) => (
     request.projectId === projectId
     && request.target?.kind === 'environment'
     && request.target.environmentId === environmentId

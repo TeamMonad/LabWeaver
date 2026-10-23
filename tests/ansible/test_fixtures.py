@@ -1379,6 +1379,25 @@ class AnsibleFixtureTests(unittest.TestCase):
                 self.assertIn(locator, manifest["secrets"][service])
             for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration):
                 self.assertIn(locator, manifest["configMaps"][config_map])
+    def test_cursor_and_service_secret_paths_match_manifests(self) -> None:
+        values = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8"))
+        platform = json.loads((ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8"))
+        resource = json.loads((ROOT / "deploy/config/resource-bundle-manifest.json").read_text(encoding="utf-8"))
+        for workload, secret_name, manifest in (
+            ("agent-service", "agent-service-secrets", platform),
+            ("resource-service", "resource-service-secrets", resource),
+        ):
+            env = values["workloads"][workload]["env"]
+            declared = set(manifest["secrets"][secret_name]) | set(
+                manifest.get("optionalSecrets", {}).get(secret_name, [])
+            )
+            for name, path in env.items():
+                if not name.endswith("_FILE"):
+                    continue
+                if path.startswith("/etc/labweaver/config/"):
+                    continue
+                self.assertTrue(path.startswith("/etc/labweaver/secrets/"), (workload, name, path))
+                self.assertIn(path.rsplit("/", 1)[1], declared, (workload, name, path))
 
     def test_platform_application_rejects_stale_access_configuration_schema(self) -> None:
         tasks = (

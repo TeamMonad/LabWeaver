@@ -126,7 +126,7 @@ describe('WorkEnvironmentsView', () => {
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue(problem(404, 'LW_LLM_POLICY_NOT_FOUND') as never)
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [workSummary], nextCursor: null }, error: undefined } as never)
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [containerRelease, vmRelease, withdrawnRelease], nextCursor: null }, error: undefined } as never)
-    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined } as never)
   })
 
@@ -225,16 +225,14 @@ describe('WorkEnvironmentsView', () => {
 
   it('shows submitted Work that has no environment yet, with the server state and a progress entry', async () => {
     vi.mocked(listProjectResourceRequests).mockResolvedValue({
-      data: [
+      data: { items: [
         workRequest('env-reviewing', 'reviewing'),
         workRequest('env-allocating', 'allocating', { diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }),
         workRequest('env-creating', 'active'),
         workRequest('env-expiring', 'expiring'),
-        // Already listed as Work: shown only in the Work list.
         workRequest('env-work-1', 'active'),
         { ...workRequest('task', 'reviewing'), target: { kind: 'task', taskRunId: 'task-1' } },
-      ],
-      error: undefined,
+      ], nextCursor: null },
     } as never)
     const { wrapper } = await mountAt()
     const preparing = wrapper.get('[data-testid="preparing-list"]')
@@ -258,12 +256,11 @@ describe('WorkEnvironmentsView', () => {
 
   it('keeps ended requests without Work visible with their reason and a way to apply again', async () => {
     vi.mocked(listProjectResourceRequests).mockResolvedValue({
-      data: [
+      data: { items: [
         workRequest('env-rejected', 'rejected'),
         workRequest('env-cancelled', 'cancelled'),
         workRequest('env-expired', 'expired', { diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }),
-      ],
-      error: undefined,
+      ], nextCursor: null },
     } as never)
     const { wrapper } = await mountAt()
     const ended = wrapper.get('[data-testid="ended-list"]')
@@ -283,11 +280,11 @@ describe('WorkEnvironmentsView', () => {
   it('moves an expiring request to the ended list once the server reports it expired', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
-      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-late', 'expiring')], error: undefined } as never)
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [workRequest('env-late', 'expiring')], nextCursor: null }, error: undefined } as never)
       const { wrapper } = await mountAt()
       expect(wrapper.get('[data-testid="preparing-list"]').find('[data-request-id="request-env-late"]').exists()).toBe(true)
 
-      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-late', 'expired')], error: undefined } as never)
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [workRequest('env-late', 'expired')], nextCursor: null }, error: undefined } as never)
       await vi.advanceTimersByTimeAsync(5000)
       await flushPromises()
 
@@ -301,8 +298,7 @@ describe('WorkEnvironmentsView', () => {
 
   it('restores submitted Work from the server after the page is reloaded', async () => {
     vi.mocked(listProjectResourceRequests).mockResolvedValue({
-      data: [workRequest('env-allocating', 'allocating'), workRequest('env-rejected', 'rejected')],
-      error: undefined,
+      data: { items: [workRequest('env-allocating', 'allocating'), workRequest('env-rejected', 'rejected')], nextCursor: null },
     } as never)
     const first = await mountAt()
     expect(first.wrapper.find('[data-request-id="request-env-allocating"]').exists()).toBe(true)
@@ -311,13 +307,13 @@ describe('WorkEnvironmentsView', () => {
     const second = await mountAt()
     expect(second.wrapper.get('[data-testid="preparing-list"]').text()).toContain('已批准，正在分配资源')
     expect(second.wrapper.get('[data-testid="ended-list"]').text()).toContain('管理员已拒绝申请')
-    expect(listProjectResourceRequests).toHaveBeenLastCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceRequests).toHaveBeenLastCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
     second.wrapper.unmount()
   })
 
   it('does not claim an active request is still being created when the Work list could not be read', async () => {
     vi.mocked(listEnvironments).mockResolvedValue(problem(503, 'LW_ENVIRONMENT_UNAVAILABLE') as never)
-    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-creating', 'active')], error: undefined } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [workRequest('env-creating', 'active')], nextCursor: null }, error: undefined } as never)
     const { wrapper } = await mountAt()
     expect(wrapper.find('[data-testid="preparing-work"]').exists()).toBe(false)
     wrapper.unmount()
@@ -335,12 +331,12 @@ describe('WorkEnvironmentsView', () => {
   it('re-reads the Work list without blanking it while submitted Work is being prepared', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
-      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-new', 'allocating')], error: undefined } as never)
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [workRequest('env-new', 'allocating')], nextCursor: null }, error: undefined } as never)
       const { wrapper } = await mountAt()
       expect(wrapper.find('[data-request-id="request-env-new"]').exists()).toBe(true)
       const listCalls = vi.mocked(listEnvironments).mock.calls.length
 
-      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [workRequest('env-new', 'active')], error: undefined } as never)
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [workRequest('env-new', 'active')], nextCursor: null }, error: undefined } as never)
       vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [workSummary, { ...workSummary, id: 'env-new', displayLabel: '新 Work', observedState: 'provisioning' }], nextCursor: null }, error: undefined } as never)
       await vi.advanceTimersByTimeAsync(5000)
       await flushPromises()

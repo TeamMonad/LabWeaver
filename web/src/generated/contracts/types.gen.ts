@@ -253,10 +253,8 @@ export type UtcTimestamp = string;
  * Page of Agent-owned project run history.
  */
 export type AgentRunHistoryPageSchema = {
-    hasMore: boolean;
     items: Array<AgentRunHistoryItem>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -11574,6 +11572,117 @@ export type ResourceRateSchemaRevision = number;
 export type ResourceRateSchemaUtcTimestamp = string;
 
 /**
+ * ResourceRequestPage
+ *
+ * Cursor page of project-scoped Resource requests.
+ */
+export type ResourceRequestPageSchema = {
+    items: Array<ResourceRequest>;
+    nextCursor?: string | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type ResourceRequestPageSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type ResourceRequestPageSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type ResourceRequestPageSchemaEnvironmentId = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type ResourceRequestPageSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ResourceRequestPageSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type ResourceRequestPageSchemaReleaseId = string;
+
+/**
+ * PostgreSQL-authoritative request projection without provider internals.
+ */
+export type ResourceRequest = {
+    courseId?: ResourceRequestPageSchemaCourseId | null;
+    createdAt: ResourceRequestPageSchemaUtcTimestamp;
+    diagnosticCode?: string | null;
+    generation: number;
+    id: ResourceRequestPageSchemaResourceRequestId;
+    projectId: ResourceRequestPageSchemaProjectId;
+    requestKey: string;
+    requestedDurationSeconds: number;
+    requestedResources: ResourceRequestPageSchemaWorkloadResources;
+    requesterId: ResourceRequestPageSchemaActorId;
+    revision: ResourceRequestPageSchemaRevision;
+    state: ResourceRequestPageSchemaResourceRequestState;
+    target: ResourceRequestPageSchemaResourceTarget;
+    updatedAt: ResourceRequestPageSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type ResourceRequestPageSchemaResourceRequestId = string;
+
+/**
+ * Request lifecycle owned by Resource Service.
+ */
+export type ResourceRequestPageSchemaResourceRequestState = 'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled';
+
+/**
+ * Immutable identity of a Resource request's target.
+ */
+export type ResourceRequestPageSchemaResourceTarget = {
+    environmentId: ResourceRequestPageSchemaEnvironmentId;
+    kind: 'environment';
+    releaseId: ResourceRequestPageSchemaReleaseId;
+    releaseVersion: number;
+} | {
+    kind: 'task';
+    taskRunId: ResourceRequestPageSchemaTaskRunId;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ResourceRequestPageSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `TaskRunId`.
+ */
+export type ResourceRequestPageSchemaTaskRunId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ResourceRequestPageSchemaUtcTimestamp = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type ResourceRequestPageSchemaWorkloadResources = {
+    cpuMillicores: number;
+    gpu?: ResourceRequestPageSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
  * ResourceRequest
  *
  * PostgreSQL-authoritative request projection without provider internals.
@@ -16295,8 +16404,9 @@ export type ListProjectAgentRunsData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        state?: Array<'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled'>;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/agent-runs';
 };
@@ -19714,6 +19824,9 @@ export type ListProjectResourceRequestsData = {
     };
     query?: {
         courseId?: string;
+        state?: Array<'reviewing' | 'allocating' | 'active' | 'expiring' | 'expired' | 'rejected' | 'cancelled'>;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/resource-requests';
 };
@@ -19771,7 +19884,7 @@ export type ListProjectResourceRequestsResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceRequestSchema>;
+    200: ResourceRequestPageSchema;
 };
 
 export type ListProjectResourceRequestsResponse = ListProjectResourceRequestsResponses[keyof ListProjectResourceRequestsResponses];

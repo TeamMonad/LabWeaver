@@ -11,8 +11,8 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use contracts::authoring::AgentTrackKind;
 use contracts::http::{
-    AgentLlmReviewQuery, AgentWorkExecutionIntentQuery, GeneratedArtifactQuery, IdempotencyKey,
-    InternalAgentBuildCancellationRequest, InternalAgentBuildStatusQuery,
+    AgentLlmReviewQuery, AgentRunListQuery, AgentWorkExecutionIntentQuery, GeneratedArtifactQuery,
+    IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildStatusQuery,
     InternalAgentLlmReviewRequest, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
@@ -271,16 +271,13 @@ async fn list_project_runs(
     State(state): State<Arc<AgentApiState>>,
     caller: Option<Extension<auth::ServiceIdentity>>,
     Path(project_id): Path<ProjectId>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<AgentRunListQuery>,
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
-    let (page, page_size, offset) = query
-        .normalized()
-        .map_err(|_| AgentApiError::history_page_invalid())?;
     Ok(Json(
         state
             .store
-            .list_project_runs(project_id, page, page_size, offset)
+            .list_project_runs_filtered(project_id, &query)
             .await?,
     )
     .into_response())
@@ -727,13 +724,6 @@ impl AgentApiError {
             retryable: false,
         }
     }
-    fn history_page_invalid() -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            diagnostic: "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
-            retryable: false,
-        }
-    }
     fn denied() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -945,6 +935,7 @@ impl From<AgentRunStoreError> for AgentApiError {
             | AgentRunStoreError::RunInProgress
             | AgentRunStoreError::StateConflict
             | AgentRunStoreError::LeaseLost => StatusCode::CONFLICT,
+            AgentRunStoreError::InvalidHistoryCursor => StatusCode::BAD_REQUEST,
             AgentRunStoreError::PersistenceFailed => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::UNPROCESSABLE_ENTITY,
         };

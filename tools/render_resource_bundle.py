@@ -32,8 +32,9 @@ def load_manifest(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise BundleError("LW_RESOURCE_BUNDLE_MANIFEST_INVALID") from error
-    if not isinstance(value, dict) or set(value) != {"apiVersion", "namespace", "configMaps", "secrets"}:
+    if not isinstance(value, dict) or set(value) not in ({"apiVersion", "namespace", "configMaps", "secrets"}, {"apiVersion", "namespace", "configMaps", "secrets", "optionalSecrets"}):
         raise BundleError("LW_RESOURCE_BUNDLE_MANIFEST_INVALID")
+    value.setdefault("optionalSecrets", {})
     if value["apiVersion"] != API_VERSION or not DNS_LABEL.fullmatch(value["namespace"]):
         raise BundleError("LW_RESOURCE_BUNDLE_MANIFEST_INVALID")
     for group in ("configMaps", "secrets"):
@@ -45,13 +46,23 @@ def load_manifest(path: Path) -> dict[str, Any]:
                 raise BundleError("LW_RESOURCE_BUNDLE_MANIFEST_INVALID")
             if any(not isinstance(key, str) or not DATA_KEY.fullmatch(key) for key in keys):
                 raise BundleError("LW_RESOURCE_BUNDLE_MANIFEST_INVALID")
+    optional = value["optionalSecrets"]
+    if not isinstance(optional, dict):
+        raise BundleError("LW_RESOURCE_BUNDLE_MANIFEST_INVALID")
+    for name, keys in optional.items():
+        if name not in value["secrets"] or not isinstance(keys, list) or len(keys) != len(set(keys)) or any(not isinstance(key, str) or not DATA_KEY.fullmatch(key) for key in keys):
+            raise BundleError("LW_RESOURCE_BUNDLE_MANIFEST_INVALID")
     return value
 
-def read_exact(directory: Path, keys: list[str], binary: bool) -> dict[str, str]:
-    if not directory.is_dir() or directory.is_symlink() or {p.name for p in directory.iterdir()} != set(keys):
+def read_exact(directory: Path, keys: list[str], binary: bool, optional_keys: list[str] | None = None) -> dict[str, str]:
+    optional_keys = optional_keys or []
+    if not directory.is_dir() or directory.is_symlink():
+        raise BundleError("LW_RESOURCE_BUNDLE_INPUT_INCOMPLETE")
+    entries = {p.name for p in directory.iterdir()}
+    if not set(keys) <= entries or not entries <= set(keys) | set(optional_keys):
         raise BundleError("LW_RESOURCE_BUNDLE_INPUT_INCOMPLETE")
     result = {}
-    for key in sorted(keys):
+    for key in sorted(entries):
         path = directory / key
         if path.is_symlink() or not path.is_file():
             raise BundleError("LW_RESOURCE_BUNDLE_INPUT_INVALID")
@@ -102,7 +113,8 @@ def render(manifest_path: Path, input_root: Path, expected_issuer: str | None) -
         for name in sorted(names):
             if kind == "Secret":
                 validate_creds(root / name, expected_issuer)
-            value = {"apiVersion":"v1","kind":kind,"metadata":{"name":name,"namespace":manifest["namespace"],"labels":{"app.kubernetes.io/part-of":"labweaver","labweaver.io/sprint":"platform"}},"data":read_exact(root / name, manifest[section][name], binary)}
+            optional_keys = manifest.get("optionalSecrets", {}).get(name, []) if kind == "Secret" else []
+            value = {"apiVersion":"v1","kind":kind,"metadata":{"name":name,"namespace":manifest["namespace"],"labels":{"app.kubernetes.io/part-of":"labweaver","labweaver.io/sprint":"platform"}},"data":read_exact(root / name, manifest[section][name], binary, optional_keys)}
             if kind == "Secret": value["type"] = "Opaque"
             objects.append(value)
     return b"".join(b"---\n" + json.dumps(v, sort_keys=True, separators=(",", ":")).encode() + b"\n" for v in objects)

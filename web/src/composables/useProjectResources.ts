@@ -12,14 +12,19 @@ import {
 import type { ResourceLeaseSchema, ResourceRequestSchema, WorkloadResources } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey as makeIdempotencyKey, ifMatch } from '@/utils/format'
+import { collectCursorPages } from '@/utils/cursorPagination'
 
 function errorDiagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
   return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true, problem)
 }
 
-async function listProjectRequests(projectId: string) {
-  return listProjectResourceRequests({ path: { projectId } })
+async function listProjectRequests(projectId: string): Promise<ResourceRequestSchema[]> {
+  const page = await collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({
+    path: { projectId },
+    query: { limit: 100, ...(cursor ? { cursor } : {}) },
+  }))
+  return page.items
 }
 
 async function listProjectLeases(projectId: string) {
@@ -80,12 +85,9 @@ export function useProjectResources(projectId: Ref<string | null>) {
 
     if (requestResult.status === 'rejected') {
       requests.value = { kind: 'error', diagnostic: errorDiagnostic(requestResult.reason, 'PROJECT_RESOURCE_REQUESTS_LOAD_FAILED', '加载项目资源申请失败') }
-    } else if (requestResult.value.error) {
-      requests.value = { kind: 'error', diagnostic: errorDiagnostic(requestResult.value.error, 'PROJECT_RESOURCE_REQUESTS_LOAD_FAILED', '加载项目资源申请失败') }
-    } else if (!Array.isArray(requestResult.value.data)) {
-      requests.value = { kind: 'error', diagnostic: makeDiagnostic('PROJECT_RESOURCE_REQUESTS_INVALID', 'Resource 返回了无法识别的资源申请响应。', false) }
     } else {
-      requests.value = requestResult.value.data.length > 0 ? { kind: 'success', data: requestResult.value.data } : { kind: 'empty' }
+      const requestItems = requestResult.value
+      requests.value = requestItems.length > 0 ? { kind: 'success', data: requestItems } : { kind: 'empty' }
     }
 
     if (leaseResult.status === 'rejected') {

@@ -156,6 +156,15 @@ pub enum ResourceRequestState {
 }
 
 impl ResourceRequestState {
+    pub const ALL: [Self; 7] = [
+        Self::Reviewing,
+        Self::Allocating,
+        Self::Active,
+        Self::Expiring,
+        Self::Expired,
+        Self::Rejected,
+        Self::Cancelled,
+    ];
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Expired | Self::Rejected | Self::Cancelled)

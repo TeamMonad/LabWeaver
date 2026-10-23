@@ -2,6 +2,7 @@ import { onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import { listEnvironments, listProjectAgentRuns, listProjectResourceRequests } from '@/generated/contracts'
 import type { AgentRunHistoryItem, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
 import { diagnosticFromError, extractProblemDetails, type AsyncState } from '@/types/async'
+import { collectCursorPages } from '@/utils/cursorPagination'
 
 /** Section state; `hidden` means the server denied this read for the account, so the section is not shown. */
 export type InProgressSection<T> = AsyncState<T[]> | { kind: 'hidden' }
@@ -44,47 +45,54 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
   async function loadEnvironments(id: string, current: number) {
     environments.value = { kind: 'loading', message: '加载运行中的环境…' }
     environmentsTruncated.value = false
-    const result = await listEnvironments({ query: { projectId: id, desiredState: 'running', limit: 50 } })
-    if (current !== generation) return
-    if (result.error) {
-      environments.value = denied(result.error)
+    try {
+      const result = await collectCursorPages<EnvironmentSummary>((cursor) => listEnvironments({ query: { projectId: id, desiredState: 'running', limit: 50, ...(cursor ? { cursor } : {}) } }))
+      if (current !== generation) return
+      const items = result.items.filter((item) => item.projectId === id && item.observedState !== 'deleted')
+      environments.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
+    } catch (error) {
+      if (current !== generation) return
+      environments.value = denied(error)
         ? { kind: 'hidden' }
-        : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_ENVIRONMENTS_LOAD_FAILED', '加载运行中的环境失败。') }
-      return
+        : { kind: 'error', diagnostic: diagnosticFromError(error, 'HOME_ENVIRONMENTS_LOAD_FAILED', '加载运行中的环境失败。') }
     }
-    environmentsTruncated.value = Boolean(result.data.nextCursor)
-    const items = result.data.items.filter((item) => item.projectId === id && item.observedState !== 'deleted')
-    environments.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 
   async function loadAgentRuns(id: string, current: number) {
     agentRuns.value = { kind: 'loading', message: '加载未完成的任务…' }
     agentRunsTruncated.value = false
-    const result = await listProjectAgentRuns({ path: { projectId: id }, query: { page: 1, pageSize: 50 } })
-    if (current !== generation) return
-    if (result.error) {
-      agentRuns.value = denied(result.error)
+    try {
+      const result = await collectCursorPages<AgentRunHistoryItem>((cursor) => listProjectAgentRuns({
+        path: { projectId: id },
+        query: { state: [...OPEN_AGENT_RUN_STATES], limit: 50, ...(cursor ? { cursor } : {}) },
+      }))
+      if (current !== generation) return
+      const items = result.items.filter((item) => item.projectId === id && isOpenAgentRun(item))
+      agentRuns.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
+    } catch (error) {
+      if (current !== generation) return
+      agentRuns.value = denied(error)
         ? { kind: 'hidden' }
-        : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_AGENT_RUNS_LOAD_FAILED', '加载未完成的任务失败。') }
-      return
+        : { kind: 'error', diagnostic: diagnosticFromError(error, 'HOME_AGENT_RUNS_LOAD_FAILED', '加载未完成的任务失败。') }
     }
-    agentRunsTruncated.value = result.data.hasMore
-    const items = result.data.items.filter((item) => item.projectId === id && isOpenAgentRun(item))
-    agentRuns.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 
   async function loadResourceRequests(id: string, current: number) {
     resourceRequests.value = { kind: 'loading', message: '加载待处理事项…' }
-    const result = await listProjectResourceRequests({ path: { projectId: id } })
-    if (current !== generation) return
-    if (result.error) {
-      resourceRequests.value = denied(result.error)
+    try {
+      const result = await collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({
+        path: { projectId: id },
+        query: { state: [...OPEN_RESOURCE_REQUEST_STATES, 'active'], limit: 50, ...(cursor ? { cursor } : {}) },
+      }))
+      if (current !== generation) return
+      const items = result.items.filter((item) => item.projectId === id && isOpenResourceRequest(item))
+      resourceRequests.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
+    } catch (error) {
+      if (current !== generation) return
+      resourceRequests.value = denied(error)
         ? { kind: 'hidden' }
-        : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'HOME_RESOURCE_REQUESTS_LOAD_FAILED', '加载资源申请失败。') }
-      return
+        : { kind: 'error', diagnostic: diagnosticFromError(error, 'HOME_RESOURCE_REQUESTS_LOAD_FAILED', '加载资源申请失败。') }
     }
-    const items = result.data.filter((item) => item.projectId === id && isOpenResourceRequest(item))
-    resourceRequests.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 
   async function load() {

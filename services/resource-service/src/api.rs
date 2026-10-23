@@ -18,8 +18,8 @@ use contracts::http::{
     AcknowledgeTaskResourceRequest, ApproveResourceRequest, CreateResourceAdjustmentRequest,
     CreateResourceRateRequest, CreateResourceRequest, EndResourceRateRequest,
     InternalCreateTaskResourceRequest, PageQuery, RecordResourceUsageRequest,
-    ReleaseTaskResourceRequest, RenewResourceLease, ResourceOperationAccepted, StrongEtag,
-    TaskResourceStatus, UpsertResourceBudgetRequest,
+    ReleaseTaskResourceRequest, RenewResourceLease, ResourceOperationAccepted,
+    ResourceRequestListQuery, StrongEtag, TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     GpuCatalogEntry, ResourceCharge, ResourceRate, ResourceRequest, ResourceRequestState,
@@ -102,6 +102,12 @@ impl ResourceApiState {
     #[must_use]
     pub fn with_task_service_client_ids(mut self, client_ids: BTreeSet<String>) -> Self {
         self.task_service_client_ids = Some(client_ids);
+        self
+    }
+    /// Installs the current and optional previous mounted Secrets used to authenticate cursors.
+    #[must_use]
+    pub fn with_cursor_signing_keys(mut self, current: Vec<u8>, previous: Option<Vec<u8>>) -> Self {
+        self.store = self.store.with_cursor_signing_keys(current, previous);
         self
     }
 }
@@ -418,19 +424,22 @@ async fn list_requests_for_project(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project_id): Path<ProjectId>,
-    Query(query): Query<ProjectListQuery>,
+    Query(query): Query<ResourceRequestListQuery>,
 ) -> Result<Response, ResourceApiError> {
     authorize(&principal);
-    let course_id = query.course_id;
-    let requests = if is_admin(&principal)? {
-        state.store.list_for_project(project_id, course_id).await?
+    query
+        .validate()
+        .map_err(|_| ResourceApiError::InvalidCursor)?;
+    let actor_id = if is_admin(&principal)? {
+        None
     } else {
-        state
-            .store
-            .list_owned(principal.actor_id, project_id, course_id)
-            .await?
+        Some(principal.actor_id)
     };
-    let mut response = Json(requests).into_response();
+    let page = state
+        .store
+        .list_project_requests_page(project_id, actor_id, &query)
+        .await?;
+    let mut response = Json(page).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
@@ -1529,6 +1538,8 @@ pub enum ResourceApiError {
     RevisionConflict,
     #[error("LW_RESOURCE_REQUEST_INVALID")]
     Invalid,
+    #[error("LW_RESOURCE_REQUEST_CURSOR_INVALID")]
+    InvalidCursor,
     #[error(transparent)]
     Store(#[from] ResourceStoreError),
 }
@@ -1542,7 +1553,9 @@ impl IntoResponse for ResourceApiError {
             }
             Self::ServiceConfiguration => StatusCode::SERVICE_UNAVAILABLE,
             Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
-            Self::Invalid | Self::Store(ResourceStoreError::RateEndInvalid) => {
+            Self::Invalid
+            | Self::InvalidCursor
+            | Self::Store(ResourceStoreError::RateEndInvalid | ResourceStoreError::InvalidCursor) => {
                 StatusCode::BAD_REQUEST
             }
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,

@@ -161,32 +161,21 @@
   "additionalProperties": false,
   "description": "Page of Agent-owned project run history.",
   "properties": {
-    "hasMore": {
-      "type": "boolean"
-    },
     "items": {
       "items": {
         "$ref": "#/$defs/AgentRunHistoryItem"
       },
       "type": "array"
     },
-    "page": {
-      "format": "uint32",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "pageSize": {
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0,
-      "type": "integer"
+    "nextCursor": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
-    "items",
-    "page",
-    "pageSize",
-    "hasMore"
+    "items"
   ],
   "title": "AgentRunHistoryPage",
   "type": "object"

@@ -20,7 +20,7 @@ use contracts::environment::{
 };
 use contracts::evaluation::EvaluationRelease;
 use contracts::http::{
-    AgentWorkExecutionIntentMetadata, AgentWorkExecutionIntentQuery, CursorPage,
+    AgentRunListQuery, AgentWorkExecutionIntentMetadata, AgentWorkExecutionIntentQuery, CursorPage,
     EvaluationReleaseListQuery, GeneratedArtifactQuery, GeneratedArtifactRecord, IdempotencyKey,
     InternalAgentBuildCancellationRequest, InternalAgentBuildCancellationResult,
     InternalAgentBuildStatusQuery, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
@@ -237,7 +237,7 @@ impl AgentClient {
     pub async fn list_project_runs(
         &self,
         project_id: contracts::ProjectId,
-        query: &PageQuery,
+        query: &AgentRunListQuery,
     ) -> Result<AgentRunHistoryPage, DownstreamError> {
         let page: AgentRunHistoryPage = send_json(
             self.client

@@ -1986,6 +1986,46 @@ pub struct CursorPage<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<String>,
 }
+/// Cursor filters for a project-scoped AgentRun history listing.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunListQuery {
+    /// One or more exact AgentRun states. Repeated `state` query parameters are accepted.
+    pub state: Option<Vec<crate::authoring::AgentRunState>>,
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl AgentRunListQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
+}
+
+/// Cursor filters for a project-scoped ResourceRequest listing.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRequestListQuery {
+    pub course_id: Option<CourseId>,
+    /// One or more exact request states. Repeated `state` query parameters are accepted.
+    pub state: Option<Vec<crate::resource::ResourceRequestState>>,
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl ResourceRequestListQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
+}
+
+/// Cursor page of project-scoped Resource requests.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRequestPage {
+    pub items: Vec<crate::resource::ResourceRequest>,
+    pub next_cursor: Option<String>,
+}
 
 /// Page parameters for bounded offset-list endpoints.
 ///
@@ -2068,7 +2108,7 @@ pub struct SnapshotPage<T> {
 
 pub const DEFAULT_PAGE_LIMIT: u16 = 50;
 pub const MAX_PAGE_LIMIT: u16 = 100;
-pub const MAX_CURSOR_LENGTH: usize = 512;
+pub const MAX_CURSOR_LENGTH: usize = 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

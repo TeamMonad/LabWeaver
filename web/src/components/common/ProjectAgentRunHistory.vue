@@ -14,7 +14,7 @@
         class="icon-button"
         aria-label="刷新项目任务历史"
         :disabled="history.kind === 'loading'"
-        @click="loadHistory(historyPage)"
+        @click="loadHistory()"
       >
         <SvgIcon name="refresh" size="sm" aria-hidden="true" />
       </button>
@@ -24,7 +24,7 @@
       :state="history"
       :empty-text="emptyText"
       loading-text="加载项目任务历史…"
-      @retry="loadHistory(historyPage)"
+      @retry="loadHistory()"
     >
       <template #success="{ data }">
         <div v-if="filteredItems.length === 0" class="history-empty" role="status">
@@ -48,22 +48,8 @@
             </button>
           </li>
         </ul>
-        <div v-if="data.items.length > 0" class="run-history-pagination">
-          <button
-            type="button"
-            class="text-button"
-            :disabled="data.page <= 1 || history.kind === 'loading'"
-            @click="loadHistory(data.page - 1)"
-          >
-            上一页
-          </button>
-          <span>第 {{ data.page }} 页</span>
-          <button
-            type="button"
-            class="text-button"
-            :disabled="!data.hasMore || history.kind === 'loading'"
-            @click="loadHistory(data.page + 1)"
-          >
+        <div v-if="hasNextPage" class="run-history-pagination">
+          <button type="button" class="text-button" :disabled="history.kind === 'loading'" @click="loadHistory(data.nextCursor ?? undefined)">
             下一页
           </button>
         </div>
@@ -92,17 +78,17 @@ const emit = defineEmits<{
 }>()
 
 const history = ref<AsyncState<AgentRunHistoryPageSchema>>({ kind: 'idle' })
-const historyPage = ref(1)
 let historyGeneration = 0
 
 const headingId = computed(() => `project-agent-run-history-${props.scope}`)
 const emptyText = computed(() => props.scope === 'work'
   ? '当前项目还没有可恢复的 Work 任务。'
   : '当前项目还没有可恢复的实验任务。')
+const hasNextPage = computed(() => history.value.kind === 'success' && Boolean(history.value.data.nextCursor))
 const filteredEmptyText = computed(() => {
-  if (history.value.kind === 'success' && (history.value.data.page > 1 || history.value.data.hasMore)) {
+  if (hasNextPage.value) {
     const taskText = props.scope === 'work' ? '本页没有可恢复的 Work 任务' : '本页没有可恢复的实验任务'
-    return `${taskText}${history.value.data.hasMore ? '，可查看下一页' : ''}。`
+    return `${taskText}，可查看下一页。`
   }
   return emptyText.value
 })
@@ -123,11 +109,9 @@ function purposeLabel(purpose: AgentRunPurpose): string {
   return purpose.environmentClass === 'work' ? 'Work 模板生成' : '实验候选生成'
 }
 
-async function loadHistory(page = historyPage.value) {
+async function loadHistory(cursor?: string) {
   const projectId = props.projectId
   const generation = ++historyGeneration
-  const requestedPage = Math.max(1, page)
-  historyPage.value = requestedPage
   if (!projectId) {
     history.value = { kind: 'idle' }
     return
@@ -136,7 +120,7 @@ async function loadHistory(page = historyPage.value) {
   history.value = { kind: 'loading', message: '加载项目任务历史…' }
   const result = await listProjectAgentRuns({
     path: { projectId },
-    query: { page: requestedPage, pageSize: 100 },
+    query: { limit: 100, ...(cursor ? { cursor } : {}) },
   })
   if (generation !== historyGeneration || props.projectId !== projectId) return
   if (result.error) {
@@ -164,11 +148,10 @@ async function loadHistory(page = historyPage.value) {
     }
     return
   }
-  historyPage.value = result.data.page
   history.value = { kind: 'success', data: result.data }
 }
 
-watch(() => props.projectId, () => void loadHistory(1), { immediate: true })
+watch(() => props.projectId, () => void loadHistory(), { immediate: true })
 
 onUnmounted(() => {
   historyGeneration += 1

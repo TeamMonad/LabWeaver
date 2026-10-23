@@ -28,6 +28,17 @@ impl Sha256Digest {
         Ok(Self::of_bytes(&bytes))
     }
 }
+/// Derives a stable, domain-separated identifier for a cursor signing key.
+#[must_use]
+pub fn cursor_key_id(domain: &str, key: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"labweaver-cursor-key-id-v1\0");
+    hasher.update(domain.as_bytes());
+    hasher.update([0]);
+    hasher.update(key);
+    let digest = format!("{:x}", hasher.finalize());
+    digest[..32].to_owned()
+}
 
 impl Display for Sha256Digest {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
@@ -83,4 +94,20 @@ pub enum Sha256Error {
     InvalidSha256,
     #[error("canonical JSON serialization failed: {0}")]
     CanonicalJson(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_key_id;
+
+    #[test]
+    fn cursor_key_id_is_domain_separated_and_32_hex_bytes() {
+        let key = b"cursor-key";
+        let agent = cursor_key_id("agent", key);
+        let resource = cursor_key_id("resource", key);
+        assert_eq!(agent.len(), 32);
+        assert_eq!(resource.len(), 32);
+        assert_ne!(agent, resource);
+        assert_eq!(agent, cursor_key_id("agent", key));
+    }
 }

@@ -1,6 +1,7 @@
 import { onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import { apiClient } from '@/api/client'
 import { listProjectResourceLeases, listProjectResourceRequests, listProjectResourceUsage } from '@/generated/contracts'
+import { collectCursorPages } from '@/utils/cursorPagination'
 import type {
   EnvironmentSummary,
   ResourceLeaseSchema,
@@ -232,10 +233,6 @@ function environmentData(result: unknown): EnvironmentSummary[] {
   return result as EnvironmentSummary[]
 }
 
-function requestData(result: unknown): ResourceRequestSchema[] {
-  return listData(result, '资源申请列表返回了无法识别的数据。') as ResourceRequestSchema[]
-}
-
 function leaseData(result: unknown): ResourceLeaseSchema[] {
   return listData(result, '资源租约列表返回了无法识别的数据。') as ResourceLeaseSchema[]
 }
@@ -266,7 +263,7 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
     usageContext.value = { kind: 'loading', message: '加载用量关联信息…' }
     const [environmentsResult, requestsResult, leasesResult] = await Promise.allSettled([
       fetchProjectEnvironments({ projectId: id, limit: 100 }),
-      needsRequestContext ? listProjectResourceRequests({ path: { projectId: id } }) : Promise.resolve({ data: [] }),
+      needsRequestContext ? collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({ path: { projectId: id }, query: { limit: 100, ...(cursor ? { cursor } : {}) } })) : Promise.resolve({ items: [], nextCursor: null }),
       needsRequestContext ? listProjectResourceLeases({ path: { projectId: id } }) : Promise.resolve({ data: [] }),
     ])
     if (!usageRequestCurrent(id, generation, requestGeneration)) return
@@ -282,7 +279,7 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
         kind: 'success',
         data: {
           environments: environmentData(environmentsResult.value),
-          requests: requestData(requestsResult.value),
+          requests: requestsResult.value.items,
           leases: leaseData(leasesResult.value),
         },
       }

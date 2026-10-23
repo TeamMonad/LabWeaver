@@ -35,7 +35,7 @@ use contracts::environment::{
 };
 use contracts::http::{
     CreateResourceRateRequest, EndResourceRateRequest, InternalCreateTaskResourceRequest,
-    RecordResourceUsageRequest, UpsertResourceBudgetRequest,
+    RecordResourceUsageRequest, ResourceRequestListQuery, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     CapacityClaim, FixedDecimal, GpuAllocationMode, GpuCatalogEntry, GpuRequest, Money,
@@ -3354,6 +3354,206 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
     Ok(())
 }
 
+#[tokio::test]
+async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_postgres, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let project_id = ProjectId::new();
+    let member = ActorId::new();
+    let other_member = ActorId::new();
+    let mut member_requests = Vec::new();
+    for index in 0..3 {
+        let mut request = outbox_request()?;
+        request.project_id = project_id;
+        request.requester_id = member;
+        request.request_key = format!("cursor-member-{index}");
+        store
+            .create(&request.request_key, &request, "cursor-member-trace")
+            .await?;
+        member_requests.push(request.id);
+    }
+    let mut other_request = outbox_request()?;
+    other_request.project_id = project_id;
+    other_request.requester_id = other_member;
+    other_request.request_key = "cursor-other".to_owned();
+    store
+        .create(
+            &other_request.request_key,
+            &other_request,
+            "cursor-other-trace",
+        )
+        .await?;
+
+    let query = ResourceRequestListQuery {
+        course_id: None,
+        state: Some(vec![ResourceRequestState::Reviewing]),
+        cursor: None,
+        limit: Some(2),
+    };
+    let member_first = store
+        .list_project_requests_page(project_id, Some(member), &query)
+        .await
+        .map_err(|error| format!("member first: {error}"))?;
+    assert_eq!(member_first.items.len(), 2);
+    assert!(
+        member_first
+            .items
+            .iter()
+            .all(|request| request.requester_id == member)
+    );
+    assert!(member_first.next_cursor.is_some());
+    let wrong_actor = store
+        .list_project_requests_page(
+            project_id,
+            Some(other_member),
+            &ResourceRequestListQuery {
+                cursor: member_first.next_cursor.clone(),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_actor,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
+    let wrong_filter = store
+        .list_project_requests_page(
+            project_id,
+            Some(member),
+            &ResourceRequestListQuery {
+                state: Some(vec![ResourceRequestState::Active]),
+                cursor: member_first.next_cursor.clone(),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_filter,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
+    let mut tampered_cursor = member_first.next_cursor.clone().ok_or("cursor missing")?;
+    let last = tampered_cursor.pop().ok_or("cursor empty")?;
+    tampered_cursor.push(if last == 'A' { 'B' } else { 'A' });
+    let tampered = store
+        .list_project_requests_page(
+            project_id,
+            Some(member),
+            &ResourceRequestListQuery {
+                cursor: Some(tampered_cursor),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(tampered, Err(ResourceStoreError::InvalidCursor)));
+    let old_store = store
+        .clone()
+        .with_cursor_signing_keys(b"old-cursor-key-012345678901234567".to_vec(), None);
+    let old_page = old_store
+        .list_project_requests_page(project_id, Some(member), &query)
+        .await
+        .map_err(|error| format!("old page: {error}"))?;
+    let rotated_store = store.clone().with_cursor_signing_keys(
+        b"new-cursor-key-012345678901234567".to_vec(),
+        Some(b"old-cursor-key-012345678901234567".to_vec()),
+    );
+    assert!(
+        rotated_store
+            .list_project_requests_page(
+                project_id,
+                Some(member),
+                &ResourceRequestListQuery {
+                    cursor: old_page.next_cursor.clone(),
+                    ..query.clone()
+                },
+            )
+            .await
+            .map_err(|error| format!("rotated page: {error}"))
+            .is_ok()
+    );
+    let removed_previous = store
+        .clone()
+        .with_cursor_signing_keys(b"new-cursor-key-012345678901234567".to_vec(), None);
+    assert!(matches!(
+        removed_previous
+            .list_project_requests_page(
+                project_id,
+                Some(member),
+                &ResourceRequestListQuery {
+                    cursor: old_page.next_cursor,
+                    ..query.clone()
+                },
+            )
+            .await,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
+
+    let non_member = store
+        .list_project_requests_page(project_id, Some(ActorId::new()), &query)
+        .await
+        .map_err(|error| format!("non-member: {error}"))?;
+    assert!(non_member.items.is_empty());
+
+    let admin_first = store
+        .list_project_requests_page(project_id, None, &query)
+        .await
+        .map_err(|error| format!("admin first: {error}"))?;
+    let admin_second = store
+        .list_project_requests_page(
+            project_id,
+            None,
+            &ResourceRequestListQuery {
+                cursor: admin_first.next_cursor,
+                ..query.clone()
+            },
+        )
+        .await
+        .map_err(|error| format!("admin second: {error}"))?;
+    assert_eq!(admin_first.items.len() + admin_second.items.len(), 4);
+
+    let mut inserted = outbox_request()?;
+    inserted.project_id = project_id;
+    inserted.requester_id = member;
+    inserted.request_key = "cursor-member-concurrent".to_owned();
+    inserted.created_at =
+        UtcTimestamp::from_utc(inserted.created_at.get() + time::Duration::hours(1))?;
+    inserted.updated_at = inserted.created_at;
+    store
+        .create(
+            &inserted.request_key,
+            &inserted,
+            "cursor-member-concurrent-trace",
+        )
+        .await?;
+
+    let member_second = store
+        .list_project_requests_page(
+            project_id,
+            Some(member),
+            &ResourceRequestListQuery {
+                cursor: member_first.next_cursor,
+                ..query.clone()
+            },
+        )
+        .await?;
+    assert_eq!(member_second.items.len(), 1);
+    assert_eq!(member_second.items[0].requester_id, member);
+    assert!(member_requests.contains(&member_second.items[0].id));
+    assert!(member_first.items.iter().all(|first| {
+        !member_second
+            .items
+            .iter()
+            .any(|second| second.id == first.id)
+    }));
+    assert!(
+        !member_second
+            .items
+            .iter()
+            .any(|request| request.id == inserted.id)
+    );
+    Ok(())
+}
+
 async fn create_active_request(
     store: &PgResourceStore,
     now: UtcTimestamp,
@@ -3997,7 +4197,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}", 
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -4018,7 +4218,8 @@ async fn migrated_pool()
         include_str!(
             "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
-        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql")
+        include_str!("../../../migrations/resource/0015_task_approval_deadline.sql"),
+        include_str!("../../../migrations/resource/0017_project_request_pagination_indexes.sql")
     )))
     .execute(&pool)
     .await?;
@@ -4395,9 +4596,10 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
             .and_then(|value| value.to_str().ok()),
         Some("no-store")
     );
-    let project_requests: Vec<ResourceRequest> = serde_json::from_slice(
+    let project_page: contracts::http::ResourceRequestPage = serde_json::from_slice(
         &to_bytes(project_requests_response.into_body(), 1024 * 1024).await?,
     )?;
+    let project_requests = project_page.items;
     assert_eq!(project_requests.len(), 2);
 
     let project_leases_response = router

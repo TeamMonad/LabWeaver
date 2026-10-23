@@ -66,10 +66,11 @@
       "postgres-ca.pem",
       "mtls-ca.pem",
       "nats-ca.pem",
-      "nats-client.crt",
       "nats-client.key",
       "nats.creds",
+      "nats-client.crt",
       "service-client-secret",
+      "cursor-signing-key-current",
       "tls.crt",
       "tls.key",
       "portal-public-root.crt"
@@ -187,5 +188,8 @@
       "target_key",
       "target_key-cert.pub"
     ]
+  },
+  "optionalSecrets": {
+    "agent-service-secrets": ["cursor-signing-key-previous"]
   }
 }

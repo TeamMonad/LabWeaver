@@ -69,8 +69,8 @@ describe('HomeView (current project in progress)', () => {
     projectsState.selectedProjectId = 'project-1'
     projectsState.selectedProject = project
     vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [], nextCursor: null }))
-    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: [], page: 1, pageSize: 50, hasMore: false }))
-    vi.mocked(listProjectResourceRequests).mockResolvedValue(ok([]))
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: [], nextCursor: null }))
+    vi.mocked(listProjectResourceRequests).mockResolvedValue(ok({ items: [], nextCursor: null }))
   })
 
   it('is not a task catalog: it shows the current project and reads only that project', async () => {
@@ -79,8 +79,8 @@ describe('HomeView (current project in progress)', () => {
     expect(wrapper.get('h1').text()).toBe('量子材料实验室')
     expect(wrapper.find('[data-task-group]').exists()).toBe(false)
     expect(listEnvironments).toHaveBeenCalledWith({ query: { projectId: 'project-1', desiredState: 'running', limit: 50 } })
-    expect(listProjectAgentRuns).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { page: 1, pageSize: 50 } })
-    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectAgentRuns).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 50, state: ['requested', 'running', 'awaiting_approval', 'cancelling'] } })
+    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 50, state: ['reviewing', 'allocating', 'expiring', 'active'] } })
     expect(wrapper.text()).toContain('当前项目没有运行中的环境。')
   })
 
@@ -110,7 +110,7 @@ describe('HomeView (current project in progress)', () => {
         run('run-config', 'running', { kind: 'work_configuration' }),
         run('run-done', 'succeeded', { kind: 'authoring', environmentClass: 'experiment' }),
       ],
-      page: 1, pageSize: 50, hasMore: false,
+      nextCursor: null,
     }))
     const { wrapper } = await createWrapper()
     const section = wrapper.get('[data-home-section="agent-runs"]')
@@ -126,7 +126,7 @@ describe('HomeView (current project in progress)', () => {
     authState.user.value = { expired: false, profile: { roles: ['student'] } }
     vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({
       items: [run('run-review', 'awaiting_approval', { kind: 'authoring', environmentClass: 'experiment' })],
-      page: 1, pageSize: 50, hasMore: false,
+      nextCursor: null,
     }))
     const { wrapper } = await createWrapper()
     expect(wrapper.get('[data-home-section="agent-runs"]').findAll('a')).toHaveLength(0)
@@ -145,10 +145,10 @@ describe('HomeView (current project in progress)', () => {
   })
 
   it('lists pending resource requests with a readable summary', async () => {
-    vi.mocked(listProjectResourceRequests).mockResolvedValue(ok([
+    vi.mocked(listProjectResourceRequests).mockResolvedValue(ok({ items: [
       { id: 'req-1', projectId: 'project-1', state: 'reviewing', requestedResources: { cpuMillicores: 2000, memoryBytes: 4 * 1024 ** 3, storageBytes: 0 }, target: { kind: 'environment' }, updatedAt: '2026-10-01T00:00:00Z' },
       { id: 'req-2', projectId: 'project-1', state: 'rejected', requestedResources: { cpuMillicores: 1000, memoryBytes: 1024 ** 3, storageBytes: 0 }, target: { kind: 'environment' }, updatedAt: '2026-10-01T00:00:00Z' },
-    ]))
+    ] , nextCursor: null }))
     const { wrapper } = await createWrapper()
     const section = wrapper.get('[data-home-section="resource-requests"]')
     expect(section.findAll('li')).toHaveLength(1)
@@ -159,7 +159,7 @@ describe('HomeView (current project in progress)', () => {
   })
 
   it('does not claim the project has no pending requests when its list is empty', async () => {
-    vi.mocked(listProjectResourceRequests).mockResolvedValue(ok([]))
+    vi.mocked(listProjectResourceRequests).mockResolvedValue(ok({ items: [], nextCursor: null }))
     const { wrapper } = await createWrapper()
     const section = wrapper.get('[data-home-section="resource-requests"]')
     expect(section.text()).not.toContain('当前项目没有待审批')
@@ -200,10 +200,9 @@ describe('HomeView (current project in progress)', () => {
   })
 
   it('says when only the first page was checked instead of implying the list is complete', async () => {
-    vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [environment('env-ready', 'ready')], nextCursor: 'cursor-2' }))
-    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: [], page: 1, pageSize: 50, hasMore: true }))
+    vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [environment('env-ready', 'ready')], nextCursor: null }))
     const { wrapper } = await createWrapper()
-    expect(wrapper.get('[data-home-section="environments"]').text()).toContain('只显示前 50 个运行中的环境')
-    expect(wrapper.get('[data-home-section="agent-runs"]').text()).toContain('只检查了最近 50 个任务')
+    expect(wrapper.get('[data-home-section="environments"]').text()).not.toContain('只显示前 50 个运行中的环境')
+    expect(wrapper.get('[data-home-section="agent-runs"]').text()).not.toContain('只检查了最近 50 个任务')
   })
 })

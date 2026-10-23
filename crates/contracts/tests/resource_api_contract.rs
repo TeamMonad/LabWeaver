@@ -2,7 +2,10 @@
 
 use serde_json::{Value, json};
 
-use contracts::{PlatformRole, http::operation_contract};
+use contracts::{
+    PlatformRole,
+    http::{AgentRunListQuery, ResourceRequestListQuery, operation_contract},
+};
 
 #[test]
 fn resource_create_requires_project_scope() -> Result<(), Box<dyn std::error::Error>> {
@@ -122,17 +125,37 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         "project",
     );
     assert_eq!(
-        list_request["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
-        "../contracts/v1/resource-request.schema.json"
+        list_request["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/resource-request-page.schema.json"
     );
     assert_eq!(
         list_request["parameters"]
             .as_array()
             .and_then(|parameters| parameters
                 .iter()
-                .find(|parameter| parameter["name"] == "courseId"))
-            .and_then(|parameter| parameter["schema"]["format"].as_str()),
-        Some("uuid")
+                .find(|parameter| parameter["name"] == "state"))
+            .and_then(|parameter| parameter["schema"]["type"].as_str()),
+        Some("array")
+    );
+    let state_parameter = list_request["parameters"]
+        .as_array()
+        .and_then(|parameters| {
+            parameters
+                .iter()
+                .find(|parameter| parameter["name"] == "state")
+        })
+        .ok_or("state query parameter missing")?;
+    assert_eq!(
+        state_parameter["schema"]["items"]["enum"],
+        json!([
+            "reviewing",
+            "allocating",
+            "active",
+            "expiring",
+            "expired",
+            "rejected",
+            "cancelled"
+        ])
     );
     let list_lease = assert_operation(
         "/api/v1/projects/{projectId}/resource-leases",
@@ -353,4 +376,36 @@ fn resource_option_reads_allow_all_authenticated_platform_roles()
         assert_eq!(operation.allowed_roles, &[PlatformRole::PlatformAdmin]);
     }
     Ok(())
+}
+
+#[test]
+fn project_list_filters_validate_limits_and_repeated_states() {
+    let repeated = ResourceRequestListQuery {
+        course_id: None,
+        state: Some(vec![
+            contracts::resource::ResourceRequestState::Reviewing,
+            contracts::resource::ResourceRequestState::Reviewing,
+        ]),
+        cursor: None,
+        limit: Some(50),
+    };
+    assert!(repeated.validate().is_ok());
+    for limit in [0, 101] {
+        assert!(
+            ResourceRequestListQuery {
+                limit: Some(limit),
+                ..repeated.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AgentRunListQuery {
+                limit: Some(limit),
+                ..AgentRunListQuery::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }

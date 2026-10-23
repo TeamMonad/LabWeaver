@@ -311,7 +311,13 @@ async fn run_agent_service() -> Result<(), StartupError> {
         .connect(&read_trimmed(&deployment.database_url_file)?)
         .await?;
     verify_schema(&pool).await?;
-    let store = PostgresAgentRunStore::new(pool.clone());
+    let cursor_current =
+        read_secret_bytes(required_path("LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE")?)?;
+    let cursor_previous = optional_path("LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE")?
+        .map(read_secret_bytes)
+        .transpose()?;
+    let store = PostgresAgentRunStore::new(pool.clone())
+        .with_cursor_signing_keys(cursor_current, cursor_previous);
     let generated_artifacts = GeneratedArtifactStore::new(pool.clone());
     let llm_reviews = LlmReviewStore::new(pool.clone());
     let build_store = PgBuildStore::new(pool);
@@ -1014,6 +1020,16 @@ fn required_path(name: &'static str) -> Result<std::path::PathBuf, StartupError>
     }
     Ok(path)
 }
+fn optional_path(name: &'static str) -> Result<Option<std::path::PathBuf>, StartupError> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(StartupError::Configuration);
+    }
+    Ok(Some(path))
+}
 
 fn required_set(name: &'static str) -> Result<BTreeSet<String>, StartupError> {
     let values = required_env(name)?
@@ -1118,6 +1134,13 @@ fn read_trimmed(path: &str) -> Result<String, StartupError> {
         return Err(StartupError::Configuration);
     }
     Ok(value.to_owned())
+}
+fn read_secret_bytes(path: std::path::PathBuf) -> Result<Vec<u8>, StartupError> {
+    let value = std::fs::read(path)?;
+    if value.len() < 32 {
+        return Err(StartupError::Configuration);
+    }
+    Ok(value)
 }
 
 async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {

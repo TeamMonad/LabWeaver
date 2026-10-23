@@ -1,8 +1,11 @@
 //! Durable idempotent `AgentRun` orchestration over the Agent-owned `PostgreSQL` schema.
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use persistence_sqlx::Sha256Digest;
+use persistence_sqlx::cursor_key_id;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use contracts::authoring::{
@@ -16,9 +19,10 @@ use contracts::events::{
     AgentRunEvent, CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, subjects,
 };
 use contracts::http::{
-    AgentWorkExecutionIntentMetadata, AgentWorkExecutionIntentQuery, ContainerWorkExecutionRequest,
-    CreateAgentRunRequest, IdempotencyKey, InternalAgentRunRequest,
-    InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
+    AgentRunListQuery, AgentWorkExecutionIntentMetadata, AgentWorkExecutionIntentQuery,
+    ContainerWorkExecutionRequest, CreateAgentRunRequest, IdempotencyKey, InternalAgentRunRequest,
+    InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest, MAX_CURSOR_LENGTH,
+    MAX_PAGE_LIMIT,
 };
 use contracts::{
     AgentRunId, ArtifactId, CandidateId, CourseId, EventId, ProjectId, Revision, Sequence,
@@ -27,7 +31,9 @@ use contracts::{
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -238,13 +244,160 @@ pub fn container_execution_request_value(
 #[derive(Clone, Debug)]
 pub struct PostgresAgentRunStore {
     pool: PgPool,
+    cursor_signing_key_current: Arc<Vec<u8>>,
+    cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
+}
+
+const AGENT_HISTORY_CURSOR_VERSION: u8 = 2;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentHistoryCursor {
+    version: u8,
+    key_id: String,
+    project_id: ProjectId,
+    states: Vec<String>,
+    snapshot_at: OffsetDateTime,
+    created_at: OffsetDateTime,
+    run_id: AgentRunId,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignedAgentHistoryCursor {
+    cursor: AgentHistoryCursor,
+    signature: String,
+}
+
+fn state_wire(state: AgentRunState) -> Result<String, AgentRunStoreError> {
+    serde_json::to_value(state)
+        .map_err(|_| AgentRunStoreError::InvalidContract)?
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or(AgentRunStoreError::InvalidContract)
+}
+
+fn history_states(
+    states: Option<&Vec<AgentRunState>>,
+) -> Result<Option<Vec<String>>, AgentRunStoreError> {
+    states
+        .map(|values| values.iter().copied().map(state_wire).collect())
+        .transpose()
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0_u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(Sha256::digest(key).as_slice());
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = [0x36_u8; 64];
+    let mut outer = [0x5c_u8; 64];
+    for index in 0..64 {
+        inner[index] ^= block[index];
+        outer[index] ^= block[index];
+    }
+    let mut inner_hash = Sha256::new();
+    inner_hash.update(inner);
+    inner_hash.update(message);
+    let mut result = Sha256::new();
+    result.update(outer);
+    result.update(inner_hash.finalize());
+    result.finalize().into()
+}
+
+fn encode_history_cursor(
+    cursor: &AgentHistoryCursor,
+    key: &[u8],
+) -> Result<String, AgentRunStoreError> {
+    let payload = serde_json::to_vec(cursor).map_err(|_| AgentRunStoreError::InvalidContract)?;
+    let signed = SignedAgentHistoryCursor {
+        cursor: AgentHistoryCursor {
+            version: cursor.version,
+            key_id: cursor.key_id.clone(),
+            project_id: cursor.project_id,
+            states: cursor.states.clone(),
+            snapshot_at: cursor.snapshot_at,
+            created_at: cursor.created_at,
+            run_id: cursor.run_id,
+        },
+        signature: URL_SAFE_NO_PAD.encode(hmac_sha256(key, &payload)),
+    };
+    let encoded = URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&signed).map_err(|_| AgentRunStoreError::InvalidContract)?);
+    if encoded.len() > MAX_CURSOR_LENGTH {
+        return Err(AgentRunStoreError::InvalidHistoryCursor);
+    }
+    Ok(encoded)
+}
+
+fn decode_history_cursor(
+    value: &str,
+    project_id: ProjectId,
+    states: &[String],
+    current: &[u8],
+    previous: Option<&[u8]>,
+) -> Result<AgentHistoryCursor, AgentRunStoreError> {
+    if value.is_empty() || value.len() > MAX_CURSOR_LENGTH {
+        return Err(AgentRunStoreError::InvalidHistoryCursor);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| AgentRunStoreError::InvalidHistoryCursor)?;
+    if URL_SAFE_NO_PAD.encode(&bytes) != value {
+        return Err(AgentRunStoreError::InvalidHistoryCursor);
+    }
+    let signed: SignedAgentHistoryCursor =
+        serde_json::from_slice(&bytes).map_err(|_| AgentRunStoreError::InvalidHistoryCursor)?;
+    if serde_json::to_vec(&signed).map_err(|_| AgentRunStoreError::InvalidHistoryCursor)? != bytes {
+        return Err(AgentRunStoreError::InvalidHistoryCursor);
+    }
+    let current_id = cursor_key_id("agent", current);
+    let key = if signed.cursor.key_id == current_id {
+        Some(current)
+    } else if previous.is_some_and(|key| signed.cursor.key_id == cursor_key_id("agent", key)) {
+        previous
+    } else {
+        None
+    }
+    .ok_or(AgentRunStoreError::InvalidHistoryCursor)?;
+    let payload =
+        serde_json::to_vec(&signed.cursor).map_err(|_| AgentRunStoreError::InvalidHistoryCursor)?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(&signed.signature)
+        .map_err(|_| AgentRunStoreError::InvalidHistoryCursor)?;
+    if signature.len() != 32
+        || !bool::from(
+            signature
+                .as_slice()
+                .ct_eq(hmac_sha256(key, &payload).as_slice()),
+        )
+        || signed.cursor.version != AGENT_HISTORY_CURSOR_VERSION
+        || signed.cursor.project_id != project_id
+        || signed.cursor.states != states
+    {
+        return Err(AgentRunStoreError::InvalidHistoryCursor);
+    }
+    Ok(signed.cursor)
 }
 
 impl PostgresAgentRunStore {
-    /// Creates a repository from an Agent-runtime-only pool.
+    /// Creates a repository with test-only cursor keys.
     #[must_use]
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            cursor_signing_key_current: Arc::new(b"labweaver-test-cursor-key".to_vec()),
+            cursor_signing_key_previous: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_cursor_signing_keys(mut self, current: Vec<u8>, previous: Option<Vec<u8>>) -> Self {
+        self.cursor_signing_key_current = Arc::new(current);
+        self.cursor_signing_key_previous = previous.map(Arc::new);
+        self
     }
 
     /// Returns the Agent-role pool for authority-local read models.
@@ -1447,31 +1600,66 @@ impl PostgresAgentRunStore {
     /// The full run contract is intentionally not returned here.  Callers use the existing
     /// `load` path for a selected run, which keeps this listing small and prevents a stale
     /// Control projection from becoming a second source of run state.
-    pub async fn list_project_runs(
+    /// Lists project runs with state filters and an opaque keyset cursor.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "cursor query validates scope and projection together"
+    )]
+    pub async fn list_project_runs_filtered(
         &self,
         project_id: ProjectId,
-        page: u32,
-        page_size: u16,
-        offset: u32,
+        query: &AgentRunListQuery,
     ) -> Result<AgentRunHistoryPage, AgentRunStoreError> {
-        let limit = i64::from(page_size) + 1;
+        let states = history_states(query.state.as_ref())?.unwrap_or_default();
+        let cursor = query
+            .cursor
+            .as_deref()
+            .map(|value| {
+                decode_history_cursor(
+                    value,
+                    project_id,
+                    &states,
+                    self.cursor_signing_key_current.as_slice(),
+                    self.cursor_signing_key_previous
+                        .as_deref()
+                        .map(Vec::as_slice),
+                )
+            })
+            .transpose()?;
+        let limit = query.limit.unwrap_or(50);
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+            return Err(AgentRunStoreError::InvalidHistoryCursor);
+        }
+        let snapshot_at = match cursor.as_ref() {
+            Some(cursor) => cursor.snapshot_at,
+            None => sqlx::query_scalar::<_, OffsetDateTime>("SELECT clock_timestamp()")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+        };
+        let state_filter = (!states.is_empty()).then_some(states.clone());
         let rows = sqlx::query(
             "SELECT run_id, project_id, course_id, purpose, state, created_at, updated_at \
              FROM agent.agent_runs \
-             WHERE project_id = $1 \
-             ORDER BY created_at DESC, run_id DESC \
-             LIMIT $2 OFFSET $3",
+             WHERE project_id=$1 \
+               AND ($2::text[] IS NULL OR state=ANY($2::text[])) \
+               AND created_at <= $3 \
+               AND ($4::timestamptz IS NULL OR (created_at,run_id) < ($4,$5)) \
+             ORDER BY created_at DESC, run_id DESC LIMIT $6",
         )
         .bind(project_id.as_uuid())
-        .bind(limit)
-        .bind(i64::from(offset))
+        .bind(state_filter)
+        .bind(snapshot_at)
+        .bind(cursor.as_ref().map(|value| value.created_at))
+        .bind(cursor.as_ref().map(|value| value.run_id.as_uuid()))
+        .bind(i64::from(limit) + 1)
         .fetch_all(&self.pool)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
-        let has_more = rows.len() > usize::from(page_size);
-        let items = rows
+        let has_more = rows.len() > usize::from(limit);
+        let mut decoded = rows
             .into_iter()
-            .take(usize::from(page_size))
+            .take(usize::from(limit))
             .map(|row| {
                 let run_id = row
                     .try_get::<Uuid, _>("run_id")
@@ -1501,26 +1689,43 @@ impl PostgresAgentRunStore {
                 .map_err(|_| AgentRunStoreError::InvalidContract)?;
                 let created_at = persisted_timestamp(&row, "created_at")?;
                 let updated_at = persisted_timestamp(&row, "updated_at")?;
+                let created_at_key = created_at.get();
                 if row_project_id != project_id {
                     return Err(AgentRunStoreError::InvalidContract);
                 }
-                Ok(AgentRunHistoryItem {
-                    id,
-                    project_id: row_project_id,
-                    course_id,
-                    purpose,
-                    state,
-                    created_at,
-                    updated_at,
-                })
+                Ok((
+                    AgentRunHistoryItem {
+                        id,
+                        project_id: row_project_id,
+                        course_id,
+                        purpose,
+                        state,
+                        created_at,
+                        updated_at,
+                    },
+                    created_at_key,
+                ))
             })
             .collect::<Result<Vec<_>, AgentRunStoreError>>()?;
-        Ok(AgentRunHistoryPage {
-            items,
-            page,
-            page_size,
-            has_more,
-        })
+        let next_cursor = if has_more {
+            let (last, created_at) = decoded.last().ok_or(AgentRunStoreError::InvalidContract)?;
+            Some(encode_history_cursor(
+                &AgentHistoryCursor {
+                    version: AGENT_HISTORY_CURSOR_VERSION,
+                    key_id: cursor_key_id("agent", self.cursor_signing_key_current.as_slice()),
+                    project_id,
+                    states,
+                    snapshot_at,
+                    created_at: *created_at,
+                    run_id: last.id,
+                },
+                self.cursor_signing_key_current.as_slice(),
+            )?)
+        } else {
+            None
+        };
+        let items = decoded.drain(..).map(|(item, _)| item).collect();
+        Ok(AgentRunHistoryPage { items, next_cursor })
     }
 
     /// Applies one exact Control-issued Work preauthorization and queues the existing generated
@@ -4420,6 +4625,8 @@ pub enum AgentRunStoreError {
     /// The caller's course authority does not own the target run.
     #[error("LW_AUTH_COURSE_SCOPE_DENIED: AgentRun course authority does not match")]
     CourseMismatch,
+    #[error("LW_AGENT_RUN_HISTORY_CURSOR_INVALID")]
+    InvalidHistoryCursor,
     /// Request, package, policy or input identity differs.
     #[error("LW_LLM_POLICY_REVISION_MISMATCH: AgentRun immutable identity does not match")]
     IdentityMismatch,
@@ -4461,7 +4668,7 @@ impl AgentRunStoreError {
             | Self::StateConflict
             | Self::RunNotFound => diagnostic::CONFLICT,
             Self::IdempotencyConflict => diagnostic::IDEMPOTENCY_CONFLICT,
-            Self::WorkerIdentityInvalid => diagnostic::INVALID_REQUEST,
+            Self::WorkerIdentityInvalid | Self::InvalidHistoryCursor => diagnostic::INVALID_REQUEST,
             Self::InvalidContract => diagnostic::CONTRACT_DOCUMENT_INVALID,
             Self::PersistenceFailed => diagnostic::DATABASE_FAILED,
         }

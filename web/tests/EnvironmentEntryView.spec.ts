@@ -273,7 +273,7 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
-    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
     vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['xterm']), error: undefined as never } as never)
     vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue({
@@ -459,13 +459,12 @@ describe('EnvironmentEntryView', () => {
         error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
       } as never)
       vi.mocked(listProjectResourceRequests).mockResolvedValue({
-        data: [{
+        data: { items: [{
           id: 'request-1',
           projectId: 'project-1',
           target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
           state: 'active',
-        }],
-        error: undefined as never,
+        }], nextCursor: null },
       } as never)
       vi.mocked(listProjectResourceLeases).mockResolvedValue({
         data: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }],
@@ -504,7 +503,7 @@ describe('EnvironmentEntryView', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
     expect(wrapper.text()).not.toContain('环境正在准备')
-    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
     expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
     expect(getEnvironment).toHaveBeenCalledTimes(1)
   })
@@ -515,13 +514,12 @@ describe('EnvironmentEntryView', () => {
       error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境不存在', retryable: true },
     } as never)
     vi.mocked(listProjectResourceRequests).mockResolvedValue({
-      data: [{
+      data: { items: [{
         id: 'request-other-project',
         projectId: 'project-2',
         target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
         state: 'active',
-      }],
-      error: undefined as never,
+      }], nextCursor: null },
     } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({
       data: [{ id: 'lease-other-project', requestId: 'request-other-project', state: 'active' }],
@@ -545,14 +543,13 @@ describe('EnvironmentEntryView', () => {
       error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
     } as never)
     vi.mocked(listProjectResourceRequests).mockResolvedValue({
-      data: [{
+      data: { items: [{
         id: 'request-1',
         projectId: 'project-1',
         diagnosticCode: 'LW_ENVIRONMENT_CREATE_AGGREGATE_INVALID',
         target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
         state: 'rejected',
-      }],
-      error: undefined as never,
+      }], nextCursor: null },
     } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
     const { wrapper } = await mountAt(
@@ -574,13 +571,12 @@ describe('EnvironmentEntryView', () => {
       error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
     } as never)
     vi.mocked(listProjectResourceRequests).mockResolvedValue({
-      data: [{
+      data: { items: [{
         id: 'request-1',
         projectId: 'project-1',
         target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
         state: 'active',
-      }],
-      error: undefined as never,
+      }], nextCursor: null },
     } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({
       data: [{ id: 'lease-1', requestId: 'request-1', state: 'revoked', revokeReasonCode: 'task_owner_release' }],

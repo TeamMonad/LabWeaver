@@ -24,9 +24,7 @@ describe('ProjectAgentRunHistory', () => {
           createdAt: '2026-07-11T00:00:00.000Z',
           updatedAt: '2026-07-11T00:01:00.000Z',
         }],
-        page: 1,
-        pageSize: 100,
-        hasMore: true,
+        nextCursor: 'cursor-next',
       } as never,
       error: undefined as never,
     })
@@ -43,7 +41,7 @@ describe('ProjectAgentRunHistory', () => {
 
   it('keeps a last empty page scoped to the page when an earlier page can contain tasks', async () => {
     vi.mocked(listProjectAgentRuns).mockResolvedValue({
-      data: { items: [], page: 2, pageSize: 100, hasMore: false } as never,
+      data: { items: [], nextCursor: null } as never,
       error: undefined as never,
     })
 
@@ -52,8 +50,8 @@ describe('ProjectAgentRunHistory', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('.history-empty').text()).toBe('本页没有可恢复的实验任务。')
-    expect(wrapper.text()).not.toContain('当前项目还没有可恢复的实验任务')
+    expect(wrapper.get('.history-empty').text()).toBe('当前项目还没有可恢复的实验任务。')
+    expect(wrapper.text()).not.toContain('本页没有可恢复的实验任务')
     wrapper.unmount()
   })
 
@@ -68,9 +66,7 @@ describe('ProjectAgentRunHistory', () => {
           createdAt: '2026-07-11T00:00:00.000Z',
           updatedAt: '2026-07-11T00:01:00.000Z',
         }],
-        page: 1,
-        pageSize: 100,
-        hasMore: false,
+        nextCursor: null,
       } as never,
       error: undefined as never,
     })
