@@ -1,7 +1,9 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
+import { actorIdFromProfile } from '@/utils/navigation'
+import { syncTrackedSubmissionOwner } from '@/utils/trackedSubmissions'
 
 interface BffUser {
   expired: boolean
@@ -24,6 +26,13 @@ const userManager = API_AUTH_MODE === 'bearer' && DIRECT_OIDC_ENABLED
 const user = ref<CurrentUser | null>(null)
 const isLoading = ref(false)
 const error = ref<Error | null>(null)
+
+// Browser-local data belongs to one actor: signing in as someone else, signing
+// out or losing the session discards what the previous actor left behind. The
+// initial unauthenticated state (before the session is read) is not a sign-out.
+watch(() => actorIdFromProfile(user.value?.profile), (actorId, previous) => {
+  if (actorId || previous) syncTrackedSubmissionOwner(actorId)
+}, { flush: 'sync' })
 type TopLevelNavigate = (url: string) => void
 
 const navigateTopLevel: TopLevelNavigate = (url) => {

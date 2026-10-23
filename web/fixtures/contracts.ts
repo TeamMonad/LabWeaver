@@ -26,6 +26,9 @@ import type {
   ResourceRequestSchema,
   ResourceRequestState,
   SshPublicKeySchema,
+  FrozenSubmissionSchema,
+  StudentEvaluationResultSchema,
+  EvaluationRunTaskProgressSchema,
   WorkloadResources,
 } from '../src/generated/contracts/types.gen'
 
@@ -735,7 +738,84 @@ export async function createSshPublicKey() { return unsupportedResponse('添加 
 export async function deleteSshPublicKey() { return unsupportedResponse('删除 SSH 公钥') }
 export async function listEnvironmentAccessGrantsForFixture() { return fixtureResponse({ items: [] }) }
 export async function freezeSubmission() { return unsupportedResponse('冻结提交') }
-export async function getFrozenSubmission(): Promise<FixtureError> { return unsupportedResponse('读取冻结提交') }
+const EVALUATION_SCENES = new Set(['student-results', 'student-result-score', 'student-result-zero', 'student-result-platform', 'student-result-running'])
+
+function frozenSubmissionFixture(id: string, frozenAt: string): FrozenSubmissionSchema {
+  return {
+    id,
+    projectId: fixtureProjectId,
+    courseId: 'course-physics-2026',
+    actorId: 'fixture-student',
+    agentRunId: 'agent-run-materials-03',
+    attempt: 1,
+    contentSha256: 'f'.repeat(64),
+    environment: { environmentId: 'env-physics-ready', environmentRevision: 12, releaseId: release.id, releaseVersion: release.version, runtimeKind: 'container' },
+    files: [],
+    frozenAt,
+    manifestRevision: 1,
+    object: { bucket: 'submissions', key: `${id}.tar`, objectVersion: 'v1', mediaType: 'application/x-tar', sizeBytes: 20480, sha256: 'f'.repeat(64) },
+    retention: { class: 'submission', disposition: 'delete', policyId: 'policy-submission', policyRevision: 1, retainUntil: later },
+    systemFacts: {},
+  } as unknown as FrozenSubmissionSchema
+}
+
+const frozenSubmissionFixtures: Record<string, string> = {
+  'submission-score': '2026-09-14T09:10:00.000Z',
+  'submission-zero': '2026-09-14T08:40:00.000Z',
+  'submission-platform': '2026-09-14T08:20:00.000Z',
+  'submission-cancelled': '2026-09-13T15:00:00.000Z',
+  'submission-pending': '2026-09-14T09:30:00.000Z',
+}
+
+function evaluationResultFixtures(): StudentEvaluationResultSchema[] {
+  const base = { projectId: fixtureProjectId, courseId: 'course-physics-2026', releaseId: 'evaluation-release-quantum', revision: 3, maxScore: 100, createdAt: now, updatedAt: later }
+  return [
+    {
+      ...base, runId: 'evaluation-run-score', frozenSubmissionId: 'submission-score', state: 'succeeded', awardedScore: 86, completedAt: '2026-09-14T09:14:00.000Z',
+      steps: [
+        { position: 0, role: 'gate', state: 'succeeded', maxScore: 0, awardedScore: 0, diagnosticCode: 'LW_OJ_ACCEPTED' },
+        { position: 1, role: 'score', state: 'succeeded', maxScore: 100, awardedScore: 86, diagnosticCode: 'LW_OJ_WRONG_ANSWER' },
+        {
+          position: 2, role: 'advisory', state: 'succeeded', maxScore: 0,
+          review: {
+            schema_version: 'goal-review/v1', assessment: 'partially_met', confidence: 0.72, requires_teacher_attention: false,
+            findings: [
+              { criterion: '能量本征值求解', result: 'met', suggestion: '数值求解与解析结果一致。', evidence: [{ path: 'solver/eigen.py', start_line: 12, end_line: 40 }] },
+              { criterion: '边界条件说明', result: 'partial', suggestion: '补充周期性边界条件的推导过程。', evidence: [{ path: 'report.md', start_line: 3, end_line: 18 }] },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      ...base, runId: 'evaluation-run-zero', frozenSubmissionId: 'submission-zero', state: 'succeeded', awardedScore: 0, completedAt: '2026-09-14T08:43:00.000Z',
+      steps: [
+        { position: 0, role: 'gate', state: 'failed', maxScore: 0, awardedScore: 0, diagnosticCode: 'LW_OJ_COMPILE_ERROR' },
+        { position: 1, role: 'score', state: 'skipped', maxScore: 100, awardedScore: 0 },
+      ],
+    },
+    {
+      ...base, runId: 'evaluation-run-platform', frozenSubmissionId: 'submission-platform', state: 'failed', awardedScore: null, completedAt: '2026-09-14T08:31:00.000Z', diagnosticCode: 'LW_OJ_INFRASTRUCTURE_ERROR',
+      steps: [
+        { position: 0, role: 'gate', state: 'succeeded', maxScore: 0, awardedScore: 0, diagnosticCode: 'LW_OJ_ACCEPTED' },
+        { position: 1, role: 'score', state: 'failed', maxScore: 100, diagnosticCode: 'LW_OJ_INFRASTRUCTURE_ERROR' },
+      ],
+    },
+    {
+      ...base, runId: 'evaluation-run-cancelled', frozenSubmissionId: 'submission-cancelled', state: 'cancelled', awardedScore: null, completedAt: '2026-09-13T15:05:00.000Z', diagnosticCode: 'LW_EVALUATION_CANCELLED',
+      steps: [{ position: 0, role: 'gate', state: 'cancelled', maxScore: 0 }],
+    },
+  ] as StudentEvaluationResultSchema[]
+}
+
+export async function getFrozenSubmission(options?: FixtureOptions): Promise<FixtureResult<FrozenSubmissionSchema>> {
+  const submissionId = options?.path?.submissionId
+  const frozenAt = submissionId ? frozenSubmissionFixtures[submissionId] : undefined
+  if (!EVALUATION_SCENES.has(activeScene.value.id) || !submissionId || !frozenAt || options?.path?.projectId !== fixtureProjectId) {
+    return notFoundResponse('读取冻结提交', submissionId)
+  }
+  return fixtureResponse(frozenSubmissionFixture(submissionId, frozenAt))
+}
 
 export async function listPlatformImages(): Promise<FixtureResult<PlatformImageCatalogViewSchema>> {
   return fixtureResponse(platformImageCatalog)
@@ -767,8 +847,62 @@ export async function getActiveProjectLlmPolicy(_options?: unknown): Promise<Fix
   return unsupportedResponse('读取项目 AI 设置')
 }
 export async function withdrawEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('撤回环境模板版本') }
-export async function getOwnProjectEvaluationResult(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取评测结果') }
-export async function listOwnProjectEvaluationResults(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取评测结果列表') }
+export async function getOwnProjectEvaluationResult(options?: FixtureOptions): Promise<FixtureResult<StudentEvaluationResultSchema>> {
+  const runId = options?.path?.runId
+  const inScene = EVALUATION_SCENES.has(activeScene.value.id) && options?.path?.projectId === fixtureProjectId
+  // A run without a terminal result answers like the real service: 404 / LW_EVALUATION_RUN_NOT_FOUND.
+  if (inScene && runId === runningEvaluationRunId) return evaluationRunNotFound(runId)
+  const result = inScene ? evaluationResultFixtures().find((item) => item.runId === runId) : undefined
+  return result ? fixtureResponse(result) : notFoundResponse('读取评测结果', runId)
+}
+export async function listOwnProjectEvaluationResults(options?: FixtureOptions): Promise<FixtureResult<{ items: StudentEvaluationResultSchema[]; nextCursor: null }>> {
+  if (options?.path?.projectId !== fixtureProjectId) return notFoundResponse('读取评测结果列表', options?.path?.projectId)
+  return fixtureResponse({ items: EVALUATION_SCENES.has(activeScene.value.id) ? evaluationResultFixtures() : [], nextCursor: null })
+}
+
+const runningEvaluationRunId = 'evaluation-run-pending'
+
+function evaluationRunNotFound(runId: string): Promise<FixtureError> {
+  return Promise.resolve({
+    data: undefined,
+    error: {
+      type: 'about:blank', title: '评测不存在或尚未结束', status: 404, detail: 'Evaluation run has no terminal result.',
+      instance: `/fixture-preview/evaluation-runs/${runId}`, requestId: 'fixture-evaluation-run-not-found', diagnosticCode: 'LW_EVALUATION_RUN_NOT_FOUND', retryable: false,
+    } satisfies ProblemDetails,
+  })
+}
+
+/** A retried step waiting for resource approval; the first attempt failed on the platform side. */
+function runningEvaluationProgress(): EvaluationRunTaskProgressSchema {
+  return {
+    runId: runningEvaluationRunId, projectId: fixtureProjectId, revision: 5, state: 'running', page: 1, pageSize: 20, hasMore: false,
+    current: [
+      { stepRunId: 'evaluation-step-gate', progress: { attempt: 1, executionGeneration: 1, taskRunId: 'task-run-gate-1', phase: 'succeeded', diagnosticCode: 'LW_OJ_ACCEPTED', nextSteps: [] } },
+      {
+        stepRunId: 'evaluation-step-score',
+        progress: { attempt: 2, taskRunId: 'task-run-score-2', phase: 'waiting_resource_approval', resourceRequestId: 'resource-request-eval-2', resourceState: 'reviewing', nextSteps: ['getOwnProjectEvaluationTaskProgress'] },
+      },
+    ],
+    history: [
+      { stepRunId: 'evaluation-step-score', progress: { attempt: 1, executionGeneration: 1, taskRunId: 'task-run-score-1', phase: 'failed', diagnosticCode: 'LW_OJ_JOB_FAILED', nextSteps: [] } },
+    ],
+  }
+}
+
+export async function getOwnProjectEvaluationTaskProgress(options?: FixtureOptions): Promise<FixtureResult<EvaluationRunTaskProgressSchema>> {
+  const runId = options?.path?.runId
+  if (!EVALUATION_SCENES.has(activeScene.value.id) || options?.path?.projectId !== fixtureProjectId || runId !== runningEvaluationRunId) {
+    return notFoundResponse('读取评测进度', runId)
+  }
+  return fixtureResponse(runningEvaluationProgress())
+}
+export async function getOwnProjectEvaluationTaskForSubmission(options?: FixtureOptions): Promise<FixtureResult<EvaluationRunTaskProgressSchema>> {
+  const submissionId = options?.path?.submissionId
+  if (!EVALUATION_SCENES.has(activeScene.value.id) || options?.path?.projectId !== fixtureProjectId || submissionId !== 'submission-pending') {
+    return notFoundResponse('读取提交的评测进度', submissionId)
+  }
+  return fixtureResponse(runningEvaluationProgress())
+}
 export async function cancelProjectAgentRun(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('取消项目任务') }
 export async function createProjectAgentRun(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('创建项目任务') }
 export async function createProjectWorkConfigurationRun(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('创建 Work 配置任务') }

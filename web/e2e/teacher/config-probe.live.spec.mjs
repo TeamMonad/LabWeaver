@@ -320,7 +320,7 @@ async function startStudentEnvironment(page, adminPage, projectId, releaseId, ac
 
 async function freezeReport(page, projectId, environment) {
   await page.goto(`/student/environments?projectId=${projectId}&environmentId=${environment.id}`, { waitUntil: 'domcontentloaded' })
-  await page.getByRole('button', { name: '实验提交与凭据', exact: true }).click()
+  await page.getByRole('tab', { name: '实验提交与凭据', exact: true }).click()
   const freeze = page.getByRole('button', { name: '发起冻结提交', exact: true })
   await expect(freeze).toBeEnabled({ timeout: 120_000 })
   await freeze.click()

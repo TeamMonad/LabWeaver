@@ -9,6 +9,8 @@ import type {
 } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { EnvironmentInstanceWithFreeze } from '@/types/access'
+import { useCurrentActorId } from '@/composables/useSubmissionDirectory'
+import { rememberSubmission } from '@/utils/trackedSubmissions'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 type InstanceState = { kind: string; data?: EnvironmentInstanceSchema }
@@ -33,6 +35,7 @@ interface FreezeAcceptance {
 /** Freeze-and-submit for one experiment environment. */
 export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
   const { env, operations, releases, selectedEnvironmentId, isWorkConnection } = deps
+  const actorId = useCurrentActorId()
 
   const freezeState = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
   const freezeDiagnostic = ref<DiagnosticViewModel | null>(null)
@@ -54,6 +57,8 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
     contentSha256: string
     frozenAt: string
   } | null>(null)
+  /** Bumped whenever a submission is remembered for progress tracking. */
+  const trackedSubmissionsVersion = ref(0)
 
   const freezeOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
     if (operations.operations.kind !== 'success') return null
@@ -211,6 +216,8 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
       contentSha256: frozenContentSha256 ?? '',
       frozenAt: frozenAt ?? '',
     }
+    rememberSubmission(actorId.value, data.projectId, submissionId)
+    trackedSubmissionsVersion.value += 1
     if (freezeAccepted.value?.operationId === result.data.operationId) freezeAccepted.value.state = 'succeeded'
     freezeIntentKey.value = null
     await env.load()
@@ -248,5 +255,6 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
     confirmFreeze,
     freezeEvidenceFor,
     retryFreeze,
+    trackedSubmissionsVersion,
   }
 }

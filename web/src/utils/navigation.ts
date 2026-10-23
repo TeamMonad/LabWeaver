@@ -349,6 +349,17 @@ export function rolesFromProfile(profile: unknown): PlatformRole[] {
   return normalizeRoles(claims.roles ?? claims.role)
 }
 
+/** The signed-in actor's identifier from an OIDC or BFF session profile. */
+export function actorIdFromProfile(profile: unknown): string | null {
+  if (!profile || typeof profile !== 'object') return null
+  const claims = profile as Record<string, unknown>
+  for (const key of ['actor_id', 'actorId', 'sub']) {
+    const value = claims[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
 export function hasAnyRole(roles: readonly PlatformRole[], allowedRoles: readonly PlatformRole[]): boolean {
   return allowedRoles.some((role) => roles.includes(role))
 }

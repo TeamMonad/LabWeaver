@@ -427,7 +427,7 @@ async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPat
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await page.getByRole('button', { name: '实验提交与凭据', exact: true }).click()
+  await page.getByRole('tab', { name: '实验提交与凭据', exact: true }).click()
   const startButton = page.getByRole('button', { name: '发起冻结提交', exact: true })
   await expect(startButton).toBeEnabled({ timeout: 120_000 })
   await startButton.click()

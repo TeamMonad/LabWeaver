@@ -178,6 +178,40 @@
                       />
                     </div>
 
+                    <section
+                      v-if="latestSubmission"
+                      class="submission-tracking"
+                      aria-labelledby="submission-tracking-heading"
+                      data-testid="submission-tracking"
+                    >
+                      <div class="submission-tracking__head">
+                        <h5 id="submission-tracking-heading">
+                          最近一次提交
+                        </h5>
+                        <RouterLink
+                          class="submission-tracking__link"
+                          :to="latestLink"
+                        >
+                          {{ latestRunId ? '查看评测详情' : '在评测结果中查看' }}
+                        </RouterLink>
+                      </div>
+                      <p
+                        class="submission-tracking__summary"
+                        role="status"
+                      >
+                        {{ latestSummary }}
+                      </p>
+                      <DiagnosticBanner
+                        v-if="latestResultFailure"
+                        :diagnostic="latestResultFailure"
+                        severity="error"
+                        data-testid="submission-result-failure"
+                        @retry="latestResultState.load()"
+                      />
+                      <SubmissionProgress :stages="latestStages" />
+                      <SubmissionTaskNotes :record="latestTask" />
+                    </section>
+
                     <div
                       v-if="freezeEvidenceFor(data)"
                       class="evidence-card"
@@ -211,13 +245,24 @@
 </template>
 
 <script setup lang="ts">
+import { computed, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import SubmissionProgress from '@/components/evaluation/SubmissionProgress.vue'
+import SubmissionTaskNotes from '@/components/evaluation/SubmissionTaskNotes.vue'
 import type { EnvironmentInstanceSchema } from '@/generated/contracts'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
+import { useSubmissionTasks } from '@/composables/useEvaluationTasks'
+import { useEvaluationResult } from '@/composables/useEvaluationResults'
+import { useSubmissionDirectory } from '@/composables/useSubmissionDirectory'
+import { useVisiblePolling } from '@/composables/useVisiblePolling'
 import { freezeStatusDescription, freezeStatusLabel, manifestRuleLabel } from '@/utils/environmentLifecycle'
+import { evaluationOutcome } from '@/utils/evaluationOutcome'
+import { isTerminalRun, readEvaluationTask, submissionStages } from '@/utils/evaluationProgress'
+import { formatTimestamp } from '@/utils/format'
 
-/** 实验提交与凭据：确认清单后冻结提交，并显示提交凭据。 */
-defineProps<{ data: EnvironmentInstanceSchema }>()
+/** 实验提交与凭据：确认清单后冻结提交，显示提交凭据和最近一次提交的评测进度。 */
+const props = defineProps<{ data: EnvironmentInstanceSchema }>()
 
 const {
   freezeState,
@@ -232,7 +277,77 @@ const {
   confirmFreeze,
   freezeEvidenceFor,
   retryFreeze,
+  trackedSubmissionsVersion,
 } = useEnvironmentEntryContext()
+
+// Submission progress: the browser remembers only submission identifiers for
+// the signed-in actor. The latest one is shown after the server returns it to
+// this actor and names this environment as its source; every stage comes from
+// the server.
+const projectId = computed(() => props.data.projectId)
+const submissionDirectory = useSubmissionDirectory(projectId)
+watch(trackedSubmissionsVersion, () => submissionDirectory.reload())
+watch(() => submissionDirectory.tracked, (ids) => { void submissionDirectory.resolve(ids) }, { immediate: true })
+const latestSubmission = computed(() => {
+  for (const submissionId of submissionDirectory.tracked) {
+    const record = submissionDirectory.records[submissionId]
+    if (record?.kind === 'ready' && record.environmentId === props.data.id) return { submissionId, frozenAt: record.frozenAt }
+  }
+  return null
+})
+const trackingProjectId = computed(() => latestSubmission.value ? props.data.projectId : undefined)
+const submissionTasks = useSubmissionTasks(trackingProjectId)
+const latestTask = computed(() => latestSubmission.value ? submissionTasks.records[latestSubmission.value.submissionId] ?? null : null)
+const latestProgress = computed(() => latestTask.value?.fact.kind === 'progress' ? latestTask.value.fact.progress : null)
+const latestRunId = computed(() => latestProgress.value?.runId)
+const latestEnded = computed(() => Boolean(latestProgress.value && isTerminalRun(latestProgress.value)))
+// The result is read once the server reports the run as ended.
+const latestResultState = useEvaluationResult(trackingProjectId, computed(() => latestEnded.value ? latestRunId.value : undefined))
+const latestResult = computed(() => latestEnded.value && latestResultState.result.kind === 'success' ? latestResultState.result.data : null)
+// A result read that another read cannot fix (403, a non-retryable server
+// answer, another run's data) ends the wait and is explained instead.
+const latestResultFailure = computed(() => {
+  const state = latestResultState.result
+  return latestEnded.value && latestResultState.failureFinal && 'diagnostic' in state ? state.diagnostic : null
+})
+const latestSummary = computed(() => {
+  if (latestResult.value) return evaluationOutcome(latestResult.value).summary
+  const fact = latestTask.value?.fact
+  if (latestResultFailure.value) return '评测已结束，但无法读取结果，页面已停止自动更新。'
+  if (latestEnded.value) return '评测已结束，正在读取结果。页面会自动更新。'
+  if (fact?.kind === 'progress') return `${readEvaluationTask(fact.progress).detail}离开后回到这里或“评测结果”页也能看到这次提交。`
+  if (fact?.kind === 'not-created') return '提交已保存，平台还没有为它创建评测。页面会自动更新。'
+  return '提交已保存，正在读取评测进度。页面会自动更新，离开后回到这里或“评测结果”页也能看到这次提交。'
+})
+const latestStages = computed(() => submissionStages({
+  frozenAt: latestSubmission.value?.frozenAt ?? null,
+  task: latestTask.value?.fact,
+  result: latestResult.value,
+  resultUnreadable: latestResultFailure.value !== null,
+}, formatTimestamp))
+const latestLink = computed(() => {
+  const submissionId = latestSubmission.value?.submissionId
+  return latestRunId.value
+    ? { path: `/student/results/${latestRunId.value}`, query: { projectId: projectId.value, submissionId } }
+    : { path: '/student/results', query: { projectId: projectId.value, submissionId } }
+})
+// Watch the project too, so the first read happens after the per-project
+// stores have reset for the newly tracked project.
+watch([() => latestSubmission.value?.submissionId, trackingProjectId], ([submissionId, project]) => {
+  if (!submissionId || !project) return
+  void submissionTasks.refresh([submissionId])
+}, { immediate: true })
+// Until the result is readable: progress while the run is open; after it
+// ended, the result itself, which may become visible a little later (404) or
+// fail once in a retryable way. A final failure stops the reads.
+useVisiblePolling(
+  () => {
+    const submission = latestSubmission.value
+    if (!submission) return undefined
+    return latestEnded.value ? latestResultState.load({ quiet: true }) : submissionTasks.refresh([submission.submissionId])
+  },
+  computed(() => Boolean(latestSubmission.value) && !latestResult.value && !latestResultFailure.value),
+)
 </script>
 
 <style scoped>
@@ -411,5 +526,39 @@ const {
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
+}
+
+.submission-tracking {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+}
+
+.submission-tracking__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+
+.submission-tracking__head h5 {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-small);
+}
+
+.submission-tracking__summary {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-body-medium);
+}
+
+.submission-tracking__link {
+  color: var(--md-sys-color-primary);
+  font: var(--md-sys-label-large);
 }
 </style>

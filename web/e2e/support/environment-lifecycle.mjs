@@ -64,7 +64,7 @@ async function waitForSettledEnvironment(page, routePrefix, projectId, environme
   // already requested; otherwise observe the operation until it settles.
   if (cancelActive && current.desiredState !== 'deleted') {
     await openEnvironmentPage(page, routePrefix, projectId, environmentId)
-    const operationsTab = page.getByRole('button', { name: '异步操作与诊断', exact: true })
+    const operationsTab = page.getByRole('tab', { name: '异步操作与诊断', exact: true })
     await expect(operationsTab).toBeVisible({ timeout: PAGE_TIMEOUT_MS })
     await operationsTab.click()
     const cancelButton = page.getByRole('button', { name: '取消操作', exact: true })
