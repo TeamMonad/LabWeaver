@@ -99,13 +99,17 @@ GPU 00000000:01:00.0
     expect(() => parseRealWorkVmLicenseStatus(output)).toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')
   })
 
+  // The helper polls with expect.poll, whose own timeout is wall-clock. These
+  // tests drive the deadline through the injected clock and keep the wall-clock
+  // bound far away, so a loaded machine cannot end the wait before the retry.
   it('retries an explicit unlicensed result until the same guest becomes licensed', async () => {
     const unlicensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        License Status : Unlicensed\n'
     const licensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        Product Name : NVIDIA RTX vWS\n        License Status : Licensed (Expiry: Never)\n'
     const calls = []
     const result = await readRealWorkVmLicenseStatus({}, {}, {
-      deadlineMs: 100,
+      deadlineMs: 60_000,
       retryDelayMs: 1,
+      now: () => 0,
       runSsh: async (...args) => {
         calls.push(args)
         return calls.length === 1 ? unlicensed : licensed
@@ -114,7 +118,7 @@ GPU 00000000:01:00.0
     expect(result).toMatchObject({ licenseStatus: 'Licensed', driverVersion: '580.159.03' })
     expect(calls).toHaveLength(2)
     expect(calls.every(([, , command]) => command === 'nvidia-smi -q')).toBe(true)
-    expect(calls.every(([, , , , options]) => options.timeoutMs <= 100)).toBe(true)
+    expect(calls.map(([, , , , options]) => options.timeoutMs)).toEqual([60_000, 60_000])
   })
 
   it('keeps the last license status when the bounded wait expires', async () => {
@@ -122,17 +126,18 @@ GPU 00000000:01:00.0
     const calls = []
     const unlicensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        License Status : Unlicensed\n'
     await expect(readRealWorkVmLicenseStatus({}, {}, {
-      deadlineMs: 50,
-      retryDelayMs: 10,
+      deadlineMs: 60_000,
+      retryDelayMs: 1,
       now: () => clock,
       runSsh: async (...args) => {
         calls.push(args)
-        clock += 3
+        clock += 20_000
         return unlicensed
       },
     })).rejects.toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')
     expect(calls.every(([, , command]) => command === 'nvidia-smi -q')).toBe(true)
-    expect(calls.every(([, , , , options]) => options.timeoutMs <= 50)).toBe(true)
+    // Each attempt only gets the time left before the deadline, and none starts after it.
+    expect(calls.map(([, , , , options]) => options.timeoutMs)).toEqual([60_000, 40_000, 20_000])
   })
 
   it('keeps the last license status when the final gateway scan reaches the deadline', async () => {
@@ -140,16 +145,16 @@ GPU 00000000:01:00.0
     const calls = []
     const unlicensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        License Status : Unlicensed\n'
     await expect(readRealWorkVmLicenseStatus({}, {}, {
-      deadlineMs: 50,
+      deadlineMs: 60_000,
       retryDelayMs: 1,
       now: () => clock,
       runSsh: async (...args) => {
         calls.push(args)
         if (calls.length === 1) {
-          clock = 49
+          clock = 59_999
           return unlicensed
         }
-        clock = 50
+        clock = 60_000
         throw new Error('WORK_SSH_GATEWAY_SCAN_TIMEOUT')
       },
     })).rejects.toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')

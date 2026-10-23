@@ -3,6 +3,11 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
 import { createMemoryHistory, createRouter, type RouteRecordRaw } from 'vue-router'
+// Each test re-imports the shell after vi.resetModules() so module-level
+// project state starts fresh. Loading the graph once here moves the cold
+// transform of the shell and its layout components into file collection,
+// which has no per-test timeout; the per-test re-import only re-evaluates.
+import '@/components/layout/AppShell.vue'
 
 const listProjects = vi.hoisted(() => vi.fn())
 const getProject = vi.hoisted(() => vi.fn())
