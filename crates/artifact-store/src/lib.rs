@@ -210,11 +210,11 @@ pub trait ImmutableObjectStore: Send + Sync {
     /// Reissues exact-length upload authority without extending the session deadline.
     async fn presign_upload_exact_until(
         &self,
-        key: &str,
-        size_bytes: u64,
-        media_type: &str,
-        now: UtcTimestamp,
-        expires_at: UtcTimestamp,
+        _key: &str,
+        _size_bytes: u64,
+        _media_type: &str,
+        _now: UtcTimestamp,
+        _expires_at: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError> {
         Err(ObjectStoreError::ConfigurationInvalid)
     }
