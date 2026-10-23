@@ -3170,11 +3170,13 @@ def make_app_input(
             # the provider endpoint is never inserted into sandbox egress.
             object_store_port = local_object_store_port(data)
             gateway_port = 9460
-            egress_pattern = re.compile(r'(?m)^([?25l\s*allowed_egress:[?25h\s*)\[[^\]]*\]$')
+            egress_pattern = re.compile(r"(?m)^[ \t]*allowed_egress:[^\r\n]*$")
             data, replacements = egress_pattern.subn(
-                rf'\g<1>["{service_cidr}:{object_store_port}", '
-                rf'"{pod_cidr}:{object_store_port}", '
-                rf'"{service_cidr}:{gateway_port}"]',
+                lambda match: (
+                    re.match(r"^[ \t]*", match.group(0)).group(0)
+                    + f'allowed_egress: ["{service_cidr}:{object_store_port}", '
+                    + f'"{pod_cidr}:{object_store_port}", "{service_cidr}:{gateway_port}"]'
+                ),
                 data,
                 count=1,
             )

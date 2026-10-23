@@ -1897,11 +1897,8 @@ class LocalDevBundleTests(unittest.TestCase):
                 if document["kind"] == "ConfigMap"
                 and document["metadata"]["name"] == "agent-service-config"
             )
-            self.assertEqual(
-                agent_config["data"]["anthropic-base-url"],
-                "https://provider.example.test/anthropic\n",
-            )
             self.assertEqual(agent_config["data"]["anthropic-model"], "test-model\n")
+            self.assertNotIn("anthropic-base-url", agent_config["data"])
             agent_secret = next(
                 document
                 for document in platform_documents
@@ -1909,8 +1906,16 @@ class LocalDevBundleTests(unittest.TestCase):
                 and document["metadata"]["name"] == "agent-service-secrets"
             )
             self.assertEqual(
-                base64.b64decode(agent_secret["data"]["anthropic-auth-token"]),
+                base64.b64decode(agent_secret["data"]["model-gateway-upstream-url"]),
+                b"https://provider.example.test/anthropic",
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["model-gateway-upstream-key"]),
                 b"test-provider-token",
+            )
+            self.assertEqual(
+                len(base64.b64decode(agent_secret["data"]["model-gateway-signing-key"])),
+                32,
             )
             self.assertNotIn("test-provider-token", bundle.read_text(encoding="utf-8"))
             control_values = yaml.safe_load(control_config["data"]["config.yaml"])
