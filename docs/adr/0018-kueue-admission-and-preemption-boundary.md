@@ -76,11 +76,18 @@ VM 继续由 Resource 做商业准入、预留/lease、费用、召回和 fencin
 | --- | --- | --- |
 | ① 独立 VM 资源池 | VM 节点使用 `labweaver.io/runtime=vm` taint/node pool；Kueue ResourceFlavor 使用显式 `nodeSelector` 排除该池；Resource VM provider 只选择 VM 池。CPU、独占 GPU、MIG、时间片和 vGPU 均不得跨池借用。 | 已评估但未采用；保留为故障隔离方案。 |
 | ② VM 级 Kueue adapter | 新 adapter 以 VM 为原子 PodSet/Workload 参加 Kueue admission，并成为 VM Workload 的唯一 writer。 | 已评估但未采用；需要新增 controller/CRD。 |
-| ③ Resource-only VM + 共享 reservation projection | Resource 在同一持久 reservation/fencing 事务中扣除 VM 实际 CPU/GPU/MIG/vGPU 后，只把剩余容量投影到 Kueue ResourceFlavor；每个投影绑定 reservation ID、设备 profile、节点拓扑和 revision。 | **用户选择；#212 实现。**
+| ③ Resource-only VM + 共享 reservation projection | Resource 通过两阶段协议：先在数据库事务中建立 pending reservation/fence，再由 projection controller 使用 usage revision 和 ClusterQueue CAS 完成投影；成功后 Resource 激活 reservation。每个投影绑定 reservation ID、设备 profile、节点拓扑和 revision。 | **用户选择；#212 实现。** |
 
-用户已选择 **③ Resource-only VM + 共享 reservation projection**。Resource 仍是 VM 商业准入唯一权威；VM 不创建 Kueue Workload。统一容量投影的数据流是：Resource 在提交 VM reservation 的同一个持久事务中锁定 `(provider_binding, reservation_id, lease_revision, environment_generation, node/topology, device_profile)`，读取并锁定该 flavor 当前已准入 Kueue Workload 的 usage snapshot/revision（包括正在运行的 PodSet 资源），计算扣除 VM 已批准 CPU/GPU/MIG/vGPU 后的剩余量；projection controller 仅以同一 reservation ID/revision CAS 更新 ClusterQueue quota 快照，并记录投影版本。Resource reservation commit 只有在“已准入 usage + 新 VM reservation <= 受管物理容量”不变量成立时才允许提交；容量不足时拒绝 VM reservation，或先走受支持的 Kueue eviction/requeue、Environment fencing 和确认释放，再重新尝试。最终一致的 quota 对账不能替代该提交前锁定。
+用户已选择 **③ Resource-only VM + 共享 reservation projection**。Resource 仍是 VM 商业准入唯一权威；VM 不创建 Kueue Workload。该方案禁止把 PostgreSQL 事务延伸到 Kubernetes API 调用，采用两阶段协议：
 
-投影必须满足：资源名、数量、设备 profile、拓扑约束、可借用期限和 reservation revision 一一对应；提交前读取/锁定的 admitted usage snapshot 发生 revision 变化、观察过期、VM fencing 未确认、投影更新失败或 Kueue status 与快照不一致时，projection 标记 stale 并 fail closed，不准入新 Work、不扩大 quota、不重新借出 allocation，直到 Resource 权威对账确认。对账按 reservation ID + revision + Kueue object UID CAS 更新；迟到的 Kueue admission/eviction 不得复活旧 generation。#212 实现该 projection interface、admitted-usage lock/CAS、eviction/requeue fallback 和 recovery；#213/#214 必须先提供 GPU profile/device-plugin/KubeVirt mdev 目录，全部模式通过真实设备验证后才能上线。
+1. **Phase 1 — Resource pending transaction**：projection controller 在事务外刷新并持久化当前 Kueue admitted-usage snapshot、`usage_revision` 和观察时间；Resource 开始数据库事务，锁定 Resource capacity/reservation 行以及该 usage snapshot 行，校验 snapshot 未过期、usage revision 与 projection intent 一致，并检查“已准入 usage + 新 VM reservation <= 受管物理容量”。通过后写入 `Pending` reservation、fence token、projection intent、expected usage revision 和 operation ID，然后提交数据库事务。该事务内不得调用 Kubernetes API。
+2. **Phase 2 — projection and activation**：projection controller 读取 Pending intent，在事务外通过 Kueue API 重新读取 admitted usage，并使用 `usage_revision`/对象 UID CAS 更新 ClusterQueue quota projection；成功结果持久化 projection UID/revision。Resource 随后以短数据库事务锁定 Pending reservation，验证 projection UID/revision、usage revision、fence token 和物理容量仍匹配，才将 reservation 激活。VM Environment 只有看到 Active reservation 才能启动。
+
+如果 Phase 1 容量不足，Resource 拒绝 VM reservation；如果 Phase 2 发现 admitted usage 增加、usage revision 改变、Kueue CAS 冲突或 fencing 未确认，Resource 不激活 Pending reservation，保持 `Pending/Stale`，不扩大 quota、不重新借出、不启动 VM；只有先完成受支持的 eviction/requeue、Environment fencing 和确认释放，才能创建新的 projection intent。已经准入的 Workload 不会因为 quota 快照更新自动消失。
+
+恢复步骤是：重试同一 operation/projection ID；重新读取 Kueue admitted usage 和 ClusterQueue 对象；若对象已按相同 UID/revision 更新则补写 activation，若 CAS 冲突则刷新 usage 并重新评估，若容量/fencing 仍不满足则保持 Stale 并拒绝新 reservation。任何中间失败都可恢复为 Pending/Stale，且不把最终一致对账当作防超卖保证。
+
+统一容量投影的数据不变量是：资源名、数量、设备 profile、拓扑约束、可借用期限和 reservation revision 一一对应；Resource 的 Active reservation 只能来自 Phase 1 的锁定 usage snapshot 和 Phase 2 的 Kueue CAS 成功。#212 实现该 pending/fence、admitted-usage snapshot lock、usage revision CAS、ClusterQueue projection、activation/recovery 接口；#213/#214 必须先提供 GPU profile/device-plugin/KubeVirt mdev 目录，全部模式通过真实设备验证后才能上线。
 
 KubeVirt 真实集群未在本次 Kind PoC 安装，故 VM 结论仍是设计边界而非运行通过。
 
@@ -194,7 +201,7 @@ KubeVirt 未安装：一节点 Kind 无虚拟化设备，且 Kueue v0.20.2 没�
 | --- | --- | --- |
 | 对象/字段唯一管理表和事件时序，覆盖容器、VM、一次性任务 | **完成（设计，实施归 #212）** | Kueue native integration 唯一拥有 Workload object/spec/status/UID；Environment/task-execution 拥有源 Pod/Job；Resource 保存 binding+source UID+Workload UID 关联和 CAS fence；VM 使用 Resource reservation projection。 |
 | 受支持接口证明暂停/准入/抢占不会被 Deployment/VMI 立即重建 | **容器原生 eviction 已完成；VM 未验证** | 可复现 PoC 证明 Kueue `LowerPriority` 立即 eviction，约 22 秒后 Pod 删除（20 秒 terminationGrace）；Deployment 创建的新 UID 保持 `SchedulingGated`，高优先级 Pod Running。ADR 已将语义定为 SIGTERM + 默认 30 秒 terminationGrace，不保证业务保存或进程内存；VMI 未安装/未验证。 |
-| 容器和 VM 使用同一商业准入规则；不篡改 virt-launcher | **设计完成；运行未验收** | Resource 是 VM/容器商业权威；VM 通过同一 reservation/fencing 事务投影 Kueue quota；GPU/MIG/vGPU 依赖 #213/#214，真实设备验证前禁止共享容量上线；无 virt-launcher 修改。 |
+| 容器和 VM 使用同一商业准入规则；不篡改 virt-launcher | **设计完成；运行未验收** | Resource 是 VM/容器商业权威；VM 通过 Phase 1 pending reservation/use snapshot lock 与 Phase 2 Kueue ClusterQueue CAS projection 共享容量不变量；GPU/MIG/vGPU 依赖 #213/#214，真实设备验证前禁止共享容量上线；无 virt-launcher 修改。
 | 依赖、限定版本和失败处理明确后进入 #212 | **设计完成；实现仍归 #212** | Kueue v0.20.2/v1beta2、Workload owner、统一 capacity projection、eviction-to-connect 5m、默认 30s termination grace、被动 UID/fencing 对账、退款与固定补偿 ledger 语义已明确；#212 仍需实现接口、CAS、对账、节点失联/fencing 和 native eviction integration。
 
 ## 替换和回滚
