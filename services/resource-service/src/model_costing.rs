@@ -3,15 +3,12 @@ use crate::{
     credits, pricing,
     store::{PgResourceStore, ResourceStoreError},
 };
-use contracts::{
-    ResourceRequestId,
-    resource::{
-        FixedDecimal, Money, ResourceBillingUnit, ResourceChargeLine,
-        credits::{CreditHold, CreditHoldRequest, CreditHoldResolutionRequest},
-        model_costing::{
-            ModelCostAdmission, ModelCostAdmissionRequest, ModelCostEstimate,
-            ModelCostEstimateRequest, ModelTokenQuantities, ModelUsageMeasurement,
-        },
+use contracts::resource::{
+    FixedDecimal, Money, ResourceBillingUnit, ResourceChargeLine,
+    credits::{CreditHold, CreditHoldResolutionRequest},
+    model_costing::{
+        ModelCostAdmission, ModelCostAdmissionRequest, ModelCostEstimate, ModelCostEstimateRequest,
+        ModelTokenQuantities, ModelUsageMeasurement,
     },
 };
 use sqlx::{Postgres, Row, Transaction};
@@ -95,7 +92,7 @@ async fn estimate_in_transaction(
         });
     }
     Ok(ModelCostEstimate {
-        request_id: input.request_id,
+        call_id: input.call_id,
         project_id,
         model_binding: input.model_binding.clone(),
         lines,
@@ -120,40 +117,42 @@ impl PgResourceStore {
         {
             return Ok(serde_json::from_value(replay)?);
         }
-        let row = sqlx::query(
-            "SELECT project_id FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE",
-        )
-        .bind(input.request_id.as_uuid())
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(ResourceStoreError::NotFound)?;
-        let project: contracts::ProjectId = row
-            .try_get::<uuid::Uuid, _>("project_id")?
-            .to_string()
-            .parse()
-            .map_err(|_| ResourceStoreError::ScopeConflict)?;
+        let project = input.project_id;
         let estimate = estimate_in_transaction(
             &mut tx,
             &ModelCostEstimateRequest {
-                request_id: input.request_id,
+                call_id: input.call_id,
+                project_id: project,
                 model_binding: input.model_binding.clone(),
                 quantities: ModelTokenQuantities::default(),
             },
             project,
         )
         .await?;
-        let hold = credits::hold_in_transaction(
+        let mut hold = credits::model_hold_in_transaction(
             &mut tx,
             key,
             owner,
-            &CreditHoldRequest {
-                project_id: project,
-                request_id: input.request_id,
-                business_key: "llm-usage".into(),
-                amount: estimate.max_preauthorization.clone(),
-            },
+            project,
+            input.call_id,
+            &estimate.max_preauthorization,
         )
         .await?;
+        hold.model_call_id = Some(input.call_id);
+        hold.model_rate_snapshot = Some(
+            estimate
+                .lines
+                .iter()
+                .map(
+                    |line| contracts::resource::model_costing::ModelRateSnapshot {
+                        unit: line.unit,
+                        rate_id: line.rate_id,
+                        rate_revision: line.rate_revision,
+                    },
+                )
+                .collect(),
+        );
+        sqlx::query("UPDATE resource.credit_holds SET model_call_id=$2,model_rate_snapshot=$3 WHERE hold_id=$1").bind(hold.id).bind(input.call_id).bind(serde_json::to_value(&hold.model_rate_snapshot)?).execute(&mut *tx).await?;
         credits::require_funded_in_transaction(
             &mut tx,
             owner,
@@ -167,11 +166,16 @@ impl PgResourceStore {
         Ok(result)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "model settlement carries the authenticated call and event fences"
+    )]
     pub async fn settle_model_cost(
         &self,
         key: &str,
         owner: &str,
         hold_id: uuid::Uuid,
+        call_id: uuid::Uuid,
         event_id: contracts::EventId,
         model_binding: &str,
         measurement: &ModelUsageMeasurement,
@@ -180,47 +184,61 @@ impl PgResourceStore {
         if let Some(replay) = credits::reserve(
             &mut tx,
             "model_cost_event",
-            &event_id.to_string(),
-            &(owner, hold_id, model_binding, measurement),
+            &format!("{call_id}:{event_id}"),
+            &(owner, hold_id, call_id, model_binding, measurement),
         )
         .await?
         {
             return Ok(serde_json::from_value(replay)?);
         }
-        let row =
-            sqlx::query("SELECT project_id,request_id FROM resource.credit_holds WHERE hold_id=$1")
-                .bind(hold_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let project: contracts::ProjectId = row
-            .try_get::<uuid::Uuid, _>("project_id")?
-            .to_string()
-            .parse()
-            .map_err(|_| ResourceStoreError::ScopeConflict)?;
-        let request_id: ResourceRequestId = row
-            .try_get::<uuid::Uuid, _>("request_id")?
-            .to_string()
-            .parse()
-            .map_err(|_| ResourceStoreError::ScopeConflict)?;
+        let row = sqlx::query("SELECT project_id,model_call_id,model_rate_snapshot FROM resource.credit_holds WHERE hold_id=$1")
+            .bind(hold_id).fetch_one(&mut *tx).await?;
+        let stored_call: Option<uuid::Uuid> = row.try_get("model_call_id")?;
+        if stored_call != Some(call_id) {
+            return Err(ResourceStoreError::ScopeConflict);
+        }
+        let snapshot: Vec<contracts::resource::model_costing::ModelRateSnapshot> =
+            serde_json::from_value(
+                row.try_get::<Option<serde_json::Value>, _>("model_rate_snapshot")?
+                    .ok_or(ResourceStoreError::RateUnconfigured)?,
+            )?;
         let resolution = match measurement {
             ModelUsageMeasurement::Unknown { reason } => CreditHoldResolutionRequest::Unknown {
                 event_id: Some(event_id),
                 reason: reason.clone(),
             },
-            ModelUsageMeasurement::Known { quantities } => {
-                let estimate = estimate_in_transaction(
-                    &mut tx,
-                    &ModelCostEstimateRequest {
-                        request_id,
-                        model_binding: model_binding.to_owned(),
-                        quantities: *quantities,
-                    },
-                    project,
-                )
-                .await?;
+            ModelUsageMeasurement::Known { quantities: usage } => {
+                let mut total = 0_i128;
+                for ((unit, _), quantity) in UNITS.into_iter().zip(quantities(usage)) {
+                    if quantity == 0 {
+                        continue;
+                    }
+                    let saved = snapshot
+                        .iter()
+                        .find(|entry| entry.unit == unit)
+                        .ok_or(ResourceStoreError::RateUnconfigured)?;
+                    let rate_row = sqlx::query("SELECT contract FROM resource.resource_rates WHERE rate_id=$1 AND model_binding=$2").bind(saved.rate_id.as_uuid()).bind(model_binding).fetch_one(&mut *tx).await?;
+                    let rate: contracts::resource::ResourceRate =
+                        serde_json::from_value(rate_row.try_get("contract")?)?;
+                    if rate.revision != saved.rate_revision {
+                        return Err(ResourceStoreError::RateSettledConflict);
+                    }
+                    total = total
+                        .checked_add(
+                            pricing::multiply_money(
+                                &rate.unit_price,
+                                quantity,
+                                rate.unit_quantity,
+                                1,
+                            )?
+                            .amount
+                            .scaled(),
+                        )
+                        .ok_or(ResourceStoreError::NumericOverflow)?;
+                }
                 CreditHoldResolutionRequest::Settle {
                     event_id,
-                    amount: estimate.total.amount,
+                    amount: FixedDecimal::from_scaled(total)?,
                     finalize: true,
                 }
             }

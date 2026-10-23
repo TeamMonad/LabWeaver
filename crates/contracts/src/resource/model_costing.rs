@@ -1,9 +1,10 @@
 //! Model token pricing, preauthorization, and settlement contracts.
 use super::credits::CreditHold;
 use super::{FixedDecimal, ResourceChargeLine};
-use crate::{EventId, ProjectId, ResourceRequestId};
+use crate::{EventId, ProjectId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -30,7 +31,9 @@ pub struct ModelRateSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCostEstimateRequest {
-    pub request_id: ResourceRequestId,
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub call_id: Uuid,
+    pub project_id: ProjectId,
     pub model_binding: String,
     pub quantities: ModelTokenQuantities,
 }
@@ -38,7 +41,8 @@ pub struct ModelCostEstimateRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCostEstimate {
-    pub request_id: ResourceRequestId,
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub call_id: Uuid,
     pub project_id: ProjectId,
     pub model_binding: String,
     pub lines: Vec<ResourceChargeLine>,
@@ -49,7 +53,9 @@ pub struct ModelCostEstimate {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCostAdmissionRequest {
-    pub request_id: ResourceRequestId,
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub call_id: Uuid,
+    pub project_id: ProjectId,
     pub model_binding: String,
 }
 
@@ -66,6 +72,8 @@ pub struct ModelCostSettlementRequest {
     pub hold_id: uuid::Uuid,
     pub event_id: EventId,
     pub model_binding: String,
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub call_id: Uuid,
     pub measurement: ModelUsageMeasurement,
 }
 

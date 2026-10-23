@@ -41,6 +41,7 @@ async fn settle(
                 "model-settlement",
                 &identity.client_id,
                 hold_id,
+                input.call_id,
                 input.event_id,
                 &input.model_binding,
                 &input.measurement,

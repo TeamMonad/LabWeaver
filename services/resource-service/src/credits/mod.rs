@@ -931,6 +931,28 @@ pub(crate) async fn build_hold_in_transaction(
     .await
 }
 
+pub(crate) async fn model_hold_in_transaction(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    project: ProjectId,
+    call_id: uuid::Uuid,
+    amount: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    stage_target_hold(
+        tx,
+        key,
+        owner,
+        project,
+        None,
+        None,
+        None,
+        &format!("llm-usage:{call_id}"),
+        amount,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn stage_target_hold(
     tx: &mut Tx<'_>,
