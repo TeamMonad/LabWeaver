@@ -1168,6 +1168,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             Method::Delete => "delete",
         };
         let mut parameters = path_parameters(operation.path);
+        let resource_request_states = serde_json::to_value(crate::resource::ResourceRequestState::ALL)?;
         if matches!(
             operation.operation_id,
             "getPlatformConfigurationVersion"
@@ -1215,7 +1216,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.operation_id == "listProjectResourceRequests" {
             parameters.extend([
                 json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
-                json!({"name":"state","in":"query","required":false,"style":"form","explode":true,"schema":{"type":"array","items":{"type":"string","enum":["reviewing","allocating","active","expired","rejected","cancelled"]}}}),
+                json!({"name":"state","in":"query","required":false,"style":"form","explode":true,"schema":{"type":"array","items":{"type":"string","enum":resource_request_states}}}),
                 json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
                 json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}),
             ]);

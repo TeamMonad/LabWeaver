@@ -188,5 +188,8 @@
       "target_key",
       "target_key-cert.pub"
     ]
+  },
+  "optionalSecrets": {
+    "agent-service-secrets": ["cursor-signing-key-previous"]
   }
 }

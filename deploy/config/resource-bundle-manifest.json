@@ -20,8 +20,11 @@
       "service-client-secret",
       "cursor-signing-key-current",
       "tls.crt",
-      "tls.key",
+      "resource-delegation-key",
       "postgres-ca.pem"
     ]
+  },
+  "optionalSecrets": {
+    "resource-service-secrets": ["cursor-signing-key-previous"]
   }
 }

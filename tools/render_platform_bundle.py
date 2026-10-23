@@ -37,13 +37,9 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID") from error
-    if not isinstance(value, dict) or set(value) != {
-        "apiVersion",
-        "namespace",
-        "configMaps",
-        "secrets",
-    }:
+    if not isinstance(value, dict) or set(value) not in ({"apiVersion", "namespace", "configMaps", "secrets"}, {"apiVersion", "namespace", "configMaps", "secrets", "optionalSecrets"}):
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
+    value.setdefault("optionalSecrets", {})
     if value["apiVersion"] != API_VERSION or not DNS_LABEL.fullmatch(value["namespace"]):
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     for group in ("configMaps", "secrets"):
@@ -60,33 +56,35 @@ def _load_manifest(path: Path) -> dict[str, Any]:
                 or any(not isinstance(key, str) or not DATA_KEY.fullmatch(key) for key in keys)
             ):
                 raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
+    optional = value["optionalSecrets"]
+    if not isinstance(optional, dict):
+        raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
+    for name, keys in optional.items():
+        if name not in value["secrets"] or not isinstance(keys, list) or len(keys) != len(set(keys)) or any(not isinstance(key, str) or not DATA_KEY.fullmatch(key) for key in keys):
+            raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     if set(value["configMaps"]) & set(value["secrets"]):
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     return value
 
 
-def _read_exact_files(directory: Path, keys: list[str], binary: bool) -> dict[str, str]:
+def _read_exact_files(directory: Path, keys: list[str], binary: bool, optional_keys: list[str] | None = None) -> dict[str, str]:
     if not directory.is_dir() or directory.is_symlink():
         raise BundleError("LW_PLATFORM_BUNDLE_INPUT_INVALID")
+    optional_keys = optional_keys or []
     entries = {entry.name for entry in directory.iterdir()}
-    if entries != set(keys):
+    required = set(keys)
+    allowed = required | set(optional_keys)
+    if not required <= entries or not entries <= allowed:
         raise BundleError("LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE")
     result: dict[str, str] = {}
-    for key in sorted(keys):
+    for key in sorted(entries):
         path = directory / key
-        if path.is_symlink() or not path.is_file():
+        if not path.is_file() or path.is_symlink():
             raise BundleError("LW_PLATFORM_BUNDLE_INPUT_INVALID")
-        size = path.stat().st_size
-        if size == 0 or size > MAX_FILE_BYTES:
-            raise BundleError("LW_PLATFORM_BUNDLE_INPUT_INVALID")
-        payload = path.read_bytes()
-        if binary:
-            result[key] = base64.b64encode(payload).decode("ascii")
-        else:
-            try:
-                result[key] = payload.decode("utf-8")
-            except UnicodeDecodeError as error:
-                raise BundleError("LW_PLATFORM_BUNDLE_INPUT_INVALID") from error
+        raw = path.read_bytes()
+        if not raw:
+            raise BundleError("LW_PLATFORM_BUNDLE_FILE_INVALID")
+        result[key] = base64.b64encode(raw).decode("ascii") if binary else raw.decode("utf-8")
     return result
 
 
@@ -131,7 +129,8 @@ def render_bundle(manifest_path: Path, input_root: Path) -> bytes:
         for name in sorted(expected_names):
             if kind == "Secret":
                 _validate_jetstream_ack_permission(name, group_root / name)
-            data = _read_exact_files(group_root / name, manifest[manifest_key][name], binary)
+            optional_keys = manifest.get("optionalSecrets", {}).get(name, []) if kind == "Secret" else []
+            data = _read_exact_files(group_root / name, manifest[manifest_key][name], binary, optional_keys)
             value: dict[str, Any] = {
                 "apiVersion": "v1",
                 "kind": kind,

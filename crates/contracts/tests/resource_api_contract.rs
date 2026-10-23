@@ -137,6 +137,14 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
             .and_then(|parameter| parameter["schema"]["type"].as_str()),
         Some("array")
     );
+    let state_parameter = list_request["parameters"]
+        .as_array()
+        .and_then(|parameters| parameters.iter().find(|parameter| parameter["name"] == "state"))
+        .ok_or("state query parameter missing")?;
+    assert_eq!(
+        state_parameter["schema"]["items"]["enum"],
+        json!(["reviewing", "allocating", "active", "expiring", "expired", "rejected", "cancelled"])
+    );
     let list_lease = assert_operation(
         "/api/v1/projects/{projectId}/resource-leases",
         "get",
