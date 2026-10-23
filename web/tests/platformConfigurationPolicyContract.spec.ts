@@ -20,7 +20,7 @@ function bundleToolRules(): string[] {
   const end = source.indexOf('\ndef ', start + 1)
   expect(start, '_configuration_policy not found in tools/deployment_bundle.py').toBeGreaterThan(-1)
   const body = source.slice(start, end)
-  expect(body).toContain('LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED')
+  expect(body).toContain('LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED')
   return [...new Set([...body.matchAll(/\b((?:runtimePolicy|builderPolicy)\.\w+)/g)].map((match) => match[1]))].sort()
 }
 

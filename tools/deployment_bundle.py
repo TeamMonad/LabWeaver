@@ -501,6 +501,7 @@ def _configuration_version(
             "LW_BUNDLE_CONFIGURATION_LIMIT",
             "LW_BUNDLE_CONFIGURATION_IO_FAILED",
             "LW_BUNDLE_INITIAL_REVISION_INVALID",
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED",
         ):
             if diagnostic.encode() in result.stderr:
                 code = diagnostic
