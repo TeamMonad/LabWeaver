@@ -880,11 +880,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     // namespace and lease without extending its window or advancing revisions.
     assert_eq!(
         store
-            .acknowledge_task_resource(
+            .acknowledge_funded_task_resource(
                 task_run_id,
-                claimed.claim_revision,
-                claimed.lease_revision,
-                "labweaver-evaluation-runs",
+                &contracts::http::AcknowledgeTaskResourceRequest {
+                    expected_claim_revision: claimed.claim_revision,
+                    expected_lease_revision: claimed.lease_revision,
+                    execution_namespace: "labweaver-evaluation-runs".into(),
+                },
+                "synthetic-task-owner",
                 "trace-task-ack-response-lost",
             )
             .await?,
@@ -892,11 +895,14 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
     );
     assert!(matches!(
         store
-            .acknowledge_task_resource(
+            .acknowledge_funded_task_resource(
                 task_run_id,
-                claimed.claim_revision,
-                claimed.lease_revision,
-                "another-namespace",
+                &contracts::http::AcknowledgeTaskResourceRequest {
+                    expected_claim_revision: claimed.claim_revision,
+                    expected_lease_revision: claimed.lease_revision,
+                    execution_namespace: "another-namespace".into(),
+                },
+                "synthetic-task-owner",
                 "trace-task-ack-wrong-namespace",
             )
             .await,
@@ -2254,22 +2260,22 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0017_cost_estimates.sql"
+        "../../../migrations/resource/0018_cost_estimates.sql"
     ))
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0018_unknown_usage_deadline.sql"
+        "../../../migrations/resource/0019_unknown_usage_deadline.sql"
     ))
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0019_build_metering.sql"
+        "../../../migrations/resource/0020_build_metering.sql"
     ))
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0020_environment_funding.sql"
+        "../../../migrations/resource/0021_environment_funding.sql"
     ))
     .execute(&pool)
     .await?;
@@ -4538,22 +4544,22 @@ async fn migrated_pool()
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0017_cost_estimates.sql"
+        "../../../migrations/resource/0018_cost_estimates.sql"
     ))
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0018_unknown_usage_deadline.sql"
+        "../../../migrations/resource/0019_unknown_usage_deadline.sql"
     ))
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0019_build_metering.sql"
+        "../../../migrations/resource/0020_build_metering.sql"
     ))
     .execute(&pool)
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0020_environment_funding.sql"
+        "../../../migrations/resource/0021_environment_funding.sql"
     ))
     .execute(&pool)
     .await?;
@@ -5830,7 +5836,7 @@ async fn estimated_cost_http_uses_signed_user_preview_and_exact_service_scope()
         idle_expires_at: timestamp + time::Duration::minutes(5),
         csrf_token: auth::CsrfToken::from_secret("synthetic-estimate-csrf".into()),
     };
-    let delegation = auth::encode_resource_delegation(&key, &session, timestamp)?;
+    let delegation = auth::encode_resource_delegation(&key, &session, Some(project), timestamp)?;
     let preview_path = format!("/api/v1/projects/{project}/resource-cost-estimate");
     let response = router
         .clone()
@@ -6018,7 +6024,8 @@ async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::err
         idle_expires_at: now.get() + time::Duration::minutes(5),
         csrf_token: auth::CsrfToken::from_secret("synthetic-mutation-http".into()),
     };
-    let delegation = auth::encode_resource_delegation(&key, &session, now.get())?;
+    let delegation =
+        auth::encode_resource_delegation(&key, &session, Some(request.project_id), now.get())?;
     let token = signed_resource_token(
         &authority.material,
         &authority.issuer,
@@ -6256,7 +6263,12 @@ async fn http_approval_lost_response_retry_returns_committed_lease_receipt()
         idle_expires_at: now.get() + time::Duration::minutes(5),
         csrf_token: auth::CsrfToken::from_secret("synthetic-denied-replay".into()),
     };
-    let denied = auth::encode_resource_delegation(&[9_u8; 32], &student, now.get())?;
+    let denied = auth::encode_resource_delegation(
+        &[9_u8; 32],
+        &student,
+        Some(f.request.project_id),
+        now.get(),
+    )?;
     assert_eq!(
         f.client
             .post(format!("{}{path}", f.base))

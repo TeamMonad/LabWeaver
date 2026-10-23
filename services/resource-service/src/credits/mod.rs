@@ -624,12 +624,33 @@ pub(crate) async fn resolve_in_transaction(
             return Ok(hold);
         }
     }
-    let (debit, released, absorbed, kind, reason) = hold_movement(&mut hold, input)?;
+    apply_resolution(tx, &mut hold, input, charge, source_event_id).await?;
+    Ok(hold)
+}
+
+async fn apply_resolution(
+    tx: &mut Tx<'_>,
+    hold: &mut CreditHold,
+    input: &CreditHoldResolutionRequest,
+    charge: Option<&ResourceCharge>,
+    source_event_id: Option<EventId>,
+) -> Result<(), CreditError> {
+    let (debit, released, absorbed, kind, reason) = hold_movement(hold, input)?;
     hold.reason = Some(reason.clone());
-    sqlx::query("UPDATE resource.credit_holds SET remaining=$2::text::numeric,state=$3,reason=$4,measurement_unknown=$5,unknown_since=$6,reconciliation_due_at=$7,expired_unknown_at=$8 WHERE hold_id=$1").bind(hold.id).bind(hold.remaining.scaled().to_string()).bind(state_name(hold.state)).bind(&reason).bind(hold.measurement_unknown).bind(hold.unknown_since.map(UtcTimestamp::get)).bind(hold.reconciliation_due_at.map(UtcTimestamp::get)).bind(hold.expired_unknown_at.map(UtcTimestamp::get)).execute(&mut **tx).await?;
+    sqlx::query("UPDATE resource.credit_holds SET remaining=$2::text::numeric,state=$3,reason=$4,measurement_unknown=$5,unknown_since=$6,reconciliation_due_at=$7,expired_unknown_at=$8 WHERE hold_id=$1")
+        .bind(hold.id)
+        .bind(hold.remaining.scaled().to_string())
+        .bind(state_name(hold.state))
+        .bind(&reason)
+        .bind(hold.measurement_unknown)
+        .bind(hold.unknown_since.map(UtcTimestamp::get))
+        .bind(hold.reconciliation_due_at.map(UtcTimestamp::get))
+        .bind(hold.expired_unknown_at.map(UtcTimestamp::get))
+        .execute(&mut **tx)
+        .await?;
     let op = Uuid::now_v7();
-    let now = now(tx).await?;
-    let mut e = entry(
+    let current = now(tx).await?;
+    let mut ledger_entry = entry(
         op,
         Some(hold.project_id),
         -debit,
@@ -637,17 +658,17 @@ pub(crate) async fn resolve_in_transaction(
         debit,
         absorbed,
         kind,
-        now,
+        current,
     )?;
-    e.hold_id = Some(hold.id);
+    ledger_entry.hold_id = Some(hold.id);
     if let CreditHoldResolutionRequest::Settle { event_id, .. } = input {
-        e.source_event_id = Some(*event_id);
+        ledger_entry.source_event_id = Some(*event_id);
     }
-    e.source_event_id = source_event_id.or(e.source_event_id);
+    ledger_entry.source_event_id = source_event_id.or(ledger_entry.source_event_id);
     if let Some(charge) = charge {
-        e.charge_id = Some(charge.id);
-        e.usage_record_id = Some(charge.usage_record_id);
-        e.rate_snapshots = charge
+        ledger_entry.charge_id = Some(charge.id);
+        ledger_entry.usage_record_id = Some(charge.usage_record_id);
+        ledger_entry.rate_snapshots = charge
             .lines
             .iter()
             .map(|line| CreditRateSnapshot {
@@ -656,23 +677,22 @@ pub(crate) async fn resolve_in_transaction(
             })
             .collect();
     }
-    e.reason = reason.clone();
-    e.owner_client_id = Some(hold.owner_client_id.clone());
-    apply(tx, &e).await?;
+    ledger_entry.reason = reason.clone();
+    ledger_entry.owner_client_id = Some(hold.owner_client_id.clone());
+    apply(tx, &ledger_entry).await?;
     if debit > 0 {
-        let mut counterpart = entry(op, None, debit, 0, 0, 0, kind, now)?;
+        let mut counterpart = entry(op, None, debit, 0, 0, 0, kind, current)?;
         counterpart.hold_id = Some(hold.id);
-        counterpart.source_event_id = e.source_event_id;
-        counterpart.charge_id = e.charge_id;
-        counterpart.usage_record_id = e.usage_record_id;
-        counterpart.rate_snapshots = e.rate_snapshots.clone();
+        counterpart.source_event_id = ledger_entry.source_event_id;
+        counterpart.charge_id = ledger_entry.charge_id;
+        counterpart.usage_record_id = ledger_entry.usage_record_id;
+        counterpart.rate_snapshots = ledger_entry.rate_snapshots.clone();
         counterpart.reason = reason;
         counterpart.owner_client_id = Some(hold.owner_client_id.clone());
         apply(tx, &counterpart).await?;
     }
     Ok(())
 }
-
 fn hold_movement(
     hold: &mut CreditHold,
     input: &CreditHoldResolutionRequest,
@@ -1045,6 +1065,8 @@ async fn expire_hold(
                     "one-hour unknown reconciliation deadline reached; late cost is platform cost"
                         .into(),
             },
+            None,
+            None,
         )
         .await?;
     } else {

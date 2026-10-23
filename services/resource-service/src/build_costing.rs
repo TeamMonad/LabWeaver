@@ -235,8 +235,11 @@ pub(crate) async fn observe_in_transaction(
                             owner,
                             old.hold.id,
                             &CreditHoldResolutionRequest::Unknown {
+                                event_id: None,
                                 reason: "build history awaiting configured prices".into(),
                             },
+                            None,
+                            None,
                         )
                         .await?;
                     }
@@ -255,6 +258,7 @@ pub(crate) async fn observe_in_transaction(
         BuildUsageMeasurement::Unknown { reason } => {
             sqlx::query("UPDATE resource.build_metering_attempts SET measurement=$3,first_unknown_observation=COALESCE(first_unknown_observation,$3) WHERE build_request_id=$1 AND attempt=$2").bind(build.as_uuid()).bind(i32::try_from(attempt).map_err(|_|ResourceStoreError::ScopeConflict)?).bind(serde_json::to_value(measurement)?).execute(&mut **tx).await?;
             CreditHoldResolutionRequest::Unknown {
+                event_id: None,
                 reason: reason.clone(),
             }
         }
@@ -265,7 +269,7 @@ pub(crate) async fn observe_in_transaction(
             }
         }
     };
-    crate::credits::resolve_in_transaction(tx, owner, old.hold.id, &resolution).await?;
+    crate::credits::resolve_in_transaction(tx, owner, old.hold.id, &resolution, None, None).await?;
     let row = sqlx::query(
         "SELECT * FROM resource.build_metering_attempts WHERE build_request_id=$1 AND attempt=$2",
     )

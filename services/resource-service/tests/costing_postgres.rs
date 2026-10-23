@@ -478,6 +478,7 @@ async fn pending_task_with_resources(
             gpu_allocation: None,
             state: CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -655,6 +656,7 @@ async fn released_or_uncertain_quote_cannot_authorize_a_new_task_execution() -> 
             .await?;
         let resolution = if uncertain {
             CreditHoldResolutionRequest::Unknown {
+                event_id: None,
                 reason: "provider response lost".into(),
             }
         } else {

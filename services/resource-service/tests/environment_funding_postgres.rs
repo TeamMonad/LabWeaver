@@ -130,6 +130,7 @@ async fn fixture_with_approval_seconds(
             gpu_allocation: None,
             state: CapacityClaimState::Reserved,
             revision: Revision::new(1)?,
+            updated_at: Some(now),
         },
         lease_id: LeaseId::new(),
     };
@@ -360,6 +361,7 @@ async fn failed_renewal_rolls_back_lease_and_money_and_unknown_keeps_the_origina
             OWNER,
             original.hold.id,
             &CreditHoldResolutionRequest::Unknown {
+                event_id: None,
                 reason: "authoritative stop/time unknown".into(),
             },
         )

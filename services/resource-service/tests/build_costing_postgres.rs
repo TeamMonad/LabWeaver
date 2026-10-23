@@ -445,7 +445,7 @@ async fn resource_build_authority_grant_has_only_the_needed_agent_read_columns()
         .execute(&pool)
         .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/agent/0021_resource_build_authority_read.sql"
+        "../../../migrations/agent/0022_resource_build_authority_read.sql"
     ))
     .execute(&pool)
     .await?;

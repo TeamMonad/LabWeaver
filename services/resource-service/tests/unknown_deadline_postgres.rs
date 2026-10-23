@@ -130,6 +130,7 @@ async fn mark_unknown(
             "environment",
             id,
             &CreditHoldResolutionRequest::Unknown {
+                event_id: None,
                 reason: "executor timing unavailable".into(),
             },
         )
@@ -286,7 +287,7 @@ async fn migration_recovers_the_first_immutable_unknown_fact_instead_of_the_last
     // Reconstruct the previous schema in this isolated database; the immutable ledger stays intact.
     sqlx::raw_sql("ALTER TABLE resource.credit_holds DROP COLUMN unknown_since,DROP COLUMN reconciliation_due_at,DROP COLUMN expired_unknown_at;").execute(&pool).await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/resource/0018_unknown_usage_deadline.sql"
+        "../../../migrations/resource/0019_unknown_usage_deadline.sql"
     ))
     .execute(&pool)
     .await?;

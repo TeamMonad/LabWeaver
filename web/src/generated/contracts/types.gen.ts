@@ -1467,7 +1467,7 @@ export type CreditHold = {
     reason?: string | null;
     reconciliationDueAt?: BuildCostRecordSchemaUtcTimestamp | null;
     remaining: BuildCostRecordSchemaFixedDecimal;
-    requestId?: ResourceRequestId | null;
+    requestId?: BuildCostRecordSchemaResourceRequestId | null;
     state: CreditHoldState;
     unknownSince?: BuildCostRecordSchemaUtcTimestamp | null;
 };
@@ -1524,7 +1524,7 @@ export type BuildCostRecordSchemaResourceChargeLine = {
 /**
  * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
  */
-export type ResourceRequestId = string;
+export type BuildCostRecordSchemaResourceRequestId = string;
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -1914,7 +1914,7 @@ export type ChargeId = string;
  * Immutable rate identity used by a Credits settlement ledger entry.
  */
 export type CreditRateSnapshot = {
-    rateId: RateId;
+    rateId: CreditLedgerEntrySchemaRateId;
     rateRevision: CreditLedgerEntrySchemaRevision;
 };
 
@@ -1941,7 +1941,7 @@ export type CreditLedgerEntrySchemaProjectId = string;
 /**
  * Strongly typed UUIDv7 identifier for `RateId`.
  */
-export type RateId = string;
+export type CreditLedgerEntrySchemaRateId = string;
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -11164,7 +11164,7 @@ export type ResourceChargeSchema = {
     courseId?: ResourceChargeSchemaCourseId | null;
     createdAt: ResourceChargeSchemaUtcTimestamp;
     diagnosticCode?: string | null;
-    id: ChargeId;
+    id: ResourceChargeSchemaChargeId;
     lines: Array<ResourceChargeSchemaResourceChargeLine>;
     projectId: ResourceChargeSchemaProjectId;
     settlement: UsageSettlementState;

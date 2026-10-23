@@ -405,14 +405,25 @@ impl PgResourceStore {
             if due {
                 let authorized:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource.environment_credit_windows WHERE hold_id=$1)").bind(id).fetch_one(&mut *tx).await?;
                 let resolution = if authorized {
-                    contracts::resource::credits::CreditHoldResolutionRequest::Unknown{reason:"Environment financial coverage ended without confirmed final usage/release".into()}
+                    contracts::resource::credits::CreditHoldResolutionRequest::Unknown {
+                        event_id: None,
+                        reason: "Environment financial coverage ended without confirmed final usage/release".into(),
+                    }
                 } else {
                     contracts::resource::credits::CreditHoldResolutionRequest::Release {
                         reason: "original approval expired before funded Environment activation"
                             .into(),
                     }
                 };
-                crate::credits::resolve_in_transaction(&mut tx, &owner, id, &resolution).await?;
+                crate::credits::resolve_in_transaction(
+                    &mut tx,
+                    &owner,
+                    id,
+                    &resolution,
+                    None,
+                    None,
+                )
+                .await?;
             }
             tx.commit().await?;
         }
