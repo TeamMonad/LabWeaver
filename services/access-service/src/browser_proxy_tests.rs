@@ -1058,7 +1058,7 @@ async fn bff_logout_closes_production_console_websocket() -> Result<(), Box<dyn 
     let secret = [7_u8; 32];
     let now = OffsetDateTime::now_utc();
     sqlx::query(
-        "INSERT INTO access.project_memberships (course_id,project_id,actor_id,role,state,revision) VALUES (NULL,$1,$2,'student','active',1)",
+        "INSERT INTO control.project_memberships (course_id,project_id,actor_id,role,object_role,state,revision) VALUES (NULL,$1,$2,'student','editor','active',1)",
     )
     .bind(project_id.as_uuid())
     .bind(actor)
@@ -1943,8 +1943,8 @@ async fn non_owner_membership_add_is_rejected_before_directory_resolution()
     let project_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO control.project_memberships \
-         (course_id,project_id,actor_id,role,state,revision) \
-         VALUES (NULL,$1,$2,'student','active',1)",
+         (course_id,project_id,actor_id,role,object_role,state,revision) \
+         VALUES (NULL,$1,$2,'student','viewer','active',1)",
     )
     .bind(project_id)
     .bind(member)
@@ -1971,7 +1971,7 @@ async fn non_owner_membership_add_is_rejected_before_directory_resolution()
         .header(header::ORIGIN, ORIGIN)
         .header("x-csrf-token", member_session.csrf_token.expose())
         .header("Idempotency-Key", Uuid::now_v7().to_string())
-        .json(&json!({"username": "target-user", "role": "student", "expiresAt": null}))
+        .json(&json!({"username": "target-user", "role": "student", "objectRole": "viewer", "expiresAt": null}))
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
