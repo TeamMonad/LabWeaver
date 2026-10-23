@@ -54,6 +54,7 @@
     ],
     "agent-service-secrets": [
       "database-url",
+      "harbor-ca.crt",
       "model-gateway-upstream-url",
       "model-gateway-upstream-key",
       "model-gateway-signing-key",
