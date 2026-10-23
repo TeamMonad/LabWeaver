@@ -1126,6 +1126,13 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     );
 
     output.push(json_artifact(
+        "schemas/contracts/v1/platform-configuration-unsupported-fields.json",
+        json!({
+            "apiVersion": "platform-configuration-policy/v1",
+            "unsupportedFields": crate::platform_configuration::PLATFORM_CONFIGURATION_UNSUPPORTED_FIELDS,
+        }),
+    )?);
+    output.push(json_artifact(
         "schemas/openapi/labweaver-public.v1.json",
         openapi(ApiSurface::Public)?,
     )?);

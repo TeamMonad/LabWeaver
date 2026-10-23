@@ -239,6 +239,17 @@ class BundleControlMountTests(unittest.TestCase):
                 self.assertNotEqual(rendered.returncode, 0, change)
                 self.assertNotIn(f.secret.decode(), rendered.stderr)
 
+    def test_policy_rules_match_the_generated_rust_manifest(self):
+        manifest = json.loads(
+            (fixtures.REPOSITORY / "schemas/contracts/v1/platform-configuration-unsupported-fields.json").read_bytes()
+        )
+        fields = manifest["unsupportedFields"]
+        source = (fixtures.REPOSITORY / "tools/deployment_bundle.py").read_text()
+        helper = (fixtures.REPOSITORY / "deploy/helm/labweaver/templates/_helpers.tpl").read_text()
+        for field in fields:
+            self.assertIn(field, source)
+            self.assertIn(field, helper)
+
     def test_plain_derivation_and_initial_settings_do_not_claim_authenticated_source(
         self,
     ):

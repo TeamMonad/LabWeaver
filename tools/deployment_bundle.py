@@ -43,6 +43,10 @@ DEFAULT_MANIFEST = (
 WORKLOADS_FILE = (
     Path(__file__).resolve().parents[1] / "deploy/helm/labweaver/values.yaml"
 )
+UNSUPPORTED_POLICY_MANIFEST = (
+    Path(__file__).resolve().parents[1]
+    / "schemas/contracts/v1/platform-configuration-unsupported-fields.json"
+)
 RESOURCE_MANIFEST = (
     Path(__file__).resolve().parents[1] / "deploy/config/resource-bundle-manifest.json"
 )
@@ -620,6 +624,22 @@ def _settings(model: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
     if document["revision"] != model["revision"]:
         raise BundleError("LW_BUNDLE_CONFIGURATION_REVISION_MISMATCH")
     return dict(document, configurationMode=mode)
+def _unsupported_policy_fields() -> tuple[str, ...]:
+    try:
+        manifest = json.loads(UNSUPPORTED_POLICY_MANIFEST.read_bytes())
+    except (OSError, ValueError) as error:
+        raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_MANIFEST_INVALID") from error
+    fields = manifest.get("unsupportedFields")
+    if (
+        manifest.get("apiVersion") != "platform-configuration-policy/v1"
+        or not isinstance(fields, list)
+        or not fields
+        or len(fields) != len(set(fields))
+        or not all(isinstance(field, str) and field for field in fields)
+    ):
+        raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_MANIFEST_INVALID")
+    return tuple(fields)
+
 
 def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
     """Return the non-secret policy projection from the validated Rust model."""
@@ -663,35 +683,26 @@ def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
             )
     runtime = configuration["runtimePolicy"]
     builder = configuration["builderPolicy"]
-    if runtime["defaultContainerUid"] != 0:
-        raise BundleError(
-            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
-            f"runtimePolicy.defaultContainerUid={runtime['defaultContainerUid']} has no "
-            "execution-side consumer (see #207)"
-        )
-    unsupported = (
-        (runtime["allowedCapabilities"], "runtimePolicy.allowedCapabilities"),
-        (runtime["preauthorizations"], "runtimePolicy.preauthorizations"),
-        (builder["capabilities"], "builderPolicy.capabilities"),
-        (builder["entitlements"], "builderPolicy.entitlements"),
-    )
-    for value, field in unsupported:
-        if value:
+    location = runtime["privilegedExecutionLocation"]
+    unsupported_values = {
+        "runtimePolicy.defaultContainerUid": runtime["defaultContainerUid"] != 0,
+        "runtimePolicy.allowedCapabilities": bool(runtime["allowedCapabilities"]),
+        "runtimePolicy.preauthorizations": bool(runtime["preauthorizations"]),
+        "runtimePolicy.privilegedExecutionLocation": (
+            location is not None and location.get("kind") != "dedicated_node_pool"
+        ),
+        "builderPolicy.capabilities": bool(builder["capabilities"]),
+        "builderPolicy.allowPrivilegeEscalation": bool(builder["allowPrivilegeEscalation"]),
+        "builderPolicy.entitlements": bool(builder["entitlements"]),
+    }
+    for field in _unsupported_policy_fields():
+        if field not in unsupported_values:
+            raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_MANIFEST_INVALID")
+        if unsupported_values[field]:
             raise BundleError(
                 "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
                 f"{field} has no execution-side consumer (see #207)"
             )
-    if builder["allowPrivilegeEscalation"]:
-        raise BundleError(
-            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
-            "builderPolicy.allowPrivilegeEscalation has no execution-side consumer (see #207)"
-        )
-    location = runtime["privilegedExecutionLocation"]
-    if location is not None and location.get("kind") != "dedicated_node_pool":
-        raise BundleError(
-            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: "
-            "runtimePolicy.privilegedExecutionLocation has no execution-side consumer (see #207)"
-        )
     return {
         "apiVersion": "deploy.labweaver.io/platform-policy/v1",
         "configurationSha256": digest,

@@ -65,6 +65,7 @@ const REASONS: Record<string, string> = {
   LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID: '特权执行位置无效。',
   LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID: '预授权超出平台允许清单或 scope 重复。',
   LW_PLATFORM_CONFIGURATION_NOT_FOUND: '请求的配置版本、登记或应用尝试不存在。',
+  LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: '当前策略字段尚无执行侧消费者，服务端拒绝保存或登记。',
   LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED: '平台配置存储暂时不可用。',
 }
 
@@ -78,6 +79,7 @@ const NEXT_STEPS: Record<string, string> = {
   LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID: '留存与提醒须在 1 秒到 365 天之间，提醒最多 16 个且不能重复，抢占宽限为 1–300 秒；草稿已保留。',
   LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID: '允许特权时必须声明专用节点池（合法的 nodeSelector 与 taint）；不允许特权时不能声明位置。草稿已保留。',
   LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID: '预授权只能使用平台允许清单内的 capability，且同一 scope 只能出现一次；草稿已保留。',
+  LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: '将具体字段恢复为当前可部署的默认值后再保存；执行侧支持由 #207 等后续消费者提供。',
   LW_PLATFORM_CONFIGURATION_NOT_FOUND: '刷新页面读取当前事实。',
   LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED: '稍后按原样重试；草稿与所选文件已保留。',
 }

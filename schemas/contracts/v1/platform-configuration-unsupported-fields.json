@@ -1,0 +1,12 @@
+{
+  "apiVersion": "platform-configuration-policy/v1",
+  "unsupportedFields": [
+    "runtimePolicy.defaultContainerUid",
+    "runtimePolicy.allowedCapabilities",
+    "runtimePolicy.preauthorizations",
+    "runtimePolicy.privilegedExecutionLocation",
+    "builderPolicy.capabilities",
+    "builderPolicy.allowPrivilegeEscalation",
+    "builderPolicy.entitlements"
+  ]
+}

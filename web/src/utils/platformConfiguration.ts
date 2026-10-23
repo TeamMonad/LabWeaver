@@ -53,14 +53,9 @@ export function nextStepLabel(step: PlatformConfigurationNextStep): string {
 }
 
 /**
- * Settings the contract can express but no execution-side consumer enforces yet.
- *
- * The encrypted Bundle only derives policy from an authenticated managed
- * version, and `tools/deployment_bundle.py::_configuration_policy` plus the Helm
- * policy helper fail closed on any non-default value below ("尚无执行侧实现，见
- * #207"). A desired version that sets them can be saved, but it can never be
- * sealed, rendered or applied, so the console keeps them at the only value the
- * deployment path accepts and refuses to submit anything else.
+ * Settings rejected by the Rust Control policy validator because no execution-side
+ * consumer enforces them yet. The generated manifest test keeps this list aligned
+ * with the Bundle and Helm boundaries.
  */
 export interface UnsupportedPolicyField {
   path: string

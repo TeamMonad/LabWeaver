@@ -156,6 +156,17 @@ pub struct PlatformConfigurationDesired {
     pub builder_policy: BuilderSecurityPolicy,
 }
 
+/// Fields with no execution-side consumer in the current platform deployment.
+pub const PLATFORM_CONFIGURATION_UNSUPPORTED_FIELDS: &[&str] = &[
+    "runtimePolicy.defaultContainerUid",
+    "runtimePolicy.allowedCapabilities",
+    "runtimePolicy.preauthorizations",
+    "runtimePolicy.privilegedExecutionLocation",
+    "builderPolicy.capabilities",
+    "builderPolicy.allowPrivilegeEscalation",
+    "builderPolicy.entitlements",
+];
+
 impl PlatformConfigurationDesired {
     pub fn validate(&self) -> Result<(), PlatformConfigurationContractError> {
         let lifecycle = &self.lifecycle;
@@ -211,28 +222,25 @@ impl PlatformConfigurationDesired {
         {
             return Err(PlatformConfigurationContractError::PreauthorizationInvalid);
         }
-        let unsupported = if policy.default_container_uid != 0 {
-            Some("runtimePolicy.defaultContainerUid")
-        } else if !policy.allowed_capabilities.is_empty() {
-            Some("runtimePolicy.allowedCapabilities")
-        } else if !policy.preauthorizations.is_empty() {
-            Some("runtimePolicy.preauthorizations")
-        } else if matches!(
-            policy.privileged_execution_location,
-            Some(PrivilegedExecutionLocation::VirtualMachineGuest { .. })
-        ) {
-            Some("runtimePolicy.privilegedExecutionLocation")
-        } else if !self.builder_policy.capabilities.is_empty() {
-            Some("builderPolicy.capabilities")
-        } else if self.builder_policy.allow_privilege_escalation {
-            Some("builderPolicy.allowPrivilegeEscalation")
-        } else if !self.builder_policy.entitlements.is_empty() {
-            Some("builderPolicy.entitlements")
-        } else {
-            None
-        };
-        if let Some(field) = unsupported {
-            return Err(PlatformConfigurationContractError::PolicyUnsupported { field });
+        for field in PLATFORM_CONFIGURATION_UNSUPPORTED_FIELDS {
+            let unsupported = match *field {
+                "runtimePolicy.defaultContainerUid" => policy.default_container_uid != 0,
+                "runtimePolicy.allowedCapabilities" => !policy.allowed_capabilities.is_empty(),
+                "runtimePolicy.preauthorizations" => !policy.preauthorizations.is_empty(),
+                "runtimePolicy.privilegedExecutionLocation" => matches!(
+                    policy.privileged_execution_location,
+                    Some(PrivilegedExecutionLocation::VirtualMachineGuest { .. })
+                ),
+                "builderPolicy.capabilities" => !self.builder_policy.capabilities.is_empty(),
+                "builderPolicy.allowPrivilegeEscalation" => {
+                    self.builder_policy.allow_privilege_escalation
+                }
+                "builderPolicy.entitlements" => !self.builder_policy.entitlements.is_empty(),
+                _ => false,
+            };
+            if unsupported {
+                return Err(PlatformConfigurationContractError::PolicyUnsupported { field });
+            }
         }
         Ok(())
     }

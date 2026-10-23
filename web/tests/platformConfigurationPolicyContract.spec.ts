@@ -4,29 +4,36 @@ import { describe, expect, it } from 'vitest'
 import type { PlatformConfigurationDesired } from '@/generated/contracts'
 import { unsupportedPolicyFields, withoutUnsupportedPolicy } from '@/utils/platformConfiguration'
 
-/**
- * The console mirrors the deployment path's fail-closed policy rules until Control validates them
- * (CONTRACT_GAP on #203). This test reads the two real rule sources, so adding or removing a rule
- * in the Bundle tool or the Helm helper fails here until the console follows.
- */
+/** The console mirrors the Rust-generated unsupported policy manifest and the deployment boundaries. */
 function repoFile(relative: string): string {
   // Vitest runs with web/ as the working directory (pnpm --dir web test).
   return readFileSync(resolve(process.cwd(), '..', relative), 'utf8')
 }
 
-function bundleToolRules(): string[] {
+function manifestRules(): string[] {
+  const manifest = JSON.parse(repoFile('schemas/contracts/v1/platform-configuration-unsupported-fields.json')) as {
+    apiVersion: string
+    unsupportedFields: string[]
+  }
+  expect(manifest.apiVersion).toBe('platform-configuration-policy/v1')
+  return [...manifest.unsupportedFields].sort()
+}
+
+function bundleToolRules(fields: string[]): string[] {
   const source = repoFile('tools/deployment_bundle.py')
   const start = source.indexOf('def _configuration_policy(')
   const end = source.indexOf('\ndef ', start + 1)
   expect(start, '_configuration_policy not found in tools/deployment_bundle.py').toBeGreaterThan(-1)
   const body = source.slice(start, end)
   expect(body).toContain('LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED')
-  return [...new Set([...body.matchAll(/\b((?:runtimePolicy|builderPolicy)\.\w+)/g)].map((match) => match[1]))].sort()
+  for (const field of fields) expect(body).toContain(field)
+  return fields
 }
 
-function helmRules(): string[] {
+function helmRules(fields: string[]): string[] {
   const source = repoFile('deploy/helm/labweaver/templates/_helpers.tpl')
-  return [...new Set([...source.matchAll(/platformConfigurationPolicy\.((?:runtimePolicy|builderPolicy)\.\w+) has no execution-side consumer/g)].map((match) => match[1]))].sort()
+  for (const field of fields) expect(source).toContain(`platformConfigurationPolicy.${field}`)
+  return fields
 }
 
 /** A configuration that violates every rule the console knows about. */
@@ -44,16 +51,16 @@ function violatingEverything(): PlatformConfigurationDesired {
   }
 }
 
-describe('platform configuration fail-closed rules match the deployment path', () => {
-  it('flags exactly the fields the Bundle tool and the Helm helper reject', () => {
+describe('platform configuration fail-closed rules match the Rust manifest', () => {
+  it('flags exactly the generated unsupported fields in Bundle, Helm and frontend', () => {
+    const manifest = manifestRules()
     const consoleRules = unsupportedPolicyFields(violatingEverything()).map((field) => field.path).sort()
-    const bundle = bundleToolRules()
-    expect(bundle.length).toBeGreaterThan(0)
-    expect(consoleRules).toEqual(bundle)
-    expect(consoleRules).toEqual(helmRules())
+    expect(consoleRules).toEqual(manifest)
+    expect(bundleToolRules(manifest)).toEqual(manifest)
+    expect(helmRules(manifest)).toEqual(manifest)
   })
 
-  it('resets to a configuration both rule sources accept', () => {
+  it('resets to a configuration accepted by the Rust manifest', () => {
     expect(unsupportedPolicyFields(withoutUnsupportedPolicy(violatingEverything()))).toEqual([])
   })
 })

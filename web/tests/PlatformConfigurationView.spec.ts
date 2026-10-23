@@ -217,6 +217,23 @@ describe('PlatformConfigurationView', () => {
     const banner = expectDiagnosticOrder(wrapper.find('[data-testid="pc-save-failure"]'), 'LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID', 'req-9')
     expect(banner.find('.diagnostic-next-step').text()).toContain('1–300')
   })
+  it('maps the server unsupported-policy diagnostic to a Chinese reason and next step', async () => {
+    vi.mocked(updatePlatformConfiguration).mockResolvedValue(
+      problem(422, 'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED') as never,
+    )
+    const wrapper = await mountView()
+    await wrapper.find('[data-testid="pc-preemption-grace"]').setValue('61')
+    await wrapper.find('[data-testid="pc-save"]').trigger('click')
+    await flushPromises()
+
+    const banner = expectDiagnosticOrder(
+      wrapper.find('[data-testid="pc-save-failure"]'),
+      'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED',
+      'req-9',
+    )
+    expect(banner.text()).toContain('尚无执行侧消费者')
+    expect(banner.find('.diagnostic-next-step').text()).toContain('可部署的默认值')
+  })
 
   it('marks a saved desired with unsupported settings and blocks registration and apply', async () => {
     const unsupported = structuredClone(configuration)
