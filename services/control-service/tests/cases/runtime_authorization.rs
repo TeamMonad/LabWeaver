@@ -184,8 +184,8 @@ async fn verified(
 pub(super) async fn assert_bindings_after_publication(
     pool: &PgPool,
     control: &ControlService,
-    approval: &AuthoringApproval,
-    candidate: &EnvironmentCandidate,
+    _approval: &AuthoringApproval,
+    _candidate: &EnvironmentCandidate,
     release: &EnvironmentTemplateRelease,
     now: UtcTimestamp,
 ) -> TestResult {
@@ -263,7 +263,7 @@ pub(super) async fn assert_bindings_after_publication(
     ));
     let mut unsupported = PlatformConfigurationDesired::default();
     unsupported.runtime_policy.allowed_capabilities = BTreeSet::from([LinuxCapability::NetAdmin]);
-    let error = configuration::update(
+    let Err(error) = configuration::update(
         pool,
         ActorId::new(),
         &UpdatePlatformConfigurationRequest {
@@ -274,7 +274,9 @@ pub(super) async fn assert_bindings_after_publication(
         now,
     )
     .await
-    .expect_err("Control must reject unsupported runtime capabilities");
+    else {
+        return Err("Control accepted unsupported runtime capabilities".into());
+    };
     assert!(matches!(
         error,
         configuration::ConfigurationError::Contract(
@@ -283,7 +285,7 @@ pub(super) async fn assert_bindings_after_publication(
             }
         )
     ));
-    let applied = verified(pool, first, now, "runtime-baseline").await?;
+    verified(pool, first, now, "runtime-baseline").await?;
     let binding = resolve_binding(pool, &request).await?;
     assert_eq!(binding.basis, RuntimeAdmissionBasis::RestrictedBaseline);
     assert!(binding.permissions.capabilities.is_empty());
