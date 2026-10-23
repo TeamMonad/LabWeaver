@@ -98,11 +98,12 @@
               <summary>查看项目标识</summary>
               <code>{{ selectedProject.id }}</code>
             </details>
-            <p v-if="!canEditProject && selectedProject.state === 'active'" class="readonly-hint" data-testid="edit-permission-hint" role="note">{{ availableActions.denialReason('edit', '编辑或归档项目、新建 Work') }}</p>
+            <p v-if="!canEditProject && selectedProject.state === 'active'" class="readonly-hint" data-testid="edit-permission-hint" role="note">{{ availableActions.denialReason('edit', '编辑项目、新建 Work') }}</p>
+            <p v-else-if="canEditProject && !canArchiveProject && selectedProject.state === 'active'" class="readonly-hint" data-testid="archive-permission-hint" role="note">只有项目负责人或平台管理员可以归档项目。</p>
             <div class="form-actions">
               <button v-if="canEditProject" type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
               <button
-                v-if="canEditProject && selectedProject.state === 'active'"
+                v-if="canArchiveProject && selectedProject.state === 'active'"
                 type="button"
                 class="outlined-button danger-button"
                 :disabled="projects.acting !== null"
@@ -392,6 +393,16 @@ const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : 
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
 const availableActions = useProjectAvailableActions(selectedProjectId)
 const canEditProject = computed(() => availableActions.allows('edit'))
+/**
+ * Control archives a project only for its owner or a platform administrator,
+ * beyond the `edit` action the contract maps `archiveProject` to; both facts
+ * are read from the project and the signed-in identity, never assumed.
+ */
+const canArchiveProject = computed(() => Boolean(
+  canEditProject.value
+  && selectedProject.value
+  && (currentActorId.value === selectedProject.value.ownerActorId || hasAnyRole(currentRoles.value, ['admin'])),
+))
 const canManageMembers = computed(() => availableActions.allows('manage_members'))
 const canSearchOrganizationDirectory = computed(() => canManageMembers.value && hasAnyRole(currentRoles.value, ['teacher', 'admin']))
 const members = useProjectMemberships(selectedProjectId)
@@ -552,7 +563,7 @@ function refreshActionsAfterProjectRefusal() {
 }
 
 function openArchiveConfirmation() {
-  if (!canEditProject.value) return
+  if (!canArchiveProject.value) return
   const project = projects.selectedProject
   if (!project) return
   destructiveConfirmation.value = { kind: 'archive', project }
@@ -600,7 +611,7 @@ async function confirmDestructiveAction() {
   destructiveConfirmation.value = null
   if (!confirmation) return
   if (confirmation.kind === 'archive') {
-    if (!canEditProject.value) return
+    if (!canArchiveProject.value) return
     if (projects.selectedProjectId === confirmation.project.id && !await projects.archive(confirmation.project)) refreshActionsAfterProjectRefusal()
   } else {
     if (!canManageMembers.value) return

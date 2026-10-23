@@ -36,14 +36,26 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '材料保留期限已过期。请重新上传材料，并重新生成、审批和发布；重试当前过期版本无法恢复。'
     case 'LW_RESOURCE_GPU_CAPACITY_EXHAUSTED':
       return 'GPU 容量当前不可用，可能已被其他任务占用。请稍后重试或调整资源申请。'
+    // Codes declared in `x-labweaver-errors` of the project and membership operations (#199).
     case 'LW_PROJECT_GOVERNANCE_DENIED':
-      return '不能添加该成员：项目负责人职责不能通过成员管理授予，也不能添加自己或平台管理员身份。请选择其他项目职责或账号。'
+      // Control uses one code for several governance rules, so the reason lists them instead of guessing one.
+      return '项目治理规则不允许这项操作：你的项目职责不足，或操作对象是你自己、项目负责人或平台管理员身份。项目负责人职责只能在创建项目时确定，归档项目只能由负责人或平台管理员执行。'
+    case 'LW_PROJECT_ARCHIVED':
+      return '项目已归档，不能再修改项目或成员。'
     case 'LW_PROJECT_MEMBERSHIP_CONFLICT':
       return '该账号的成员记录已被其他操作修改。请刷新成员列表后再试。'
+    case 'LW_PROJECT_MEMBERSHIP_NOT_FOUND':
+      return '该成员记录不存在或已被移除。请刷新成员列表。'
     case 'LW_PROJECT_COURSE_MEMBERSHIP_REQUIRED':
       return '该账号还不是课程成员，不能加入课程项目。请先将其加入课程。'
     case 'LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED':
       return '项目负责人的成员记录受保护，不能修改或移除。'
+    case 'LW_ACCESS_DIRECTORY_USERNAME_INVALID':
+      return '用户名格式无效。请输入完整的组织账号用户名。'
+    case 'LW_ACCESS_DIRECTORY_USER_NOT_FOUND':
+      return '没有找到这个账号。请确认用户名完整且正确。'
+    case 'LW_ACCESS_DIRECTORY_USER_DISABLED':
+      return '该账号已停用，不能加入项目。'
     default:
       return message
   }

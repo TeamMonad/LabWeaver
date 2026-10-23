@@ -316,6 +316,23 @@ describe('WorkspaceListView', () => {
     wrapper.unmount()
   })
 
+  it('offers archiving only to the project owner or a platform administrator', async () => {
+    // A manager holds every project action except runtime policy, yet Control archives only for the owner or an administrator.
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'manager-1' } }
+    mockAvailableActions(['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs'])
+    const manager = await mountView()
+    expect(manager.wrapper.get('button[type="submit"]').text()).toContain('保存项目')
+    expect(manager.wrapper.find('button.danger-button').exists()).toBe(false)
+    expect(manager.wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(true)
+    manager.wrapper.unmount()
+
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'owner-1' } }
+    const owner = await mountView()
+    expect(owner.wrapper.find('button.danger-button').exists()).toBe(true)
+    expect(owner.wrapper.find('[data-testid="archive-permission-hint"]').exists()).toBe(false)
+    owner.wrapper.unmount()
+  })
+
   it('keeps every write closed and shows the reason while the permission read fails', async () => {
     vi.mocked(getProjectAvailableActions).mockResolvedValue({
       data: undefined,
@@ -406,17 +423,27 @@ describe('WorkspaceListView', () => {
     wrapper.unmount()
   })
 
-  it('shows the Chinese reason before the code when the server refuses the member', async () => {
-    membersState.outcome = {
-      kind: 'error',
-      diagnostic: makeDiagnostic('LW_PROJECT_GOVERNANCE_DENIED', 'The request was rejected by a fail-closed control-plane boundary.', false, { status: 403, requestId: 'req-member-1' }),
-    }
+  it.each([
+    'LW_PROJECT_GOVERNANCE_DENIED',
+    'LW_PROJECT_ARCHIVED',
+    'LW_PROJECT_MEMBERSHIP_CONFLICT',
+    'LW_PROJECT_MEMBERSHIP_NOT_FOUND',
+    'LW_PROJECT_COURSE_MEMBERSHIP_REQUIRED',
+    'LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED',
+    'LW_ACCESS_DIRECTORY_USERNAME_INVALID',
+    'LW_ACCESS_DIRECTORY_USER_NOT_FOUND',
+    'LW_ACCESS_DIRECTORY_USER_DISABLED',
+  ])('shows a Chinese reason before the code when the server refuses the member with %s', async (code) => {
+    const serverDetail = 'The request was rejected by a fail-closed control-plane boundary.'
+    membersState.outcome = { kind: 'error', diagnostic: makeDiagnostic(code, serverDetail, false, { status: 403, requestId: 'req-member-1' }) }
     const { wrapper } = await mountView()
-    const text = wrapper.text()
-    const reason = '不能添加该成员：项目负责人职责不能通过成员管理授予'
-    expect(text).toContain(reason)
-    expect(text).not.toContain('fail-closed control-plane boundary')
-    expect(text.indexOf(reason)).toBeLessThan(text.indexOf('LW_PROJECT_GOVERNANCE_DENIED'))
+    const banner = wrapper.get('.members-section .diagnostic-banner')
+    const reason = banner.get('.diagnostic-message').text()
+    expect(reason).not.toContain(serverDetail)
+    expect(/[\u4e00-\u9fff]/.test(reason)).toBe(true)
+    expect(banner.get('.diagnostic-code').text()).toBe(code)
+    // The reason is read before the collapsed code details.
+    expect(banner.text().indexOf(reason)).toBeLessThan(banner.text().indexOf(code))
     wrapper.unmount()
   })
 
