@@ -160,7 +160,7 @@ describe('useEnvironmentInstance polling', () => {
 
     // Unguarded, this pending handoff for env-1 would replace env-2 with "环境正在准备" and restart polling.
     resolveRequests({
-      data: [{ id: 'request-1', projectId: 'project-1', state: 'active', target: { kind: 'environment', environmentId: 'env-1' } }],
+      data: { items: [{ id: 'request-1', projectId: 'project-1', state: 'active', target: { kind: 'environment', environmentId: 'env-1' } }], nextCursor: null },
       error: undefined,
     })
     await flushPromises()

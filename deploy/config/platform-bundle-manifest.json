@@ -66,10 +66,10 @@
       "postgres-ca.pem",
       "mtls-ca.pem",
       "nats-ca.pem",
+      "nats-client.key",
+      "nats.creds",
       "nats-client.crt",
-      "service-client-secret",
       "cursor-signing-key-current",
-      "cursor-signing-key-previous",
       "tls.crt",
       "tls.key",
       "portal-public-root.crt"
