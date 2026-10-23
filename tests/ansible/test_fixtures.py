@@ -18,6 +18,27 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+SECRET_FILE_PATH = re.compile(r"^/etc/labweaver/secrets/([^/]+)$")
+
+
+def _yaml_string_scalars(value: object):
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _yaml_string_scalars(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _yaml_string_scalars(nested)
+    elif isinstance(value, str):
+        yield value
+
+
+def _secret_file_keys(value: object):
+    for scalar in _yaml_string_scalars(value):
+        match = SECRET_FILE_PATH.fullmatch(scalar)
+        if match is not None:
+            yield match.group(1)
+
 SAFETY_PATH = ROOT / "deploy/ansible/roles/storage_nodes/files/storage_safety.py"
 SPEC = importlib.util.spec_from_file_location("storage_safety", SAFETY_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -1374,11 +1395,56 @@ class AnsibleFixtureTests(unittest.TestCase):
             ("access-service-secrets", "access-service-config", "access-auth.yaml.example"),
             ("agent-service-secrets", "agent-service-config", "agent-control-plane.yaml.example"),
         ):
-            configuration = (ROOT / "deploy/config" / example).read_text(encoding="utf-8")
-            for locator in re.findall(r"/etc/labweaver/secrets/([a-z0-9.-]+)", configuration):
+            configuration_text = (ROOT / "deploy/config" / example).read_text(encoding="utf-8")
+            configuration = yaml.safe_load(configuration_text)
+            for locator in _secret_file_keys(configuration):
                 self.assertIn(locator, manifest["secrets"][service])
-            for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration):
+            for locator in re.findall(r"/etc/labweaver/config/([a-z0-9.-]+)", configuration_text):
                 self.assertIn(locator, manifest["configMaps"][config_map])
+
+    def test_service_config_secret_paths_match_declared_manifest_keys(self) -> None:
+        platform_manifest = json.loads(
+            (ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8")
+        )
+        resource_manifest = json.loads(
+            (ROOT / "deploy/config/resource-bundle-manifest.json").read_text(encoding="utf-8")
+        )
+        for service, example, manifest in (
+            ("control-service-secrets", "control-plane.yaml.example", platform_manifest),
+            ("access-service-secrets", "access-auth.yaml.example", platform_manifest),
+            ("agent-service-secrets", "agent-control-plane.yaml.example", platform_manifest),
+            ("evaluation-service-secrets", "evaluation-service.yaml.example", platform_manifest),
+            ("resource-service-secrets", "resource-service.yaml.example", resource_manifest),
+        ):
+            configuration = yaml.safe_load(
+                (ROOT / "deploy/config" / example).read_text(encoding="utf-8")
+            )
+            declared = set(manifest["secrets"][service]) | set(
+                manifest.get("optionalSecrets", {}).get(service, [])
+            )
+            for locator in _secret_file_keys(configuration):
+                self.assertIn(locator, declared, (example, locator))
+
+    def test_secret_path_parser_accepts_underscored_key(self) -> None:
+        configuration = yaml.safe_load("secret: /etc/labweaver/secrets/key_with_underscore\n")
+        self.assertEqual(list(_secret_file_keys(configuration)), ["key_with_underscore"])
+
+    def test_secret_path_parser_rejects_nested_path(self) -> None:
+        configuration = yaml.safe_load("secret: /etc/labweaver/secrets/key/nested\n")
+        self.assertEqual(list(_secret_file_keys(configuration)), [])
+
+    def test_secret_path_parser_walks_list_scalars(self) -> None:
+        configuration = yaml.safe_load(
+            "secret_files:\n  - /etc/labweaver/secrets/list-key\n"
+        )
+        self.assertEqual(list(_secret_file_keys(configuration)), ["list-key"])
+
+    def test_secret_path_parser_ignores_comments(self) -> None:
+        configuration = yaml.safe_load(
+            "# /etc/labweaver/secrets/comment-key\nvalue: null\n"
+        )
+        self.assertEqual(list(_secret_file_keys(configuration)), [])
+
     def test_cursor_and_service_secret_paths_match_manifests(self) -> None:
         values = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8"))
         platform = json.loads((ROOT / "deploy/config/platform-bundle-manifest.json").read_text(encoding="utf-8"))

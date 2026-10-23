@@ -3403,6 +3403,20 @@ async fn project_request_cursor_pagination_enforces_actor_scope_and_snapshot_bou
             .all(|request| request.requester_id == member)
     );
     assert!(member_first.next_cursor.is_some());
+    let wrong_project = store
+        .list_project_requests_page(
+            ProjectId::new(),
+            Some(member),
+            &ResourceRequestListQuery {
+                cursor: member_first.next_cursor.clone(),
+                ..query.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_project,
+        Err(ResourceStoreError::InvalidCursor)
+    ));
     let wrong_actor = store
         .list_project_requests_page(
             project_id,
@@ -4602,6 +4616,40 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
     let project_requests = project_page.items;
     assert_eq!(project_requests.len(), 2);
 
+    let first_page_response = router
+        .clone()
+        .oneshot(public_project_list_page_request(
+            &access_token,
+            &delegation,
+            project_id,
+            "resource-requests",
+            "limit=1",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page: contracts::http::ResourceRequestPage =
+        serde_json::from_slice(&to_bytes(first_page_response.into_body(), 1024 * 1024).await?)?;
+    let cursor = first_page.next_cursor.ok_or("missing project cursor")?;
+    let wrong_project_response = router
+        .clone()
+        .oneshot(public_project_list_page_request(
+            &access_token,
+            &delegation,
+            ProjectId::new(),
+            "resource-requests",
+            &format!("limit=1&cursor={cursor}"),
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(wrong_project_response.status(), StatusCode::BAD_REQUEST);
+    let problem: contracts::ProblemDetails =
+        serde_json::from_slice(&to_bytes(wrong_project_response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(
+        problem.diagnostic_code.as_str(),
+        "LW_RESOURCE_REQUEST_CURSOR_INVALID"
+    );
+
     let project_leases_response = router
         .oneshot(public_project_list_request(
             &access_token,
@@ -4863,6 +4911,23 @@ fn public_project_list_request(
     Ok(Request::builder()
         .method(Method::GET)
         .uri(format!("/api/v1/projects/{project_id}/{resource_path}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("x-labweaver-resource-delegation", delegation)
+        .body(Body::empty())?)
+}
+
+fn public_project_list_page_request(
+    token: &str,
+    delegation: &str,
+    project_id: ProjectId,
+    resource_path: &str,
+    query: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    Ok(Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/projects/{project_id}/{resource_path}?{query}"
+        ))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header("x-labweaver-resource-delegation", delegation)
         .body(Body::empty())?)
