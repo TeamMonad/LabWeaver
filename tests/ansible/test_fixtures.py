@@ -736,6 +736,8 @@ class AnsibleFixtureTests(unittest.TestCase):
             self.assertNotIn("access.project_memberships", template)
         self.assertIn("SET ROLE lw_control_owner", seed)
         self.assertIn("SET ROLE lw_control_owner", platform_seed)
+        self.assertIn("PLATFORM_ACCESS_ACTOR_IDENTITY_CONFLICT", platform_seed)
+        self.assertNotIn("ON CONFLICT (actor_id) DO UPDATE", platform_seed)
 
     def test_postgres_apply_rejects_an_unknown_listener_without_protocol_probe(self) -> None:
         apply_path = ROOT / "deploy/ansible/library/labweaver_postgres_apply.py"
