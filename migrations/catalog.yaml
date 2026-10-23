@@ -224,3 +224,6 @@ domains:
       - id: 14
         file: resource/0014_environment_resource_reservation_lifecycle.sql
         sha256: 703cda466c331b5751b90c671dd74c4d04e324d9a3510acf48b6150e3c8796e5
+      - id: 21
+        file: resource/0021_outbox_publication_claims.sql
+        sha256: 4c278cc0169006ca2e4125529abeb49d1e3ba2799f552c0f8f4da6fbaa3bbbcc
