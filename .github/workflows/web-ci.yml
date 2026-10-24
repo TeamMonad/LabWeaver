@@ -82,6 +82,11 @@ jobs:
         working-directory: ./web
         run: pnpm typecheck
 
+      - name: Type check fixture preview
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm typecheck:fixtures
+
       - name: Unit tests
         if: steps.changes.outputs.web_changed == 'true'
         working-directory: ./web
@@ -91,3 +96,8 @@ jobs:
         if: steps.changes.outputs.web_changed == 'true'
         working-directory: ./web
         run: pnpm build
+
+      - name: Build fixture preview
+        if: steps.changes.outputs.web_changed == 'true'
+        working-directory: ./web
+        run: pnpm build:fixtures

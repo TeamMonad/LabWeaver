@@ -76,6 +76,8 @@ EVENT_NAME=pull_request BASE_SHA=$(git rev-parse origin/develop) HEAD_SHA=$(git 
 
 Rust、Web、Playwright、Ansible 和 Platform Images 对所有目标分支的 PR 检查；push 仅覆盖 main/develop。Platform Images 仍按其影响路径触发，在命中时为 main/develop 以及堆叠 PR 生成并验证 OCI 构建产物。镜像 CI 不推送运行镜像、不创建 Release，也不部署。Local Integration 保留人工触发。
 
+Web 工作流在 `web/**`（包括 `web/fixtures/**`）或自身工作流文件变更时运行检查。除生产前端检查外，还运行 `pnpm --dir web typecheck:fixtures` 和 `pnpm --dir web build:fixtures`，分别检查 fixture 预览的类型和实际构建。提交相关变更前在本地运行这两条命令；fixture 预览通过不代表真实后端旅程验收通过。
+
 Platform Images 的路径范围还包括 `web/**`（Web 镜像上下文由 `cargo xtask package-prepare` 生成）、Rust builder 复制的 `.cargo/`、`migrations/`、`vendor/`、`rust-toolchain.toml`、`rustfmt.toml` 和影响构建上下文的 `.dockerignore`。仅修改这些输入时仍需检查镜像构建。
 
 离线 Alpine APK 的文件名、下载地址和 SHA-256 在 `xtask/src/platform_images.rs` 的 `ALPINE_V3_21_PKGS` 中锁定。更新包时，先检查全部锁定地址是否仍可下载，再对实际下载文件计算 SHA-256；保持校验启用。`musl-dev` 精确依赖同 revision 的 `musl`，因此两者必须一起锁定并传给 gateway builder 的 `apk add --no-network`，不能假设按 digest 固定的 Rust 基础镜像已包含新 revision。`containers/Containerfile.web` 的本地 Work fixture 也消费这份 APK 闭包。更新后运行 `cargo xtask package-prepare` 和受影响镜像构建；基础镜像 digest 未变时，不改 `deploy/versions.lock.yml`。
