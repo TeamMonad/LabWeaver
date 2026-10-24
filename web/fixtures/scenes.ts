@@ -54,6 +54,7 @@ export const fixtureScenes: FixtureScene[] = [
   { id: 'workspace-archive', label: '项目与工作 · 归档确认', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '保留项目归属，并检查危险归档确认文案。' },
   { id: 'work-launcher', label: 'Work 环境 · 无模型手工创建', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '项目没有可用模型：Agent 关闭并说明原因，仍可手工选择模板创建 Work。' },
   { id: 'work-launcher-empty', label: 'Work 环境 · 没有模板', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, description: '没有已发布模板且没有模型时的下一步说明。' },
+  { id: 'work-upgrade', label: 'Work 环境 · 连接指引与模板升级', group: '项目与工作', role: 'student', path: '/researcher/environments', projectId: DEFAULT_PROJECT_ID, environmentId: 'env-workbench', environmentState: 'ready', description: '连接状态与 guest 指引来自平台；容器 Work 可确认后升级到同一模板系列的新版本。' },
   { id: 'workspace-members', label: '项目成员 · 成员管理', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '展示可读成员名称和移除确认入口。' },
   { id: 'workspace-viewer', label: '项目成员 · 只读成员', group: '项目与工作', role: 'student', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '项目职责只有查看：编辑、归档和成员管理关闭，并说明缺少的职责。' },
   { id: 'resource-reclaim', label: '资源授权 · 回收确认', group: '项目与工作', role: 'student', path: '/researcher/resources', projectId: DEFAULT_PROJECT_ID, description: '已授权 Lease 的回收动作会要求确认。' },

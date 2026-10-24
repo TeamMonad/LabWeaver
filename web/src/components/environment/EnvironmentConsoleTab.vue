@@ -118,11 +118,11 @@
 <script setup lang="ts">
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import ConsolePanel from '@/components/console/ConsolePanel.vue'
-import type { EnvironmentInstanceSchema } from '@/generated/contracts'
+import type { EnvironmentDetailSchema } from '@/generated/contracts'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 
 /** Web 控制台：授权后连接终端或桌面；冻结提交期间说明断开原因并提供重新连接。 */
-defineProps<{ data: EnvironmentInstanceSchema }>()
+defineProps<{ data: EnvironmentDetailSchema }>()
 
 const {
   teacherMode,

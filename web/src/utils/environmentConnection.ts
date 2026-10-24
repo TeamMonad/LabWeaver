@@ -1,20 +1,20 @@
-import type { AccessGrantSchema, ConsoleKind, EnvironmentEndpointSchema, EnvironmentInstanceSchema } from '@/generated/contracts'
+import type { AccessGrantSchema, ConsoleKind, EnvironmentDetailSchema, EnvironmentEndpointSchema } from '@/generated/contracts'
 import type { AsyncState } from '@/types/async'
 
 /**
  * Connection readiness is separate from instance readiness: an instance can be
- * running while its endpoints are still being checked (a VM guest still
- * booting, a service not yet listening) or while the caller holds no usable
- * access grant. Every input here is a server read plus the current time; the
- * browser only orders them and fails closed when a read is missing.
+ * running while its connection is still being prepared (a VM guest still
+ * booting, SSH not yet handshaken) or while the caller holds no usable access
+ * grant. Instance and connection readiness come only from the server's
+ * `connection` read model; the browser never infers them from endpoints or the
+ * runtime kind, and it fails closed when a read is missing.
  */
 export type ConnectionReadinessKind =
   | 'instance-not-ready'
-  | 'checking'
+  | 'connection-preparing'
   | 'unknown'
-  | 'no-endpoints'
-  | 'endpoints-pending'
-  | 'endpoints-unhealthy'
+  | 'connection-unavailable'
+  | 'checking'
   | 'needs-grant'
   | 'needs-regrant'
   | 'grant-pending'
@@ -28,9 +28,7 @@ export interface ConnectionReadiness {
   detail: string
 }
 
-export function instanceIsReady(instance: Pick<EnvironmentInstanceSchema, 'desiredState' | 'observedState'>): boolean {
-  return instance.desiredState === 'running' && instance.observedState === 'ready'
-}
+export type ConnectionFacts = Pick<EnvironmentDetailSchema, 'desiredState' | 'connection'>
 
 /** A grant the server reported active stops counting at its own expiry, even before the next read. */
 export function grantIsUsable(grant: AsyncState<AccessGrantSchema>, now: number): boolean {
@@ -38,44 +36,37 @@ export function grantIsUsable(grant: AsyncState<AccessGrantSchema>, now: number)
 }
 
 export function connectionReadiness(
-  instance: Pick<EnvironmentInstanceSchema, 'desiredState' | 'observedState'>,
-  endpoints: AsyncState<EnvironmentEndpointSchema[]>,
+  instance: ConnectionFacts,
   grant: AsyncState<AccessGrantSchema>,
   instanceBlockReason: string,
   now: number,
 ): ConnectionReadiness {
-  if (!instanceIsReady(instance)) {
+  const { connection } = instance
+  // A stop or delete request ends connections, whatever the last observation said.
+  if (instance.desiredState !== 'running' || !connection.instanceReady) {
     return { kind: 'instance-not-ready', label: '不可连接', detail: instanceBlockReason }
   }
-  if (endpoints.kind === 'idle' || endpoints.kind === 'loading') {
-    return { kind: 'checking', label: '检查中', detail: '正在读取连接入口。' }
-  }
-  if (endpoints.kind === 'empty') {
-    return {
-      kind: 'no-endpoints',
-      label: '暂无入口',
-      detail: '实例已运行，但平台还没有为它登记连接入口。页面会自动重新检查；持续没有入口时到“异步操作与诊断”查看原因。',
-    }
-  }
-  if (endpoints.kind !== 'success') {
-    return { kind: 'unknown', label: '无法确认', detail: `无法读取连接入口：${endpoints.diagnostic.message}` }
-  }
-  const live = endpoints.data.filter((endpoint) => endpoint.health !== 'removed')
-  if (live.length === 0) {
-    return { kind: 'no-endpoints', label: '暂无入口', detail: '连接入口已全部移除，请刷新或重启环境。' }
-  }
-  if (!live.some((endpoint) => endpoint.health === 'healthy')) {
-    return live.some((endpoint) => endpoint.health === 'pending')
-      ? {
-          kind: 'endpoints-pending',
-          label: '入口检查中',
-          detail: '实例已运行，连接入口仍在检查：系统或服务可能还在启动。页面会自动重新检查，入口健康后即可签发访问授权。',
-        }
-      : {
-          kind: 'endpoints-unhealthy',
-          label: '入口未就绪',
-          detail: '实例已运行，但连接入口检查未通过，暂时无法连接。页面会自动重新检查；也可以刷新或重启环境。',
-        }
+  switch (connection.state) {
+    case 'preparing':
+      return {
+        kind: 'connection-preparing',
+        label: '连接准备中',
+        detail: '实例已运行，平台正在准备连接入口：系统或服务可能还在启动。页面会自动重新检查，准备好后即可签发访问授权。',
+      }
+    case 'unknown':
+      return {
+        kind: 'unknown',
+        label: '无法确认',
+        detail: '实例已运行，但平台还没有确认连接入口可用（例如虚拟机的 SSH 还没有完成握手）。页面会自动重新检查。',
+      }
+    case 'unavailable':
+      return {
+        kind: 'connection-unavailable',
+        label: '入口不可用',
+        detail: '实例已运行，但连接入口当前不可用。页面会自动重新检查；持续不可用时到“异步操作与诊断”查看原因，或重启环境。',
+      }
+    case 'ready':
+      break
   }
   if (grant.kind === 'loading') {
     return { kind: 'checking', label: '检查中', detail: '正在读取当前访问授权。' }
@@ -98,7 +89,7 @@ export function connectionReadiness(
       detail: `无法确认当前访问授权：${grant.diagnostic.message} 重新签发访问授权后再连接。`,
     }
   }
-  return { kind: 'needs-grant', label: '待授权', detail: '入口已就绪。签发访问授权后即可连接。' }
+  return { kind: 'needs-grant', label: '待授权', detail: '连接入口已就绪。签发访问授权后即可连接。' }
 }
 
 export type ConnectionMethodId = 'console' | 'desktop' | 'ssh' | 'app'

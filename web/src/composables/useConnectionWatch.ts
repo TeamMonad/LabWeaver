@@ -1,7 +1,7 @@
 import { computed, getCurrentScope, onScopeDispose, ref, watch, type Ref } from 'vue'
-import type { AccessGrantSchema, EnvironmentEndpointSchema, EnvironmentInstanceSchema } from '@/generated/contracts'
+import type { AccessGrantSchema, EnvironmentEndpointSchema } from '@/generated/contracts'
 import type { AsyncState } from '@/types/async'
-import { connectionReadiness, type ConnectionReadinessKind } from '@/utils/environmentConnection'
+import { connectionReadiness, type ConnectionFacts, type ConnectionReadinessKind } from '@/utils/environmentConnection'
 
 const RECHECK_INTERVAL_MS = 5000
 /** Automatic re-checks stop after this long without progress; the user can re-check by hand. */
@@ -12,10 +12,9 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 /** Readiness states that can change on the server without any user action. */
 const WAITING_KINDS: Partial<Record<ConnectionReadinessKind, true>> = {
+  'connection-preparing': true,
   'unknown': true,
-  'no-endpoints': true,
-  'endpoints-pending': true,
-  'endpoints-unhealthy': true,
+  'connection-unavailable': true,
   'needs-regrant': true,
 }
 
@@ -29,15 +28,18 @@ export interface WatchedAccess {
 
 /**
  * Keeps the connection readiness of one open environment current while the
- * page is visible: endpoints and the current access grant are re-read every
- * few seconds while the server may still change them, the grant is re-read
- * when it expires, and both are re-read when the page becomes visible again.
- * Re-reads are silent so the last answer stays on screen, and every timer is
- * cancelled when the page hides or the view goes away.
+ * page is visible: the environment's `connection` facts, its endpoints and the
+ * current access grant are re-read every few seconds while the server may
+ * still change them, the grant is re-read when it expires, and all are re-read
+ * when the page becomes visible again. Re-reads are silent so the last answer
+ * stays on screen, and every timer is cancelled when the page hides or the
+ * view goes away.
  */
 export function useConnectionWatch(
-  instance: Ref<Pick<EnvironmentInstanceSchema, 'desiredState' | 'observedState'> | null>,
+  instance: Ref<ConnectionFacts | null>,
   access: WatchedAccess,
+  /** Re-reads the environment (and so its `connection` facts) without blanking it. */
+  reloadInstance: () => Promise<unknown>,
 ) {
   const now = ref(Date.now())
   const autoChecking = ref(false)
@@ -50,7 +52,7 @@ export function useConnectionWatch(
   let refreshGeneration = 0
 
   const readinessKind = computed(() => instance.value
-    ? connectionReadiness(instance.value, access.endpoints, access.grant, '', now.value).kind
+    ? connectionReadiness(instance.value, access.grant, '', now.value).kind
     : null)
 
   const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
@@ -61,6 +63,7 @@ export function useConnectionWatch(
     now.value = Date.now()
     // An access grant that is being issued is followed by its own activation reads.
     await Promise.all([
+      reloadInstance(),
       access.loadEndpoints(true),
       access.creating ? Promise.resolve() : access.loadCurrentGrant(true),
     ])

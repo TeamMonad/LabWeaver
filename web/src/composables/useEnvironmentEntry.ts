@@ -11,7 +11,7 @@ import { useEnvironmentSubmission } from '@/composables/useEnvironmentSubmission
 import { useProjects } from '@/composables/useProjects'
 import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import type { TimelineEvent } from '@/components/common/EventTimeline.vue'
-import type { ConsoleKind, EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import type { ConsoleKind, EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { accessGrantBlockReason, canIssueAccessGrant, operationTimelineDescription } from '@/utils/environmentLifecycle'
 import { grantIsUsable } from '@/utils/environmentConnection'
@@ -55,7 +55,7 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     ? routeProjectId.value ?? projects.selectedProjectId ?? undefined
     : undefined)
   const env = useEnvironmentInstance(selectedEnvironmentId, handoffProjectId)
-  const instance = computed<EnvironmentInstanceSchema | null>(() => env.instance.kind === 'success' ? env.instance.data : null)
+  const instance = computed<EnvironmentDetailSchema | null>(() => env.instance.kind === 'success' ? env.instance.data : null)
   const isEnvironmentLoaded = computed(() => env.instance.kind === 'success')
   const environmentTitle = computed(() => {
     if (env.instance.kind === 'success') return env.instance.data.displayLabel
@@ -110,7 +110,7 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
 
   // ---- Connection readiness and browser console ----------------------------
 
-  const connection = useConnectionWatch(instance, access)
+  const connection = useConnectionWatch(instance, access, env.load)
   const connectionRechecking = ref(false)
   async function recheckConnection() {
     connectionRechecking.value = true
@@ -175,7 +175,10 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
   const operationItems = computed(() => operations.operations.kind === 'success' ? operations.operations.data : [])
   const operationTimeline = computed<TimelineEvent[]>(() => operationItems.value.map((op) => ({
     id: op.operationId,
-    title: `${environmentOperationKindLabel(op.kind)} · ${environmentOperationStateLabel(op.state)}`,
+    // A template upgrade runs as the ordinary restart operation and carries its source and target.
+    title: `${op.templateUpgrade
+      ? `模板升级 v${op.templateUpgrade.sourceReleaseVersion} → v${op.templateUpgrade.targetReleaseVersion}`
+      : environmentOperationKindLabel(op.kind)} · ${environmentOperationStateLabel(op.state)}`,
     timestamp: op.terminalAt ?? op.acceptedAt,
     description: operationTimelineDescription(op),
   })))
@@ -354,7 +357,7 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
 
   // ---- Access grant and console ------------------------------------------
 
-  function accessGrantRequestEnvironment(): EnvironmentInstanceSchema | null {
+  function accessGrantRequestEnvironment(): EnvironmentDetailSchema | null {
     const data = instance.value
     if (!data) {
       createGrantDiagnostic.value = makeDiagnostic('ACCESS_GRANT_ENVIRONMENT_NOT_READY', '环境状态尚未加载，无法签发访问授权。', false)
@@ -375,12 +378,12 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
    * Why the actor cannot be issued an access grant for `data`: a missing
    * `grant_access` responsibility comes before the instance state.
    */
-  function grantBlockReason(data: EnvironmentInstanceSchema): string {
+  function grantBlockReason(data: EnvironmentDetailSchema): string {
     return permissions.denialReason('grant_access') ?? accessGrantBlockReason(data)
   }
 
   /** The instance can be connected and the actor may be issued an access grant for it. */
-  function canRequestAccessGrant(data: EnvironmentInstanceSchema): boolean {
+  function canRequestAccessGrant(data: EnvironmentDetailSchema): boolean {
     return canIssueGrantForProject.value && canIssueAccessGrant(data)
   }
 

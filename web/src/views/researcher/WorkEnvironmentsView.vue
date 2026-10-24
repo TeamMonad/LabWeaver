@@ -164,7 +164,21 @@
                     <SvgIcon :name="release.runtimeKind === 'virtual_machine' ? 'computer' : 'deployed_code'" size="sm" aria-hidden="true" />
                     {{ workTemplateTitle(release) }}
                   </span>
-                  <span class="template-card__meta">发布于 {{ formatTimestamp(release.publishedAt) }}</span>
+                  <span class="template-card__meta">
+                    {{ runtimeKindLabel(release.runtimeKind) }} · {{ workTemplateSourceLabel(release) }} · 发布于 {{ formatTimestamp(release.publishedAt) }}
+                  </span>
+                  <span v-if="release.description" class="template-card__description">{{ release.description }}</span>
+                  <span class="template-card__capabilities" aria-label="支持的能力">
+                    <span
+                      v-for="capability in release.capabilities"
+                      :key="capability"
+                      class="capability-chip"
+                      :class="{ 'capability-chip--off': capability === 'agent' && agent.state.kind !== 'configured' }"
+                      :data-capability="capability"
+                    >
+                      {{ templateCapabilityLabel(capability) }}{{ capability === 'agent' && agent.state.kind !== 'configured' ? '（项目当前不可用）' : '' }}
+                    </span>
+                  </span>
                   <span class="template-card__artifact">{{ workTemplateArtifactLabel(release) }}</span>
                 </span>
               </RadioGroupItem>
@@ -189,17 +203,26 @@
             <div class="templates-empty" data-testid="templates-empty">
               <SvgIcon name="inventory_2" size="lg" aria-hidden="true" />
               <p><strong>当前项目还没有可用的 Work 模板。</strong></p>
-              <p>目前 Work 模板只能通过 Agent 生成、审核并发布；从平台镜像直接发布手工模板需要后端支持，当前版本还不能使用。模板发布后即可在这里手工选择并创建 Work。</p>
-              <p v-if="agent.state.kind === 'available'" class="section-hint">
-                当前项目已配置模型，可以生成 Work 模板。
+              <p>项目所有者或管理者可以在下方“发布手工 Work 模板”中，从平台镜像直接发布模板，不需要模型。其他成员请联系项目负责人或课程教师发布。</p>
+              <p v-if="agent.state.kind === 'configured'" class="section-hint">
+                当前项目已配置模型，也可以让 Agent 生成 Work 模板。
                 <RouterLink :to="{ path: '/researcher/software', query: { projectId } }">生成 Work 模板</RouterLink>
-              </p>
-              <p v-else class="section-hint">
-                当前项目没有可用的模型，不能生成模板：请项目负责人在项目 AI 设置中配置模型，或联系课程教师发布已有模板。
               </p>
             </div>
           </template>
         </AsyncStateView>
+
+        <details class="manual-section" :open="manualOpen" data-testid="manual-section" @toggle="syncManualOpen">
+          <summary>发布手工 Work 模板</summary>
+          <ManualWorkTemplatePublisher
+            v-if="manualOpen"
+            :project-id="projectId"
+            :course-id="project?.courseId ?? null"
+            :project-owner-id="project?.ownerActorId ?? null"
+            :releases="releases.releases.kind === 'success' ? releases.releases.data : []"
+            @published="releases.load"
+          />
+        </details>
       </section>
 
       <details class="advanced">
@@ -223,8 +246,9 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import AgentAvailabilityNote from '@/components/work/AgentAvailabilityNote.vue'
+import ManualWorkTemplatePublisher from '@/components/work/ManualWorkTemplatePublisher.vue'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
-import { useAgentAvailability } from '@/composables/useAgentAvailability'
+import { useProjectAgentCapability } from '@/composables/useProjectAgentCapability'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useProjects } from '@/composables/useProjects'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
@@ -233,7 +257,14 @@ import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema, Resource
 import type { AsyncState } from '@/types/async'
 import { formatTimestamp } from '@/utils/format'
 import { resourceAllocationFailureMessage } from '@/utils/stateLabels'
-import { isUsableRelease, runtimeKindLabel, workTemplateArtifactLabel, workTemplateTitle } from '@/utils/workTemplate'
+import {
+  isWorkTemplate,
+  runtimeKindLabel,
+  templateCapabilityLabel,
+  workTemplateArtifactLabel,
+  workTemplateSourceLabel,
+  workTemplateTitle,
+} from '@/utils/workTemplate'
 
 const route = useRoute()
 const router = useRouter()
@@ -247,17 +278,17 @@ const project = computed(() => projects.projects.kind === 'success' ? projects.p
 // The launcher only loads when it is shown; an open environment owns its own data.
 const launcherProjectId = computed(() => routeEnvironmentId.value ? null : projectId.value)
 const workEnvironments = useProjectWorkEnvironments(launcherProjectId)
-const agent = useAgentAvailability(launcherProjectId)
+const agent = useProjectAgentCapability(launcherProjectId)
 const releases = useEnvironmentTemplateReleases(
   computed(() => launcherProjectId.value ?? undefined),
   computed(() => project.value?.courseId ?? undefined),
 )
 
-/** Withdrawn templates cannot create new Work, so they are not offered. */
+/** Only Work releases that are not withdrawn can create new Work. */
 const usableReleases = computed<AsyncState<EnvironmentTemplateReleaseViewSchema[]>>(() => {
   const state = releases.releases
   if (state.kind !== 'success') return state
-  const items = state.data.filter(isUsableRelease)
+  const items = state.data.filter(isWorkTemplate)
   return items.length ? { kind: 'success', data: items } : { kind: 'empty' }
 })
 
@@ -267,6 +298,13 @@ const selectedRelease = computed(() => {
   return state.kind === 'success' ? state.data.find((release) => releaseKey(release) === selectedReleaseKey.value) ?? null : null
 })
 watch(launcherProjectId, () => { selectedReleaseKey.value = '' })
+
+/** The manual publication form opens by itself when the project has no Work template yet. */
+const manualOpen = ref(false)
+watch(() => usableReleases.value.kind, (kind) => { if (kind === 'empty') manualOpen.value = true }, { immediate: true })
+function syncManualOpen(event: Event) {
+  if (event.currentTarget instanceof HTMLDetailsElement) manualOpen.value = event.currentTarget.open
+}
 
 type EnvironmentRequest = ResourceRequestSchema & { target: Extract<ResourceRequestSchema['target'], { kind: 'environment' }> }
 
@@ -383,6 +421,13 @@ function openById() {
 .template-card__body { display: grid; gap: var(--space-1); min-width: 0; }
 .template-card__title { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
 .template-card__meta, .template-card__artifact { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); overflow-wrap: anywhere; }
+.template-card__description { color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); overflow-wrap: anywhere; white-space: pre-line; }
+.template-card__capabilities { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.capability-chip { padding: 2px var(--space-2); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-label-small); }
+.capability-chip--off { background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface-variant); }
+.manual-section { padding-top: var(--space-3); border-top: 1px solid var(--md-sys-color-outline-variant); }
+.manual-section > summary { cursor: pointer; color: var(--md-sys-color-on-surface); font: var(--md-sys-label-large); }
+.manual-section[open] > summary { margin-bottom: var(--space-3); }
 .create-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
 .templates-empty { display: grid; justify-items: start; gap: var(--space-2); padding: var(--space-2) 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .templates-empty p { margin: 0; }

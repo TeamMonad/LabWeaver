@@ -87,8 +87,9 @@
               </option>
             </AppSelect>
             <small v-if="releaseSelectionMessage" class="field-note">{{ releaseSelectionMessage }}</small>
-            <small v-else-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布模板。请联系课程教师或管理员发布模板；配置了项目 AI 设置时，也可以生成 Work 模板。</small>
+            <small v-else-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布 Work 模板。项目所有者或管理者可以在“Work 环境”页从平台镜像手工发布模板，不需要模型；配置了项目 AI 设置时，也可以生成 Work 模板。</small>
             <div v-if="options.releases.kind === 'empty'" class="release-empty-next-step">
+              <RouterLink class="text-button" :to="{ path: '/researcher/environments', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">发布手工 Work 模板</RouterLink>
               <RouterLink v-if="canPublishEnvironmentTemplates" class="text-button" :to="{ path: '/teacher/materials', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">教师发布模板</RouterLink>
               <RouterLink class="text-button" :to="{ path: '/researcher/software', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">生成 Work 模板</RouterLink>
             </div>

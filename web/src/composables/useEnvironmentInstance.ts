@@ -1,6 +1,6 @@
 import { getCurrentScope, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import { getEnvironment, listProjectResourceLeases, listProjectResourceRequests } from '@/generated/contracts'
-import type { EnvironmentInstanceSchema, ResourceRequestSchema } from '@/generated/contracts'
+import type { EnvironmentDetailSchema, ResourceRequestSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { resourceLeaseStateLabel, resourceRequestStateLabel } from '@/utils/stateLabels'
 import { collectCursorPages } from '@/utils/cursorPagination'
@@ -88,11 +88,11 @@ async function readHandoffResourceState(projectId: string, environmentId: string
 }
 
 const ENVIRONMENT_POLL_INTERVAL_MS = 3000
-const SETTLED_OBSERVED_STATES = new Set<EnvironmentInstanceSchema['observedState']>(['ready', 'stopped', 'failed', 'deleted'])
-const ACTIVE_OPERATION_STATES = new Set<EnvironmentInstanceSchema['operation']['state']>(['accepted', 'running', 'cancelling'])
+const SETTLED_OBSERVED_STATES = new Set<EnvironmentDetailSchema['observedState']>(['ready', 'stopped', 'failed', 'deleted'])
+const ACTIVE_OPERATION_STATES = new Set<EnvironmentDetailSchema['operation']['state']>(['accepted', 'running', 'cancelling'])
 
 /** An environment still moving between states; a settled one only changes after a new command. */
-export function environmentIsTransitioning(data: EnvironmentInstanceSchema): boolean {
+export function environmentIsTransitioning(data: EnvironmentDetailSchema): boolean {
   return !SETTLED_OBSERVED_STATES.has(data.observedState) || ACTIVE_OPERATION_STATES.has(data.operation.state)
 }
 
@@ -107,7 +107,7 @@ export function useEnvironmentInstance(
   environmentId: Ref<string | undefined>,
   handoffProjectId: Ref<string | undefined> = ref(undefined),
 ) {
-  const instance = ref<AsyncState<EnvironmentInstanceSchema>>({ kind: 'idle' })
+  const instance = ref<AsyncState<EnvironmentDetailSchema>>({ kind: 'idle' })
   /** True while the environment needs watching; the timer itself also pauses on hidden tabs. */
   const polling = ref(false)
   let timer: ReturnType<typeof setTimeout> | null = null

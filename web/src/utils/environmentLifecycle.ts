@@ -1,4 +1,4 @@
-import type { EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, SubmissionManifest } from '@/generated/contracts'
+import type { EnvironmentDetailSchema, EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, SubmissionManifest } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
 import { environmentOperationStateLabel, environmentStateLabel } from '@/utils/stateLabels'
 
@@ -59,8 +59,9 @@ export function environmentMaterialDeadlineLabel(deadline: string | null): strin
   return deadline === null ? '不过期，直到明确撤回' : formatTimestamp(deadline)
 }
 
-export function canIssueAccessGrant(data: EnvironmentInstanceSchema): boolean {
-  return data.desiredState === 'running' && data.observedState === 'ready'
+/** The server reports the current instance generation ready; connection preparation is shown separately. */
+export function canIssueAccessGrant(data: Pick<EnvironmentDetailSchema, 'desiredState' | 'connection'>): boolean {
+  return data.desiredState === 'running' && data.connection.instanceReady
 }
 
 export function accessGrantBlockReason(data: EnvironmentInstanceSchema): string {

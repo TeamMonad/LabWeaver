@@ -43,6 +43,11 @@
                     @issue-grant="issueGrantAndConnect"
                   />
 
+                  <WorkTemplateUpgradePanel
+                    v-if="data.class === 'work'"
+                    :data="data"
+                  />
+
                   <div class="access-section">
                     <h4 class="section-subtitle">
                       访问端点与授权
@@ -247,8 +252,9 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import EnvironmentConnectionSummary from '@/components/environment/EnvironmentConnectionSummary.vue'
+import WorkTemplateUpgradePanel from '@/components/environment/WorkTemplateUpgradePanel.vue'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
-import type { EnvironmentInstanceSchema } from '@/generated/contracts'
+import type { EnvironmentDetailSchema } from '@/generated/contracts'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 import { formatTimestamp } from '@/utils/format'
 import { accessGrantStateLabel, endpointHealthLabel } from '@/utils/stateLabels'
@@ -257,7 +263,7 @@ import { accessGrantBlockReason, desiredEnvironmentStateLabel, environmentMateri
 import { connectUrl, openContainerRuntime, sshCommand, sshFingerprint, sshGrant, webGrant } from '@/utils/environmentAccessGrant'
 
 /** 概览与访问：环境信息、访问端点、访问授权、容器入口和 SSH。 */
-defineProps<{ data: EnvironmentInstanceSchema }>()
+defineProps<{ data: EnvironmentDetailSchema }>()
 
 const {
   createGrantDiagnostic,

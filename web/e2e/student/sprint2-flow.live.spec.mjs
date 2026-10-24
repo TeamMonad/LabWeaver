@@ -762,13 +762,17 @@ test('student provisions a Work environment, configures it, and releases its cap
   }
   await selectProjectByUi(page, project.id)
   if (!PRESERVE_EXISTING_PROJECT) {
-    // A new project has no AI setting yet: the Work page turns off only the
-    // Agent, says why, and keeps the manual template path.
+    // A new project has no AI setting yet: the Work page reads the project
+    // Agent capability, turns off only the Agent, says why, and opens the
+    // manual template publication form.
     await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     const agentNote = page.getByTestId('agent-availability')
-    await expect(agentNote).toContainText('未配置模型', { timeout: 120_000 })
+    await expect(agentNote).toHaveAttribute('data-agent-state', 'unconfigured', { timeout: 120_000 })
+    await expect(agentNote).toContainText('Agent 已关闭')
     await expect(agentNote).toContainText('手工创建和连接 Work 不受影响')
     await expect(page.getByTestId('templates-empty')).toContainText('当前项目还没有可用的 Work 模板', { timeout: 120_000 })
+    await expect(page.getByTestId('manual-section')).toHaveAttribute('open', '')
+    await expect(page.getByTestId('manual-publisher')).toBeVisible()
     await configureProjectPolicyByUi(page, project.id)
   }
   const packageCopy = !resumed && (REAL_WORK_VM || REAL_WORK_CONFIG)

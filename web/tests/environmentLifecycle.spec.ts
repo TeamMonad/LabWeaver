@@ -111,10 +111,13 @@ describe('environment lifecycle rules', () => {
     expect(c.lifecycleDiagnostic.value).toBeNull()
   })
 
-  it('only issues access grants for a running, ready environment', () => {
-    expect(canIssueAccessGrant(instance())).toBe(true)
+  it('only issues access grants once the server reports the running instance ready', () => {
+    const connection = { instanceReady: true, state: 'preparing' as const, guestInstructions: [] as string[] }
+    expect(canIssueAccessGrant({ desiredState: 'running', connection })).toBe(true)
+    // An observed `ready` is not enough: readiness comes from the connection read model.
+    expect(canIssueAccessGrant({ desiredState: 'running', connection: { ...connection, instanceReady: false } })).toBe(false)
+    expect(canIssueAccessGrant({ desiredState: 'stopped', connection })).toBe(false)
     const stopped = instance({ desiredState: 'stopped', observedState: 'stopped' })
-    expect(canIssueAccessGrant(stopped)).toBe(false)
     expect(accessGrantBlockReason(stopped)).toBe('环境已停止，启动后才能签发访问授权。')
   })
 

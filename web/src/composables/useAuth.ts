@@ -4,6 +4,7 @@ import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/cont
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
 import { actorIdFromProfile } from '@/utils/navigation'
 import { syncTrackedSubmissionOwner } from '@/utils/trackedSubmissions'
+import { syncPendingCommandOwner } from '@/utils/pendingCommands'
 
 interface BffUser {
   expired: boolean
@@ -32,7 +33,17 @@ const error = ref<Error | null>(null)
 // initial unauthenticated state (before the session is read) is not a sign-out.
 watch(() => actorIdFromProfile(user.value?.profile), (actorId, previous) => {
   if (actorId || previous) syncTrackedSubmissionOwner(actorId)
+  // Unconfirmed write commands survive an identity that is only temporarily
+  // unknown (network error, 503): they are dropped for another actor here and
+  // on a confirmed sign-out in `confirmSignedOut`.
+  if (actorId) syncPendingCommandOwner(actorId)
 }, { flush: 'sync' })
+
+/** The session is known to have ended: the server said so or the user signed out. */
+function confirmSignedOut() {
+  user.value = null
+  syncPendingCommandOwner(null)
+}
 type TopLevelNavigate = (url: string) => void
 
 const navigateTopLevel: TopLevelNavigate = (url) => {
@@ -66,7 +77,7 @@ async function loadBffSession(): Promise<void> {
     headers: { Accept: 'application/json, application/problem+json' },
   })
   if (response.status === 401) {
-    user.value = null
+    confirmSignedOut()
     return
   }
   if (!response.ok) throw new Error(`BFF session lookup failed with HTTP ${response.status}`)
@@ -131,7 +142,7 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
           headers: { Accept: 'application/json, application/problem+json' },
         })
         if (csrfResponse.status === 401) {
-          user.value = null
+          confirmSignedOut()
           throw sessionExpiredError(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
         }
         if (!csrfResponse.ok) throw new Error(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
@@ -146,7 +157,7 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
           },
         })
         if (response.status === 401) {
-          user.value = null
+          confirmSignedOut()
           throw sessionExpiredError(`BFF logout failed with HTTP ${response.status}`)
         }
         if (!response.ok) throw new Error(`BFF logout failed with HTTP ${response.status}`)
@@ -154,11 +165,11 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
         if (typeof logout.logoutUrl !== 'string' || !logout.logoutUrl) {
           throw new Error('BFF returned an invalid provider logout URL')
         }
-        user.value = null
+        confirmSignedOut()
         navigate(logout.logoutUrl)
       } else if (userManager) {
         await userManager.signoutRedirect()
-        user.value = null
+        confirmSignedOut()
       }
     } catch (err) {
       error.value = err instanceof Error ? err : new Error(String(err))
@@ -172,8 +183,13 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
     error.value = null
     try {
       if (API_AUTH_MODE === 'bff') await loadBffSession()
-      else if (userManager) user.value = await userManager.getUser()
+      else if (userManager) {
+        const current = await userManager.getUser()
+        if (current) user.value = current
+        else confirmSignedOut()
+      }
     } catch (err) {
+      // The identity is unknown, not ended: fail closed without discarding the actor's pending commands.
       user.value = null
       error.value = err instanceof Error ? err : new Error(String(err))
     } finally {
