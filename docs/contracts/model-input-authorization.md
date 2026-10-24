@@ -64,6 +64,8 @@ Claude 的 `PreToolUse`/`PostToolUse` hook 调用同一网关的 `/authorize` �
 
 发送前拒绝的已确认零观察及稳定 `eventId` 先写入现有 `model_gateway_call` 持久 fence，再提交 Resource 结算。RPC 失败时记录保持 pending；gateway 启动和每 10 秒的有界对账会幂等补交，同一 callId 的重复请求也先补交这条记录，再返回原拒绝，不重新发送模型。Resource 确认后 fence 才完成，零观察保留；原会话撤销也不阻止已知事实的结算。没有证据的未知调用不会进入该零用量恢复路径，不以一小时兜底代替已确认零观察。
 
+每批最多处理 100 条到期零观察，返回本轮成功数与失败数。单条失败按 `callId` 和错误码记录 warn 后继续本批，原 `knownZero` 不变；重试次数、上次尝试时间、下次尝试时间和错误码保存在同一 ledger 行的 `zeroRetry` 元数据。自动重试按 10、20、40、80、160、300 秒退避并封顶，未尝试记录优先，已尝试记录按上次尝试时间轮转，避免永久失败的项目占满每批队首。多副本与重启共用持久调度；结算及完成 fence 仍以原不可变零观察和稳定事件标识幂等执行，不新增迁移。
+
 秘密分类在 JSON 解码后覆盖所有字符串值和对象键，包括明文键、Unicode 转义键和任意嵌套对象键。对象键中的私钥、AWS key、JWT、provider credential 或 task capability 与字符串值使用同一拒绝规则，不会因位于工具输入的键而绕过检查。
 
 教师创作和私人/共享 Work 配置均只把显式选择的材料包文件放进隔离 sandbox，校验实际字节的 SHA-256；未选文件不读取、不分类、不材料化。该路径不挂载、遍历或读取 Work 用户持久盘。学生 advisory 只消费冻结 manifest/step.include/llmReadable 交集和独立获准的 rubric。不能用同目录、文件名、课程相同或付款项目权限扩大输入范围。
