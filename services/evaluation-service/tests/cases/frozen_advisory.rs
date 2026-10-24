@@ -573,3 +573,7 @@ async fn frozen_advisory_rejects_cross_step_binding_with_identical_includes() ->
     cluster.stop().await;
     Ok(())
 }
+
+mod consumer_recovery_tests {
+    include!("consumer_recovery.rs");
+}
