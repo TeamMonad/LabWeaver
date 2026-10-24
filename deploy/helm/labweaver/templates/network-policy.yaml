@@ -42,7 +42,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: [access-service, environment-service, evaluation-service]
+                values: [access-service, agent-service, environment-service, evaluation-service]
       ports: [{protocol: TCP, port: 9444}]
     {{- else if eq $name "environment-service" }}
     - from:

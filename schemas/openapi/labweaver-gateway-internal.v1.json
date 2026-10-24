@@ -16,6 +16,9 @@
       "AgentLlmReviewQuery": {
         "$ref": "../contracts/v1/http/agent-llm-review-query.schema.json"
       },
+      "AgentRunDiagnostics": {
+        "$ref": "../contracts/v1/agent-run-diagnostics.schema.json"
+      },
       "AgentRunHistoryPage": {
         "$ref": "../contracts/v1/agent-run-history-page.schema.json"
       },
@@ -51,6 +54,9 @@
       },
       "ContainerWorkExecutionRequest": {
         "$ref": "../contracts/v1/http/container-work-execution-request.schema.json"
+      },
+      "CreateFrozenModelInputAuthorizationRequest": {
+        "$ref": "../contracts/v1/http/create-frozen-model-input-authorization-request.schema.json"
       },
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
@@ -129,6 +135,12 @@
       },
       "LogoutBrowserSessionResponse": {
         "$ref": "../contracts/v1/logout-browser-session-response.schema.json"
+      },
+      "ModelInputAuthorizationResolution": {
+        "$ref": "../contracts/v1/http/model-input-authorization-resolution.schema.json"
+      },
+      "ModelInputAuthorizationResolveRequest": {
+        "$ref": "../contracts/v1/http/model-input-authorization-resolve-request.schema.json"
       },
       "OperationAccepted": {
         "additionalProperties": false,
@@ -432,6 +444,44 @@
           }
         ],
         "summary": "Request cancellation at an exact AgentRun revision"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/diagnostics": {
+      "get": {
+        "operationId": "getInternalAgentRunDiagnostics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunDiagnostics"
+                }
+              }
+            },
+            "description": "Unexpired sanitized failure details"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent_run:read"
+            ]
+          }
+        ]
       }
     },
     "/internal/v1/agent-runs/{runId}/outcome": {
@@ -980,6 +1030,86 @@
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/authoring/frozen-model-input-authorizations": {
+      "post": {
+        "operationId": "createFrozenModelInputAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateFrozenModelInputAuthorizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInputAuthorizationResolution"
+                }
+              }
+            },
+            "description": "Current authorization permits this exact frozen input"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.authoring.read"
+            ]
+          }
+        ],
+        "x-labweaver-errors": [
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        ]
+      }
+    },
+    "/internal/v1/authoring/model-input-authorizations/resolve": {
+      "post": {
+        "operationId": "resolveFrozenModelInputAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelInputAuthorizationResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInputAuthorizationResolution"
+                }
+              }
+            },
+            "description": "Current authorization permits this exact frozen input"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.authoring.read"
+            ]
+          }
+        ],
+        "x-labweaver-errors": [
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        ]
       }
     },
     "/internal/v1/build-cost-admissions": {
@@ -3790,6 +3920,47 @@
           }
         ],
         "summary": "Persist cancellation for one Agent LLM review"
+      }
+    },
+    "/internal/v1/model-input-authorizations/resolve": {
+      "post": {
+        "operationId": "resolveModelInputAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelInputAuthorizationResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInputAuthorizationResolution"
+                }
+              }
+            },
+            "description": "Current authorization permits this exact input"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.agent_run.read"
+            ]
+          }
+        ],
+        "summary": "Recheck current session, object action and explicitly selected material versions",
+        "x-labweaver-errors": [
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        ]
       }
     },
     "/internal/v1/platform-configuration/applies/{applyId}": {

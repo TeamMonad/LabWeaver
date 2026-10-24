@@ -61,6 +61,16 @@
     },
     "projectId": {
       "$ref": "#/$defs/ProjectId"
+    },
+    "selectedPaths": {
+      "description": "Explicit material paths. Missing or empty selection is rejected; never defaults to all files.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     }
   },
   "required": [

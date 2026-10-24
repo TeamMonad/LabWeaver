@@ -753,6 +753,8 @@ pub struct CompleteAuthoringApprovalRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAgentRunRequest {
+    /// Explicit material paths. Missing or empty selection is rejected; never defaults to all files.
+    pub selected_paths: Option<Vec<String>>,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub package_id: ProblemPackageId,
@@ -766,6 +768,8 @@ pub struct CreateAgentRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateWorkConfigurationRunRequest {
+    /// Explicit material paths. Missing or empty selection is rejected.
+    pub selected_paths: Option<Vec<String>>,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub package_id: ProblemPackageId,
@@ -993,6 +997,300 @@ impl ModelInputAuthorizationContext {
         Ok(())
     }
 }
+/// Control-derived asynchronous recheck input, never accepted from a public create request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputRubricIdentity {
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub path: String,
+    pub artifact: ArtifactRef,
+    pub sha256: String,
+}
+
+impl ModelInputRubricIdentity {
+    /// Structural identity validation is not an external-model permission.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_artifact_ref(&self.artifact)?;
+        validate_review_path_and_hash(&self.path, &self.sha256)
+    }
+}
+
+/// References Control's current material-project policy and the approving instructor fact.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputRubricPermissionRef {
+    pub authoring_project_id: ProjectId,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub approved_by: ActorId,
+    pub approver_course_membership_revision: Revision,
+}
+
+/// Course-controlled rubric visibility, separate from model-use approval.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RubricModelInputVisibility {
+    CoursePublic,
+    Hidden,
+}
+
+/// One verified instructor's model-use approval for an exact rubric version.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RubricModelInputApproval {
+    pub approved_by: ActorId,
+    pub approver_course_membership_revision: Revision,
+    pub runtime_binding: String,
+    pub model: String,
+}
+
+/// Control-owned rule stored with the current material-project policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RubricModelInputRule {
+    pub course_id: CourseId,
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub rubric: ModelInputRubricIdentity,
+    pub visibility: RubricModelInputVisibility,
+    pub approval: Option<RubricModelInputApproval>,
+}
+
+/// Visibility declaration does not implicitly approve model disclosure.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum RubricModelInputRuleAction {
+    SetVisibility {
+        visibility: RubricModelInputVisibility,
+    },
+    ApproveModelUse {
+        runtime_binding: String,
+        model: String,
+    },
+    RevokeModelUse,
+}
+
+/// Teacher maintenance input; the caller cannot supply the approving actor or role evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaintainRubricModelInputRuleRequest {
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub rubric: ModelInputRubricIdentity,
+    pub action: RubricModelInputRuleAction,
+}
+
+/// Teacher-only projection of current authority; no object contents or storage locators.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectRubricModelInputRules {
+    pub project_id: ProjectId,
+    pub course_id: CourseId,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub rules: Vec<RubricModelInputRule>,
+}
+
+/// Immutable freeze identities; Evaluation and Environment releases are distinct.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FrozenModelInputSource {
+    pub task_run_id: TaskRunId,
+    /// Advisory step resolved from the protected task ledger, not inferred from selected files.
+    pub step_id: String,
+    /// SHA of the original Evaluation worker lease; never refreshed on recovery.
+    pub parent_lease_sha256: String,
+    pub frozen_submission_id: FrozenSubmissionId,
+    pub manifest_revision: Revision,
+    pub manifest_sha256: String,
+    pub archive: ArtifactRef,
+    pub content_sha256: String,
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub environment: crate::submission::FrozenEnvironmentIdentity,
+    pub rubric: ModelInputRubricIdentity,
+    /// Missing permission is representable for a refusal, never for model egress.
+    pub rubric_permission: Option<ModelInputRubricPermissionRef>,
+}
+
+/// A freeze identifier cannot be interpreted as a material package identifier.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ModelInputAuthorizationSource {
+    ProblemPackage {
+        package_id: ProblemPackageId,
+        package_revision: Revision,
+    },
+    FrozenSubmission(Box<FrozenModelInputSource>),
+}
+
+/// Control-derived asynchronous recheck input, never accepted from a public create request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationBinding {
+    pub session_sha256: String,
+    pub actor_id: ActorId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub operation_id: String,
+    pub valid_until: UtcTimestamp,
+    pub source: ModelInputAuthorizationSource,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub policy_sha256: String,
+    pub selection_sha256: String,
+}
+
+impl ModelInputAuthorizationBinding {
+    /// Checks identities only; current permissions must be obtained from Control.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.context().validate()?;
+        if !is_sha256(&self.selection_sha256) || !is_sha256(&self.policy_sha256) {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        if let ModelInputAuthorizationSource::FrozenSubmission(source) = &self.source {
+            if !is_sha256(&source.parent_lease_sha256)
+                || !is_sha256(&source.manifest_sha256)
+                || !is_sha256(&source.content_sha256)
+                || source.environment.release_version == 0
+                || source.step_id.is_empty()
+            {
+                return Err(HttpContractError::InvalidInternalIdentity);
+            }
+            validate_artifact_ref(&source.archive)?;
+            validate_artifact_ref(&source.rubric.artifact)?;
+            validate_review_path_and_hash(&source.rubric.path, &source.rubric.sha256)?;
+        }
+        Ok(())
+    }
+
+    /// Preserves first-request evidence without deriving it from artifact ownership.
+    #[must_use]
+    pub fn context(&self) -> ModelInputAuthorizationContext {
+        ModelInputAuthorizationContext {
+            session_sha256: self.session_sha256.clone(),
+            actor_id: self.actor_id,
+            project_id: self.project_id,
+            course_id: self.course_id,
+            operation_id: self.operation_id.clone(),
+            valid_until: self.valid_until,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationResolveRequest {
+    pub binding: ModelInputAuthorizationBinding,
+    pub selected_paths: Vec<String>,
+}
+
+/// Evaluation requests binding only after a real freeze exists; Control derives object facts.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateFrozenModelInputAuthorizationRequest {
+    pub input_authorization_context: ModelInputAuthorizationContext,
+    pub task_run_id: TaskRunId,
+    /// Derived by Evaluation from its actual fenced worker lease, not from user input.
+    pub parent_lease_sha256: String,
+    pub frozen_submission_id: FrozenSubmissionId,
+    pub evaluation_release_id: EvaluationReleaseId,
+    pub evaluation_release_revision: Revision,
+    pub selected_paths: Vec<String>,
+}
+
+impl CreateFrozenModelInputAuthorizationRequest {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.input_authorization_context.validate()?;
+        if !is_sha256(&self.parent_lease_sha256) {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// Binds an Evaluation worker generation without transmitting the raw lease token.
+#[must_use]
+pub fn model_input_parent_lease_sha256(lease_token: uuid::Uuid) -> String {
+    use sha2::Digest;
+    format!(
+        "{:x}",
+        sha2::Sha256::digest(lease_token.to_string().as_bytes())
+    )
+}
+
+/// Digest of the exact frozen inputs and separate rubric/permission identities.
+pub fn frozen_model_input_selection_sha256(
+    source: &FrozenModelInputSource,
+    files: &[(String, String)],
+) -> Result<String, HttpContractError> {
+    use sha2::Digest;
+    let mut files = files.to_vec();
+    files.sort();
+    if files.is_empty() || files.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(HttpContractError::InvalidAgentLlmReview);
+    }
+    for (path, sha) in &files {
+        validate_review_path_and_hash(path, sha)?;
+    }
+    let value = serde_json::to_value((source, files))
+        .map_err(|_| HttpContractError::InvalidAgentLlmReview)?;
+    let bytes = serde_json::to_vec(&value).map_err(|_| HttpContractError::InvalidAgentLlmReview)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelInputAuthorizationResolution {
+    pub binding: ModelInputAuthorizationBinding,
+}
+
+pub fn model_input_selection_sha256(paths: &[String]) -> Result<String, HttpContractError> {
+    use sha2::Digest;
+    let bytes =
+        serde_json::to_vec(paths).map_err(|_| HttpContractError::InvalidModelInputSelection)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+/// Binds model identity, DLP and budget values as well as the immutable policy identifiers.
+pub fn model_input_policy_sha256(
+    policy: &crate::authoring::ProjectLlmEgressPolicy,
+) -> Result<String, HttpContractError> {
+    use sha2::Digest;
+    let value =
+        serde_json::to_value(policy).map_err(|_| HttpContractError::InvalidInternalIdentity)?;
+    let bytes =
+        serde_json::to_vec(&value).map_err(|_| HttpContractError::InvalidInternalIdentity)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+/// Validates an explicit selection against an immutable package without guessing hidden filenames.
+pub fn validate_model_input_selection(
+    package: &crate::authoring::ProblemPackage,
+    selected: Option<&[String]>,
+) -> Result<Vec<String>, HttpContractError> {
+    let paths = selected.ok_or(HttpContractError::InvalidModelInputSelection)?;
+    let mut seen = BTreeSet::new();
+    if paths.is_empty()
+        || paths.iter().any(|path| {
+            !seen.insert(path.clone()) || !package.files.iter().any(|file| &file.path == path)
+        })
+    {
+        return Err(HttpContractError::InvalidModelInputSelection);
+    }
+    Ok(seen.into_iter().collect())
+}
 
 /// Control-to-Agent command carried only over an allowlisted mTLS service identity.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -1011,6 +1309,7 @@ pub enum InternalAgentRunRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalCreateAgentRunRequest {
+    pub input_authorization: ModelInputAuthorizationBinding,
     /// Authoritative Project ownership and optional teaching association.
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
@@ -1111,6 +1410,41 @@ impl InternalCreateAgentRunRequest {
         {
             return Err(HttpContractError::InvalidInternalIdentity);
         }
+        let (selection, revision, operation_matches) = match &self.request {
+            InternalAgentRunRequest::Authoring(request) => (
+                request.selected_paths.as_deref(),
+                request.package_revision,
+                matches!(
+                    self.input_authorization.operation_id.as_str(),
+                    "createProjectAgentRun" | "createAgentRun"
+                ),
+            ),
+            InternalAgentRunRequest::WorkConfiguration(request) => (
+                request.selected_paths.as_deref(),
+                request.package_revision,
+                self.input_authorization.operation_id == "createProjectWorkConfigurationRun",
+            ),
+        };
+        let paths = validate_model_input_selection(&self.package, selection)?;
+        let binding = &self.input_authorization;
+        binding.validate()?;
+        if !operation_matches
+            || binding.actor_id != self.actor_id
+            || binding.project_id != self.project_id
+            || binding.course_id != self.course_id
+            || binding.source
+                != (ModelInputAuthorizationSource::ProblemPackage {
+                    package_id: self.package.id,
+                    package_revision: self.package.revision,
+                })
+            || revision != self.package.revision
+            || binding.policy_id != self.policy.id
+            || binding.policy_revision != self.policy.revision
+            || binding.policy_sha256 != model_input_policy_sha256(&self.policy)?
+            || model_input_selection_sha256(&paths)? != binding.selection_sha256
+        {
+            return Err(HttpContractError::InvalidInternalIdentity);
+        }
         self.package
             .validate()
             .map_err(|_| HttpContractError::InvalidInternalIdentity)?;
@@ -1157,6 +1491,7 @@ pub struct AgentLlmReviewRubric {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InternalAgentLlmReviewRequest {
+    pub input_authorization: ModelInputAuthorizationBinding,
     pub task_run_id: TaskRunId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
@@ -1177,6 +1512,37 @@ impl InternalAgentLlmReviewRequest {
     /// Validates transport-safe paths, bounded input, immutable artifact metadata, and policy
     /// ownership. Agent separately hashes the supplied UTF-8 bytes before any provider egress.
     pub fn validate(&self) -> Result<(), HttpContractError> {
+        self.input_authorization.validate()?;
+        let ModelInputAuthorizationSource::FrozenSubmission(source) =
+            &self.input_authorization.source
+        else {
+            return Err(HttpContractError::InvalidAgentLlmReview);
+        };
+        if source.rubric_permission.is_none()
+            || source.task_run_id != self.task_run_id
+            || source.frozen_submission_id != self.frozen_submission_id
+            || source.archive != self.submission_artifact
+            || source.rubric.artifact != self.rubric.artifact
+            || source.rubric.path != self.rubric.path
+            || source.rubric.sha256 != self.rubric.sha256
+            || self.input_authorization.operation_id != "freezeSubmission"
+            || self.input_authorization.project_id != self.project_id
+            || self.input_authorization.course_id != self.course_id
+            || self.input_authorization.policy_id != self.policy.id
+            || self.input_authorization.policy_revision != self.policy.revision
+            || self.input_authorization.policy_sha256 != model_input_policy_sha256(&self.policy)?
+            || self.input_authorization.selection_sha256
+                != frozen_model_input_selection_sha256(
+                    source,
+                    &self
+                        .files
+                        .iter()
+                        .map(|file| (file.path.clone(), file.sha256.clone()))
+                        .collect::<Vec<_>>(),
+                )?
+        {
+            return Err(HttpContractError::InvalidAgentLlmReview);
+        }
         if self.files.is_empty() || self.files.len() > Self::MAX_FILES {
             return Err(HttpContractError::InvalidAgentLlmReview);
         }
@@ -1390,6 +1756,40 @@ pub struct InternalAgentBuildCancellationResult {
     pub cancellation_requested: bool,
     pub diagnostic_code: Option<DiagnosticCode>,
     pub cleanup_verified: Option<bool>,
+}
+
+/// Sanitized failure context; never contains provider output, file contents or credentials.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunDiagnostic {
+    pub track: crate::authoring::AgentTrackKind,
+    /// Preparation failures have no observed model input or usage.
+    pub preparation_failed: bool,
+    pub attempt: u32,
+    pub diagnostic_code: String,
+    pub reason: String,
+    pub next_step: String,
+    pub model: String,
+    pub runtime_binding: String,
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub input_sha256: Option<String>,
+    pub output_sha256: Option<String>,
+    pub usage: Option<crate::authoring::LlmUsage>,
+    pub created_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Current-object-authorized failure details retained separately from durable usage receipts.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunDiagnostics {
+    pub run_id: AgentRunId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub items: Vec<AgentRunDiagnostic>,
 }
 
 /// Terminal or in-progress Agent result used to rebuild Control projections after replay.
@@ -2907,6 +3307,34 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Post,
+        "/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules",
+        "maintainProjectRubricModelInputRule",
+        "llm_policy:write",
+        Oidc,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        &[PlatformRole::Teacher],
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules",
+        "getProjectRubricModelInputRules",
+        "llm_policy:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        &[PlatformRole::Teacher],
+        Project
+    ),
+    op!(
+        Public,
         Get,
         "/api/v1/projects/{projectId}/llm-egress-policies/active",
         "getActiveProjectLlmPolicy",
@@ -3022,6 +3450,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/projects/{projectId}/agent-runs/{runId}",
         "getProjectAgentRun",
+        "agent_run:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/agent-runs/{runId}/diagnostics",
+        "getProjectAgentRunDiagnostics",
         "agent_run:read",
         Oidc,
         None,
@@ -4889,6 +5331,8 @@ pub struct EventStreamQuery {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpContractError {
+    #[error("explicit model input selection is missing or invalid")]
+    InvalidModelInputSelection,
     #[error("invalid Idempotency-Key")]
     InvalidIdempotencyKey,
     #[error("weak ETag is not accepted")]

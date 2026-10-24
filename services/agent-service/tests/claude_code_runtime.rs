@@ -854,7 +854,8 @@ fn runtime(
 ) -> Result<(ClaudeCodeRuntime, Arc<FakeProcess>, ProjectLlmEgressPolicy), Box<dyn Error>> {
     let process = Arc::new(FakeProcess::new(mode));
     let policy = valid_policy()?;
-    let runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?;
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     Ok((runtime, process, policy))
 }
 
@@ -872,7 +873,8 @@ fn work_runtime_with_policy(
     let process = Arc::new(FakeProcess::new(mode));
     let materializer = Arc::new(FakeMaterializer::new());
     let runtime =
-        ClaudeCodeRuntime::new_with_materializer(policy.clone(), process.clone(), materializer)?;
+        ClaudeCodeRuntime::new_with_materializer(policy.clone(), process.clone(), materializer)?
+            .with_input_authorization(Arc::new(AllowAuthorization));
     Ok((runtime, process, policy))
 }
 
@@ -894,7 +896,8 @@ fn materializing_runtime(
         policy.clone(),
         process.clone(),
         Arc::clone(&materializer),
-    )?;
+    )?
+    .with_input_authorization(Arc::new(AllowAuthorization));
     Ok((runtime, process, policy, materializer))
 }
 
@@ -911,7 +914,7 @@ fn package(
         media_type: "text/plain".to_owned(),
     };
     let files = vec![PackageFile {
-        sha256: "0".repeat(64),
+        sha256: Sha256Digest::of_bytes(bytes).to_string(),
         path: "assignment.md".to_owned(),
         object,
     }];
@@ -952,6 +955,7 @@ fn run_request(
     policy: &ProjectLlmEgressPolicy,
 ) -> CreateAgentRunRequest {
     CreateAgentRunRequest {
+        selected_paths: Some(vec!["assignment.md".to_owned()]),
         project_id: input.project_id(),
         course_id: input.course_id(),
         package_id: input.package_id(),
@@ -987,7 +991,17 @@ async fn prepare_input_bytes(
             denied,
         }),
     );
-    gate.prepare(&package, policy).await.map_err(Into::into)
+    gate.prepare(
+        &package,
+        policy,
+        &package
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(Into::into)
 }
 
 async fn work_package_input(
@@ -1002,7 +1016,17 @@ async fn work_package_input(
             denied: BTreeSet::new(),
         }),
     );
-    let input = gate.prepare(&package, policy).await?;
+    let input = gate
+        .prepare(
+            &package,
+            policy,
+            &package
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
     Ok((package, input))
 }
 
@@ -1019,7 +1043,8 @@ async fn live_claude_code_generates_environment_candidate() -> Result<(), Box<dy
         "environmentSpec": environment_candidate()
     }))?;
     let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
-    let runtime = ClaudeCodeRuntime::new(policy, process)?;
+    let runtime = ClaudeCodeRuntime::new(policy, process)?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let environment = runtime
         .generate(AgentTrackKind::Environment, input, RunCancellation::new())
         .await?;
@@ -1054,7 +1079,8 @@ async fn live_claude_code_generates_evaluation_candidate() -> Result<(), Box<dyn
     let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
     let materializer = Arc::new(FakeMaterializer::new());
     let runtime =
-        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?;
+        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?
+            .with_input_authorization(Arc::new(AllowAuthorization));
     let evaluation = runtime
         .generate(AgentTrackKind::Evaluation, input, RunCancellation::new())
         .await?;
@@ -1085,7 +1111,8 @@ async fn live_claude_code_materializes_generated_container_environment()
     let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
     let materializer = Arc::new(FakeMaterializer::new());
     let runtime =
-        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?;
+        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?
+            .with_input_authorization(Arc::new(AllowAuthorization));
     let execution = runtime
         .generate(AgentTrackKind::Environment, input, RunCancellation::new())
         .await?;
@@ -1137,7 +1164,8 @@ async fn live_claude_code_materializes_work_configuration_scripts() -> Result<()
     let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
     let materializer = Arc::new(FakeMaterializer::new());
     let runtime =
-        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?;
+        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?
+            .with_input_authorization(Arc::new(AllowAuthorization));
     let execution = runtime
         .generate(
             AgentTrackKind::WorkConfiguration,
@@ -1211,7 +1239,8 @@ async fn live_claude_code_returns_bounded_advisory_goal_review() -> Result<(), B
         }
     }))?;
     let allowed_paths = vec!["submission.md".to_owned()];
-    let runtime = ClaudeCodeRuntime::new(policy, process)?;
+    let runtime = ClaudeCodeRuntime::new(policy, process)?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let execution = runtime
         .review_with_usage(input, &allowed_paths, RunCancellation::new())
         .await
@@ -1319,7 +1348,17 @@ async fn deterministic_gate_allows_student_auth_path_and_rejects_sensitive_conte
             Revision::new(1)?,
         )?),
     );
-    let prepared = clean_gate.prepare(&clean_package, &policy).await?;
+    let prepared = clean_gate
+        .prepare(
+            &clean_package,
+            &policy,
+            &clean_package
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
     assert_eq!(prepared.package_id(), clean_package.id);
 
     let mut sensitive_package = package(policy.project_id, policy.course_id, &sensitive)?;
@@ -1336,7 +1375,15 @@ async fn deterministic_gate_allows_student_auth_path_and_rejects_sensitive_conte
         )?),
     );
     let error = sensitive_gate
-        .prepare(&sensitive_package, &policy)
+        .prepare(
+            &sensitive_package,
+            &policy,
+            &sensitive_package
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
         .await
         .expect_err("sensitive content must be blocked before runtime entry");
     assert_eq!(error, EgressPreparationError::DeniedData);
@@ -1360,7 +1407,17 @@ async fn package_object_hash_drift_is_blocking() -> Result<(), Box<dyn Error>> {
             denied: BTreeSet::new(),
         }),
     );
-    let result = gate.prepare(&package, &policy).await;
+    let result = gate
+        .prepare(
+            &package,
+            &policy,
+            &package
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await;
     let Err(error) = result else {
         return Err("modified object reached the runtime boundary".into());
     };
@@ -2411,22 +2468,55 @@ async fn postgres_llm_review_completion_preserves_claim_start_and_cancellation()
     assert_eq!(cancelling.state, AgentLlmReviewState::Cancelling);
     assert_eq!(cancelling.started_at, Some(cancellation_started_at));
     assert_eq!(cancelling.finished_at, None);
+    let observed_usage = contracts::authoring::LlmUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        requests: 1,
+        cost_microusd: 1000,
+    };
     let cancelled = store
         .complete(
             &cancellation_lease,
             None,
-            None,
+            Some(observed_usage),
             Some("ignored-after-cancellation"),
             cancellation_finished_at,
         )
         .await?;
     assert_eq!(cancelled.state, AgentLlmReviewState::Cancelled);
+    assert_eq!(cancelled.usage, Some(observed_usage));
     assert_eq!(cancelled.started_at, Some(cancellation_started_at));
     assert_eq!(cancelled.finished_at, Some(cancellation_finished_at));
 
     drop(store);
     remove_isolated_database(admin_pool, pool, &database_name).await?;
     drop(container);
+    Ok(())
+}
+
+#[test]
+fn persisted_frozen_review_cannot_refresh_parent_lease_on_recovery() -> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let deadline = UtcTimestamp::from_utc(test_timestamp()?.get() + time::Duration::minutes(1))?;
+    let original = review_request(&policy, deadline);
+    original.validate()?;
+    let saved = serde_json::to_value(&original)?;
+    let replay: InternalAgentLlmReviewRequest = serde_json::from_value(saved.clone())?;
+    assert_eq!(replay, original);
+    let mut renewed = replay;
+    let contracts::http::ModelInputAuthorizationSource::FrozenSubmission(source) =
+        &mut renewed.input_authorization.source
+    else {
+        return Err("missing frozen source".into());
+    };
+    source.parent_lease_sha256 = contracts::http::model_input_parent_lease_sha256(Uuid::now_v7());
+    assert!(renewed.validate().is_err());
+    let mut legacy = saved;
+    legacy["inputAuthorization"]["source"]
+        .as_object_mut()
+        .ok_or("source missing")?
+        .remove("parentLeaseSha256");
+    assert!(serde_json::from_value::<InternalAgentLlmReviewRequest>(legacy).is_err());
     Ok(())
 }
 
@@ -2440,20 +2530,90 @@ fn review_request(
     policy: &ProjectLlmEgressPolicy,
     deadline_at: UtcTimestamp,
 ) -> InternalAgentLlmReviewRequest {
+    let project_id = policy.project_id;
+    let course_id = policy.course_id;
     let submission = "submission";
     let rubric = "rubric";
-    InternalAgentLlmReviewRequest {
-        task_run_id: TaskRunId::new(),
-        project_id: policy.project_id,
-        course_id: policy.course_id,
-        frozen_submission_id: FrozenSubmissionId::new(),
-        submission_artifact: ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "minio-primary".to_owned(),
-            object_version: "version-1".to_owned(),
-            size_bytes: submission.len() as u64,
-            media_type: "text/plain".to_owned(),
+    let task_run_id = TaskRunId::new();
+    let frozen_submission_id = FrozenSubmissionId::new();
+    let submission_artifact = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "minio-primary".to_owned(),
+        object_version: "version-1".to_owned(),
+        size_bytes: submission.len() as u64,
+        media_type: "text/plain".to_owned(),
+    };
+    let rubric_artifact = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "minio-primary".to_owned(),
+        object_version: "version-1".to_owned(),
+        size_bytes: rubric.len() as u64,
+        media_type: "text/plain".to_owned(),
+    };
+    let source = contracts::http::FrozenModelInputSource {
+        parent_lease_sha256: "d".repeat(64),
+        task_run_id,
+        step_id: "review".to_owned(),
+        frozen_submission_id,
+        manifest_revision: contracts::Revision::new(1).expect("revision"),
+        manifest_sha256: "a".repeat(64),
+        archive: submission_artifact.clone(),
+        content_sha256: "b".repeat(64),
+        evaluation_release_id: contracts::EvaluationReleaseId::new(),
+        evaluation_release_revision: contracts::Revision::new(1).expect("revision"),
+        environment: contracts::submission::FrozenEnvironmentIdentity {
+            environment_id: contracts::EnvironmentId::new(),
+            environment_revision: contracts::Revision::new(1).expect("revision"),
+            release_id: contracts::ReleaseId::new(),
+            release_version: 1,
+            runtime_kind: contracts::authoring::RuntimeKind::Container,
+            build_request_id: None,
         },
+        rubric: contracts::http::ModelInputRubricIdentity {
+            package_id: contracts::ProblemPackageId::new(),
+            package_revision: contracts::Revision::new(1).expect("revision"),
+            path: "rubric.md".to_owned(),
+            artifact: rubric_artifact.clone(),
+            sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
+        },
+        rubric_permission: Some(contracts::http::ModelInputRubricPermissionRef {
+            authoring_project_id: project_id,
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            approved_by: contracts::ActorId::new(),
+            approver_course_membership_revision: contracts::Revision::new(1).expect("revision"),
+        }),
+    };
+    let selection_sha256 = contracts::http::frozen_model_input_selection_sha256(
+        &source,
+        &[(
+            "submission.md".to_owned(),
+            Sha256Digest::of_bytes(submission.as_bytes()).to_string(),
+        )],
+    )
+    .expect("selection");
+    InternalAgentLlmReviewRequest {
+        input_authorization: contracts::http::ModelInputAuthorizationBinding {
+            session_sha256: "c".repeat(64),
+            actor_id: contracts::ActorId::new(),
+            project_id,
+            course_id,
+            operation_id: "freezeSubmission".to_owned(),
+            valid_until: deadline_at,
+            source: contracts::http::ModelInputAuthorizationSource::FrozenSubmission(Box::new(
+                source,
+            )),
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)
+                .expect("policy hash"),
+            selection_sha256,
+        },
+        task_run_id,
+        project_id,
+        course_id,
+        frozen_submission_id,
+        submission_artifact,
         policy: policy.clone(),
         files: vec![AgentLlmReviewFile {
             path: "submission.md".to_owned(),
@@ -2461,13 +2621,7 @@ fn review_request(
             content: submission.to_owned(),
         }],
         rubric: AgentLlmReviewRubric {
-            artifact: ArtifactRef {
-                artifact_id: ArtifactId::new(),
-                store_binding: "minio-primary".to_owned(),
-                object_version: "version-1".to_owned(),
-                size_bytes: rubric.len() as u64,
-                media_type: "text/plain".to_owned(),
-            },
+            artifact: rubric_artifact,
             path: "rubric.md".to_owned(),
             sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
             content: rubric.to_owned(),
@@ -2484,6 +2638,7 @@ async fn assert_dispatch_does_not_replay_live_tracks(
     let bytes = b"dispatch lease fencing";
     let package = package(policy.project_id, policy.course_id, bytes)?;
     let request = CreateAgentRunRequest {
+        selected_paths: Some(package.files.iter().map(|file| file.path.clone()).collect()),
         project_id: policy.project_id,
         course_id: policy.course_id,
         package_id: package.id,
@@ -2500,7 +2655,8 @@ async fn assert_dispatch_does_not_replay_live_tracks(
         .clone();
     let locators = BTreeMap::from([(object.artifact_id, "problem-packages/test".to_owned())]);
     let key = IdempotencyKey::parse("agent-dispatch-live-track-fence-0001")?;
-    let command = InternalCreateAgentRunRequest {
+    let command = test_authorized_command(InternalCreateAgentRunRequest {
+        input_authorization: placeholder_binding(),
         project_id: policy.project_id,
         course_id: policy.course_id,
         actor_id: ActorId::new(),
@@ -2512,7 +2668,7 @@ async fn assert_dispatch_does_not_replay_live_tracks(
         object_locators: locators.clone(),
         policy: policy.clone(),
         preauthorization: None,
-    };
+    });
     store
         .reserve_internal_dispatch(&command, &key, now, "trace-agent-dispatch-fence")
         .await
@@ -2581,7 +2737,17 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
             denied: BTreeSet::new(),
         }),
     );
-    let prepared = gate.prepare(&package, &policy).await?;
+    let prepared = gate
+        .prepare(
+            &package,
+            &policy,
+            &package
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
     let mut request = run_request(&prepared, &policy);
     request.environment_class = environment_class;
     let object = package
@@ -2595,7 +2761,8 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
         EnvironmentClass::Experiment => "agent-dispatch-reserved-exec-experiment-0001",
         EnvironmentClass::Work => "agent-dispatch-reserved-exec-work-0001",
     })?;
-    let command = InternalCreateAgentRunRequest {
+    let command = test_authorized_command(InternalCreateAgentRunRequest {
+        input_authorization: placeholder_binding(),
         project_id: policy.project_id,
         course_id: policy.course_id,
         actor_id: ActorId::new(),
@@ -2605,7 +2772,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
         object_locators: locators.clone(),
         policy: policy.clone(),
         preauthorization: None,
-    };
+    });
     let reservation = store
         .reserve_internal_dispatch(&command, &key, now, "trace-agent-dispatch-reserved-exec")
         .await?;
@@ -2700,7 +2867,17 @@ async fn assert_failed_authoring_retry_dispatch_executes(
             denied: BTreeSet::new(),
         }),
     );
-    let prepared = gate.prepare(&package, &policy).await?;
+    let prepared = gate
+        .prepare(
+            &package,
+            &policy,
+            &package
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
     let mut request = run_request(&prepared, &policy);
     request.environment_class = EnvironmentClass::Work;
     let object = package
@@ -2709,7 +2886,8 @@ async fn assert_failed_authoring_retry_dispatch_executes(
         .ok_or("package file missing")?
         .object
         .clone();
-    let command = InternalCreateAgentRunRequest {
+    let command = test_authorized_command(InternalCreateAgentRunRequest {
+        input_authorization: placeholder_binding(),
         project_id: policy.project_id,
         course_id: policy.course_id,
         actor_id: ActorId::new(),
@@ -2724,7 +2902,7 @@ async fn assert_failed_authoring_retry_dispatch_executes(
         )]),
         policy: policy.clone(),
         preauthorization: None,
-    };
+    });
     let key = IdempotencyKey::parse("agent-dispatch-failed-retry-0001")?;
     let reservation = store
         .reserve_internal_dispatch(&command, &key, now, "trace-agent-failed-retry")
@@ -2742,7 +2920,8 @@ async fn assert_failed_authoring_retry_dispatch_executes(
         .await?;
 
     let failed_process = Arc::new(FakeProcess::new(FakeMode::ProcessFailure));
-    let failed_runtime = ClaudeCodeRuntime::new(policy.clone(), failed_process.clone())?;
+    let failed_runtime = ClaudeCodeRuntime::new(policy.clone(), failed_process.clone())?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let failed_service = AgentRunService::new(
         store.clone(),
         failed_runtime,
@@ -2787,7 +2966,8 @@ async fn assert_failed_authoring_retry_dispatch_executes(
         .await?;
 
     let success_process = Arc::new(FakeProcess::new(FakeMode::WorkFullSuccess));
-    let success_runtime = ClaudeCodeRuntime::new(policy.clone(), success_process.clone())?;
+    let success_runtime = ClaudeCodeRuntime::new(policy.clone(), success_process.clone())?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let success_service = AgentRunService::new(
         store.clone(),
         success_runtime,
@@ -2910,6 +3090,7 @@ fn work_dispatch_command_with_runtime(
     runtime_kind: RuntimeKind,
 ) -> InternalCreateAgentRunRequest {
     let request = contracts::http::CreateWorkConfigurationRunRequest {
+        selected_paths: Some(package.files.iter().map(|file| file.path.clone()).collect()),
         project_id: policy.project_id,
         course_id: policy.course_id,
         package_id: package.id,
@@ -2921,7 +3102,8 @@ fn work_dispatch_command_with_runtime(
         preauthorization_id: None,
         preauthorization_revision: None,
     };
-    InternalCreateAgentRunRequest {
+    test_authorized_command(InternalCreateAgentRunRequest {
+        input_authorization: placeholder_binding(),
         project_id: policy.project_id,
         course_id: policy.course_id,
         actor_id,
@@ -2945,7 +3127,7 @@ fn work_dispatch_command_with_runtime(
             .collect(),
         policy: policy.clone(),
         preauthorization: None,
-    }
+    })
 }
 
 async fn reserve_prepared_work_dispatch(
@@ -3650,7 +3832,8 @@ async fn assert_concurrent_idempotency(
                 policy.clone(),
                 process.clone(),
                 Arc::new(FakeMaterializer::new()),
-            )?,
+            )?
+            .with_input_authorization(Arc::new(AllowAuthorization)),
             format!("concurrent-worker-{worker}"),
             Duration::from_secs(1),
         )?);
@@ -4066,7 +4249,8 @@ async fn copy_repair_runtime(
         delay,
     }));
     let runtime =
-        ClaudeCodeRuntime::new_with_materializer(policy, process.clone(), Arc::new(materializer))?;
+        ClaudeCodeRuntime::new_with_materializer(policy, process.clone(), Arc::new(materializer))?
+            .with_input_authorization(Arc::new(AllowAuthorization));
     Ok((runtime, process))
 }
 
@@ -4708,7 +4892,8 @@ async fn advisory_review_restricts_evidence_to_submission_files() -> Result<(), 
     let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenSuccess));
     let mut policy = valid_policy()?;
     policy.budget.max_schema_repairs = 0;
-    let runtime = ClaudeCodeRuntime::new(policy, process.clone())?;
+    let runtime = ClaudeCodeRuntime::new(policy, process.clone())?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let failure = runtime
         .review_with_usage(
             b"review input".to_vec(),
@@ -4733,6 +4918,65 @@ async fn advisory_review_restricts_evidence_to_submission_files() -> Result<(), 
 }
 
 #[tokio::test]
+async fn frozen_review_rechecks_authority_before_first_call_and_repair()
+-> Result<(), Box<dyn Error>> {
+    for allowed in [0, 1] {
+        let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenSuccess));
+        let authority = Arc::new(LimitedAuthorization {
+            calls: AtomicUsize::new(0),
+            allowed,
+        });
+        let runtime = ClaudeCodeRuntime::new(valid_policy()?, process.clone())?
+            .with_input_authorization(authority.clone());
+        let failure = runtime
+            .review_with_usage(
+                b"SYNTHETIC_FROZEN_INPUT".to_vec(),
+                &["submission.md".to_owned()],
+                RunCancellation::new(),
+            )
+            .await
+            .expect_err("revocation must prevent the next model call");
+        assert_eq!(
+            failure.error.diagnostic_code(),
+            "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        );
+        assert_eq!(process.total_calls(), allowed);
+        assert_eq!(authority.calls.load(Ordering::SeqCst), allowed + 1);
+        if allowed == 0 {
+            assert!(failure.usage.is_none());
+        } else {
+            assert_eq!(
+                failure
+                    .usage
+                    .expect("retain observed first-call usage")
+                    .requests,
+                1
+            );
+        }
+    }
+    let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenSuccess));
+    let authority = Arc::new(LimitedAuthorization {
+        calls: AtomicUsize::new(0),
+        allowed: 1,
+    });
+    let runtime = ClaudeCodeRuntime::new(valid_policy()?, process.clone())?
+        .with_input_authorization(authority.clone());
+    let cancellation = RunCancellation::new();
+    cancellation.cancel();
+    runtime
+        .review_with_usage(
+            b"SYNTHETIC_FROZEN_INPUT".to_vec(),
+            &["submission.md".to_owned()],
+            cancellation,
+        )
+        .await
+        .expect_err("cancelled request must not send input");
+    assert_eq!(process.total_calls(), 0);
+    assert_eq!(authority.calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn advisory_review_accumulates_repair_usage_and_enforces_total_budget()
 -> Result<(), Box<dyn Error>> {
     let (runtime, process, _policy) = runtime(FakeMode::ReviewRepairThenSuccess)?;
@@ -4752,7 +4996,8 @@ async fn advisory_review_accumulates_repair_usage_and_enforces_total_budget()
     let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenSuccess));
     let mut policy = valid_policy()?;
     policy.budget.max_requests = 1;
-    let runtime = ClaudeCodeRuntime::new(policy, process.clone())?;
+    let runtime = ClaudeCodeRuntime::new(policy, process.clone())?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let failure = runtime
         .review_with_usage(
             b"review input".to_vec(),
@@ -4776,7 +5021,8 @@ async fn advisory_review_cancellation_after_repair_preserves_observed_usage()
     let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenCancel));
     let mut policy = valid_policy()?;
     policy.budget.max_schema_repairs = 1;
-    let runtime = ClaudeCodeRuntime::new(policy, process.clone())?;
+    let runtime = ClaudeCodeRuntime::new(policy, process.clone())?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let cancellation = RunCancellation::new();
     let review = tokio::spawn({
         let cancellation = cancellation.clone();
@@ -4940,7 +5186,8 @@ async fn tokio_process_clears_inheritance_and_isolates_invocation_directories()
     ]);
     let process = Arc::new(TokioClaudeCodeProcess::new(environment));
     let policy = valid_policy()?;
-    let runtime = ClaudeCodeRuntime::new(policy.clone(), process)?;
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process)?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let prepared = input(&policy).await?;
     let first = runtime.generate(
         AgentTrackKind::Environment,
@@ -5005,7 +5252,8 @@ async fn tokio_process_cancellation_kills_and_reaps_the_provider_process()
     )]);
     let process = Arc::new(TokioClaudeCodeProcess::new(environment));
     let policy = valid_policy()?;
-    let runtime = ClaudeCodeRuntime::new(policy.clone(), process)?;
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process)?
+        .with_input_authorization(Arc::new(AllowAuthorization));
     let cancellation = RunCancellation::new();
     let request_input = input(&policy).await?;
     let request = runtime.generate(
@@ -5197,4 +5445,362 @@ async fn provider_error_response_is_terminal_and_not_mislabeled_as_schema_invali
     assert_diagnostic(&failure, "LW_PROVIDER_UNAVAILABLE");
     assert_eq!(process.total_calls(), 1);
     Ok(())
+}
+
+struct AllowAuthorization;
+#[async_trait]
+impl agent_service::claude_code::ModelInputAuthorization for AllowAuthorization {
+    async fn check(&self) -> Result<(), agent_service::claude_code::ClaudeCodeRuntimeError> {
+        Ok(())
+    }
+}
+fn placeholder_binding() -> contracts::http::ModelInputAuthorizationBinding {
+    contracts::http::ModelInputAuthorizationBinding {
+        session_sha256: "a".repeat(64),
+        actor_id: ActorId::new(),
+        project_id: ProjectId::new(),
+        course_id: None,
+        operation_id: "createProjectAgentRun".to_owned(),
+        valid_until: UtcTimestamp::from_utc(
+            OffsetDateTime::now_utc()
+                .replace_nanosecond(0)
+                .expect("fixture time precision")
+                + time::Duration::hours(1),
+        )
+        .expect("fixture time"),
+        source: contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+            package_id: contracts::ProblemPackageId::new(),
+            package_revision: Revision::new(1).expect("fixture revision"),
+        },
+        policy_id: PolicyId::new(),
+        policy_revision: Revision::new(1).expect("fixture revision"),
+        policy_sha256: "a".repeat(64),
+        selection_sha256: "a".repeat(64),
+    }
+}
+fn test_authorized_command(
+    mut command: InternalCreateAgentRunRequest,
+) -> InternalCreateAgentRunRequest {
+    let paths = command
+        .package
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    match &mut command.request {
+        InternalAgentRunRequest::Authoring(request) => {
+            request.selected_paths = Some(paths.clone());
+            command.input_authorization.operation_id = "createProjectAgentRun".to_owned();
+        }
+        InternalAgentRunRequest::WorkConfiguration(request) => {
+            request.selected_paths = Some(paths.clone());
+            command.input_authorization.operation_id =
+                "createProjectWorkConfigurationRun".to_owned();
+        }
+    }
+    let binding = &mut command.input_authorization;
+    binding.actor_id = command.actor_id;
+    binding.project_id = command.project_id;
+    binding.course_id = command.course_id;
+    binding.source = contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+        package_id: command.package.id,
+        package_revision: command.package.revision,
+    };
+    binding.policy_id = command.policy.id;
+    binding.policy_revision = command.policy.revision;
+    binding.policy_sha256 =
+        contracts::http::model_input_policy_sha256(&command.policy).expect("fixture policy hash");
+    binding.selection_sha256 =
+        contracts::http::model_input_selection_sha256(&paths).expect("fixture selection");
+    command
+}
+
+#[test]
+fn persisted_dispatch_rejects_context_and_material_identity_substitution()
+-> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let package = package(policy.project_id, policy.course_id, b"synthetic input")?;
+    let command = work_dispatch_command(
+        &policy,
+        &package,
+        EnvironmentId::new(),
+        Revision::new(1)?,
+        ActorId::new(),
+    );
+    command.validate()?;
+    let stored = serde_json::to_value(&command)?;
+    let replay: InternalCreateAgentRunRequest = serde_json::from_value(stored.clone())?;
+    replay.validate()?;
+    assert_eq!(replay.input_authorization, command.input_authorization);
+    let mut altered_budget = replay.clone();
+    altered_budget.policy.budget.max_requests += 1;
+    altered_budget.policy.validate()?;
+    assert!(altered_budget.validate().is_err());
+    let mut altered_model = replay;
+    altered_model.policy.binding.model.push_str("-different");
+    altered_model.policy.validate()?;
+    assert!(altered_model.validate().is_err());
+
+    for (field, replacement) in [
+        ("actorId", json!(ActorId::new())),
+        ("projectId", json!(ProjectId::new())),
+        ("courseId", json!(contracts::CourseId::new())),
+        ("operationId", json!("freezeSubmission")),
+        ("sessionSha256", json!("not-a-session-digest")),
+        ("policyId", json!(PolicyId::new())),
+        ("policyRevision", json!(2)),
+        ("selectionSha256", json!("b".repeat(64))),
+    ] {
+        let mut tampered = stored.clone();
+        tampered["inputAuthorization"][field] = replacement;
+        let replay: InternalCreateAgentRunRequest = serde_json::from_value(tampered)?;
+        assert!(replay.validate().is_err(), "accepted substituted {field}");
+    }
+    for (field, replacement) in [
+        ("packageId", json!(contracts::ProblemPackageId::new())),
+        ("packageRevision", json!(2)),
+    ] {
+        let mut tampered = stored.clone();
+        tampered["inputAuthorization"]["source"][field] = replacement;
+        let replay: InternalCreateAgentRunRequest = serde_json::from_value(tampered)?;
+        assert!(replay.validate().is_err(), "accepted substituted {field}");
+    }
+    let mut missing = stored;
+    missing
+        .as_object_mut()
+        .ok_or("not an object")?
+        .remove("inputAuthorization");
+    assert!(serde_json::from_value::<InternalCreateAgentRunRequest>(missing).is_err());
+    Ok(())
+}
+
+struct LimitedAuthorization {
+    calls: AtomicUsize,
+    allowed: usize,
+}
+#[async_trait]
+impl agent_service::claude_code::ModelInputAuthorization for LimitedAuthorization {
+    async fn check(&self) -> Result<(), agent_service::claude_code::ClaudeCodeRuntimeError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) < self.allowed {
+            Ok(())
+        } else {
+            Err(agent_service::claude_code::ClaudeCodeRuntimeError::InputAuthorizationDenied)
+        }
+    }
+}
+
+struct SelectedOnlyReader {
+    allowed: ArtifactId,
+    reads: AtomicUsize,
+}
+#[async_trait]
+impl ProblemPackageReader for SelectedOnlyReader {
+    async fn read(
+        &self,
+        reference: &ArtifactRef,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, PackageObjectReadError> {
+        assert_eq!(
+            reference.artifact_id, self.allowed,
+            "unselected object must never be read"
+        );
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(b"SYNTHETIC_SELECTED_MARKER".to_vec())
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn model_input_selection_and_repair_recheck_capture_actual_local_stdin()
+-> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let policy = valid_policy()?;
+    let mut package = package(
+        policy.project_id,
+        policy.course_id,
+        b"SYNTHETIC_SELECTED_MARKER",
+    )?;
+    let allowed = package.files[0].object.artifact_id;
+    let mut hidden = package.files[0].clone();
+    hidden.path = "SYNTHETIC_HIDDEN_RULE_SECRET_MARKER.md".to_owned();
+    hidden.object.artifact_id = ArtifactId::new();
+    hidden.object.size_bytes = u64::MAX;
+    package.files.push(hidden);
+    package
+        .files
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    let reader = Arc::new(SelectedOnlyReader {
+        allowed,
+        reads: AtomicUsize::new(0),
+    });
+    let gate = ProblemPackageEgressGate::new(
+        reader.clone(),
+        Arc::new(DeterministicEgressClassifier::new(
+            "fixture".to_owned(),
+            Revision::new(1)?,
+        )?),
+    );
+    let prepared = gate
+        .prepare(&package, &policy, &["assignment.md".to_owned()])
+        .await?;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    assert!(gate.prepare(&package, &policy, &[]).await.is_err());
+    assert!(
+        gate.prepare(&package, &policy, &["other-project.md".to_owned()])
+            .await
+            .is_err()
+    );
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    let fixture = tempfile::tempdir()?;
+    let binary = fixture.path().join("claude");
+    let stream = fixture.path().join("stream.jsonl");
+    let capture = fixture.path().join("capture.jsonl");
+    let envelope = json!({"type":"result","subtype":"success","is_error":false,"session_id":Uuid::new_v4(),"num_turns":1,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1},"permission_denials":[]});
+    // Invalid candidate requires repair; the second actual invocation must be blocked by fresh authorization.
+    std::fs::write(&stream, stream_output(Some("{}".to_owned()), envelope)?)?;
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then printf '2.1.207\\n'; exit 0; fi\n/bin/cat >> \"$LABWEAVER_CAPTURE\"\nprintf '\\n' >> \"$LABWEAVER_CAPTURE\"\n/bin/cat \"$LABWEAVER_FAKE_OUTPUT\"\n",
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
+    let process = Arc::new(TokioClaudeCodeProcess::new(BTreeMap::from([
+        ("PATH".to_owned(), fixture.path().display().to_string()),
+        (
+            "LABWEAVER_CAPTURE".to_owned(),
+            capture.display().to_string(),
+        ),
+        (
+            "LABWEAVER_FAKE_OUTPUT".to_owned(),
+            stream.display().to_string(),
+        ),
+    ])));
+    let check = Arc::new(LimitedAuthorization {
+        calls: AtomicUsize::new(0),
+        allowed: 1,
+    });
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(check.clone());
+    let failure = runtime
+        .generate(
+            AgentTrackKind::Environment,
+            prepared.clone(),
+            RunCancellation::new(),
+        )
+        .await
+        .expect_err("repair must be denied");
+    assert_eq!(
+        failure.diagnostic_code(),
+        "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+    );
+    assert_eq!(check.calls.load(Ordering::SeqCst), 2);
+    let sent = std::fs::read_to_string(&capture)?;
+    let captured: Vec<_> = sent.lines().collect();
+    assert_eq!(captured.len(), 1);
+    assert!(sent.contains("SYNTHETIC_SELECTED_MARKER"));
+    assert!(!sent.contains("SYNTHETIC_HIDDEN_RULE_SECRET_MARKER"));
+    let envelope: Value = serde_json::from_str(captured[0])?;
+    assert_eq!(
+        envelope["files"].as_array().ok_or("files missing")?.len(),
+        1
+    );
+    // Cancellation and revoked authorization both prevent the first real stdin write.
+    std::fs::remove_file(&capture)?;
+    let cancelled = RunCancellation::new();
+    cancelled.cancel();
+    assert_eq!(
+        runtime
+            .generate(AgentTrackKind::Environment, prepared.clone(), cancelled)
+            .await
+            .expect_err("cancelled")
+            .diagnostic_code(),
+        "LW_CONFLICT"
+    );
+    assert!(!capture.exists());
+    let denied = ClaudeCodeRuntime::new(policy.clone(), process.clone())?.with_input_authorization(
+        Arc::new(LimitedAuthorization {
+            calls: AtomicUsize::new(0),
+            allowed: 0,
+        }),
+    );
+    assert_eq!(
+        denied
+            .generate(
+                AgentTrackKind::Environment,
+                prepared.clone(),
+                RunCancellation::new()
+            )
+            .await
+            .expect_err("revoked")
+            .diagnostic_code(),
+        "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+    );
+    assert!(!capture.exists());
+    let race = RunCancellation::new();
+    let runtime = ClaudeCodeRuntime::new(policy, process)?.with_input_authorization(Arc::new(
+        CancellingAuthorization {
+            checks: AtomicUsize::new(0),
+            cancellation: race.clone(),
+        },
+    ));
+    let failure = runtime
+        .generate(AgentTrackKind::Environment, prepared, race)
+        .await
+        .expect_err("cancel after successful recheck");
+    assert_eq!(failure.audit().usage.requests, 1);
+    assert!(failure.audit().usage_observed);
+    assert_eq!(std::fs::read_to_string(&capture)?.lines().count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_without_current_authorization_never_enters_process() -> Result<(), Box<dyn Error>>
+{
+    let policy = valid_policy()?;
+    let process = Arc::new(FakeProcess::new(FakeMode::Success));
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?;
+    let prepared = input(&policy).await?;
+    let scope = agent_service::claude_code::AuthoringAttemptScope {
+        run_id: AgentRunId::new(),
+        project_id: policy.project_id,
+        course_id: policy.course_id,
+        actor_id: ActorId::new(),
+        track: AgentTrackKind::Environment,
+        attempt: 1,
+        execution_generation: 1,
+        started_at: "2026-10-13T00:00:00.000Z".parse()?,
+        worker_id: "synthetic".to_owned(),
+        lease_token: Uuid::new_v4(),
+        trace_id: "synthetic".to_owned(),
+        claude_code_version: policy.binding.claude_code_version.clone(),
+    };
+    let failure = runtime
+        .generate_authoring(
+            &scope,
+            prepared,
+            RunCancellation::new(),
+            EnvironmentClass::Work,
+            &[],
+        )
+        .await
+        .expect_err("authoring needs a current guard");
+    assert_eq!(
+        failure.diagnostic_code(),
+        "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+    );
+    assert_eq!(process.total_calls(), 0);
+    Ok(())
+}
+
+struct CancellingAuthorization {
+    checks: AtomicUsize,
+    cancellation: RunCancellation,
+}
+#[async_trait]
+impl agent_service::claude_code::ModelInputAuthorization for CancellingAuthorization {
+    async fn check(&self) -> Result<(), agent_service::claude_code::ClaudeCodeRuntimeError> {
+        if self.checks.fetch_add(1, Ordering::SeqCst) > 0 {
+            self.cancellation.cancel();
+        }
+        Ok(())
+    }
 }

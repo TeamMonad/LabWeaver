@@ -94,6 +94,20 @@ only `ANTHROPIC_MODEL` statically; each run/attempt receives a short-lived scope
 `ANTHROPIC_API_KEY` and the gateway URL. Missing files fail startup. The authoring sandbox
 NetworkPolicy permits the gateway Service and does not permit the provider endpoint directly.
 
+Authoring sandboxes use only `model_gateway.public_base_url` on port 9460, with the full Service
+DNS name when the authoring namespace differs from the Agent namespace. No second provider
+transport or provider credential is mounted in the sandbox. The gateway checks the original
+session, current object permission, immutable policy, exact execution lease and cancellation /
+deadline before classifying every decoded JSON key and value. Only permitted input reaches
+Resource admission and the upstream. A pre-send refusal releases an acquired hold with a known
+zero observation; it does not invent zero usage after a possibly sent request. Per-tool hooks use
+the same signed capability and gateway authorization endpoint.
+
+Agent detailed model diagnostics expire after 30 days. The Agent retention worker deletes only
+separate diagnostic rows and marked, abandoned model temporary directories; durable usage, grades,
+business checkpoints and user volumes are not retention targets. Apply the migration catalog
+before starting an Agent binary that uses the diagnostic endpoint.
+
 The administrator image catalog binds exactly one platform registry. Put the operator-provided CA,
 robot username and robot password values in
 `secrets/agent-service-secrets/{harbor-ca.crt,harbor-username,harbor-password}` with mode `0600`;

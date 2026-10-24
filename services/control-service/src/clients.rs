@@ -459,6 +459,21 @@ impl AgentClient {
         Ok(outcome)
     }
 
+    pub async fn diagnostics(
+        &self,
+        run_id: AgentRunId,
+    ) -> Result<contracts::http::AgentRunDiagnostics, DownstreamError> {
+        send_json(
+            self.client.get(
+                self.config
+                    .endpoint(&format!("internal/v1/agent-runs/{run_id}/diagnostics"))?,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
     pub async fn artifact(
         &self,
         artifact_id: ImageArtifactId,
@@ -1104,4 +1119,26 @@ pub enum DownstreamError {
     Conflict,
     #[error("LW_AUTH_SCOPE_DENIED")]
     Denied,
+}
+
+impl EvaluationClient {
+    /// Protected metadata-only endpoint; no artifact bytes or storage locators are requested.
+    pub async fn frozen_model_input_facts(
+        &self,
+        input: &contracts::http::CreateFrozenModelInputAuthorizationRequest,
+    ) -> Result<serde_json::Value, DownstreamError> {
+        input
+            .validate()
+            .map_err(|_| DownstreamError::Configuration)?;
+        let context = &input.input_authorization_context;
+        let mut request = self.client.get(self.config.endpoint(&format!("internal/v1/evaluation-releases/{}/frozen-submissions/{}/model-input-facts/tasks/{}", input.evaluation_release_id, input.frozen_submission_id, input.task_run_id))?)
+            .header("x-labweaver-project-id", context.project_id.to_string())
+            .header("x-labweaver-actor-id", context.actor_id.to_string())
+            .header("x-labweaver-evaluation-lease-sha256", &input.parent_lease_sha256)
+            .header("If-Match", contracts::http::StrongEtag::from_revision(input.evaluation_release_revision).header_value());
+        if let Some(course) = context.course_id {
+            request = request.header("x-labweaver-course-id", course.to_string());
+        }
+        send_json(request, &self.service_token_client, self.token_target).await
+    }
 }

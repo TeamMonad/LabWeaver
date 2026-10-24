@@ -94,6 +94,10 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
             "/internal/v1/agent-runs/{run_id}/task-progress",
             get(get_task_progress),
         )
+        .route(
+            "/internal/v1/agent-runs/{run_id}/diagnostics",
+            get(get_run_diagnostics),
+        )
         .route("/internal/v1/agent-runs/{run_id}/cancel", post(cancel_run))
         .route(
             "/internal/v1/build-requests/{build_request_id}/cancel",
@@ -380,6 +384,19 @@ async fn approve_work_configuration(
         .approve_work_configuration(run_id, &request, &idempotency(&headers)?, now()?)
         .await?;
     Ok((StatusCode::ACCEPTED, Json(run)).into_response())
+}
+
+async fn get_run_diagnostics(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(run_id): Path<AgentRunId>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(state.store.diagnostics(run_id).await?),
+    )
+        .into_response())
 }
 
 async fn get_outcome(

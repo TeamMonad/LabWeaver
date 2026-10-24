@@ -34,7 +34,10 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+agent-service = { path = "../agent-service" }
+environment-service = { path = "../environment-service" }
 resource-service = { path = "../resource-service" }
+task-execution = { path = "../../crates/task-execution", features = ["test-support"] }
 jsonwebtoken.workspace = true
 base64.workspace = true
 rcgen.workspace = true

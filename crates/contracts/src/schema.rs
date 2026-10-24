@@ -126,6 +126,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::AgentRunTaskProgress
     );
     document!(
+        "schemas/contracts/v1/agent-run-diagnostics.schema.json",
+        crate::http::AgentRunDiagnostics
+    );
+    document!(
         "schemas/contracts/v1/task-attempt-progress.schema.json",
         crate::execution::TaskAttemptProgress
     );
@@ -606,6 +610,30 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/authorization-decision-request.schema.json",
         crate::auth::AuthorizationDecisionRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/maintain-rubric-model-input-rule-request.schema.json",
+        crate::http::MaintainRubricModelInputRuleRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/project-rubric-model-input-rules.schema.json",
+        crate::http::ProjectRubricModelInputRules
+    );
+    document!(
+        "schemas/contracts/v1/http/create-frozen-model-input-authorization-request.schema.json",
+        crate::http::CreateFrozenModelInputAuthorizationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/model-input-authorization-context.schema.json",
+        crate::http::ModelInputAuthorizationContext
+    );
+    document!(
+        "schemas/contracts/v1/http/model-input-authorization-resolve-request.schema.json",
+        crate::http::ModelInputAuthorizationResolveRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/model-input-authorization-resolution.schema.json",
+        crate::http::ModelInputAuthorizationResolution
     );
     document!(
         "schemas/contracts/v1/http/internal-create-agent-run-request.schema.json",
@@ -1838,6 +1866,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         entry[method] = operation_json;
     }
     add_auth_paths(surface, &mut paths);
+    declare_model_input_errors(&mut paths)?;
     let security_schemes = if surface == ApiSurface::Public {
         json!({
             "oidc": {"type":"oauth2","flows":{"authorizationCode":{"authorizationUrl":"/auth/login","tokenUrl":"/auth/callback","scopes":{}}}},
@@ -1847,7 +1876,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
     } else {
         json!({"serviceJwt": {"type":"http","scheme":"bearer","bearerFormat":"JWT","description":"Short-lived service-account JWT validated against the configured issuer, audience, signature, expiry, and route permission. Service-to-service transport is protected by TLS."}})
     };
-    let value = json!({
+    let mut value = json!({
         "openapi": "3.1.0",
         "info": {"title": title, "version": "1.0.0", "description": "Generated from the contracts Rust crate. Runtime implementation is outside this artifact."},
         "servers": [{"url": if surface == ApiSurface::Public { "/" } else { "https://gateway-control.internal" }}],
@@ -1868,6 +1897,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"OrganizationUserPage": contract_ref("organization-user-page")
                  ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
                  ,"AgentRunTaskProgress": contract_ref("agent-run-task-progress")
+                 ,"AgentRunDiagnostics": contract_ref("agent-run-diagnostics")
                  ,"TaskAttemptProgress": contract_ref("task-attempt-progress")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
                 ,"LogoutBrowserSessionResponse": contract_ref("logout-browser-session-response")
@@ -1875,6 +1905,9 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
                 ,"EnvironmentWorkConfigurationTargetQuery": contract_ref("http/environment-work-configuration-target-query")
+                 ,"CreateFrozenModelInputAuthorizationRequest": contract_ref("http/create-frozen-model-input-authorization-request")
+                 ,"ModelInputAuthorizationResolveRequest": contract_ref("http/model-input-authorization-resolve-request")
+                 ,"ModelInputAuthorizationResolution": contract_ref("http/model-input-authorization-resolution")
                  ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
                  ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
                  ,"InternalAgentLlmReviewRequest": contract_ref("http/internal-agent-llm-review-request")
@@ -1918,8 +1951,60 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
     });
+    if surface == ApiSurface::Public
+        && let Some(schemas) = value
+            .pointer_mut("/components/schemas")
+            .and_then(Value::as_object_mut)
+    {
+        schemas.remove("CreateFrozenModelInputAuthorizationRequest");
+        schemas.remove("ModelInputAuthorizationResolveRequest");
+        schemas.remove("ModelInputAuthorizationResolution");
+        schemas.remove("InternalCreateAgentRunRequest");
+    }
     let document: utoipa::openapi::OpenApi = serde_json::from_value(value)?;
     Ok(serde_json::to_value(document)?)
+}
+
+fn declare_model_input_errors(paths: &mut BTreeMap<String, Value>) -> Result<(), GenerationError> {
+    for path in paths.values_mut() {
+        let Some(methods) = path.as_object_mut() else {
+            continue;
+        };
+        for operation in methods.values_mut() {
+            let codes: &[&str] = match operation.get("operationId").and_then(Value::as_str) {
+                Some("createProjectAgentRun" | "createProjectWorkConfigurationRun") => &[
+                    "LW_MODEL_INPUT_SELECTION_REQUIRED",
+                    "LW_MODEL_INPUT_AUTHORIZATION_DENIED",
+                ],
+                Some("maintainProjectRubricModelInputRule") => &[
+                    "LW_MODEL_INPUT_AUTHORIZATION_INVALID",
+                    "LW_MODEL_INPUT_AUTHORIZATION_DENIED",
+                ],
+                Some(
+                    "createFrozenModelInputAuthorization"
+                    | "resolveFrozenModelInputAuthorization"
+                    | "resolveModelInputAuthorization",
+                ) => &["LW_MODEL_INPUT_AUTHORIZATION_DENIED"],
+                _ => continue,
+            };
+            let fields = operation.as_object_mut().ok_or_else(|| {
+                GenerationError::Contract("model input operation must be an object".to_owned())
+            })?;
+            let errors = fields
+                .entry("x-labweaver-errors")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or_else(|| {
+                    GenerationError::Contract("model input HTTP errors must be an array".to_owned())
+                })?;
+            for code in codes {
+                if !errors.iter().any(|value| value.as_str() == Some(code)) {
+                    errors.push(json!(code));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
@@ -1951,6 +2036,9 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
         }
         ApiSurface::GatewayInternal => {
+            paths.insert("/internal/v1/authoring/frozen-model-input-authorizations".to_owned(), json!({"post":{"operationId":"createFrozenModelInputAuthorization","security":internal_security("control.authoring.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateFrozenModelInputAuthorizationRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact frozen input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
+            paths.insert("/internal/v1/authoring/model-input-authorizations/resolve".to_owned(), json!({"post":{"operationId":"resolveFrozenModelInputAuthorization","security":internal_security("control.authoring.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolveRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact frozen input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
+            paths.insert("/internal/v1/model-input-authorizations/resolve".to_owned(),json!({"post":{"operationId":"resolveModelInputAuthorization","summary":"Recheck current session, object action and explicitly selected material versions","security":internal_security("control.agent_run.read"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolveRequest"}}}},"responses":{"200":{"description":"Current authorization permits this exact input","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ModelInputAuthorizationResolution"}}}},"403":{"$ref":"#/components/responses/Problem"}}}}));
             paths.insert(
                 "/internal/v1/auth/decision".to_owned(),
                 json!({"post":{"operationId":"decideAuthorization","summary":"Evaluate an actor session and exact resource scope for a service JWT caller","security": internal_security("authorization:decide"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecisionRequest"}}}},"responses":{"200":{"description":"Expiry-bounded authorization decision","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecision"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
@@ -1966,6 +2054,10 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             paths.insert(
                 "/internal/v1/agent-runs/{runId}".to_owned(),
                 json!({"get":{"operationId":"getInternalAgentRun","summary":"Read the authoritative Agent-owned run","security": internal_security("agent_run:read"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/agent-runs/{runId}/diagnostics".to_owned(),
+                json!({"get":{"operationId":"getInternalAgentRunDiagnostics","security":internal_security("agent_run:read"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Unexpired sanitized failure details","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AgentRunDiagnostics"}}}},"404":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/cancel".to_owned(),
@@ -2197,6 +2289,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "addProjectMembership" => "http/add-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
+        "maintainProjectRubricModelInputRule" => "http/maintain-rubric-model-input-rule-request",
         "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
         "createProjectAgentRun" => "http/create-agent-run-request",
         "cancelProjectCandidateBuild" => "http/cancel-candidate-build-request",
@@ -2310,6 +2403,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }),
         "listOrganizationUsers" => contract_ref("organization-user-page"),
         "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
+        "getProjectAgentRunDiagnostics" => contract_ref("agent-run-diagnostics"),
         "getProjectAgentTaskProgress" | "getInternalAgentTaskProgress" => {
             contract_ref("agent-run-task-progress")
         }
@@ -2331,6 +2425,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
         "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
+        "maintainProjectRubricModelInputRule" | "getProjectRubricModelInputRules" => {
+            contract_ref("http/project-rubric-model-input-rules")
+        }
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"

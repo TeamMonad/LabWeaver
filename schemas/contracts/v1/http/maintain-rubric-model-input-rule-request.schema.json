@@ -1,0 +1,176 @@
+{
+  "$defs": {
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "EvaluationReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.",
+      "type": "string"
+    },
+    "ModelInputRubricIdentity": {
+      "additionalProperties": false,
+      "description": "Control-derived asynchronous recheck input, never accepted from a public create request.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "packageId": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "packageRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "packageId",
+        "packageRevision",
+        "path",
+        "artifact",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RubricModelInputRuleAction": {
+      "description": "Visibility declaration does not implicitly approve model disclosure.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "set_visibility",
+              "type": "string"
+            },
+            "visibility": {
+              "$ref": "#/$defs/RubricModelInputVisibility"
+            }
+          },
+          "required": [
+            "kind",
+            "visibility"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "approve_model_use",
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "runtimeBinding": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "runtimeBinding",
+            "model"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "revoke_model_use",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RubricModelInputVisibility": {
+      "description": "Course-controlled rubric visibility, separate from model-use approval.",
+      "enum": [
+        "course_public",
+        "hidden"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Teacher maintenance input; the caller cannot supply the approving actor or role evidence.",
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/RubricModelInputRuleAction"
+    },
+    "evaluationReleaseId": {
+      "$ref": "#/$defs/EvaluationReleaseId"
+    },
+    "evaluationReleaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "rubric": {
+      "$ref": "#/$defs/ModelInputRubricIdentity"
+    }
+  },
+  "required": [
+    "evaluationReleaseId",
+    "evaluationReleaseRevision",
+    "rubric",
+    "action"
+  ],
+  "title": "MaintainRubricModelInputRuleRequest",
+  "type": "object"
+}
