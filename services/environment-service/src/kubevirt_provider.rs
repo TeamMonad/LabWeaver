@@ -1297,17 +1297,12 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         envelope: &KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
         let runtime_gate = if match &envelope.request {
-            KubeVirtExecutorRequest::Apply { plan }
-            | KubeVirtExecutorRequest::Start { plan }
-            | KubeVirtExecutorRequest::Restart { plan } => !plan.resources.is_empty(),
-            _ => false,
-        } && matches!(
-            envelope.fence.action,
-            ReconcileAction::Provision
-                | ReconcileAction::Start
-                | ReconcileAction::Restart
-                | ReconcileAction::Reset
-        ) {
+            KubeVirtExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+            KubeVirtExecutorRequest::Start { .. } | KubeVirtExecutorRequest::Restart { .. } => true,
+            KubeVirtExecutorRequest::Observe { .. }
+            | KubeVirtExecutorRequest::Stop { .. }
+            | KubeVirtExecutorRequest::DeleteNamespace { .. } => false,
+        } {
             crate::runtime_admission::executor_authorization(
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),

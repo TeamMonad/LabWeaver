@@ -27,6 +27,8 @@ use std::{sync::Arc, time::Duration};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, runners::AsyncRunner};
 use tower::ServiceExt;
+#[path = "environment_executor_gate.rs"]
+mod executor_gate;
 #[path = "environment_pending_attach.rs"]
 pub(super) mod pending_attachment;
 #[path = "environment_funded_auth.rs"]
@@ -404,6 +406,12 @@ pub(super) async fn exercise(
         admission.for_instance(&instance).await?.lease_authorization,
         original.lease
     );
+    if instance.runtime_kind == contracts::authoring::RuntimeKind::VirtualMachine {
+        Box::pin(executor_gate::exercise(
+            pool, resource, &admission, &instance,
+        ))
+        .await?;
+    }
     sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
         .bind(request.course_id.ok_or("course scope")?.as_uuid()).bind(request.requester_id.as_uuid()).execute(pool).await?;
     assert!(matches!(
@@ -970,6 +978,7 @@ async fn exercise_execution(
             ));
         }
         assert_eq!(physical_calls.load(Ordering::SeqCst), 0);
+        Box::pin(executor_gate::exercise(pool, resource, admission, &ready)).await?;
         executor.execute(first.clone()).await?;
         assert_eq!(physical_calls.load(Ordering::SeqCst), 1);
     }

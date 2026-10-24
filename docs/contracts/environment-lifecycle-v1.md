@@ -116,6 +116,14 @@ Environment target must agree. Native executor admission also checks the exact
 runtime kind, operation and generation before a new effect. Existing baseline security
 projection remains unchanged. Stop and cleanup do not require a new runtime grant.
 
+执行器按实际副作用选择 fresh gate，而不是按计划中是否出现 Deployment/PVC 判断。
+容器非空 Apply（Provision/Reset）、Scale 到正副本数（Start）和 Restart 必须重核原资金与运行授权；
+空资源计划的 Scale/Restart 仍会操作已存在的计算对象，不能跳过重核。
+VM Start/Restart 同样一律重核，即使计划资源列表为空；非空 Apply（Provision/Reset）也须重核。
+空 Apply 不写 Kubernetes 对象，Observe 只读，Stop/Scale 到零及 Cleanup 用于停止和回收，
+不要求新的运行授权。Validate、Build、Configure 不属于这两个原生执行器协议，不能以这些动作提交计算请求。
+现有完整响应仍由原请求身份重放，fresh gate 失败不会把已完成效果再执行一次。
+
 
 Public `CreateEnvironmentRequest` requires `resourceRequestId`; its approved target
 is resolved from the original request. Resource's normal approval → capacity claim →
