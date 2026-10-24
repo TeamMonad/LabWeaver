@@ -8,7 +8,7 @@ import type {
 } from '@/generated/contracts'
 import { diagnosticFromError, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, newUuidV7 } from '@/utils/format'
-import { clearPendingCommand, commandOutcomeIsFinal, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
+import { clearPendingCommand, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 
 export type TemplateImage = PlatformImageCatalogSchemaPlatformImageEntry
 
@@ -207,6 +207,22 @@ interface PendingPublication {
 }
 
 /**
+ * Control answers with these codes only after its idempotency ledger reserved
+ * a key it had never seen and before the publication transaction commits (the
+ * reservation rolls back with it), so a replay of an accepted publication can
+ * never produce them: the command is proven not to have been accepted. Every
+ * other answer, including 401, 403 (checked before the ledger), a retryable
+ * 409 such as an operation in progress, 5xx, a transport failure or an
+ * unknown code, leaves the outcome unknown.
+ */
+const NOT_ACCEPTED_CODES: readonly string[] = ['LW_CONTRACT_DOCUMENT_INVALID', 'LW_MATERIAL_RETENTION_EXPIRED', 'LW_RELEASE_ARTIFACT_MISMATCH']
+
+export type PublicationOutcome =
+  | { kind: 'accepted' }
+  /** `unconfirmed`: the publication may have been accepted; retrying the same content replays it. */
+  | { kind: 'failed'; diagnostic: DiagnosticViewModel; unconfirmed: boolean }
+
+/**
  * Manual Work template publication: the project's pinned platform images and
  * one reviewed, confirmed publication command.
  *
@@ -214,8 +230,8 @@ interface PendingPublication {
  * signed-in actor and project, keyed by its canonical content. A retry, a page
  * refresh or reopening the form with the same content replays it with the same
  * Idempotency-Key and retention identity, so a lost response never publishes a
- * second version; changed content is a new command. The entry is removed once
- * the server accepts the command or answers with a definite client error.
+ * second version; changed content is a new command. The entry is removed only
+ * when that exact command is accepted or proven not accepted.
  */
 export function useManualWorkTemplatePublication(
   projectId: Ref<string | null | undefined>,
@@ -224,10 +240,12 @@ export function useManualWorkTemplatePublication(
 ) {
   const images = ref<AsyncState<TemplateImage[]>>({ kind: 'idle' })
   const publishing = ref(false)
-  const outcome = ref<{ kind: 'accepted' } | { kind: 'failed'; diagnostic: DiagnosticViewModel } | null>(null)
+  const outcome = ref<PublicationOutcome | null>(null)
   /** The reviewed draft of a publication whose outcome is still unknown, restored after a refresh. */
   const pendingDraft = ref<ManualWorkTemplateDraft | null>(null)
   let generation = 0
+  /** Changes with the project or actor; an answer for an older context only updates storage. */
+  let context = 0
 
   const scope = (id: string) => `manual-work-template:${id}`
 
@@ -249,6 +267,7 @@ export function useManualWorkTemplatePublication(
     images.value = active.length ? { kind: 'success', data: active } : { kind: 'empty' }
   }
 
+  /** Resolves to true only when this context's publication was accepted. */
   async function publish(draft: ManualWorkTemplateDraft): Promise<boolean> {
     const id = projectId.value
     const actor = actorId.value
@@ -262,8 +281,11 @@ export function useManualWorkTemplatePublication(
       : { fingerprint, idempotencyKey: idempotencyKey(), data: { policyId: newUuidV7(), draft: { ...draft } } }
     // Recorded before sending: a response lost after this point is replayed, never re-minted.
     writePendingCommand(actor, scope(id), command)
+    const requestContext = context
+    const current = () => requestContext === context
     publishing.value = true
     outcome.value = null
+    let next: PublicationOutcome
     try {
       const result = await createEnvironmentTemplateRelease({
         path: { projectId: id },
@@ -272,23 +294,26 @@ export function useManualWorkTemplatePublication(
       })
       if (result.error || !result.data) {
         const diagnostic = diagnosticFromError(result.error, 'MANUAL_TEMPLATE_PUBLISH_FAILED', '发布 Work 模板失败。')
-        if (commandOutcomeIsFinal(diagnostic.status)) clearPendingCommand(actor, scope(id))
-        outcome.value = { kind: 'failed', diagnostic }
-        return false
+        const notAccepted = NOT_ACCEPTED_CODES.includes(diagnostic.code)
+        if (notAccepted) clearPendingCommand(actor, scope(id), command.idempotencyKey)
+        next = { kind: 'failed', diagnostic, unconfirmed: !notAccepted }
+      } else {
+        clearPendingCommand(actor, scope(id), command.idempotencyKey)
+        next = { kind: 'accepted' }
       }
-      clearPendingCommand(actor, scope(id))
-      pendingDraft.value = null
-      outcome.value = { kind: 'accepted' }
-      return true
     } catch (error) {
-      outcome.value = { kind: 'failed', diagnostic: diagnosticFromError(error, 'MANUAL_TEMPLATE_PUBLISH_FAILED', '发布结果尚未确认，请重试；重试同样内容不会重复发布。') }
-      return false
-    } finally {
-      publishing.value = false
+      next = { kind: 'failed', diagnostic: diagnosticFromError(error, 'MANUAL_TEMPLATE_PUBLISH_FAILED', '发布结果尚未确认。'), unconfirmed: true }
     }
+    if (!current()) return false
+    publishing.value = false
+    outcome.value = next
+    if (next.kind === 'accepted') pendingDraft.value = null
+    return next.kind === 'accepted'
   }
 
   watch([projectId, actorId], ([id, actor]) => {
+    context += 1
+    publishing.value = false
     outcome.value = null
     pendingDraft.value = id && actor ? readPendingCommand<PendingPublication>(actor, scope(id))?.data?.draft ?? null : null
   }, { immediate: true })

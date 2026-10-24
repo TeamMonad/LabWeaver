@@ -77,6 +77,9 @@
 
     <div v-if="upgradeDiagnostic" class="upgrade-result">
       <DiagnosticBanner :diagnostic="upgradeDiagnostic" @retry="retryUpgrade" />
+      <p class="upgrade-panel__note" role="status" data-testid="upgrade-unconfirmed">
+        升级结果待确认：如果平台已经受理之前的请求，点击“重试”会沿用同一请求，不会重复升级。
+      </p>
       <RouterLink
         v-if="upgradeDiagnostic.code === 'LW_RUNTIME_LEASE_NOT_ACTIVE'"
         class="outlined-button small"
@@ -120,7 +123,7 @@ import { diagnosticFromError, makeDiagnostic, type DiagnosticViewModel } from '@
 import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 import { isTerminalEnvironment } from '@/utils/environmentLifecycle'
 import { actorIdFromProfile } from '@/utils/navigation'
-import { clearPendingCommand, commandOutcomeIsFinal, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
+import { clearPendingCommand, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 import { environmentOperationStateLabel } from '@/utils/stateLabels'
 import { newerWorkReleases, workTemplateTitle } from '@/utils/workTemplate'
 
@@ -215,7 +218,10 @@ const newRequestLink = computed(() => ({
  * One Idempotency-Key per (actor, environment, revision, target), kept as a
  * pending command in session storage: a retry or a page refresh before the
  * server answered replays the same command instead of submitting a second
- * upgrade. Another actor signing in on this browser never sees it.
+ * upgrade. Another actor signing in on this browser never sees it. The key is
+ * dropped only when this exact command is accepted: Environment checks
+ * compatibility, permissions and the lease before its idempotency record can
+ * answer a replay, so no refusal proves the first attempt was not accepted.
  */
 function upgradeCommand(actor: string, releaseId: string, version: number) {
   const scope = `work-template-upgrade:${props.data.id}:${props.data.revision}:${releaseId}:${version}`
@@ -228,27 +234,31 @@ function upgradeCommand(actor: string, releaseId: string, version: number) {
 async function submitUpgrade(releaseId: string, version: number) {
   const actor = actorId.value
   if (!canUpgrade.value || !actor) return
+  const environmentId = props.data.id
+  // A late answer for another environment or actor only updates storage, never this panel.
+  const current = () => props.data.id === environmentId && actorId.value === actor
   submitting.value = true
   upgradeDiagnostic.value = null
   lastTarget.value = { releaseId, version }
   const { scope, key } = upgradeCommand(actor, releaseId, version)
   try {
     const result = await upgradeEnvironmentTemplate({
-      path: { environmentId: props.data.id },
+      path: { environmentId },
       headers: { 'Idempotency-Key': key, 'If-Match': ifMatch(props.data.revision) },
       body: { targetReleaseId: releaseId, targetReleaseVersion: version, confirmed: true },
     })
     if (result.error) {
+      if (!current()) return
       upgradeDiagnostic.value = diagnosticFromError(result.error, 'WORK_TEMPLATE_UPGRADE_FAILED', '模板升级没有被受理。')
-      if (commandOutcomeIsFinal(upgradeDiagnostic.value.status)) clearPendingCommand(actor, scope)
       if (upgradeDiagnostic.value.status === 403) void permissions.refresh()
       return
     }
-    clearPendingCommand(actor, scope)
+    clearPendingCommand(actor, scope, key)
+    if (!current()) return
     lastTarget.value = null
     await Promise.all([env.load(), operations.load()])
   } catch (error) {
-    upgradeDiagnostic.value = diagnosticFromError(error, 'WORK_TEMPLATE_UPGRADE_FAILED', '升级请求的结果尚未确认。重试会沿用同一请求，不会重复升级。')
+    if (current()) upgradeDiagnostic.value = diagnosticFromError(error, 'WORK_TEMPLATE_UPGRADE_FAILED', '升级请求的结果尚未确认。')
   } finally {
     submitting.value = false
   }

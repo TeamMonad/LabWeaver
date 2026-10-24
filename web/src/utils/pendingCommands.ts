@@ -50,9 +50,14 @@ export function writePendingCommand<T>(actorId: string, scope: string, command: 
   }
 }
 
-export function clearPendingCommand(actorId: string, scope: string) {
+/**
+ * Remove the command only while it is still the one identified by
+ * `idempotencyKey`: a late answer to an older command must not delete a newer
+ * command that replaced it.
+ */
+export function clearPendingCommand(actorId: string, scope: string, idempotencyKey: string) {
   try {
-    store()?.removeItem(entryKey(actorId, scope))
+    if (readPendingCommand(actorId, scope)?.idempotencyKey === idempotencyKey) store()?.removeItem(entryKey(actorId, scope))
   } catch {
     // Nothing was stored either.
   }
@@ -73,13 +78,4 @@ export function syncPendingCommandOwner(actorId: string | null) {
   } catch {
     // Storage disabled: nothing was stored either.
   }
-}
-
-/**
- * Whether a failed command has a definite outcome: the server answered with a
- * client error that a replay would repeat. Timeouts, throttling and server or
- * transport failures leave the outcome unknown, so the command is kept.
- */
-export function commandOutcomeIsFinal(status: number | undefined): boolean {
-  return status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429
 }

@@ -120,6 +120,14 @@
       :diagnostic="publication.outcome.diagnostic"
       @retry="submit"
     />
+    <p
+      v-if="publication.outcome?.kind === 'failed' && publication.outcome.unconfirmed"
+      class="hint hint--blocked"
+      role="status"
+      data-testid="manual-unconfirmed"
+    >
+      发布结果待确认：平台可能已经受理这次发布。点击“重试”或再次提交相同内容会沿用同一请求，不会重复发布。
+    </p>
   </section>
 </template>
 

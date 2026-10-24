@@ -456,18 +456,108 @@ describe('WorkEnvironmentsView', () => {
       wrapper.unmount()
     })
 
-    it('re-reads the project actions after a 403 and stops offering publication once revoked', async () => {
-      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: undefined, error: { status: 403, diagnosticCode: 'LW_PROJECT_GOVERNANCE_DENIED', detail: 'denied', retryable: false } } as never)
-      const { wrapper } = await mountEmpty()
-      await fillContainerDraft(wrapper)
+    it('re-reads the project actions after a 403, keeps the command and replays it once permission returns', async () => {
+      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValueOnce({ data: undefined, error: { status: 403, diagnosticCode: 'LW_PROJECT_GOVERNANCE_DENIED', detail: 'denied', retryable: false } } as never)
+      const first = await mountEmpty()
+      await fillContainerDraft(first.wrapper)
       vi.mocked(getProjectAvailableActions).mockResolvedValue(grantActions(['browse']))
       const reads = vi.mocked(getProjectAvailableActions).mock.calls.length
-      await wrapper.get('.manual-form').trigger('submit')
+      await first.wrapper.get('.manual-form').trigger('submit')
       await flushPromises()
       expect(vi.mocked(getProjectAvailableActions).mock.calls.length).toBeGreaterThan(reads)
-      await vi.waitFor(() => expect(wrapper.find('[data-testid="manual-permission-hint"]').exists()).toBe(true))
-      // A definite refusal ends the command: nothing is left to replay.
+      await vi.waitFor(() => expect(first.wrapper.find('[data-testid="manual-permission-hint"]').exists()).toBe(true))
+      // Permission is checked before the idempotency ledger: a 403 does not prove an earlier attempt failed.
+      expect(first.wrapper.get('[data-testid="manual-unconfirmed"]').text()).toContain('发布结果待确认')
+      expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:owner-1:manual-work-template:'))).toHaveLength(1)
+      first.wrapper.unmount()
+
+      vi.mocked(getProjectAvailableActions).mockResolvedValue(grantActions(['browse', 'edit']))
+      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValueOnce({ data: { operationId: 'op-1', statusUrl: '/x' }, error: undefined } as never)
+      const second = await mountEmpty()
+      await second.wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+      await second.wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      const [denied, replay] = vi.mocked(createEnvironmentTemplateRelease).mock.calls.map(([options]) => options)
+      expect(replay.headers['Idempotency-Key']).toBe(denied.headers['Idempotency-Key'])
+      expect(replay.body.manual?.spec.retention.policyId).toBe(denied.body.manual?.spec.retention.policyId)
+      second.wrapper.unmount()
+    })
+  })
+
+  describe('manual publication outcome', () => {
+    it('keeps the identity after a retryable 409 operation in progress', async () => {
+      vi.mocked(createEnvironmentTemplateRelease)
+        .mockResolvedValueOnce({ data: undefined, error: { status: 409, diagnosticCode: 'LW_OPERATION_IN_PROGRESS', detail: 'in progress', retryable: true } } as never)
+        .mockResolvedValueOnce({ data: { operationId: 'op-1', statusUrl: '/x' }, error: undefined } as never)
+      const { wrapper } = await mountEmpty()
+      await fillContainerDraft(wrapper)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="manual-unconfirmed"]').exists()).toBe(true)
+      await wrapper.get('[data-testid="manual-publisher"] .diagnostic-banner').findAll('button').find((button) => button.text() === '重试')!.trigger('click')
+      await flushPromises()
+      const keys = publishKeys()
+      expect(keys[1]).toBe(keys[0])
+      expect(wrapper.get('[data-testid="manual-accepted"]').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('drops the identity when the reviewed content is rejected before anything is committed', async () => {
+      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: undefined, error: { status: 422, diagnosticCode: 'LW_CONTRACT_DOCUMENT_INVALID', detail: 'invalid', retryable: false } } as never)
+      const { wrapper } = await mountEmpty()
+      await fillContainerDraft(wrapper)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      expect(wrapper.find('[data-testid="manual-unconfirmed"]').exists()).toBe(false)
       expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:'))).toEqual([])
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      const keys = publishKeys()
+      expect(keys[1]).not.toBe(keys[0])
+      wrapper.unmount()
+    })
+
+    it('lets a late answer to an older command neither delete a newer command nor change the reopened form', async () => {
+      let finishA: (value: unknown) => void = () => undefined
+      let finishB: (value: unknown) => void = () => undefined
+      vi.mocked(createEnvironmentTemplateRelease)
+        .mockImplementationOnce(() => new Promise((resolve) => { finishA = resolve }) as never)
+        .mockImplementationOnce(() => new Promise((resolve) => { finishB = resolve }) as never)
+      const { wrapper } = await mountEmpty()
+      await fillContainerDraft(wrapper)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+
+      // Collapse while A is in flight, reopen and submit different content as B.
+      const section = wrapper.get<HTMLDetailsElement>('[data-testid="manual-section"]')
+      section.element.open = false
+      await section.trigger('toggle')
+      section.element.open = true
+      await section.trigger('toggle')
+      await flushPromises()
+      await field(wrapper, '模板名称').setValue('Python 分析（第二版）')
+      await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      const [a, b] = vi.mocked(createEnvironmentTemplateRelease).mock.calls.map(([options]) => options)
+      expect(b.headers['Idempotency-Key']).not.toBe(a.headers['Idempotency-Key'])
+
+      // Answers arrive out of order: B is unconfirmed first, then A succeeds.
+      finishB({ data: undefined, error: { status: 503, diagnosticCode: 'LW_CONTROL_UNAVAILABLE', detail: 'down', retryable: true } })
+      await flushPromises()
+      finishA({ data: { operationId: 'op-a', statusUrl: '/a' }, error: undefined })
+      await flushPromises()
+
+      const stored = Object.entries(window.sessionStorage)
+        .filter(([key]) => key.startsWith('labweaver.pending-command:owner-1:manual-work-template:'))
+        .map(([, value]) => JSON.parse(value))
+      expect(stored).toHaveLength(1)
+      expect(stored[0].idempotencyKey).toBe(b.headers['Idempotency-Key'])
+      expect(stored[0].data.policyId).toBe(b.body.manual?.spec.retention.policyId)
+      // The reopened form still shows B's unconfirmed outcome, not A's acceptance.
+      expect(wrapper.find('[data-testid="manual-accepted"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="manual-unconfirmed"]').exists()).toBe(true)
+      expect((field(wrapper, '模板名称').element as HTMLInputElement).value).toBe('Python 分析（第二版）')
       wrapper.unmount()
     })
   })

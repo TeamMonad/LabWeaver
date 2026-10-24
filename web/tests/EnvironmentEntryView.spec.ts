@@ -2262,16 +2262,52 @@ describe('EnvironmentEntryView', () => {
       expect(bySecond).not.toBe(byFirst)
     })
 
-    it('clears the upgrade identity once the server gives a definite refusal', async () => {
+    it.each([
+      ['409 lease not active', 409, 'LW_RUNTIME_LEASE_NOT_ACTIVE'],
+      ['409 operation in progress', 409, 'LW_OPERATION_IN_PROGRESS'],
+      ['403 permission', 403, 'LW_SCOPE_DENIED'],
+    ])('keeps the upgrade identity after %s and retries with the same key', async (_label, status, diagnosticCode) => {
       mockWork()
-      vi.mocked(upgradeEnvironmentTemplate).mockResolvedValue({ data: undefined, error: { status: 409, diagnosticCode: 'LW_RUNTIME_LEASE_NOT_ACTIVE', detail: 'lease', retryable: false } } as never)
+      vi.mocked(upgradeEnvironmentTemplate)
+        .mockResolvedValueOnce({ data: undefined, error: { status, diagnosticCode, detail: 'refused', retryable: false } } as never)
+        .mockResolvedValueOnce({ data: { environmentId: 'env-1', operationId: 'op-upgrade', revision: 12, statusUrl: '/x' }, error: undefined } as never)
       const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
       const panel = await vi.waitFor(() => wrapper.get('[data-testid="template-upgrade"]'))
       await vi.waitFor(() => expect(panel.find('[data-testid="upgrade-to-2"]').exists()).toBe(true))
       await panel.get('[data-testid="upgrade-to-2"]').trigger('click')
       upgradeDialog(wrapper).vm.$emit('confirm')
       await flushPromises()
+      expect(panel.get('[data-testid="upgrade-unconfirmed"]').text()).toContain('升级结果待确认')
+      expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:student-1:work-template-upgrade:'))).toHaveLength(1)
+
+      // These refusals are not retryable, so the user confirms the same target again.
+      await panel.get('[data-testid="upgrade-to-2"]').trigger('click')
+      upgradeDialog(wrapper).vm.$emit('confirm')
+      await flushPromises()
+      const [first, second] = vi.mocked(upgradeEnvironmentTemplate).mock.calls.map(([options]) => options.headers['Idempotency-Key'])
+      expect(second).toBe(first)
+      // Accepted: the identity is released.
       expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:'))).toEqual([])
+    })
+
+    it('does not let a late answer for an older upgrade command delete a newer one in the same scope', async () => {
+      mockWork()
+      let finishA: (value: unknown) => void = () => undefined
+      vi.mocked(upgradeEnvironmentTemplate).mockImplementationOnce(() => new Promise((resolve) => { finishA = resolve }) as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+      const panel = await vi.waitFor(() => wrapper.get('[data-testid="template-upgrade"]'))
+      await vi.waitFor(() => expect(panel.find('[data-testid="upgrade-to-2"]').exists()).toBe(true))
+      await panel.get('[data-testid="upgrade-to-2"]').trigger('click')
+      upgradeDialog(wrapper).vm.$emit('confirm')
+      await flushPromises()
+      const storageKey = Object.keys(window.sessionStorage).find((key) => key.startsWith('labweaver.pending-command:student-1:work-template-upgrade:'))!
+      const a = JSON.parse(window.sessionStorage.getItem(storageKey)!)
+      // Another tab of the same actor replaced the command in this scope with B.
+      window.sessionStorage.setItem(storageKey, JSON.stringify({ ...a, idempotencyKey: 'key-b' }))
+
+      finishA({ data: { environmentId: 'env-1', operationId: 'op-a', revision: 12, statusUrl: '/a' }, error: undefined })
+      await flushPromises()
+      expect(JSON.parse(window.sessionStorage.getItem(storageKey)!).idempotencyKey).toBe('key-b')
     })
 
     it('never offers an in-place upgrade for VM Work and explains the alternative', async () => {
