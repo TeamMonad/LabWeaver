@@ -56,6 +56,32 @@ class PlatformBundleTests(unittest.TestCase):
         with_previous = MODULE.render_bundle(self.manifest, self.root / "input")
         self.assertIn(b"cHJldmlvdXM=", with_previous)
 
+    def test_optional_configmap_is_absent_or_rendered_with_exact_keys(self) -> None:
+        manifest = json.loads(self.manifest.read_text())
+        manifest["optionalConfigMaps"] = {"placement-config": ["profile.json"]}
+        self.manifest.write_text(json.dumps(manifest))
+        self.assertEqual(MODULE.render_bundle(self.manifest, self.root / "input").count(b"---\n"), 2)
+        config = self.root / "input/configmaps/placement-config"
+        config.mkdir()
+        with self.assertRaisesRegex(MODULE.BundleError, "LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE"):
+            MODULE.render_bundle(self.manifest, self.root / "input")
+        (config / "profile.json").write_text('{"mode":"dedicated"}')
+        payload = MODULE.render_bundle(self.manifest, self.root / "input")
+        self.assertEqual(payload.count(b"---\n"), 3)
+        self.assertIn(b'"name":"placement-config"', payload)
+        (config / "extra").write_text("unexpected")
+        with self.assertRaisesRegex(MODULE.BundleError, "LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE"):
+            MODULE.render_bundle(self.manifest, self.root / "input")
+
+    def test_optional_configmap_cannot_shadow_required_objects_or_secrets(self) -> None:
+        for name in ("service-config", "service-secrets"):
+            with self.subTest(name=name):
+                manifest = json.loads(self.manifest.read_text())
+                manifest["optionalConfigMaps"] = {name: ["profile.json"]}
+                self.manifest.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(MODULE.BundleError, "LW_PLATFORM_BUNDLE_MANIFEST_INVALID"):
+                    MODULE._load_manifest(self.manifest)
+
     def test_extra_file_is_rejected(self) -> None:
         extra = self.root / "input" / "secrets" / "service-secrets" / "unexpected"
         extra.write_text("value", encoding="utf-8")

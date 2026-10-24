@@ -18,7 +18,7 @@
     },
     "ConsoleLeaseFence": {
       "additionalProperties": false,
-      "description": "Resource-owned Lease identity that fences a Work console capability.",
+      "description": "Resource-owned Lease identity that fences a funded environment console capability.",
       "properties": {
         "expiresAt": {
           "$ref": "#/$defs/UtcTimestamp"

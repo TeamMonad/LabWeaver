@@ -17,7 +17,7 @@ Environment 是交互环境的唯一业务生命周期。Experiment 与 Work 表
 默认不设置 `LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE`，继续使用 `lw-env-{environmentId}` 专用 namespace。启用时按以下步骤准备部署输入：
 
 1. 在私有部署目录准备 `profile.json`，格式见 `deploy/config/container-placement.json.example`。填入已批准既有 namespace 的名称、当前 UID 和唯一项目 ID。示例中的 ID 都是合成数据。
-2. 将该文件放入一个部署管理员维护的 ConfigMap 的 `profile.json` key。设置 Helm 的 `containerPlacementProfileConfigMap` 为该对象名。模板只把同一对象只读挂载到 Environment owner 和 Container executor，并设置相同文件路径；不会创建该 ConfigMap 或目标 Namespace。
+2. 在加密 Bundle 的 `application.configMaps` 中添加可选 `container-placement-config` 对象，将 `profile.json` 引用到该私有配置文件。Bundle 从同一归档生成 ConfigMap 并派生 `containerPlacementProfileConfigMap`，Helm 将同一对象只读挂载到 Environment owner 和 Container executor。独立 Helm 部署可以直接引用管理员维护的同一 ConfigMap；Helm 本身不创建它或目标 Namespace。不要覆盖两个 workload 的文件环境变量。
 3. 非 Helm 启动同样使用绝对文件路径，并给两个进程提供同一 profile。文件缺失、未知字段、非法名称、零 UID、非 Work/指定项目或不支持的网络声明明确失败。
 4. 部署管理员在批准的操作范围内检查 namespace 现行 PSA、资源预算、存储类和网络隔离是否适合本 Work 及冻结 Job。Environment 不创建或覆盖 namespace 的 PSA、quota、LimitRange 或 NetworkPolicy，也不扩大 RBAC。现行 `deny_all` 依赖该专用 namespace 的部署策略；本模式不能用于未隔离的多租户共享 namespace。
 
@@ -84,6 +84,8 @@ VM runtime 运行事实可先于 SSH 握手入库，此时 `instanceReady=true`�
 配置操作说明实际影响，尤其是重启、临时文件和活跃进程。默认不打断科研任务；超出预授权范围的变更需要用户确认，不能将任意用户文本作为平台管理指令执行。
 
 停止、删除和设备释放由实际执行结果确认。失败保留明确状态和诊断，不虚报 Deleted 或可用容量。保留存储与计算资源分别处理，Environment 向 Resource 提供可信状态变化用于计量；异常清理期间费用待核实。
+
+Access 的 `0008_funded_experiment_console_fence.sql` 将控制台能力的租约 CHECK 改为按实际资金租约而非用途分类：Work 必须带完整 lease fence；Experiment 可以保留旧的无租约形态，也可以带完整 fence。任一字段缺失或能力到期超过 lease 到期均拒绝。Rust 的能力与发现结果校验使用同一规则，精确 lease 身份仍参与消费匹配。该迁移不创建租约、批准或资金预占，也不单独开启 funded Experiment 创建；资金生命周期消费需在 Resource 原资金接口落地后接入。
 
 ## 验证
 
