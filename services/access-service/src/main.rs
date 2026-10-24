@@ -1361,6 +1361,12 @@ async fn csrf(
     let session = authenticated_session(&state, &headers).await?;
     metrics::counter!("labweaver_auth_csrf_tokens", "result" => "issued").increment(1);
     Ok(Json(CsrfTokenResponse {
+        actor_id: session
+            .actor_id
+            .hyphenated()
+            .encode_lower(&mut Uuid::encode_buffer())
+            .parse()
+            .map_err(|_| ApiError::internal("LW_AUTH_SESSION_REJECTED"))?,
         csrf_token: session.csrf_token.expose().to_owned(),
         expires_at: utc_timestamp(session.expires_at)?,
     }))

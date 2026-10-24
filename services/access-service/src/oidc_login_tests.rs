@@ -411,6 +411,7 @@ async fn real_keycloak_binds_two_browsers_and_preserves_tabs_replay_expiry_and_l
         .error_for_status()?
         .json()
         .await?;
+    assert_eq!(csrf["actorId"], session_body["actor"]["actorId"]);
     let logout = browser_a
         .post(format!("{base}/auth/logout"))
         .header(header::ORIGIN, &base)

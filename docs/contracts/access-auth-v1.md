@@ -21,6 +21,8 @@
 
 BFF 会话通过 HttpOnly Cookie 识别，写请求还必须携带允许的 `Origin` 和当前 CSRF token。退出必须先通过该边界；Access 撤销 BFF 会话、清理 Cookie，并终止属于该 BFF 会话的浏览器 Console 连接。provider logout 使用返回的 `logoutUrl` 顶层导航完成，不用后台 fetch 跟随跨源重定向。
 
+`GET /api/v1/auth/csrf` 返回必填的 `actorId`、`csrfToken` 和 `expiresAt`。`actorId` 来自签发 token 的同一个 BFF 会话；客户端在发送写请求前用它确认 token 属于当前页面的 actor。token 仍按会话校验：即使两个会话属于同一 actor，也不能互换 token；若共享 Cookie 已切换到其他会话，旧 token 的写请求返回 403 `LW_AUTH_CSRF_REJECTED`，不会以替换后的身份写入。客户端不得因这一拒绝自动重放原写请求。
+
 SSH Gateway 会话不与 BFF Cookie 混用。它绑定独立 AccessGrant、SSH key 和 endpoint；BFF 退出不撤销仍独立有效的 SSH grant。grant 到期、显式撤销、成员撤销或环境授权变化必须使新连接失败，并由既有 Gateway 终止已建立连接。
 
 ## 内部服务 JWT

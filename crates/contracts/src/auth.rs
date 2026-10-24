@@ -76,6 +76,8 @@ pub struct AuthSession {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CsrfTokenResponse {
+    /// Issuing session's actor, so clients can confirm the token belongs to their current actor.
+    pub actor_id: ActorId,
     /// Opaque token to send in the `X-CSRF-Token` request header.
     pub csrf_token: String,
     /// Session expiry bound to this token.
