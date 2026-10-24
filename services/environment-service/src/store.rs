@@ -1329,6 +1329,7 @@ fn build_create_instance(
         runtime_kind: spec.runtime_kind,
         release_id: spec.release_id,
         release_version: spec.release_version,
+        runtime_authorization: spec.runtime_authorization.clone(),
         lease_id: spec.lease_id,
         capacity_binding: spec.capacity_binding.clone(),
         approved_resources: spec.approved_resources.clone(),
@@ -2485,6 +2486,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let actor_id = ActorId::new();
         let request = CreateEnvironmentRequest {
+            resource_request_id: contracts::ResourceRequestId::new(),
             project_id: ProjectId::new(),
             course_id: Some(CourseId::new()),
             release_id: ReleaseId::new(),

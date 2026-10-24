@@ -20,6 +20,9 @@ use contracts::{
 use control_service::{ControlError, ControlService, platform_configuration as configuration};
 use persistence_sqlx::{Domain, Sha256Digest};
 use resource_service::runtime_authorization::{RuntimeBindingError, resolve_binding};
+use resource_service::{ApprovalPolicy, store::{PendingAllocation, PgResourceStore}};
+use contracts::resource::{CapacityClaim, CapacityClaimState, ResourceApproval};
+use contracts::{CapacityClaimId, ResourceApprovalId, LeaseId};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -310,6 +313,8 @@ pub(super) async fn assert_bindings_after_publication(
                 &format!("runtime-funded-rate-{index}"),
                 &contracts::http::CreateResourceRateRequest {
                     builder_binding: None,
+                    model_binding: None,
+                    max_preauthorization: None,
                     unit,
                     gpu_mode: None,
                     gpu_class: None,
@@ -405,7 +410,7 @@ pub(super) async fn assert_bindings_after_publication(
         resource_service::runtime_authorization::current_authorization(pool, &allocated).await?,
         binding
     );
-    let allocated = Box::pin(lease_cases::assert_original_lease_chain(
+    let _allocated = Box::pin(lease_cases::assert_original_lease_chain(
         pool,
         &store,
         &resource_approval,

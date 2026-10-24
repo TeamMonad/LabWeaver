@@ -117,7 +117,7 @@ impl OwnerResolver {
             .await
             .map_err(OwnerResolverError::ReleaseUnavailable)?;
         if release.withdrawn_at.is_some()
-            || release.projection.release.project_id != instance.project_id
+            || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
             || release.projection.environment_spec.class != instance.class
@@ -140,24 +140,7 @@ impl OwnerResolver {
             }
             _ => return Err(OwnerResolverError::EnvironmentUnavailable),
         };
-        let lease_fence = match instance.class {
-            EnvironmentClass::Experiment => None,
-            EnvironmentClass::Work => {
-                let authorization = instance
-                    .operation
-                    .lease_authorization
-                    .as_ref()
-                    .ok_or(OwnerResolverError::EnvironmentUnavailable)?;
-                if authorization.expires_at <= authority_now {
-                    return Err(OwnerResolverError::EnvironmentUnavailable);
-                }
-                Some(ConsoleLeaseFence {
-                    lease_id: authorization.lease_id,
-                    lease_revision: authorization.lease_revision,
-                    expires_at: authorization.expires_at,
-                })
-            }
-        };
+        let lease_fence = resource_lease_fence(&instance, authority_now)?;
         let resolution = EnvironmentConsoleEligibility {
             environment_id: instance.id,
             project_id: instance.project_id,
@@ -241,7 +224,7 @@ pub fn authorize_owner_resolution(
         owner_actor_id: instance.owner_id,
         environment_revision: instance.revision,
         eligibility_expires_at: instance.eligibility_expires_at,
-        lease_fence: resource_lease_fence(instance, now),
+        lease_fence: resource_lease_fence(instance, now)?,
     })
 }
 
@@ -298,29 +281,28 @@ pub fn authorize_endpoint_eligibility(
         owner_actor_id: instance.owner_id,
         environment_revision: instance.revision,
         eligibility_expires_at: instance.eligibility_expires_at,
-        lease_fence: resource_lease_fence(instance, now),
+        lease_fence: resource_lease_fence(instance, now)?,
         endpoints,
         runtime_target: None,
     })
 }
 
-fn resource_lease_fence(
+pub(crate) fn resource_lease_fence(
     instance: &EnvironmentInstance,
     now: UtcTimestamp,
-) -> Option<ConsoleLeaseFence> {
-    if instance.class != EnvironmentClass::Work {
-        return None;
+) -> Result<Option<ConsoleLeaseFence>, OwnerResolverError> {
+    instance.validate().map_err(|_| OwnerResolverError::EnvironmentUnavailable)?;
+    if !instance.has_resource_lease() {
+        return Ok(None);
     }
-    let authorization = instance.operation.lease_authorization.as_ref()?;
-    (authorization.expires_at > now).then_some(ConsoleLeaseFence {
-        lease_id: authorization.lease_id,
-        lease_revision: authorization.lease_revision,
-        expires_at: authorization.expires_at,
-    })
+    let lease = instance.operation.lease_authorization.as_ref()
+        .filter(|lease| lease.active_from <= now && lease.expires_at > now)
+        .ok_or(OwnerResolverError::EnvironmentUnavailable)?;
+    Ok(Some(ConsoleLeaseFence { lease_id: lease.lease_id, lease_revision: lease.lease_revision, expires_at: lease.expires_at }))
 }
 
 fn resource_lease_active(instance: &EnvironmentInstance, now: UtcTimestamp) -> bool {
-    instance.class == EnvironmentClass::Experiment || resource_lease_fence(instance, now).is_some()
+    resource_lease_fence(instance, now).is_ok()
 }
 
 /// Builds the internal route. Service JWT middleware must inject `ServiceIdentity`.

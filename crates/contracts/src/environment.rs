@@ -84,6 +84,8 @@ pub struct EnvironmentCreateSpec {
     pub release_id: ReleaseId,
     pub release_version: u64,
     pub provider_binding: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<EnvironmentRuntimeAuthorizationResolution>,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
     /// Resources approved by the immutable ReleaseProjection or Work lease.
@@ -399,6 +401,76 @@ pub struct EnvironmentLeaseVerificationResponse {
     pub version: u8,
     pub state: EnvironmentLeaseState,
     pub authorization: Option<EnvironmentLeaseAuthorization>,
+}
+
+/// Environment requests the existing request/claim/approval/lease chain, never a new grant.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveEnvironmentRuntimeAuthorizationRequest {
+    pub expected_lease_id: Option<LeaseId>,
+    pub resource_request_id: ResourceRequestId,
+    pub environment_id: Option<EnvironmentId>,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub owner_actor_id: ActorId,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+}
+
+/// A read-only transport receipt; Resource remains the single approval authority.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentRuntimeAuthorizationResolution {
+    pub provider_binding: String,
+    pub valid_until: UtcTimestamp,
+    pub lease_authorization: EnvironmentLeaseAuthorization,
+    pub authorization: crate::runtime_authorization::RuntimeAuthorizationBinding,
+    pub owner_actor_id: ActorId,
+    pub default_container_uid: u32,
+    pub privileged_execution_location: Option<crate::platform_configuration::PrivilegedExecutionLocation>,
+}
+
+impl EnvironmentRuntimeAuthorizationResolution {
+    pub fn validate_for(
+        &self,
+        request: &ResolveEnvironmentRuntimeAuthorizationRequest,
+        spec: &crate::authoring::EnvironmentSpec,
+        expected_configuration_sha256: &str,
+    ) -> Result<EnvironmentId, EnvironmentError> {
+        let crate::resource::ResourceTarget::Environment { environment_id, release_id, release_version } = self.authorization.target else {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        };
+        self.lease_authorization.validate()?;
+        let declared = crate::runtime_authorization::declared_baseline_permissions(spec, request.project_id)
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        let scope_matches = match self.authorization.permissions.scope {
+            crate::platform_configuration::RuntimePreauthorizationScope::Project { project_id } => project_id == request.project_id,
+            crate::platform_configuration::RuntimePreauthorizationScope::Course { course_id } => Some(course_id) == request.course_id && spec.class == EnvironmentClass::Experiment,
+        };
+        if !scope_matches
+            || self.authorization.configuration.course_id != request.course_id
+            || self.lease_authorization.resource_request_id != request.resource_request_id
+            || self.lease_authorization.environment_id != environment_id
+            || self.lease_authorization.project_id != request.project_id
+            || self.lease_authorization.course_id != request.course_id
+            || self.lease_authorization.owner_actor_id != request.owner_actor_id
+            || request.expected_lease_id.is_some_and(|id| id != self.lease_authorization.lease_id)
+            || self.authorization.request_id != request.resource_request_id
+            || self.authorization.project_id != request.project_id
+            || self.authorization.course_id != request.course_id
+            || self.owner_actor_id != request.owner_actor_id
+            || self.authorization.configuration.configuration_sha256 != expected_configuration_sha256
+            || request.environment_id.is_some_and(|expected| expected != environment_id)
+            || release_id != request.release_id
+            || release_version != request.release_version
+            || self.authorization.permissions.capabilities != declared.capabilities
+            || self.authorization.permissions.privileged != declared.privileged
+            || self.valid_until > self.lease_authorization.expires_at
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(environment_id)
+    }
 }
 
 /// Resource-to-Environment handoff for the original lease and capacity shell.
@@ -1209,6 +1281,9 @@ pub struct EnvironmentInstance {
     pub runtime_kind: RuntimeKind,
     pub release_id: ReleaseId,
     pub release_version: u64,
+    /// Read-only receipt of the original Resource approval, refreshed before new compute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<EnvironmentRuntimeAuthorizationResolution>,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
     pub approved_resources: WorkloadResources,
@@ -1789,8 +1864,8 @@ impl EnvironmentConsoleEligibility {
     ) -> Result<(), EnvironmentError> {
         let lease_valid = match (self.environment_class, &self.lease_fence) {
             (EnvironmentClass::Experiment, None) => true,
-            (EnvironmentClass::Work, Some(fence)) => fence.expires_at > now,
-            _ => false,
+            (_, Some(fence)) => fence.expires_at > now,
+            (EnvironmentClass::Work, None) => false,
         };
         let binding_valid = match (&self.binding, self.runtime_kind) {
             (EnvironmentConsoleBinding::Xterm { terminal }, RuntimeKind::Container) => {

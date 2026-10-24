@@ -2290,6 +2290,7 @@ impl InternalCompleteEvaluationStepRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironmentRequest {
+    pub resource_request_id: ResourceRequestId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub release_id: ReleaseId,
@@ -4067,6 +4068,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         PLATFORM_ADMIN,
         Service
     ),
+    op!(GatewayInternal, Post, "/internal/v1/environment-runtime-authorization", "resolveEnvironmentRuntimeAuthorization", "resource.environment.resolve", ServiceJwt, None, 200, false, false, PLATFORM_ADMIN, Service),
     op!(
         GatewayInternal,
         Post,

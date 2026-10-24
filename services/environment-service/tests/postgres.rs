@@ -800,6 +800,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         reset_target: None,
     };
     let create = EnvironmentCreateSpec {
+        runtime_authorization: None,
         project_id: handoff.project_id,
         course_id: handoff.course_id,
         owner_actor_id: handoff.owner_id,

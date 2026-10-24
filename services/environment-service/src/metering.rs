@@ -1222,7 +1222,7 @@ impl ResourceUsageClient {
         Ok(body)
     }
 
-    async fn post_json<T: serde::Serialize>(
+    pub(crate) async fn post_json<T: serde::Serialize>(
         &self,
         path: &str,
         body: &T,

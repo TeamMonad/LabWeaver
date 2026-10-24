@@ -311,7 +311,8 @@ impl EnvironmentProcessRuntime {
         let worker = ReconcileWorker::new(
             store.clone(),
             Reconciler::new(registry, PROVIDER_TIMEOUT)?
-                .with_resource_allocator(resource_usage_client.clone()),
+                .with_resource_allocator(resource_usage_client.clone())
+                .with_runtime_admission(crate::EnvironmentRuntimeAdmission::new(release_store.clone(), Arc::new(resource_usage_client.clone()))),
             RECONCILE_LEASE,
             RETRY_DELAY,
         )?;
@@ -370,7 +371,7 @@ impl EnvironmentProcessRuntime {
             self.freeze_bindings.clone(),
         )
         .with_work_executions(self.work_executions.clone())
-        .with_resource_reservations(self.resource_usage_client.clone())
+        .with_runtime_admission(crate::EnvironmentRuntimeAdmission::new(self.release_store.clone(), Arc::new(self.resource_usage_client.clone())))
     }
 
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.

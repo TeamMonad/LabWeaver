@@ -155,7 +155,7 @@ impl FreezeBindingService {
             .resolve(instance.release_id, instance.release_version)
             .await?;
         if release.withdrawn_at.is_some()
-            || release.projection.release.project_id != instance.project_id
+            || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
         {
@@ -361,7 +361,7 @@ impl FreezeBindingService {
             .resolve(instance.release_id, instance.release_version)
             .await?;
         if release.withdrawn_at.is_some()
-            || release.projection.release.project_id != instance.project_id
+            || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
         {

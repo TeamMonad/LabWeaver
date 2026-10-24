@@ -139,6 +139,7 @@ pub struct Reconciler {
     registry: ProviderRegistry,
     provider_timeout: Duration,
     resource_reservations: Option<Arc<dyn crate::metering::ExperimentResourceAllocator>>,
+    runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
 }
 
 /// Durable one-item reconciler worker. A caller may drive this in a bounded loop.
@@ -416,6 +417,7 @@ impl Reconciler {
             registry,
             provider_timeout,
             resource_reservations: None,
+            runtime_admission: None,
         })
     }
 
@@ -430,17 +432,33 @@ impl Reconciler {
         self
     }
 
+    #[must_use]
+    pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
+        self.runtime_admission = Some(admission);
+        self
+    }
+
     pub async fn execute_once(
         &self,
         instance: &EnvironmentInstance,
         now: UtcTimestamp,
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
+        let mut authorized = instance.clone();
+        if matches!(action, ReconcileAction::Provision | ReconcileAction::Start | ReconcileAction::Restart | ReconcileAction::Reset | ReconcileAction::Configure) {
+            let receipt = self.runtime_admission.as_ref().ok_or(crate::RuntimeAdmissionError::Unavailable)?
+                .for_instance(instance).await?;
+            if receipt.provider_binding != instance.provider_binding || receipt.valid_until <= now {
+                return Err(crate::RuntimeAdmissionError::Binding.into());
+            }
+            authorized.operation.deadline_at = authorized.operation.deadline_at.min(receipt.valid_until);
+            authorized.runtime_authorization = Some(receipt);
+        }
         if requires_experiment_activation(instance, action) {
             self.activate_experiment_reservation(instance).await?;
         }
         let provider = self.registry.resolve(&instance.provider_binding)?;
-        let result = timeout(self.provider_timeout, provider.execute(action, instance))
+        let result = timeout(self.provider_timeout, provider.execute(action, &authorized))
             .await
             .map_err(|_| ReconcileError::ProviderTimeout)?;
         let outcome = result.map_err(ReconcileError::Provider)?;
@@ -621,6 +639,8 @@ pub enum ReconcileError {
     Resource(crate::metering::ResourceUsageClientError),
     #[error("{0}")]
     ResourceSuspension(crate::metering::ResourceUsageClientError),
+    #[error(transparent)]
+    RuntimeAdmission(#[from] crate::RuntimeAdmissionError),
     #[error("{0:?}")]
     Provider(ProviderFailure),
 }
@@ -639,6 +659,7 @@ impl ReconcileError {
             Self::ResourceFence => "LW_ENVIRONMENT_RESOURCE_RESERVATION_FENCE",
             Self::Resource(error) | Self::ResourceSuspension(error) => error.diagnostic_code(),
             Self::Provider(failure) => failure.code.diagnostic_code(),
+            Self::RuntimeAdmission(error) => error.diagnostic_code(),
         }
     }
 
@@ -654,6 +675,7 @@ impl ReconcileError {
             | Self::ResourceUnavailable
             | Self::ResourceFence => false,
             Self::Resource(error) | Self::ResourceSuspension(error) => error.retryable(),
+            Self::RuntimeAdmission(error) => error.retryable(),
         }
     }
 }
@@ -730,6 +752,7 @@ mod tests {
             },
             gpu_allocation: None,
             resource_reservation_released: false,
+            runtime_authorization: None,
             provider_binding: "container-primary-v1".to_owned(),
             desired_state: DesiredEnvironmentState::Running,
             observed_state: ObservedEnvironmentState::Provisioning,

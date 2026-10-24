@@ -1312,6 +1312,8 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),
                 envelope.fence.environment_id,
+                envelope.fence.operation_id,
+                envelope.fence.environment_generation,
                 envelope.fence.deadline_at,
             )
             .await
@@ -2395,7 +2397,7 @@ where
         if instance.runtime_kind != RuntimeKind::VirtualMachine
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
-            || instance.project_id != projection.release.project_id
+            || !crate::runtime_admission::release_project_matches(instance, projection)
             || instance.course_id != projection.release.course_id
             || instance.provider_binding != self.binding
         {

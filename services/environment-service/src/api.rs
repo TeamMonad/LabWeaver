@@ -13,7 +13,7 @@ use axum::{
 };
 use contracts::{
     ActorId, DiagnosticCode, EnvironmentId, Revision, UtcTimestamp,
-    authoring::{EnvironmentClass, EnvironmentRuntimeSpec},
+    authoring::EnvironmentRuntimeSpec,
     environment::{
         EndpointHealth, EnvironmentAccessEligibilityState, EnvironmentAccessEligibilitySummary,
         EnvironmentCreateSpec, EnvironmentExecutionBinding, EnvironmentExecutionBindingRequest,
@@ -21,7 +21,7 @@ use contracts::{
         EnvironmentLifecycleCommand, EnvironmentOperationKind, EnvironmentOwnerRelation,
         EnvironmentOwnerSummary, EnvironmentResetTarget, EnvironmentSummary,
         EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
-        ResolveEnvironmentResourceReservationRequest, ResourceWorkCleanup,
+        ResolveEnvironmentRuntimeAuthorizationRequest, ResourceWorkCleanup,
         ResourceWorkCleanupStatus, ResourceWorkHandoff, ResourceWorkLeaseUpdate,
     },
     http::{
@@ -38,7 +38,7 @@ use crate::{
     ContainerReleaseResolver, ContainerWorkExecutionService, EnvironmentInventoryFilter,
     EnvironmentStoreError, FreezeBindingError, FreezeBindingService, NatsAccessRevoker,
     NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore,
-    ReleaseProjectionError, WorkExecutionError, metering::ExperimentResourceAllocator,
+    ReleaseProjectionError, WorkExecutionError,
     work_execution::validate_work_environment,
 };
 
@@ -62,7 +62,7 @@ pub struct EnvironmentApiState {
     lease_verifier: NatsResourceLeaseVerifier,
     freeze_bindings: FreezeBindingService,
     pub(crate) work_executions: Option<ContainerWorkExecutionService>,
-    resource_reservations: Option<Arc<dyn ExperimentResourceAllocator>>,
+    runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
 }
 
 impl EnvironmentApiState {
@@ -81,7 +81,7 @@ impl EnvironmentApiState {
             lease_verifier,
             freeze_bindings,
             work_executions: None,
-            resource_reservations: None,
+            runtime_admission: None,
         }
     }
 
@@ -92,13 +92,9 @@ impl EnvironmentApiState {
         self
     }
 
-    /// Installs the Resource reservation boundary used to reserve Experiment resources.
     #[must_use]
-    pub fn with_resource_reservations<T>(mut self, client: T) -> Self
-    where
-        T: ExperimentResourceAllocator + 'static,
-    {
-        self.resource_reservations = Some(Arc::new(client));
+    pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
+        self.runtime_admission = Some(admission);
         self
     }
 }
@@ -328,6 +324,12 @@ async fn accept_resource_work_lease_update(
     {
         return Err(EnvironmentApiError::LeaseFenceInvalid);
     }
+    let instance = state.store.load(update.environment_id).await?;
+    let receipt = state.runtime_admission.as_ref().ok_or(crate::RuntimeAdmissionError::Unavailable)?
+        .for_instance(&instance).await?;
+    if receipt.lease_authorization != authorization {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
     Ok(Json(
         state
             .store
@@ -348,8 +350,7 @@ async fn accept_resource_work_cleanup(
         .validate()
         .map_err(|_| EnvironmentApiError::RequestInvalid)?;
     let instance = state.store.load(cleanup.environment_id).await?;
-    if instance.class != EnvironmentClass::Work
-        || instance.lease_id != Some(cleanup.lease_id)
+    if instance.lease_id != Some(cleanup.lease_id)
         || instance.project_id != cleanup.project_id
         || instance.course_id != cleanup.course_id
         || instance.owner_id != cleanup.owner_actor_id
@@ -488,6 +489,17 @@ async fn accept_resource_work_handoff(
     if authorization.lease_revision != handoff.lease_revision {
         return Err(EnvironmentApiError::LeaseFenceInvalid);
     }
+    let runtime_authorization = state.runtime_admission.as_ref()
+        .ok_or(crate::RuntimeAdmissionError::Unavailable)?
+        .resolve(&ResolveEnvironmentRuntimeAuthorizationRequest {
+            expected_lease_id: Some(handoff.lease_id), resource_request_id: handoff.request_id,
+            environment_id: Some(handoff.environment_id), project_id: handoff.project_id,
+            course_id: handoff.course_id, owner_actor_id: handoff.owner_actor_id,
+            release_id: handoff.release_id, release_version: handoff.release_version,
+        }).await?;
+    if runtime_authorization.lease_authorization != authorization {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
     let command = EnvironmentLifecycleCommand {
         environment_id: handoff.environment_id,
         kind: EnvironmentOperationKind::Create,
@@ -495,7 +507,7 @@ async fn accept_resource_work_handoff(
         actor_id: handoff.owner_actor_id,
         trace_id: handoff.trace_id.clone(),
         accepted_at: now,
-        deadline_at: add_duration(now, OPERATION_DEADLINE)?,
+        deadline_at: add_duration(now, OPERATION_DEADLINE)?.min(runtime_authorization.valid_until),
         access_revocation_revision: None,
         preserve_mutable_disk: false,
         max_attempts: 3,
@@ -768,7 +780,7 @@ fn environment_summary(
 )]
 async fn create_environment(
     State(state): State<EnvironmentApiState>,
-    Extension(context): Extension<telemetry::RequestContext>,
+    Extension(_context): Extension<telemetry::RequestContext>,
     caller: Option<Extension<auth::ServiceIdentity>>,
     headers: HeaderMap,
     body: Bytes,
@@ -796,14 +808,13 @@ async fn create_environment(
     if release.withdrawn_at.is_some() || release.projection.release.course_id != request.course_id {
         return Err(EnvironmentApiError::ReleaseDenied);
     }
-    let provider_binding = match &release.projection.environment_spec.runtime {
-        EnvironmentRuntimeSpec::Container {
-            provider_binding, ..
-        }
-        | EnvironmentRuntimeSpec::VirtualMachine {
-            provider_binding, ..
-        } => provider_binding.clone(),
-    };
+    let resolution = state.runtime_admission.as_ref().ok_or(crate::RuntimeAdmissionError::Unavailable)?
+        .resolve(&ResolveEnvironmentRuntimeAuthorizationRequest {
+            expected_lease_id: None, resource_request_id: request.resource_request_id,
+            environment_id: None, project_id: request.project_id, course_id: request.course_id,
+            owner_actor_id: actor_id, release_id: request.release_id, release_version: request.release_version,
+        }).await?;
+    let environment_id = resolution.lease_authorization.environment_id;
     // Resource owns allocation and delivers the single original handoff. Public create only
     // attaches its idempotent intent to that aggregate; it cannot reserve or create another one.
     let accepted = state
@@ -1388,10 +1399,8 @@ pub enum EnvironmentApiError {
     ResponseInvalid,
     #[error("LW_ENVIRONMENT_WORK_EXECUTION_UNAVAILABLE")]
     WorkExecutionUnavailable,
-    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_UNAVAILABLE")]
-    ResourceReservationUnavailable,
-    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_REJECTED")]
-    ResourceReservationRejected,
+    #[error(transparent)]
+    RuntimeAdmission(#[from] crate::RuntimeAdmissionError),
     #[error(transparent)]
     ServiceAuth(#[from] auth::ServiceAuthError),
     #[error(transparent)]
@@ -1441,7 +1450,7 @@ impl IntoResponse for EnvironmentApiError {
         if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
             return template_upgrade_problem(error);
         }
-        let status = match self {
+        let status = match &self {
             Self::CallerDenied
             | Self::ScopeDenied
             | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied) => StatusCode::FORBIDDEN,
@@ -1490,7 +1499,6 @@ impl IntoResponse for EnvironmentApiError {
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
             ) => StatusCode::PRECONDITION_FAILED,
             Self::ReleaseDenied
-            | Self::ResourceReservationRejected
             | Self::Store(EnvironmentStoreError::InvalidCreateAggregate)
             | Self::WorkExecution(WorkExecutionError::EnvironmentNotEligible)
             | Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {

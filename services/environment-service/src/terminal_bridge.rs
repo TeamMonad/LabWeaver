@@ -15,7 +15,7 @@ use axum::{
 use contracts::{
     AccessGrantId, ConsoleSessionId, EnvironmentId, LeaseId, ProjectId, ReleaseId, Revision,
     access::{ConsoleClientControl, ConsoleKind},
-    authoring::{EnvironmentClass, EnvironmentRuntimeSpec, RuntimeKind},
+    authoring::{EnvironmentRuntimeSpec, RuntimeKind},
     environment::{DesiredEnvironmentState, ObservedEnvironmentState},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -184,15 +184,10 @@ async fn upgrade(
     {
         return Err(TerminalBridgeError::ScopeDenied);
     }
-    match (
-        instance.class,
-        &instance.operation.lease_authorization,
-        identity.lease,
-    ) {
-        (EnvironmentClass::Experiment, None, None) => {}
-        (EnvironmentClass::Work, Some(auth), Some((id, revision)))
-            if auth.lease_id == id && auth.lease_revision == revision && auth.expires_at > now => {}
-        _ => return Err(TerminalBridgeError::ScopeDenied),
+    let fence = crate::resolver::resource_lease_fence(&instance, now)
+        .map_err(|_| TerminalBridgeError::ScopeDenied)?;
+    if fence.map(|lease| (lease.lease_id, lease.lease_revision)) != identity.lease {
+        return Err(TerminalBridgeError::ScopeDenied);
     }
     let release = state
         .authority
@@ -201,9 +196,10 @@ async fn upgrade(
         .await
         .map_err(|_| TerminalBridgeError::AuthorityUnavailable)?;
     if release.withdrawn_at.is_some()
-        || release.projection.release.project_id != instance.project_id
+        || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
         || release.projection.release.course_id != instance.course_id
         || release.projection.release.runtime_kind != instance.runtime_kind
+        || release.projection.environment_spec.class != instance.class
     {
         return Err(TerminalBridgeError::ScopeDenied);
     }
