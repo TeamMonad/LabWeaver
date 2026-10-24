@@ -177,6 +177,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(get_project_agent_run),
         )
         .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/diagnostics",
+            get(get_project_agent_run_diagnostics),
+        )
+        .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/task-progress",
             get(get_project_agent_task_progress),
         )
@@ -1284,6 +1288,35 @@ async fn get_project_agent_run(
     .await?;
     let run = current_project_agent_run(&state, project_id, run_id).await?;
     Ok(with_etag(StatusCode::OK, &run, run.revision))
+}
+
+async fn get_project_agent_run_diagnostics(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, run_id)): Path<(ProjectId, AgentRunId)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectAgentRunDiagnostics",
+        project_id,
+    )
+    .await?;
+    let run = current_project_agent_run(&state, project_id, run_id).await?;
+    let detail = state.agent.diagnostics(run_id).await?;
+    if detail.run_id != run_id
+        || detail.project_id != project_id
+        || detail.course_id != run.course_id
+    {
+        return Err(DownstreamError::IdentityMismatch.into());
+    }
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(detail),
+    )
+        .into_response())
 }
 
 async fn get_project_agent_task_progress(

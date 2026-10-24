@@ -59,8 +59,11 @@ use tower::ServiceExt;
 
 const SERVICE_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsibGFid2VhdmVyLWFjY2VzcyIsImxhYndlYXZlci1hZ2VudCIsImxhYndlYXZlci1lbnZpcm9ubWVudCIsImxhYndlYXZlci1ldmFsdWF0aW9uIl19.signature";
 
+#[path = "cases/model_input_proxy.rs"]
+mod model_input_proxy;
 #[path = "cases/parent_task_client.rs"]
 mod parent_task_client;
+mod support;
 
 #[derive(Clone)]
 struct AccessState {
@@ -1251,7 +1254,7 @@ async fn creation_authority_token(
     }
     let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
     header.kid = Some("test".to_owned());
-    let token=jsonwebtoken::encode(&header,&json!({"iss":state.issuer,"sub":"synthetic-control","azp":"control-service","aud":["labweaver-agent","labweaver-control","labweaver-access"],"exp":time::OffsetDateTime::now_utc().unix_timestamp()+300,"resource_access":{"labweaver-agent":{"roles":["agent.control.invoke"]},"labweaver-control":{"roles":["access.control.forward"]},"labweaver-access":{"roles":["access.authorization.decide"]}}}),&state.key).map_err(|_|StatusCode::INTERNAL_SERVER_ERROR)?;
+    let token=jsonwebtoken::encode(&header,&json!({"iss":state.issuer,"sub":"synthetic-control","azp":"control-service","aud":["labweaver-agent","labweaver-control","labweaver-access"],"exp":time::OffsetDateTime::now_utc().unix_timestamp()+300,"resource_access":{"labweaver-agent":{"roles":["agent.control.invoke"]},"labweaver-control":{"roles":["access.control.forward","control.agent_run.read"]},"labweaver-access":{"roles":["access.authorization.decide"]}}}),&state.key).map_err(|_|StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(
         json!({"access_token":token,"token_type":"Bearer","expires_in":300}),
     ))
@@ -1320,10 +1323,9 @@ async fn model_input_create_replays_stable_intent_without_refreshing_first_dispa
         .execute(&mut *connection)
         .await?;
     for migration in &domain.migrations {
-        sqlx::raw_sql(&persistence_sqlx::MigrationCatalog::read_verified_sql(
-            &migration_root,
-            migration,
-        )?)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            persistence_sqlx::MigrationCatalog::read_verified_sql(&migration_root, migration)?,
+        ))
         .execute(&mut *connection)
         .await?;
     }

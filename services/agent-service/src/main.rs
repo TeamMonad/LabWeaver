@@ -137,6 +137,9 @@ struct SandboxFileConfig {
     /// Reviewed object-store trust root the attempt reads signed URLs with; absent means the
     /// object store is trusted by the sandbox image trust store.
     object_store_ca_file: Option<String>,
+    /// Reachable Agent HTTPS origin and CA; attempts never receive provider credentials.
+    model_proxy_base_uri: String,
+    model_proxy_ca_file: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -446,6 +449,8 @@ async fn run_agent_service() -> Result<(), StartupError> {
             kubernetes_ca_file: sandbox.kubernetes_ca_file.clone(),
             request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
             object_store_ca_file: sandbox.object_store_ca_file.clone().map(Into::into),
+            model_proxy_base_uri: sandbox.model_proxy_base_uri.clone(),
+            model_proxy_ca_file: sandbox.model_proxy_ca_file.clone().into(),
             worker_environment: worker_environment.clone(),
             model_gateway: Some(gateway_runtime.clone()),
         },
@@ -511,6 +516,21 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let input_authorization_client =
         ModelInputAuthorizationClient::from_env(Arc::clone(&service_token_client))
             .map_err(|_| StartupError::Configuration)?;
+    let retention_store = store.clone();
+    let model_input_proxy = agent_service::model_input_proxy::ModelInputProxy::new(
+        store.clone(),
+        input_authorization_client.clone(),
+        Arc::clone(&classifier),
+        &worker_environment,
+        reqwest::Client::builder()
+            .no_proxy()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_mins(5))
+            .build()
+            .map_err(|_| StartupError::Configuration)?,
+    )
+    .map_err(|_| StartupError::Configuration)?;
     let worker = Worker {
         input_authorization_client: input_authorization_client.clone(),
         store,
@@ -563,7 +583,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
     tokio::select! {
         result = http_transport::serve_tls(
             listener,
-            with_service_auth(router(state), service_verifier),
+            with_service_auth(router(state), service_verifier).merge(model_input_proxy.router()),
             tls,
         ) => result?,
         result = agent_service::model_gateway::serve(gateway_state, gateway_listener) => result?,
@@ -571,6 +591,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         result = review_worker.run() => result?,
         result = work_execution_worker.run() => result?,
         result = platform_image_import_worker.run() => result.map_err(StartupError::PlatformImageImport)?,
+        result = retention_store.run_model_retention() => result?,
         result = &mut sandbox_cleanup_worker => {
             result.map_err(|_| StartupError::SandboxCleanupWorker)?;
             return Err(StartupError::SandboxCleanupWorker);

@@ -184,6 +184,9 @@ domains:
       - id: 22
         file: agent/0022_resource_build_authority_read.sql
         sha256: d0a2ed8ede540f6df2620df505b9c594895e0d2945d48a1de536cc7e4a9a829a
+      - id: 23
+        file: agent/0023_model_diagnostics.sql
+        sha256: 91b50e0ef7d7847607f47d2df1c107877e3adfbc93e7aa56c8dd0ee9bf7a4dd2
   - name: evaluation
     migrations:
       - id: 1

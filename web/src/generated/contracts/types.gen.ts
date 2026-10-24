@@ -6,6 +6,8 @@ export type ClientOptions = {
 
 export type AgentLlmReviewQuery = AgentLlmReviewQuerySchema;
 
+export type AgentRunDiagnostics = AgentRunDiagnosticsSchema;
+
 export type AgentRunHistoryPage = AgentRunHistoryPageSchema;
 
 export type AgentRunTaskProgress = AgentRunTaskProgressSchema;
@@ -248,6 +250,94 @@ export type Revision = number;
 export type UtcTimestamp = string;
 
 /**
+ * AgentRunDiagnostics
+ *
+ * Current-object-authorized failure details retained separately from durable usage receipts.
+ */
+export type AgentRunDiagnosticsSchema = {
+    courseId?: AgentRunDiagnosticsSchemaCourseId | null;
+    items: Array<AgentRunDiagnostic>;
+    projectId: AgentRunDiagnosticsSchemaProjectId;
+    runId: AgentRunId;
+};
+
+/**
+ * Sanitized failure context; never contains provider output, file contents or credentials.
+ */
+export type AgentRunDiagnostic = {
+    attempt: number;
+    createdAt: AgentRunDiagnosticsSchemaUtcTimestamp;
+    diagnosticCode: string;
+    expiresAt: AgentRunDiagnosticsSchemaUtcTimestamp;
+    inputSha256?: string | null;
+    model: string;
+    nextStep: string;
+    outputSha256?: string | null;
+    packageId: ProblemPackageId;
+    packageRevision: AgentRunDiagnosticsSchemaRevision;
+    policyId: PolicyId;
+    policyRevision: AgentRunDiagnosticsSchemaRevision;
+    /**
+     * Preparation failures have no observed model input or usage.
+     */
+    preparationFailed: boolean;
+    reason: string;
+    runtimeBinding: string;
+    track: AgentTrackKind;
+    usage?: LlmUsage | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type AgentRunId = string;
+
+/**
+ * Independent Agent track.
+ */
+export type AgentTrackKind = 'environment' | 'evaluation' | 'work_configuration';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type AgentRunDiagnosticsSchemaCourseId = string;
+
+/**
+ * Frozen LLM usage for one attempt.
+ */
+export type LlmUsage = {
+    costMicrousd: number;
+    inputTokens: number;
+    outputTokens: number;
+    requests: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type PolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type ProblemPackageId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type AgentRunDiagnosticsSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AgentRunDiagnosticsSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type AgentRunDiagnosticsSchemaUtcTimestamp = string;
+
+/**
  * AgentRunHistoryPage
  *
  * Page of Agent-owned project run history.
@@ -273,7 +363,7 @@ export type AgentRunHistoryItem = {
      */
     courseId?: AgentRunHistoryPageSchemaCourseId | null;
     createdAt: AgentRunHistoryPageSchemaUtcTimestamp;
-    id: AgentRunId;
+    id: AgentRunHistoryPageSchemaAgentRunId;
     projectId: AgentRunHistoryPageSchemaProjectId;
     purpose: AgentRunPurpose;
     state: AgentRunState;
@@ -283,7 +373,7 @@ export type AgentRunHistoryItem = {
 /**
  * Strongly typed UUIDv7 identifier for `AgentRunId`.
  */
-export type AgentRunId = string;
+export type AgentRunHistoryPageSchemaAgentRunId = string;
 
 /**
  * Immutable purpose selected by Control for one Agent run.
@@ -381,14 +471,14 @@ export type AgentRunTaskProgressSchemaAgentRunState = 'requested' | 'running' | 
 /**
  * Independent Agent track.
  */
-export type AgentTrackKind = 'environment' | 'evaluation' | 'work_configuration';
+export type AgentRunTaskProgressSchemaAgentTrackKind = 'environment' | 'evaluation' | 'work_configuration';
 
 /**
  * An Agent track's business identity and its actual execution progress.
  */
 export type AgentTrackTaskProgress = {
     progress: AgentRunTaskProgressSchemaTaskAttemptProgress;
-    track: AgentTrackKind;
+    track: AgentRunTaskProgressSchemaAgentTrackKind;
 };
 
 /**
@@ -450,9 +540,9 @@ export type TaskRunId = string;
 export type AgentRunSchema = {
     courseId?: AgentRunSchemaCourseId | null;
     id: AgentRunSchemaAgentRunId;
-    packageId: ProblemPackageId;
+    packageId: AgentRunSchemaProblemPackageId;
     plan?: WorkConfigurationPlan | null;
-    policyId: PolicyId;
+    policyId: AgentRunSchemaPolicyId;
     policyRevision: AgentRunSchemaRevision;
     projectId: AgentRunSchemaProjectId;
     purpose: AgentRunSchemaAgentRunPurpose;
@@ -474,7 +564,7 @@ export type AgentAttempt = {
     diagnosticCode?: string | null;
     number: number;
     state: AgentAttemptState;
-    usage: LlmUsage;
+    usage: AgentRunSchemaLlmUsage;
     /**
      * Whether a terminal provider envelope made this usage observable.
      */
@@ -590,7 +680,7 @@ export type AgentRunSchemaEnvironmentId = string;
 /**
  * Frozen LLM usage for one attempt.
  */
-export type LlmUsage = {
+export type AgentRunSchemaLlmUsage = {
     costMicrousd: number;
     inputTokens: number;
     outputTokens: number;
@@ -600,12 +690,12 @@ export type LlmUsage = {
 /**
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
-export type PolicyId = string;
+export type AgentRunSchemaPolicyId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
  */
-export type ProblemPackageId = string;
+export type AgentRunSchemaProblemPackageId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -7802,12 +7892,18 @@ export type InternalAgentLlmReviewRequestSchema = {
     deadlineAt: InternalAgentLlmReviewRequestSchemaUtcTimestamp;
     files: Array<AgentLlmReviewFile>;
     frozenSubmissionId: InternalAgentLlmReviewRequestSchemaFrozenSubmissionId;
+    inputAuthorization: ModelInputAuthorizationBinding;
     policy: ProjectLlmEgressPolicy;
     projectId: InternalAgentLlmReviewRequestSchemaProjectId;
     rubric: AgentLlmReviewRubric;
     submissionArtifact: InternalAgentLlmReviewRequestSchemaArtifactRef;
     taskRunId: InternalAgentLlmReviewRequestSchemaTaskRunId;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaActorId = string;
 
 /**
  * One UTF-8 submission file included in a bounded internal advisory review request.
@@ -7866,6 +7962,11 @@ export type InternalAgentLlmReviewRequestSchemaArtifactRef = {
 };
 
 /**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaBuildRequestId = string;
+
+/**
  * Immutable Claude Code worker binding.
  *
  * Provider-specific transport and authentication remain deployment-owned Claude Code
@@ -7902,6 +8003,28 @@ export type InternalAgentLlmReviewRequestSchemaCourseId = string;
 export type DeniedDataClass = 'secret' | 'token' | 'private_key' | 'personally_identifiable_information' | 'unallowlisted_student_submission';
 
 /**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaEvaluationReleaseId = string;
+
+/**
+ * Frozen build and runtime identity used to reproduce collection.
+ */
+export type InternalAgentLlmReviewRequestSchemaFrozenEnvironmentIdentity = {
+    buildRequestId?: InternalAgentLlmReviewRequestSchemaBuildRequestId | null;
+    environmentId: InternalAgentLlmReviewRequestSchemaEnvironmentId;
+    environmentRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    releaseId: InternalAgentLlmReviewRequestSchemaReleaseId;
+    releaseVersion: number;
+    runtimeKind: InternalAgentLlmReviewRequestSchemaRuntimeKind;
+};
+
+/**
  * Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.
  */
 export type InternalAgentLlmReviewRequestSchemaFrozenSubmissionId = string;
@@ -7920,9 +8043,82 @@ export type LlmBudget = {
 };
 
 /**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type ModelInputAuthorizationBinding = {
+    actorId: InternalAgentLlmReviewRequestSchemaActorId;
+    courseId?: InternalAgentLlmReviewRequestSchemaCourseId | null;
+    operationId: string;
+    policyId: InternalAgentLlmReviewRequestSchemaPolicyId;
+    policyRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    policySha256: string;
+    projectId: InternalAgentLlmReviewRequestSchemaProjectId;
+    selectionSha256: string;
+    sessionSha256: string;
+    source: ModelInputAuthorizationSource;
+    validUntil: InternalAgentLlmReviewRequestSchemaUtcTimestamp;
+};
+
+/**
+ * A freeze identifier cannot be interpreted as a material package identifier.
+ */
+export type ModelInputAuthorizationSource = {
+    kind: 'problem_package';
+    packageId: InternalAgentLlmReviewRequestSchemaProblemPackageId;
+    packageRevision: InternalAgentLlmReviewRequestSchemaRevision;
+} | {
+    archive: InternalAgentLlmReviewRequestSchemaArtifactRef;
+    contentSha256: string;
+    environment: InternalAgentLlmReviewRequestSchemaFrozenEnvironmentIdentity;
+    evaluationReleaseId: InternalAgentLlmReviewRequestSchemaEvaluationReleaseId;
+    evaluationReleaseRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    frozenSubmissionId: InternalAgentLlmReviewRequestSchemaFrozenSubmissionId;
+    kind: 'frozen_submission';
+    manifestRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    manifestSha256: string;
+    /**
+     * SHA of the original Evaluation worker lease; never refreshed on recovery.
+     */
+    parentLeaseSha256: string;
+    rubric: ModelInputRubricIdentity;
+    /**
+     * Missing permission is representable for a refusal, never for model egress.
+     */
+    rubricPermission?: ModelInputRubricPermissionRef | null;
+    taskRunId: InternalAgentLlmReviewRequestSchemaTaskRunId;
+};
+
+/**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type ModelInputRubricIdentity = {
+    artifact: InternalAgentLlmReviewRequestSchemaArtifactRef;
+    packageId: InternalAgentLlmReviewRequestSchemaProblemPackageId;
+    packageRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    path: string;
+    sha256: string;
+};
+
+/**
+ * References Control's current material-project policy and the approving instructor fact.
+ */
+export type ModelInputRubricPermissionRef = {
+    approvedBy: InternalAgentLlmReviewRequestSchemaActorId;
+    approverCourseMembershipRevision: InternalAgentLlmReviewRequestSchemaRevision;
+    authoringProjectId: InternalAgentLlmReviewRequestSchemaProjectId;
+    policyId: InternalAgentLlmReviewRequestSchemaPolicyId;
+    policyRevision: InternalAgentLlmReviewRequestSchemaRevision;
+};
+
+/**
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
 export type InternalAgentLlmReviewRequestSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaProblemPackageId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -7945,9 +8141,19 @@ export type ProjectLlmEgressPolicy = {
 };
 
 /**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type InternalAgentLlmReviewRequestSchemaReleaseId = string;
+
+/**
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type InternalAgentLlmReviewRequestSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type InternalAgentLlmReviewRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
 
 /**
  * Only explicit SubmissionManifest paths may disclose student content.
@@ -8971,360 +9177,6 @@ export type InternalCompleteEvaluationStepRequestSchemaGoalReviewSchemaVersion =
 export type InternalCompleteEvaluationStepRequestSchemaProjectId = string;
 
 /**
- * InternalCreateAgentRunRequest
- *
- * Control-to-Agent command carried only over an allowlisted mTLS service identity.
- */
-export type InternalCreateAgentRunRequestSchema = {
-    /**
-     * Control-authenticated actor that initiated this run.
-     *
-     * The actor authorizes and is attributed for the one-shot Resource task reservation that a
-     * sandboxed authoring attempt creates; it is never derived from browser input.
-     */
-    actorId: InternalCreateAgentRunRequestSchemaActorId;
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    /**
-     * Internal artifact ID to opaque object-key mapping; keys never contain original paths.
-     */
-    objectLocators: {
-        [key: string]: string;
-    };
-    /**
-     * Completed Control-owned package; Agent re-reads and re-hashes every object.
-     */
-    package: ProblemPackage;
-    /**
-     * Active immutable Project policy.
-     */
-    policy: InternalCreateAgentRunRequestSchemaProjectLlmEgressPolicy;
-    /**
-     * Optional concrete grant for reusing one exact approved Work configuration plan.
-     */
-    preauthorization?: InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorization | null;
-    /**
-     * Authoritative Project ownership and optional teaching association.
-     */
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    /**
-     * Control-derived immutable purpose. Agent rejects a request whose purpose does not agree
-     * with its typed request variant and target identities.
-     */
-    purpose: InternalCreateAgentRunRequestSchemaAgentRunPurpose;
-    /**
-     * Public immutable request whose idempotency key remains an HTTP header.
-     */
-    request: InternalAgentRunRequest;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type InternalCreateAgentRunRequestSchemaActorId = string;
-
-/**
- * Immutable purpose selected by Control for one Agent run.
- *
- * The purpose is authoritative: callers cannot substitute an environment class, target
- * environment, actor, or runtime through an untyped request field. Experiment Authoring creates
- * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
- * WorkConfiguration targets one existing Work environment and produces one configuration plan.
- */
-export type InternalCreateAgentRunRequestSchemaAgentRunPurpose = {
-    environmentClass: InternalCreateAgentRunRequestSchemaEnvironmentClass;
-    kind: 'authoring';
-} | {
-    actorId: InternalCreateAgentRunRequestSchemaActorId;
-    environmentId: InternalCreateAgentRunRequestSchemaEnvironmentId;
-    environmentRevision: InternalCreateAgentRunRequestSchemaRevision;
-    kind: 'work_configuration';
-    /**
-     * Runtime selected by the authoritative Work environment.
-     *
-     * Control resolves this value from the environment instance before dispatching the
-     * run. Agent uses it as the immutable execution routing key, so a missing or altered
-     * runtime cannot silently select a different executor.
-     */
-    runtimeKind: InternalCreateAgentRunRequestSchemaRuntimeKind;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ArtifactId`.
- */
-export type InternalCreateAgentRunRequestSchemaArtifactId = string;
-
-/**
- * Immutable object-store identity without a machine-local path or credential.
- */
-export type InternalCreateAgentRunRequestSchemaArtifactRef = {
-    /**
-     * Stable metadata identity resolved by the owning service.
-     */
-    artifactId: InternalCreateAgentRunRequestSchemaArtifactId;
-    /**
-     * Registered media type.
-     */
-    mediaType: string;
-    /**
-     * Immutable backend object version.
-     */
-    objectVersion: string;
-    /**
-     * Raw object length.
-     */
-    sizeBytes: number;
-    /**
-     * Explicit object-store binding from deployment configuration.
-     */
-    storeBinding: string;
-};
-
-/**
- * Immutable Claude Code worker binding.
- *
- * Provider-specific transport and authentication remain deployment-owned Claude Code
- * configuration. The contract binds only a sanitized profile identity, exact model, CLI version,
- * worker image, effective non-secret runtime configuration hash, and per-worker admission limit.
- */
-export type InternalCreateAgentRunRequestSchemaClaudeCodeBindingV1 = {
-    /**
-     * Exact Claude Code CLI version baked into the worker image.
-     */
-    claudeCodeVersion: string;
-    /**
-     * Maximum concurrent Claude Code child processes admitted by one worker instance.
-     */
-    maxInFlightPerWorker: number;
-    /**
-     * Exact model identifier passed to Claude Code; moving aliases are rejected.
-     */
-    model: string;
-    /**
-     * Deployment-owned opaque runtime profile; never a credential or endpoint URL.
-     */
-    runtimeBinding: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type InternalCreateAgentRunRequestSchemaCourseId = string;
-
-export type CreateAgentRunRequest = {
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    environmentClass: InternalCreateAgentRunRequestSchemaEnvironmentClass;
-    packageId: InternalCreateAgentRunRequestSchemaProblemPackageId;
-    packageRevision: InternalCreateAgentRunRequestSchemaRevision;
-    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
-    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-};
-
-/**
- * Public request for a configuration run against one existing Resource-managed Work environment.
- */
-export type CreateWorkConfigurationRunRequest = {
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    environmentId: InternalCreateAgentRunRequestSchemaEnvironmentId;
-    environmentRevision: InternalCreateAgentRunRequestSchemaRevision;
-    packageId: InternalCreateAgentRunRequestSchemaProblemPackageId;
-    packageRevision: InternalCreateAgentRunRequestSchemaRevision;
-    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
-    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
-    preauthorizationId?: InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorizationId | null;
-    preauthorizationRevision?: InternalCreateAgentRunRequestSchemaRevision | null;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-};
-
-/**
- * Non-overridable content classifications at the LLM boundary.
- */
-export type InternalCreateAgentRunRequestSchemaDeniedDataClass = 'secret' | 'token' | 'private_key' | 'personally_identifiable_information' | 'unallowlisted_student_submission';
-
-/**
- * Environment business class retained from the v2.1 architecture.
- */
-export type InternalCreateAgentRunRequestSchemaEnvironmentClass = 'experiment' | 'work';
-
-/**
- * Strongly typed UUIDv7 identifier for `EnvironmentId`.
- */
-export type InternalCreateAgentRunRequestSchemaEnvironmentId = string;
-
-/**
- * Control-to-Agent command carried only over an allowlisted mTLS service identity.
- */
-export type InternalAgentRunRequest = {
-    kind: 'authoring';
-    request: CreateAgentRunRequest;
-} | {
-    kind: 'work_configuration';
-    request: CreateWorkConfigurationRunRequest;
-};
-
-/**
- * Per-attempt bounded LLM budget.
- */
-export type InternalCreateAgentRunRequestSchemaLlmBudget = {
-    maxCostMicrousd: number;
-    maxInputTokens: number;
-    maxOutputTokens: number;
-    maxRequests: number;
-    maxSchemaRepairs: number;
-    maxTransientRetries: number;
-    timeoutMilliseconds: number;
-};
-
-/**
- * One immutable file in a teacher ProblemPackage.
- */
-export type PackageFile = {
-    /**
-     * Immutable object reference.
-     */
-    object: InternalCreateAgentRunRequestSchemaArtifactRef;
-    /**
-     * Normalized package-relative file path.
-     */
-    path: string;
-    /**
-     * SHA-256 of the actual bytes of this exact immutable object version.
-     */
-    sha256: string;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `PolicyId`.
- */
-export type InternalCreateAgentRunRequestSchemaPolicyId = string;
-
-/**
- * Immutable, atomically completed teacher material package.
- */
-export type ProblemPackage = {
-    completedAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    files: Array<PackageFile>;
-    id: InternalCreateAgentRunRequestSchemaProblemPackageId;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    retention: InternalCreateAgentRunRequestSchemaRetentionSnapshot;
-    revision: InternalCreateAgentRunRequestSchemaRevision;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
- */
-export type InternalCreateAgentRunRequestSchemaProblemPackageId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type InternalCreateAgentRunRequestSchemaProjectId = string;
-
-/**
- * Versioned project policy governing all LLM egress. A course is optional teaching context.
- */
-export type InternalCreateAgentRunRequestSchemaProjectLlmEgressPolicy = {
-    activatedAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
-    binding: InternalCreateAgentRunRequestSchemaClaudeCodeBindingV1;
-    budget: InternalCreateAgentRunRequestSchemaLlmBudget;
-    courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
-    deniedDataClasses: Array<InternalCreateAgentRunRequestSchemaDeniedDataClass>;
-    id: InternalCreateAgentRunRequestSchemaPolicyId;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    revision: InternalCreateAgentRunRequestSchemaRevision;
-    studentContentMode: InternalCreateAgentRunRequestSchemaStudentContentMode;
-};
-
-/**
- * Retention classes with distinct privacy and recovery requirements.
- */
-export type InternalCreateAgentRunRequestSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
-
-/**
- * Required action after retention expires.
- */
-export type InternalCreateAgentRunRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
-
-/**
- * Frozen data-retention decision for an immutable resource.
- */
-export type InternalCreateAgentRunRequestSchemaRetentionSnapshot = {
-    /**
-     * Stable retention class.
-     */
-    class: InternalCreateAgentRunRequestSchemaRetentionClass;
-    /**
-     * Required terminal disposition.
-     */
-    disposition: InternalCreateAgentRunRequestSchemaRetentionDisposition;
-    /**
-     * Policy identity.
-     */
-    policyId: InternalCreateAgentRunRequestSchemaPolicyId;
-    /**
-     * Exact policy revision used at creation.
-     */
-    policyRevision: InternalCreateAgentRunRequestSchemaRevision;
-    /**
-     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
-     * material decision whose disposition is `RetainUntilRevoked`.
-     */
-    retainUntil: string | null;
-};
-
-/**
- * Monotonic aggregate revision. Zero is never a persisted revision.
- */
-export type InternalCreateAgentRunRequestSchemaRevision = number;
-
-/**
- * Runtime kind shared by candidates, releases, and instances.
- */
-export type InternalCreateAgentRunRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
-
-/**
- * Only explicit SubmissionManifest paths may disclose student content.
- */
-export type InternalCreateAgentRunRequestSchemaStudentContentMode = 'manifest_allowlist_only';
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type InternalCreateAgentRunRequestSchemaUtcTimestamp = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.
- */
-export type InternalCreateAgentRunRequestSchemaWorkConfigurationPlanId = string;
-
-/**
- * Concrete per-Work grant for executing one exact immutable configuration plan.
- *
- * The grant binds both script artifacts and the plan revision. It therefore cannot authorize a
- * newly generated script, a changed verification script, or a plan whose restart requirement was
- * altered after approval.
- */
-export type InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorization = {
-    actorId: InternalCreateAgentRunRequestSchemaActorId;
-    environmentId: InternalCreateAgentRunRequestSchemaEnvironmentId;
-    environmentRevision: InternalCreateAgentRunRequestSchemaRevision;
-    expiresAt: InternalCreateAgentRunRequestSchemaUtcTimestamp;
-    id: InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorizationId;
-    planId: InternalCreateAgentRunRequestSchemaWorkConfigurationPlanId;
-    planRevision: InternalCreateAgentRunRequestSchemaRevision;
-    projectId: InternalCreateAgentRunRequestSchemaProjectId;
-    revision: InternalCreateAgentRunRequestSchemaRevision;
-    scriptArtifact: InternalCreateAgentRunRequestSchemaArtifactRef;
-    verificationScriptArtifact?: InternalCreateAgentRunRequestSchemaArtifactRef | null;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `WorkConfigurationPreauthorizationId`.
- */
-export type InternalCreateAgentRunRequestSchemaWorkConfigurationPreauthorizationId = string;
-
-/**
  * InternalCreateEvaluationRunRequest
  *
  * Control-to-Evaluation command that starts one run from a release and frozen submission.
@@ -10098,6 +9950,94 @@ export type IssueConsoleCapabilityRequestSchemaRevision = number;
 export type IssueConsoleCapabilityRequestSchemaUtcTimestamp = string;
 
 /**
+ * MaintainRubricModelInputRuleRequest
+ *
+ * Teacher maintenance input; the caller cannot supply the approving actor or role evidence.
+ */
+export type MaintainRubricModelInputRuleRequestSchema = {
+    action: RubricModelInputRuleAction;
+    evaluationReleaseId: MaintainRubricModelInputRuleRequestSchemaEvaluationReleaseId;
+    evaluationReleaseRevision: MaintainRubricModelInputRuleRequestSchemaRevision;
+    rubric: MaintainRubricModelInputRuleRequestSchemaModelInputRubricIdentity;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: MaintainRubricModelInputRuleRequestSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaEvaluationReleaseId = string;
+
+/**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaModelInputRubricIdentity = {
+    artifact: MaintainRubricModelInputRuleRequestSchemaArtifactRef;
+    packageId: MaintainRubricModelInputRuleRequestSchemaProblemPackageId;
+    packageRevision: MaintainRubricModelInputRuleRequestSchemaRevision;
+    path: string;
+    sha256: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaProblemPackageId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type MaintainRubricModelInputRuleRequestSchemaRevision = number;
+
+/**
+ * Visibility declaration does not implicitly approve model disclosure.
+ */
+export type RubricModelInputRuleAction = {
+    kind: 'set_visibility';
+    visibility: RubricModelInputVisibility;
+} | {
+    kind: 'approve_model_use';
+    model: string;
+    runtimeBinding: string;
+} | {
+    kind: 'revoke_model_use';
+};
+
+/**
+ * Course-controlled rubric visibility, separate from model-use approval.
+ */
+export type RubricModelInputVisibility = 'course_public' | 'hidden';
+
+/**
  * PlatformImageCatalogView
  *
  * Catalog listing with the Control-owned release impact hint on every entry.
@@ -10694,6 +10634,123 @@ export type ProjectAgentCapabilitySchema = {
     reasonCode: string;
     status: 'unavailable';
 };
+
+/**
+ * ProjectRubricModelInputRules
+ *
+ * Teacher-only projection of current authority; no object contents or storage locators.
+ */
+export type ProjectRubricModelInputRulesSchema = {
+    courseId: ProjectRubricModelInputRulesSchemaCourseId;
+    policyId: ProjectRubricModelInputRulesSchemaPolicyId;
+    policyRevision: ProjectRubricModelInputRulesSchemaRevision;
+    projectId: ProjectRubricModelInputRulesSchemaProjectId;
+    rules: Array<RubricModelInputRule>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type ProjectRubricModelInputRulesSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type ProjectRubricModelInputRulesSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type ProjectRubricModelInputRulesSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: ProjectRubricModelInputRulesSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type ProjectRubricModelInputRulesSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.
+ */
+export type ProjectRubricModelInputRulesSchemaEvaluationReleaseId = string;
+
+/**
+ * Control-derived asynchronous recheck input, never accepted from a public create request.
+ */
+export type ProjectRubricModelInputRulesSchemaModelInputRubricIdentity = {
+    artifact: ProjectRubricModelInputRulesSchemaArtifactRef;
+    packageId: ProjectRubricModelInputRulesSchemaProblemPackageId;
+    packageRevision: ProjectRubricModelInputRulesSchemaRevision;
+    path: string;
+    sha256: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type ProjectRubricModelInputRulesSchemaPolicyId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
+ */
+export type ProjectRubricModelInputRulesSchemaProblemPackageId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ProjectRubricModelInputRulesSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ProjectRubricModelInputRulesSchemaRevision = number;
+
+/**
+ * One verified instructor's model-use approval for an exact rubric version.
+ */
+export type RubricModelInputApproval = {
+    approvedBy: ProjectRubricModelInputRulesSchemaActorId;
+    approverCourseMembershipRevision: ProjectRubricModelInputRulesSchemaRevision;
+    model: string;
+    runtimeBinding: string;
+};
+
+/**
+ * Control-owned rule stored with the current material-project policy.
+ */
+export type RubricModelInputRule = {
+    approval?: RubricModelInputApproval | null;
+    courseId: ProjectRubricModelInputRulesSchemaCourseId;
+    evaluationReleaseId: ProjectRubricModelInputRulesSchemaEvaluationReleaseId;
+    evaluationReleaseRevision: ProjectRubricModelInputRulesSchemaRevision;
+    rubric: ProjectRubricModelInputRulesSchemaModelInputRubricIdentity;
+    visibility: ProjectRubricModelInputRulesSchemaRubricModelInputVisibility;
+};
+
+/**
+ * Course-controlled rubric visibility, separate from model-use approval.
+ */
+export type ProjectRubricModelInputRulesSchemaRubricModelInputVisibility = 'course_public' | 'hidden';
 
 /**
  * RegisterPlatformImageRequest
@@ -18257,6 +18314,74 @@ export type CancelProjectAgentRunResponses = {
 
 export type CancelProjectAgentRunResponse = CancelProjectAgentRunResponses[keyof CancelProjectAgentRunResponses];
 
+export type GetProjectAgentRunDiagnosticsData = {
+    body?: never;
+    path: {
+        projectId: string;
+        runId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}/diagnostics';
+};
+
+export type GetProjectAgentRunDiagnosticsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectAgentRunDiagnosticsError = GetProjectAgentRunDiagnosticsErrors[keyof GetProjectAgentRunDiagnosticsErrors];
+
+export type GetProjectAgentRunDiagnosticsResponses = {
+    /**
+     * Successful response
+     */
+    200: AgentRunDiagnosticsSchema;
+};
+
+export type GetProjectAgentRunDiagnosticsResponse = GetProjectAgentRunDiagnosticsResponses[keyof GetProjectAgentRunDiagnosticsResponses];
+
 export type GetProjectAgentTaskProgressData = {
     body?: never;
     path: {
@@ -20273,6 +20398,144 @@ export type GetActiveProjectLlmPolicyResponses = {
 };
 
 export type GetActiveProjectLlmPolicyResponse = GetActiveProjectLlmPolicyResponses[keyof GetActiveProjectLlmPolicyResponses];
+
+export type GetProjectRubricModelInputRulesData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules';
+};
+
+export type GetProjectRubricModelInputRulesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectRubricModelInputRulesError = GetProjectRubricModelInputRulesErrors[keyof GetProjectRubricModelInputRulesErrors];
+
+export type GetProjectRubricModelInputRulesResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectRubricModelInputRulesSchema;
+};
+
+export type GetProjectRubricModelInputRulesResponse = GetProjectRubricModelInputRulesResponses[keyof GetProjectRubricModelInputRulesResponses];
+
+export type MaintainProjectRubricModelInputRuleData = {
+    body: MaintainRubricModelInputRuleRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules';
+};
+
+export type MaintainProjectRubricModelInputRuleErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type MaintainProjectRubricModelInputRuleError = MaintainProjectRubricModelInputRuleErrors[keyof MaintainProjectRubricModelInputRuleErrors];
+
+export type MaintainProjectRubricModelInputRuleResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectRubricModelInputRulesSchema;
+};
+
+export type MaintainProjectRubricModelInputRuleResponse = MaintainProjectRubricModelInputRuleResponses[keyof MaintainProjectRubricModelInputRuleResponses];
 
 export type GetProjectLlmPolicyOptionsData = {
     body?: never;

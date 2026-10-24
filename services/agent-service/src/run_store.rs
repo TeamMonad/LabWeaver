@@ -930,6 +930,15 @@ impl PostgresAgentRunStore {
                     AgentAttemptState::Failed
                 };
                 attempt.diagnostic_code = Some(terminal_diagnostic.to_owned());
+                crate::model_diagnostics::record_preparation_failure(
+                    &mut transaction,
+                    run_id,
+                    kind,
+                    number,
+                    terminal_diagnostic,
+                    now,
+                )
+                .await?;
                 sqlx::query("UPDATE agent.agent_track_work_items SET state=$3,attempt_number=$4,worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now() WHERE run_id=$1 AND track=$2")
                     .bind(run_id.as_uuid()).bind(track_name(kind)).bind(if cancellation_requested {"cancelled"} else {"failed"}).bind(i64::from(number)).execute(&mut *transaction).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?;
                 let derived = run
@@ -995,6 +1004,15 @@ impl PostgresAgentRunStore {
                 usage_observed: false,
                 diagnostic_code: Some(terminal_diagnostic.to_owned()),
             });
+            crate::model_diagnostics::record_preparation_failure(
+                &mut transaction,
+                run_id,
+                track.kind,
+                1,
+                terminal_diagnostic,
+                now,
+            )
+            .await?;
         }
         run.state = if cancellation_requested {
             AgentRunState::Cancelled
@@ -1666,6 +1684,14 @@ impl PostgresAgentRunStore {
         let cancellation_requested = row
             .try_get::<bool, _>("cancellation_requested")
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let failure_guidance = if cancellation_requested {
+            Some((
+                "任务已取消，未启动后续模型调用。",
+                "查看已产生的用量；需要继续时显式重试。",
+            ))
+        } else {
+            outcome.as_ref().err().map(ClaudeCodeFailure::user_guidance)
+        };
         let mut checkpoint = match lease.track {
             AgentTrackKind::Environment => {
                 environment_checkpoint(&run, lease.attempt, outcome, now)?
@@ -1714,6 +1740,17 @@ impl PostgresAgentRunStore {
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
 
         insert_checkpoint(&mut transaction, &checkpoint).await?;
+        if let Some(guidance) = failure_guidance {
+            crate::model_diagnostics::record_failure(
+                &mut transaction,
+                run.id,
+                lease.attempt,
+                &checkpoint.audit,
+                guidance,
+                now,
+            )
+            .await?;
+        }
         update_run(&mut transaction, &run).await?;
         let work_state = checkpoint_state(&checkpoint);
         let updated = sqlx::query(

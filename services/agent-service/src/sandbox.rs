@@ -717,6 +717,15 @@ fn job_document(
             "printf '%s' \"$OBJECT_STORE_CA_BASE64\" | base64 -d > {ATTEMPT_DIR}/ca.pem"
         );
     }
+    if spec
+        .command_environment
+        .contains_key("LABWEAVER_MODEL_PROXY_CA_BASE64")
+    {
+        let _ = writeln!(
+            script,
+            "printf '%s' \"$LABWEAVER_MODEL_PROXY_CA_BASE64\" | base64 -d > {ATTEMPT_DIR}/model-proxy-ca.pem"
+        );
+    }
     script.push_str(
         "version=$(claude --version)\n\
          case \"$version\" in \"$CLAUDE_CODE_VERSION\"*) ;; *)\n\

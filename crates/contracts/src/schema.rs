@@ -126,6 +126,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::AgentRunTaskProgress
     );
     document!(
+        "schemas/contracts/v1/agent-run-diagnostics.schema.json",
+        crate::http::AgentRunDiagnostics
+    );
+    document!(
         "schemas/contracts/v1/task-attempt-progress.schema.json",
         crate::execution::TaskAttemptProgress
     );
@@ -1904,6 +1908,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"OrganizationUserPage": contract_ref("organization-user-page")
                  ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
                  ,"AgentRunTaskProgress": contract_ref("agent-run-task-progress")
+                 ,"AgentRunDiagnostics": contract_ref("agent-run-diagnostics")
                  ,"TaskAttemptProgress": contract_ref("task-attempt-progress")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
                 ,"LogoutBrowserSessionResponse": contract_ref("logout-browser-session-response")
@@ -2019,6 +2024,10 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             paths.insert(
                 "/internal/v1/agent-runs/{runId}".to_owned(),
                 json!({"get":{"operationId":"getInternalAgentRun","summary":"Read the authoritative Agent-owned run","security": internal_security("agent_run:read"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/agent-runs/{runId}/diagnostics".to_owned(),
+                json!({"get":{"operationId":"getInternalAgentRunDiagnostics","security":internal_security("agent_run:read"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Unexpired sanitized failure details","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AgentRunDiagnostics"}}}},"404":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/cancel".to_owned(),
@@ -2399,6 +2408,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }),
         "listOrganizationUsers" => contract_ref("organization-user-page"),
         "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
+        "getProjectAgentRunDiagnostics" => contract_ref("agent-run-diagnostics"),
         "getProjectAgentTaskProgress" | "getInternalAgentTaskProgress" => {
             contract_ref("agent-run-task-progress")
         }

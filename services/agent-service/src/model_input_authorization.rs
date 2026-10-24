@@ -27,6 +27,31 @@ impl ModelInputAuthorizationClient {
         Self::from_env_inner(token).map_err(|()| ModelInputAuthorizationConfigurationError)
     }
 
+    /// Constructs the same bounded HTTPS connection without mutating process environment.
+    pub fn from_configuration(
+        base_uri: String,
+        ca_file: &std::path::Path,
+        audience: String,
+        timeout_milliseconds: u64,
+        token: Arc<auth::ServiceTokenClient>,
+    ) -> Result<Self, ModelInputAuthorizationConfigurationError> {
+        let values = [
+            Some(base_uri),
+            Some(ca_file.to_string_lossy().into_owned()),
+            Some(audience),
+            Some(timeout_milliseconds.to_string()),
+        ];
+        let (http, endpoint, audience) = Self::read_configuration(values)
+            .map_err(|()| ModelInputAuthorizationConfigurationError)?
+            .ok_or(ModelInputAuthorizationConfigurationError)?;
+        Ok(Self {
+            http,
+            endpoint,
+            audience,
+            token,
+        })
+    }
+
     fn from_env_inner(token: Arc<auth::ServiceTokenClient>) -> Result<Option<Self>, ()> {
         let names = [
             "LABWEAVER_CONTROL_SERVICE_BASE_URI",

@@ -16,6 +16,9 @@
       "AgentLlmReviewQuery": {
         "$ref": "../contracts/v1/http/agent-llm-review-query.schema.json"
       },
+      "AgentRunDiagnostics": {
+        "$ref": "../contracts/v1/agent-run-diagnostics.schema.json"
+      },
       "AgentRunHistoryPage": {
         "$ref": "../contracts/v1/agent-run-history-page.schema.json"
       },
@@ -444,6 +447,44 @@
           }
         ],
         "summary": "Request cancellation at an exact AgentRun revision"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/diagnostics": {
+      "get": {
+        "operationId": "getInternalAgentRunDiagnostics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunDiagnostics"
+                }
+              }
+            },
+            "description": "Unexpired sanitized failure details"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent_run:read"
+            ]
+          }
+        ]
       }
     },
     "/internal/v1/agent-runs/{runId}/outcome": {

@@ -220,6 +220,10 @@
             "manifestSha256": {
               "type": "string"
             },
+            "parentLeaseSha256": {
+              "description": "SHA of the original Evaluation worker lease; never refreshed on recovery.",
+              "type": "string"
+            },
             "rubric": {
               "$ref": "#/$defs/ModelInputRubricIdentity"
             },
@@ -241,6 +245,7 @@
           "required": [
             "kind",
             "taskRunId",
+            "parentLeaseSha256",
             "frozenSubmissionId",
             "manifestRevision",
             "manifestSha256",

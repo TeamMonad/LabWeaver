@@ -1793,6 +1793,40 @@ pub struct InternalAgentBuildCancellationResult {
     pub cleanup_verified: Option<bool>,
 }
 
+/// Sanitized failure context; never contains provider output, file contents or credentials.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunDiagnostic {
+    pub track: crate::authoring::AgentTrackKind,
+    /// Preparation failures have no observed model input or usage.
+    pub preparation_failed: bool,
+    pub attempt: u32,
+    pub diagnostic_code: String,
+    pub reason: String,
+    pub next_step: String,
+    pub model: String,
+    pub runtime_binding: String,
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub policy_id: crate::PolicyId,
+    pub policy_revision: Revision,
+    pub input_sha256: Option<String>,
+    pub output_sha256: Option<String>,
+    pub usage: Option<crate::authoring::LlmUsage>,
+    pub created_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Current-object-authorized failure details retained separately from durable usage receipts.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunDiagnostics {
+    pub run_id: AgentRunId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub items: Vec<AgentRunDiagnostic>,
+}
+
 /// Terminal or in-progress Agent result used to rebuild Control projections after replay.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -3475,6 +3509,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/projects/{projectId}/agent-runs/{runId}",
         "getProjectAgentRun",
+        "agent_run:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/agent-runs/{runId}/diagnostics",
+        "getProjectAgentRunDiagnostics",
         "agent_run:read",
         Oidc,
         None,

@@ -126,6 +126,7 @@ pub fn project_operation_action(operation: &str) -> Option<ObjectAction> {
         | "listProjectMemberships"
         | "getProjectAvailableActions"
         | "getProjectAgentRun"
+        | "getProjectAgentRunDiagnostics"
         | "listProjectAgentRuns"
         | "getProjectWorkConfigurationPlan"
         | "getProjectProblemPackage"

@@ -69,7 +69,7 @@ impl ControlService {
             package_revision,
         } = binding.source
         else {
-            // Frozen facts and rubric authorization are not connected yet. Never read objects.
+            // Frozen sources are rebuilt through the task-bound metadata path in the API.
             return Err(ControlError::ContractInvalid);
         };
         // valid_until is evidence for the original create decision, not this task's deadline.

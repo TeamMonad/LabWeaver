@@ -914,7 +914,7 @@ fn package(
         media_type: "text/plain".to_owned(),
     };
     let files = vec![PackageFile {
-        sha256: "0".repeat(64),
+        sha256: Sha256Digest::of_bytes(bytes).to_string(),
         path: "assignment.md".to_owned(),
         object,
     }];
