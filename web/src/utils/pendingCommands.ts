@@ -148,17 +148,6 @@ export function listPendingCommands<T>(actorId: string, scopePrefix: string): Ar
   return entries.sort((left, right) => left.scope.localeCompare(right.scope))
 }
 
-/**
- * Remove every pending command of `actorId` whose scope starts with
- * `scopePrefix`. Only for a command kind the page can no longer send: no newer
- * command of that kind can exist, so nothing has to be compared first.
- */
-export function clearPendingCommandsWithScopePrefix(actorId: string, scopePrefix: string) {
-  const prefix = entryKey(actorId, scopePrefix)
-  removeStored(storedKeys(prefix))
-  for (const key of [...unpersisted.keys()]) if (key.startsWith(prefix)) unpersisted.delete(key)
-}
-
 /** Remove every pending command, stored or in memory, that does not belong to `actorId` (all of them on sign-out). */
 export function syncPendingCommandOwner(actorId: string | null) {
   const keep = actorId ? entryKey(actorId, '') : null

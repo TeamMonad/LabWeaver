@@ -67,10 +67,14 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '平台暂时无法核验这个 Work 的资源使用授权，本次操作没有执行。'
     case 'LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM':
       return '虚拟机 Work 不支持在原 Work 内升级模板：需要导出/导入流程，当前不可用。'
-    case 'LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE':
-      return '本版本暂不支持在原资金租约上升级模板。可以用新版本新建 Work，再自行迁移 /workspace 数据。'
     case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
-      return '目标版本的资源、网络、安全或入口配置与当前 Work 不同，需要重新申请资源，不能在原 Work 内升级。'
+      return '目标版本的资源、网络、安全、入口或运行位置与这个 Work 的资源批准不同。资源或权限变化需要新的资源申请，不能在原 Work 内升级。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_FAMILY_MISMATCH':
+      return '所选版本不属于这个 Work 的模板系列，不能在原 Work 内升级。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE':
+      return '所选版本未发布、已撤回或当前不可用，本次升级没有执行。'
+    case 'LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED':
+      return '这个环境的旧资源批准没有权限投影，平台不能再用它执行升级、启动、重启或其他新的计算。'
     // Model input selection and authorization codes (#216).
     case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
       return '没有收到有效的文件选择：必须勾选至少一个材料包内的文件，且不能重复或包含该材料包版本中不存在的路径。本次没有创建生成任务。'
@@ -134,9 +138,13 @@ function codeNextStep(code: string): string | undefined {
       return '请稍后重试；多次失败请把下方诊断信息发给管理员。'
     case 'LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM':
       return '如需使用新版本，请用新版本模板新建 Work，再自行把需要的数据迁移过去。'
-    case 'LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE':
     case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
-      return '请用新版本模板新建 Work，迁移并检查数据后再释放原 Work。'
+      return '请为目标版本提交新的资源申请；审批通过后平台会创建新的 Work，原 Work 不受影响。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_FAMILY_MISMATCH':
+    case 'LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE':
+      return '请刷新版本列表，重新选择同一模板系列中可用的新版本。'
+    case 'LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED':
+      return '请重新提交资源申请；审批通过后平台会按新的批准创建环境。重试原操作不会成功。'
     case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
       return '请刷新材料包后重新勾选要交给模型的文件，再启动生成。'
     case 'LW_MODEL_INPUT_AUTHORIZATION_INVALID':
@@ -193,8 +201,25 @@ export function diagnosticNextStep(status: number | undefined, retryable: boolea
 
 type DiagnosticProblem = Pick<Partial<ProblemDetails>, 'requestId' | 'status' | 'traceId'> | null | undefined
 
+/**
+ * Refusals that are final for the request as sent: repeating it cannot
+ * succeed, so no surface offers a retry even when the transport marks it
+ * retryable. The next step names what has to change instead.
+ */
+const FINAL_REFUSAL_CODES: Record<string, true> = {
+  LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED: true,
+  LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL: true,
+  LW_WORK_TEMPLATE_UPGRADE_FAMILY_MISMATCH: true,
+  LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE: true,
+}
+
+/** The environment can only run again after a new, approved resource request. */
+export function requiresNewResourceRequest(code: string): boolean {
+  return code === 'LW_RUNTIME_LEASE_NOT_ACTIVE' || code === 'LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED'
+}
+
 export function makeDiagnostic(code: string, message: string, retryable = false, problem?: DiagnosticProblem): DiagnosticViewModel {
-  const diagnostic: DiagnosticViewModel = { code, message: readableDiagnosticMessage(code, message), retryable }
+  const diagnostic: DiagnosticViewModel = { code, message: readableDiagnosticMessage(code, message), retryable: retryable && FINAL_REFUSAL_CODES[code] !== true }
   const specificNextStep = codeNextStep(code)
   if (specificNextStep) diagnostic.nextStep = specificNextStep
   if (!problem) return diagnostic

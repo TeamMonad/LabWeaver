@@ -55,9 +55,10 @@ export function templateCapabilityLabel(capability: TemplateCapability): string 
 }
 
 /**
- * Newer Work releases offered as a new Work for this environment: the same
- * project, course, template family and runtime, a higher version, not
- * withdrawn. Newest first.
+ * Newer Work releases this environment could be upgraded to (container) or
+ * re-created on (virtual machine): the same project, course, template family
+ * and runtime, a higher version, not withdrawn. Newest first. The server
+ * re-checks that the target keeps the original approval's permissions.
  */
 export function newerWorkReleases(
   releases: readonly Release[],
