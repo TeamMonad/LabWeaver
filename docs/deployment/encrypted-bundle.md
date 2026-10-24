@@ -101,7 +101,9 @@ nats:
   serverFile: /etc/labweaver/environment-authority/nats-server
 ```
 
-派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影；Environment 启动消费者读取 `serverFile`，原非 Bundle YAML 仍支持单个 `server` 字符串。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。
+派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。Environment 的 Container/KubeVirt 执行器共用真实启动解析器，`server` 与 `serverFile` 必须恰好提供一个；缺失、同时提供或文件内容 trim 后为空均返回 `LW_ENVIRONMENT_CONFIG_INVALID`，保留未知字段拒绝。文件中的 endpoint 只读入进程内存，不写回 ConfigMap。原非 Bundle YAML 可继续提供单个 `server` 字符串。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续由 TLS 客户端读取各执行器已有 Secret；databaseUrlFile 由启动代码读取。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致；工具不签发 NATS 用户、不扩大发布/订阅/响应权限。
+
+可运行 `environment-service --check-runtime-executor-config <runtime.yaml>` 校验同一真实启动解析器及 NATS endpoint 文件读取；该入口不连接数据库、NATS、Kubernetes 或模型服务，不代表完整部署已启动。普通 local_dev 与 external-fixtures 的完整真实投影 YAML 均由 Python 部署回归送入此 Rust 入口，测试仅将挂载文件 locator 映射到临时 Secret 目录，不替换为内联 endpoint。
 
 有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
 

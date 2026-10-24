@@ -1815,6 +1815,35 @@ class LocalDevBundleTests(unittest.TestCase):
         startup = yaml.safe_load(config["data"]["config.yaml"])
         self.assertEqual(startup["databaseUrlFile"], "/etc/labweaver/environment-authority/database-url")
         self.assertEqual(startup["nats"]["serverFile"], "/etc/labweaver/environment-authority/nats-server")
+        # Feed the full real projector output to the production Rust startup parser.
+        # Rebase only the mounted file locator into this fixture's real Secret tree;
+        # do not replace serverFile with a synthetic inline endpoint.
+        mounted = json.loads(json.dumps(startup))
+        endpoint_file = work / "app-input/secrets/environment-service-secrets/nats-server"
+        mounted["nats"]["serverFile"] = str(endpoint_file)
+        parser_input = work / "runtime-executor-parser.yaml"
+        parser_input.write_text(yaml.safe_dump(mounted))
+        command = ["cargo", "run", "--quiet", "--locked", "-p", "environment-service", "--bin", "environment-service",
+                   "--", "--check-runtime-executor-config", str(parser_input)]
+        parsed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        both = json.loads(json.dumps(mounted))
+        both["nats"]["server"] = endpoint_file.read_text().strip()
+        missing = json.loads(json.dumps(mounted))
+        del missing["nats"]["serverFile"]
+        for invalid in (both, missing):
+            parser_input.write_text(yaml.safe_dump(invalid))
+            rejected = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("LW_ENVIRONMENT_CONFIG_INVALID", rejected.stderr)
+            self.assertNotIn(endpoint_file.read_text().strip(), rejected.stderr)
+        empty_endpoint = work / "empty-nats-server"
+        empty_endpoint.write_text(" \n\t")
+        mounted["nats"]["serverFile"] = str(empty_endpoint)
+        parser_input.write_text(yaml.safe_dump(mounted))
+        rejected = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("LW_ENVIRONMENT_CONFIG_INVALID", rejected.stderr)
         render_args = [
             "helm", "template", "labweaver-local", str(ROOT / "deploy/helm/labweaver"),
             "--values", str(ROOT / "deploy/helm/labweaver/values.local-kind.yaml"),
