@@ -167,25 +167,30 @@ impl NatsResourceLeaseVerifier {
         let response: EnvironmentLeaseVerificationResponse =
             serde_json::from_slice(&message.payload)
                 .map_err(|_| NatsMessagingError::LeaseResponseInvalid)?;
+        if response.version != 1 {
+            return Err(NatsMessagingError::LeaseResponseInvalid);
+        }
+        if response.state != EnvironmentLeaseState::Active {
+            return Err(NatsMessagingError::LeaseNotActive);
+        }
         let authorization = response
             .authorization
-            .ok_or(NatsMessagingError::LeaseResponseInvalid)?;
-        if response.version != 1
-            || response.state != EnvironmentLeaseState::Active
-            || authorization.lease_id != request.lease_id
+            .ok_or(NatsMessagingError::LeaseNotActive)?;
+        if authorization.lease_id != request.lease_id
             || authorization.environment_id != request.environment_id
             || authorization.project_id != request.project_id
             || authorization.course_id != request.course_id
             || authorization.owner_actor_id != request.owner_actor_id
             || authorization.capacity_binding != request.capacity_binding
-            || authorization.active_from > authority_now
-            || authorization.expires_at <= authority_now
         {
             return Err(NatsMessagingError::LeaseResponseInvalid);
         }
         authorization
             .validate()
             .map_err(|_| NatsMessagingError::LeaseResponseInvalid)?;
+        if authorization.active_from > authority_now || authorization.expires_at <= authority_now {
+            return Err(NatsMessagingError::LeaseNotActive);
+        }
         Ok(authorization)
     }
 }
@@ -498,13 +503,9 @@ impl JetStreamCommandConsumer {
                         .map_err(|_| NatsMessagingError::Acknowledge)?;
                     return Ok(CommandConsumeOutcome::Deferred);
                 }
-                Err(LeaseGateFailure::Rejected) => {
-                    self.quarantine(
-                        &message,
-                        Some(command.id),
-                        "LW_ENVIRONMENT_LEASE_VERIFICATION_REJECTED",
-                    )
-                    .await?;
+                Err(LeaseGateFailure::Rejected(diagnostic)) => {
+                    self.quarantine(&message, Some(command.id), diagnostic)
+                        .await?;
                     message
                         .double_ack_with(AckKind::Term)
                         .await
@@ -807,8 +808,11 @@ impl JetStreamReleaseConsumer {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LeaseGateFailure {
     Retryable,
-    Rejected,
+    Rejected(&'static str),
 }
+
+const LEASE_GATE_REJECTED: LeaseGateFailure =
+    LeaseGateFailure::Rejected("LW_ENVIRONMENT_LEASE_VERIFICATION_REJECTED");
 
 async fn resolve_lease_authorization(
     store: &PgEnvironmentStore,
@@ -817,15 +821,12 @@ async fn resolve_lease_authorization(
 ) -> Result<Option<EnvironmentLeaseAuthorization>, LeaseGateFailure> {
     let command = &message.data.command;
     let request = if command.kind == EnvironmentOperationKind::Create {
-        let spec = message
-            .data
-            .create
-            .as_ref()
-            .ok_or(LeaseGateFailure::Rejected)?;
+        let spec = message.data.create.as_ref().ok_or(LEASE_GATE_REJECTED)?;
         lease_request_from_create(command.environment_id, spec)?
     } else if matches!(
         command.kind,
         EnvironmentOperationKind::Start
+            | EnvironmentOperationKind::Restart
             | EnvironmentOperationKind::Retry
             | EnvironmentOperationKind::Recover
             | EnvironmentOperationKind::Reset
@@ -834,21 +835,19 @@ async fn resolve_lease_authorization(
             Ok(instance) => instance,
             Err(crate::EnvironmentStoreError::EnvironmentNotFound) => return Ok(None),
             Err(error) if error.retryable() => return Err(LeaseGateFailure::Retryable),
-            Err(_) => return Err(LeaseGateFailure::Rejected),
+            Err(_) => return Err(LEASE_GATE_REJECTED),
         };
         if instance.class == EnvironmentClass::Experiment {
             return Ok(None);
         }
         Some(EnvironmentLeaseVerificationRequest {
             version: 1,
-            lease_id: instance.lease_id.ok_or(LeaseGateFailure::Rejected)?,
+            lease_id: instance.lease_id.ok_or(LEASE_GATE_REJECTED)?,
             environment_id: instance.id,
             project_id: instance.project_id,
             course_id: instance.course_id,
             owner_actor_id: instance.owner_id,
-            capacity_binding: instance
-                .capacity_binding
-                .ok_or(LeaseGateFailure::Rejected)?,
+            capacity_binding: instance.capacity_binding.ok_or(LEASE_GATE_REJECTED)?,
         })
     } else {
         None
@@ -864,12 +863,15 @@ async fn resolve_lease_authorization(
         .verify(request, authority_now)
         .await
         .map(Some)
-        .map_err(|error| {
-            if error.lease_retryable() {
-                LeaseGateFailure::Retryable
-            } else {
-                LeaseGateFailure::Rejected
+        .map_err(|error| match error {
+            NatsMessagingError::LeaseNotActive => {
+                LeaseGateFailure::Rejected("LW_RUNTIME_LEASE_NOT_ACTIVE")
             }
+            NatsMessagingError::LeaseResponseInvalid => {
+                LeaseGateFailure::Rejected("LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID")
+            }
+            error if error.lease_retryable() => LeaseGateFailure::Retryable,
+            _ => LEASE_GATE_REJECTED,
         })
 }
 
@@ -879,21 +881,18 @@ fn lease_request_from_create(
 ) -> Result<Option<EnvironmentLeaseVerificationRequest>, LeaseGateFailure> {
     if spec.class == EnvironmentClass::Experiment {
         if spec.lease_id.is_some() || spec.capacity_binding.is_some() {
-            return Err(LeaseGateFailure::Rejected);
+            return Err(LEASE_GATE_REJECTED);
         }
         return Ok(None);
     }
     Ok(Some(EnvironmentLeaseVerificationRequest {
         version: 1,
-        lease_id: spec.lease_id.ok_or(LeaseGateFailure::Rejected)?,
+        lease_id: spec.lease_id.ok_or(LEASE_GATE_REJECTED)?,
         environment_id,
         project_id: spec.project_id,
         course_id: spec.course_id,
         owner_actor_id: spec.owner_actor_id,
-        capacity_binding: spec
-            .capacity_binding
-            .clone()
-            .ok_or(LeaseGateFailure::Rejected)?,
+        capacity_binding: spec.capacity_binding.clone().ok_or(LEASE_GATE_REJECTED)?,
     }))
 }
 
@@ -974,6 +973,8 @@ pub enum NatsMessagingError {
     LeaseRequestTimeout,
     #[error("LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE")]
     LeaseRequestFailed,
+    #[error("LW_RUNTIME_LEASE_NOT_ACTIVE")]
+    LeaseNotActive,
     #[error("LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID")]
     LeaseResponseInvalid,
     #[error("LW_ENVIRONMENT_COMMAND_QUARANTINE_FAILED")]

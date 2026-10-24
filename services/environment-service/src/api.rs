@@ -135,6 +135,10 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             post(restart_environment),
         )
         .route(
+            "/api/v1/environments/{environment_id}/template-upgrade",
+            post(upgrade_environment_template),
+        )
+        .route(
             "/api/v1/environments/{environment_id}/retry",
             post(retry_environment),
         )
@@ -158,6 +162,13 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/api/v1/environments/{environment_id}/endpoints",
             get(list_endpoints),
         )
+        .merge(internal_environment_routes())
+        .with_state(state);
+    telemetry::instrument_http(router, "environment-service", "environment-api")
+}
+
+fn internal_environment_routes() -> Router<EnvironmentApiState> {
+    Router::new()
         .route(
             "/internal/v1/environments/{environment_id}/freeze-binding",
             post(resolve_freeze_binding),
@@ -202,8 +213,6 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/internal/v1/work-configurations/{run_id}/cancel",
             post(cancel_work_configuration),
         )
-        .with_state(state);
-    telemetry::instrument_http(router, "environment-service", "environment-api")
 }
 
 async fn start_work_configuration(
@@ -1003,8 +1012,19 @@ async fn get_environment(
     headers: HeaderMap,
 ) -> Result<Response, EnvironmentApiError> {
     require_access_bff(caller)?;
+    require_session(&headers)?;
     let instance = load_owned(&state, environment_id, actor(&headers)?).await?;
-    instance_response(instance)
+    let vm_ready_at = if instance.runtime_kind == contracts::authoring::RuntimeKind::VirtualMachine
+    {
+        state.store.vm_runtime_ready_at(&instance).await?
+    } else {
+        None
+    };
+    let connection = connection_readiness(&instance, vm_ready_at);
+    instance_response(contracts::environment::EnvironmentDetail {
+        instance,
+        connection,
+    })
 }
 
 async fn get_environment_operation(
@@ -1201,6 +1221,66 @@ async fn recover_environment(
     .await
 }
 
+async fn upgrade_environment_template(
+    State(state): State<EnvironmentApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    headers: HeaderMap,
+    Json(request): Json<contracts::http::UpgradeEnvironmentTemplateRequest>,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    require_access_bff(caller)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    let key = idempotency_key(&headers)?;
+    let expected_revision = if_match(&headers)?;
+    let instance = load_owned(&state, environment_id, actor_id).await?;
+    if let Some(accepted) = state
+        .store
+        .lookup_work_template_upgrade_replay(
+            key.as_str(),
+            environment_id,
+            actor_id,
+            expected_revision,
+            &request,
+        )
+        .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(accepted)));
+    }
+    if instance.revision != expected_revision {
+        return Err(EnvironmentApiError::RevisionConflict);
+    }
+    state
+        .store
+        .prepare_work_template_upgrade(&instance, &request)
+        .await?;
+    let accepted_at = state.store.current_time().await?;
+    let authorization = verify_work_lease(&state, &instance, accepted_at).await?;
+    let revocation = state
+        .access_revoker
+        .revoke(&instance, "environment_restarted")
+        .await?;
+    let command = EnvironmentLifecycleCommand {
+        environment_id,
+        kind: EnvironmentOperationKind::Restart,
+        expected_revision,
+        actor_id,
+        trace_id: context.trace_id().to_owned(),
+        accepted_at,
+        deadline_at: add_duration(accepted_at, OPERATION_DEADLINE)?,
+        access_revocation_revision: Some(revocation),
+        preserve_mutable_disk: true,
+        max_attempts: 3,
+        reset_target: None,
+    };
+    let accepted = state
+        .store
+        .accept_work_template_upgrade(key.as_str(), &command, &request, authorization)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the HTTP boundary passes each lifecycle precondition and immutable command field explicitly"
@@ -1249,6 +1329,19 @@ async fn accept_lifecycle(
         None
     };
     let accepted_at = state.store.current_time().await?;
+    let lease_authorization = if instance.class == EnvironmentClass::Work
+        && matches!(
+            kind,
+            EnvironmentOperationKind::Start
+                | EnvironmentOperationKind::Restart
+                | EnvironmentOperationKind::Retry
+                | EnvironmentOperationKind::Recover
+                | EnvironmentOperationKind::Reset
+        ) {
+        Some(verify_work_lease(state, &instance, accepted_at).await?)
+    } else {
+        None
+    };
     let command = EnvironmentLifecycleCommand {
         environment_id,
         kind,
@@ -1268,12 +1361,41 @@ async fn accept_lifecycle(
             key.as_str(),
             &command,
             None,
-            None,
+            lease_authorization,
             instance.project_id,
             instance.course_id,
         )
         .await?;
     Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
+async fn verify_work_lease(
+    state: &EnvironmentApiState,
+    instance: &EnvironmentInstance,
+    now: UtcTimestamp,
+) -> Result<contracts::environment::EnvironmentLeaseAuthorization, EnvironmentApiError> {
+    let lease_id = instance
+        .lease_id
+        .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
+    let capacity_binding = instance
+        .capacity_binding
+        .clone()
+        .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
+    Ok(state
+        .lease_verifier
+        .verify(
+            EnvironmentLeaseVerificationRequest {
+                version: 1,
+                lease_id,
+                environment_id: instance.id,
+                project_id: instance.project_id,
+                course_id: instance.course_id,
+                owner_actor_id: instance.owner_id,
+                capacity_binding,
+            },
+            now,
+        )
+        .await?)
 }
 
 async fn load_owned(
@@ -1353,9 +1475,72 @@ fn add_duration(
         .map_err(|_| EnvironmentApiError::ClockInvalid)
 }
 
-fn instance_response(instance: EnvironmentInstance) -> Result<Response, EnvironmentApiError> {
-    let etag = StrongEtag::from_revision(instance.revision).header_value();
-    let mut response = Json(instance).into_response();
+fn connection_readiness(
+    instance: &EnvironmentInstance,
+    vm_ready_at: Option<UtcTimestamp>,
+) -> contracts::environment::EnvironmentConnectionReadiness {
+    use contracts::environment::{
+        DesiredEnvironmentState, EnvironmentConnectionState, ObservedEnvironmentState,
+    };
+    let running = instance.desired_state == DesiredEnvironmentState::Running
+        && matches!(
+            instance.observed_state,
+            ObservedEnvironmentState::Ready | ObservedEnvironmentState::Provisioning
+        );
+    let instance_ready = running
+        && (instance.observed_state == ObservedEnvironmentState::Ready || vm_ready_at.is_some());
+    let endpoint_ready = instance.endpoints.iter().any(|endpoint| {
+        endpoint.health == EndpointHealth::Healthy && endpoint.revision == instance.revision
+    });
+    let (state, reason_code) = if !running {
+        (
+            EnvironmentConnectionState::Unavailable,
+            Some("LW_ENVIRONMENT_INSTANCE_NOT_RUNNING".to_owned()),
+        )
+    } else if endpoint_ready {
+        (EnvironmentConnectionState::Ready, None)
+    } else if instance_ready {
+        (
+            EnvironmentConnectionState::Unknown,
+            Some("LW_ENVIRONMENT_GUEST_CONNECTION_NOT_READY".to_owned()),
+        )
+    } else {
+        (
+            EnvironmentConnectionState::Preparing,
+            Some("LW_ENVIRONMENT_CONNECTION_PREPARING".to_owned()),
+        )
+    };
+    let guest_instructions = match instance.runtime_kind {
+        contracts::authoring::RuntimeKind::Container => {
+            vec!["终端通过平台控制台连接；/workspace 是持久工作目录。".to_owned()]
+        }
+        contracts::authoring::RuntimeKind::VirtualMachine => vec![
+            "平台登录不会自动登录 guest；桌面控制台使用镜像管理员提供的 guest 用户名和登录方式。"
+                .to_owned(),
+            "SSH 通过平台网关连接，请先登记自己的 SSH 公钥；SSH 探测成功前不会授予 SSH 入口。"
+                .to_owned(),
+        ],
+    };
+    contracts::environment::EnvironmentConnectionReadiness {
+        instance_ready,
+        state,
+        reason_code,
+        guest_instructions,
+        observed_at: vm_ready_at.or_else(|| {
+            instance
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.observed_at)
+                .max()
+        }),
+    }
+}
+
+fn instance_response(
+    detail: contracts::environment::EnvironmentDetail,
+) -> Result<Response, EnvironmentApiError> {
+    let etag = StrongEtag::from_revision(detail.instance.revision).header_value();
+    let mut response = Json(detail).into_response();
     response.headers_mut().insert(
         header::ETAG,
         HeaderValue::from_str(&etag).map_err(|_| EnvironmentApiError::ResponseInvalid)?,
@@ -1413,8 +1598,41 @@ pub enum EnvironmentApiError {
     WorkExecution(#[from] WorkExecutionError),
 }
 
+fn template_upgrade_problem(error: &crate::TemplateUpgradeError) -> Response {
+    let context =
+        telemetry::current_request_context().unwrap_or_else(telemetry::RequestContext::generate);
+    let request_id = context.request_id().to_owned();
+    let diagnostic_code = DiagnosticCode::parse(error.to_string())
+        .unwrap_or_else(|_| DiagnosticCode::registered("LW_ENVIRONMENT_REQUEST_FAILED"));
+    let status = StatusCode::UNPROCESSABLE_ENTITY;
+    let problem = contracts::ProblemDetails {
+        problem_type: format!(
+            "urn:labweaver:problem:{}",
+            diagnostic_code.as_str().to_ascii_lowercase()
+        ),
+        title: "无法升级 Work 模板".to_owned(),
+        status: status.as_u16(),
+        detail: error.detail().to_owned(),
+        instance: format!("urn:labweaver:request:{request_id}"),
+        diagnostic_code,
+        request_id,
+        trace_id: Some(context.trace_id().to_owned()),
+        retryable: false,
+        violations: Vec::new(),
+    };
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        Json(problem),
+    )
+        .into_response()
+}
+
 impl IntoResponse for EnvironmentApiError {
     fn into_response(self) -> Response {
+        if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
+            return template_upgrade_problem(error);
+        }
         let status = match self {
             Self::CallerDenied
             | Self::ScopeDenied
@@ -1441,6 +1659,7 @@ impl IntoResponse for EnvironmentApiError {
             ) => StatusCode::BAD_REQUEST,
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
             Self::RevisionConflict
+            | Self::Store(EnvironmentStoreError::RevisionConflict)
             | Self::LeaseFenceInvalid
             | Self::WorkExecution(
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
@@ -1460,8 +1679,10 @@ impl IntoResponse for EnvironmentApiError {
             | Self::WorkExecution(WorkExecutionError::NotFound) => StatusCode::NOT_FOUND,
             Self::Store(
                 EnvironmentStoreError::IdempotencyConflict
-                | EnvironmentStoreError::IdempotencyInProgress,
-            ) => StatusCode::CONFLICT,
+                | EnvironmentStoreError::IdempotencyInProgress
+                | EnvironmentStoreError::Lifecycle(crate::LifecycleError::OperationActive),
+            )
+            | Self::Messaging(NatsMessagingError::LeaseNotActive) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
         let rendered = self.to_string();

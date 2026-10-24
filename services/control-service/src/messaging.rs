@@ -145,6 +145,9 @@ async fn resolve_generated_context<A: AgentAuthority>(
     else {
         return Ok(None);
     };
+    let build_context = build_context
+        .as_ref()
+        .ok_or(ContextResolutionError::Rejected)?;
     let package = match control
         .project_package(run.project_id, run.package_id)
         .await
@@ -1629,7 +1632,8 @@ fn container_build_request_id(
         contracts::supply_chain::ImageArtifact::Container {
             build_request_id, ..
         } => Some(*build_request_id),
-        contracts::supply_chain::ImageArtifact::VirtualMachine { .. } => None,
+        contracts::supply_chain::ImageArtifact::VirtualMachine { .. }
+        | contracts::supply_chain::ImageArtifact::CatalogContainer { .. } => None,
     }
 }
 

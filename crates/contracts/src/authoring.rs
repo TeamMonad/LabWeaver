@@ -604,7 +604,8 @@ fn normalized_absolute_posix_path(path: &str) -> bool {
 pub enum EnvironmentRuntimeSpec {
     Container {
         provider_binding: String,
-        build_context: ArtifactRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build_context: Option<ArtifactRef>,
         service_port: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal: Option<Box<TerminalSpec>>,
@@ -753,7 +754,9 @@ impl EnvironmentSpec {
                         "container binding and port are required".to_owned(),
                     ));
                 }
-                validate_artifact_ref(build_context)?;
+                if let Some(build_context) = build_context {
+                    validate_artifact_ref(build_context)?;
+                }
                 if let Some(terminal) = terminal {
                     terminal.validate()?;
                 }
@@ -1176,6 +1179,17 @@ pub struct EnvironmentCandidate {
 impl EnvironmentCandidate {
     pub fn validate(&self) -> Result<(), AuthoringError> {
         self.spec.validate()?;
+        if matches!(
+            &self.spec.runtime,
+            EnvironmentRuntimeSpec::Container {
+                build_context: None,
+                ..
+            }
+        ) {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "Agent candidates require an immutable build context".to_owned(),
+            ));
+        }
         if self.model.trim().is_empty() {
             return Err(AuthoringError::InvalidEnvironmentSpec(
                 "candidate model is invalid".to_owned(),
@@ -1343,7 +1357,8 @@ impl AuthoringApproval {
                     .validate()
                     .map_err(|_| AuthoringError::InvalidArtifactReference)?;
             }
-            (ImageArtifact::Container { .. }, None) => {
+            (ImageArtifact::Container { .. }, None)
+            | (ImageArtifact::CatalogContainer { .. }, _) => {
                 return Err(AuthoringError::InvalidApproval);
             }
             (ImageArtifact::VirtualMachine { .. }, Some(runner)) => {

@@ -988,7 +988,7 @@ function formatCandidateSpec(spec: EnvironmentCandidateViewSchema['candidate']['
 }
 
 function artifactIdentity(artifact: NonNullable<EnvironmentCandidateViewSchema['imageArtifact']>) {
-  if (artifact.kind === 'container') return `${artifact.repository}@${artifact.digest}`
+  if (artifact.kind === 'container' || artifact.kind === 'catalog_container') return `${artifact.repository}@${artifact.digest}`
   return `${artifact.base_disk.binding}@${artifact.base_disk.sourceRegistryDigest} (${artifact.format})`
 }
 

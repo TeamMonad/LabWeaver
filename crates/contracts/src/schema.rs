@@ -260,6 +260,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentInstance
     );
     document!(
+        "schemas/contracts/v1/environment-detail.schema.json",
+        crate::environment::EnvironmentDetail
+    );
+    document!(
         "schemas/contracts/v1/internal/environment-execution-binding-request.schema.json",
         crate::environment::EnvironmentExecutionBindingRequest
     );
@@ -294,6 +298,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/reset-environment-request.schema.json",
         crate::http::ResetEnvironmentRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/upgrade-environment-template-request.schema.json",
+        crate::http::UpgradeEnvironmentTemplateRequest
     );
     document!(
         "schemas/contracts/v1/environment-lease-verification-request.schema.json",
@@ -798,6 +806,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/evaluation-candidate-view.schema.json",
         crate::http::EvaluationCandidateView
+    );
+    document!(
+        "schemas/contracts/v1/http/project-agent-capability.schema.json",
+        crate::http::ProjectAgentCapability
     );
     document!(
         "schemas/contracts/v1/http/create-environment-template-release-request.schema.json",
@@ -1875,6 +1887,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
                 ,"EnvironmentWorkConfigurationTargetQuery": contract_ref("http/environment-work-configuration-target-query")
+                ,"EnvironmentInstance": contract_ref("environment-instance")
                  ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
                  ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
                  ,"InternalAgentLlmReviewRequest": contract_ref("http/internal-agent-llm-review-request")
@@ -2099,6 +2112,12 @@ fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
 
 fn environment_management_errors(operation_id: &str) -> Option<Value> {
     let errors = match operation_id {
+        "getProjectAgentCapability" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_ACCESS_DENIED",
+            "LW_AUTH_SCOPE_DENIED",
+            "LW_AGENT_CONFIGURATION_UNREADABLE",
+        ],
         "listEnvironments" | "listEnvironmentOperations" => vec![
             "LW_CONTRACT_DOCUMENT_INVALID",
             "LW_HTTP_UNAUTHENTICATED",
@@ -2145,6 +2164,34 @@ fn environment_management_errors(operation_id: &str) -> Option<Value> {
             "LW_HTTP_RATE_LIMITED",
             "LW_HTTP_SERVICE_UNAVAILABLE",
             "LW_HTTP_INTERNAL",
+        ],
+        "startEnvironment" | "restartEnvironment" | "retryEnvironment" | "recoverEnvironment"
+        | "resetEnvironment" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_ACCESS_DENIED",
+            "LW_IDEMPOTENCY_CONFLICT",
+            "LW_REVISION_CONFLICT",
+            "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE",
+        ],
+        "upgradeEnvironmentTemplate" => vec![
+            "LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM",
+            "LW_WORK_TEMPLATE_UPGRADE_CONFIRMATION_REQUIRED",
+            "LW_WORK_TEMPLATE_UPGRADE_WORK_REQUIRED",
+            "LW_WORK_TEMPLATE_UPGRADE_SCOPE_DENIED",
+            "LW_WORK_TEMPLATE_UPGRADE_FAMILY_MISMATCH",
+            "LW_WORK_TEMPLATE_UPGRADE_TARGET_NOT_NEWER",
+            "LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL",
+            "LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE",
+            "LW_WORK_TEMPLATE_UPGRADE_TIMEOUT",
+            "LW_ENVIRONMENT_REVISION_CONFLICT",
+            "LW_IDEMPOTENCY_CONFLICT",
+            "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE",
         ],
         _ => return None,
     };
@@ -2215,6 +2262,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         }
         "createEnvironment" => "http/create-environment-request",
         "resetEnvironment" => "http/reset-environment-request",
+        "upgradeEnvironmentTemplate" => "http/upgrade-environment-template-request",
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
         "createCreditAdminOperation" => "credit-admin-operation",
@@ -2331,6 +2379,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
         "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
+        "getProjectAgentCapability" => contract_ref("http/project-agent-capability"),
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"
@@ -2368,7 +2417,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listEnvironmentTemplateReleases" => {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("http/environment-template-release-view")},"nextCursor":{"type":["string","null"]}}})
         }
-        "getEnvironment" => contract_ref("environment-instance"),
+        "getEnvironment" => contract_ref("environment-detail"),
         "getInternalAuthoringPublicationAdmission"
         | "getInternalEnvironmentPublicationAdmission" => {
             contract_ref("http/authoring-publication-admission-binding")
@@ -2457,6 +2506,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("gateway-session")
         }
         "listPlatformImages" => contract_ref("http/platform-image-catalog-view"),
+        "listProjectTemplateImages" => contract_ref("http/platform-image-catalog"),
         "getPlatformImageUpload" => contract_ref("http/platform-image-upload-status"),
         "registerPlatformImage" | "repinPlatformImage" | "disablePlatformImage" => {
             contract_ref("http/platform-image-entry-view")
@@ -2476,6 +2526,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "startEnvironment",
             "stopEnvironment",
             "restartEnvironment",
+            "upgradeEnvironmentTemplate",
             "resetEnvironment",
             "retryEnvironment",
             "cancelEnvironmentOperation",
@@ -2499,6 +2550,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
                 "startEnvironment",
                 "stopEnvironment",
                 "restartEnvironment",
+                "upgradeEnvironmentTemplate",
                 "resetEnvironment",
                 "retryEnvironment",
                 "cancelEnvironmentOperation",

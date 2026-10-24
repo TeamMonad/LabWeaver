@@ -1333,26 +1333,41 @@ where
         {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
-        let ImageArtifact::Container {
-            repository, digest, ..
-        } = &projection.release.artifact
-        else {
-            return Err(ReleaseProjectionError::IdentityMismatch);
-        };
+        let (repository, digest) = projection
+            .release
+            .artifact
+            .container_reference()
+            .ok_or(ReleaseProjectionError::IdentityMismatch)?;
         if !digest.starts_with("sha256:")
             || repository.contains('@')
             || repository.contains(char::is_whitespace)
         {
             return Err(ReleaseProjectionError::ContractInvalid);
         }
-        let expected_repository = format!(
-            "{}/project-{}-{}",
-            self.image_repository_prefix,
-            projection.release.project_id,
-            projection.release.candidate_id
-        );
-        if repository != &expected_repository {
-            return Err(ReleaseProjectionError::IdentityMismatch);
+        match &projection.release.artifact {
+            ImageArtifact::Container { .. } => {
+                let candidate_id = projection
+                    .release
+                    .candidate_id
+                    .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+                let expected_repository = format!(
+                    "{}/project-{}-{}",
+                    self.image_repository_prefix, projection.release.project_id, candidate_id
+                );
+                if repository != expected_repository {
+                    return Err(ReleaseProjectionError::IdentityMismatch);
+                }
+            }
+            ImageArtifact::CatalogContainer { .. } => {
+                if !repository.starts_with(&format!("{}/", self.image_repository_prefix))
+                    || projection.release.manual_approval.is_none()
+                {
+                    return Err(ReleaseProjectionError::IdentityMismatch);
+                }
+            }
+            ImageArtifact::VirtualMachine { .. } => {
+                return Err(ReleaseProjectionError::IdentityMismatch);
+            }
         }
         let image = format!("{repository}@{digest}");
         let namespace = format!("lw-env-{}", instance.id);
@@ -1644,7 +1659,11 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        if release.approval.trust_revision != self.release_policy.trust_revision {
+        if release
+            .trust_revision()
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?
+            != self.release_policy.trust_revision
+        {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
         Ok(())

@@ -1203,11 +1203,11 @@ fn release(
         project_id,
         course_id: Some(course_id),
         version,
-        candidate_id,
-        agent_run_id: contracts::AgentRunId::new(),
-        candidate_revision,
+        candidate_id: Some(candidate_id),
+        agent_run_id: Some(contracts::AgentRunId::new()),
+        candidate_revision: Some(candidate_revision),
         runtime_kind,
-        approval: CandidateApproval {
+        approval: Some(CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision,
@@ -1217,7 +1217,8 @@ fn release(
             decision: CandidateDecision::Approved,
             reason: "approved base image".to_owned(),
             decided_at: now,
-        },
+        }),
+        manual_approval: None,
         artifact,
         published_by: actor_id,
         published_at: now,
@@ -1239,8 +1240,13 @@ async fn insert_release(
     .bind(release.project_id.as_uuid())
     .bind(release.course_id.map(CourseId::as_uuid))
     .bind(i64::try_from(release.version)?)
-    .bind(release.candidate_id.as_uuid())
-    .bind(i64::try_from(release.candidate_revision.get())?)
+    .bind(release.candidate_id.map(CandidateId::as_uuid))
+    .bind(
+        release
+            .candidate_revision
+            .map(|revision| i64::try_from(revision.get()))
+            .transpose()?,
+    )
     .bind(Sha256Digest::of_bytes(b"spec").to_string())
     .bind(release.artifact.id().as_uuid())
     .bind(contract)
@@ -2245,10 +2251,11 @@ async fn fresh_vm_catalog_base_is_visible_approved_and_published_through_normal_
     let publish = CreateEnvironmentTemplateReleaseRequest {
         project_id: project.id,
         course_id: project.course_id,
-        candidate_id: candidate.id,
-        candidate_revision: candidate.revision,
+        candidate_id: Some(candidate.id),
+        candidate_revision: Some(candidate.revision),
         runtime_kind: RuntimeKind::VirtualMachine,
-        approval_id: approval.id,
+        approval_id: Some(approval.id),
+        manual: None,
     };
     let publish_uri = format!(
         "/api/v1/projects/{}/environment-template-releases",
@@ -2311,7 +2318,7 @@ async fn fresh_vm_catalog_base_is_visible_approved_and_published_through_normal_
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
     let release = release_view.release;
     assert_eq!(release.artifact, expected_artifact);
-    assert_eq!(release.candidate_revision, candidate.revision);
+    assert_eq!(release.candidate_revision, Some(candidate.revision));
     release.validate()?;
     Ok(())
 }

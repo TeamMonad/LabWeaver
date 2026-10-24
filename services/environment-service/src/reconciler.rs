@@ -209,7 +209,7 @@ impl ReconcileWorker {
             }
             return Ok(ReconcileWorkerOutcome::Advanced {
                 state: updated.observed_state,
-                terminal: false,
+                terminal: updated.operation.state.is_terminal(),
             });
         }
         match self.reconciler.execute_once(&lease.instance, now).await {
@@ -573,6 +573,9 @@ pub fn next_action(
             Ok(ReconcileAction::Provision)
         }
         (Operation::Start, State::Stopped) => Ok(ReconcileAction::Start),
+        (Operation::Cancel, State::Stopping) if instance.operation.template_upgrade.is_some() => {
+            Ok(ReconcileAction::Stop)
+        }
         (
             Operation::Stop | Operation::Reset | Operation::Retry | Operation::Recover,
             State::Stopping,
@@ -758,6 +761,7 @@ mod tests {
                 retry_from_phase: None,
                 reset_target: None,
                 lease_authorization: None,
+                template_upgrade: None,
             },
             eligibility_expires_at: Some(timestamp("2026-07-23T00:00:00.000Z")),
             endpoints: Vec::new(),

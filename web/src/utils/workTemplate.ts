@@ -6,11 +6,7 @@ export function runtimeKindLabel(kind: RuntimeKind): string {
   return kind === 'virtual_machine' ? '虚拟机' : '容器'
 }
 
-/**
- * Readable title for a published template. Releases carry no display name in
- * the contract, so the title is built only from facts the server returns:
- * runtime kind and the immutable version number.
- */
+/** Readable title based on runtime kind and the immutable version number. */
 export function workTemplateTitle(release: Pick<EnvironmentTemplateReleaseViewSchema, 'runtimeKind' | 'version'>): string {
   return `${runtimeKindLabel(release.runtimeKind)}模板 v${release.version}`
 }
@@ -23,7 +19,7 @@ function shortDigest(digest: string): string {
 /** One line describing the exact image the template pins. */
 export function workTemplateArtifactLabel(release: Pick<EnvironmentTemplateReleaseViewSchema, 'artifact'>): string {
   const artifact = release.artifact
-  if (artifact.kind === 'container') {
+  if (artifact.kind === 'container' || artifact.kind === 'catalog_container') {
     const repository = artifact.repository.split('/').slice(-2).join('/')
     return `容器镜像 ${repository} · ${shortDigest(artifact.digest)}`
   }

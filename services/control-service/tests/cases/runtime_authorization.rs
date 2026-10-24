@@ -349,3 +349,82 @@ pub(super) async fn assert_assistant_cannot_approve(
     ));
     Ok(())
 }
+
+pub(super) async fn assert_manual_work_binding(
+    pool: &PgPool,
+    release: &EnvironmentTemplateRelease,
+    owner: ActorId,
+    now: UtcTimestamp,
+) -> TestResult {
+    sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
+        .execute(pool)
+        .await?;
+    apply_domain_migrations(pool, Domain::Access).await?;
+    apply_domain_migrations(pool, Domain::Resource).await?;
+    sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256,username,display_name) VALUES($1,'https://synthetic.invalid',$2,'manual-owner','manual-owner')")
+        .bind(owner.as_uuid()).bind(Sha256Digest::of_bytes(owner.as_uuid().as_bytes()).to_string()).execute(pool).await?;
+    let status = configuration::update(
+        pool,
+        owner,
+        &UpdatePlatformConfigurationRequest {
+            expected_revision: 0,
+            configuration: PlatformConfigurationDesired::default(),
+        },
+        &IdempotencyKey::parse("manual-runtime-policy")?,
+        now,
+    )
+    .await?;
+    verified(pool, status, now, "manual-runtime-policy").await?;
+    let spec = &release
+        .manual_approval
+        .as_ref()
+        .ok_or("manual approval required")?
+        .spec;
+    let request = ResourceRequest {
+        id: ResourceRequestId::new(),
+        generation: 1,
+        request_key: "manual-work-resource".to_owned(),
+        requester_id: owner,
+        project_id: release.project_id,
+        course_id: None,
+        target: ResourceTarget::Environment {
+            environment_id: EnvironmentId::new(),
+            release_id: release.id,
+            release_version: release.version,
+        },
+        requested_resources: WorkloadResources {
+            cpu_millicores: spec.resources.cpu_millicores,
+            memory_bytes: spec.resources.memory_bytes,
+            storage_bytes: spec.resources.storage_bytes,
+            gpu: None,
+        },
+        requested_duration_seconds: 600,
+        state: ResourceRequestState::Reviewing,
+        revision: Revision::new(1)?,
+        created_at: now,
+        updated_at: now,
+        diagnostic_code: None,
+    };
+    let binding = resolve_binding(pool, &request).await?;
+    assert_eq!(binding.configuration.release_id, release.id);
+    assert_eq!(binding.configuration.release_version, release.version);
+    assert_eq!(binding.configuration.authoring_approval_id, None);
+    assert_eq!(
+        binding.configuration.configuration_sha256,
+        Sha256Digest::of_canonical(spec)?.to_string()
+    );
+    assert_eq!(binding.basis, RuntimeAdmissionBasis::RestrictedBaseline);
+    let mut foreign = request.clone();
+    foreign.project_id = contracts::ProjectId::new();
+    assert!(matches!(
+        resolve_binding(pool, &foreign).await,
+        Err(RuntimeBindingError::ScopeDenied)
+    ));
+    let mut no_membership = request;
+    no_membership.requester_id = ActorId::new();
+    assert!(matches!(
+        resolve_binding(pool, &no_membership).await,
+        Err(RuntimeBindingError::ScopeDenied)
+    ));
+    Ok(())
+}

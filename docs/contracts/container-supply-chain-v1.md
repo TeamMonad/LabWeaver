@@ -59,6 +59,43 @@ Control resolves the exact successful build projection and policy evaluation;
 the public publication request contains only candidate, approval and runtime
 identity and cannot supply its own artifact or scanner evidence.
 
+## Manual Work publication
+
+`GET /api/v1/projects/{projectId}/template-images` returns the active administrator-pinned
+catalog entries at the current trust revision to authorized project readers. Image import and
+repinning remain administrator operations; a teacher does not receive registry credentials.
+
+`POST /api/v1/projects/{projectId}/environment-template-releases` is the Work publication command.
+The project owner or manager supplies either the approved Agent candidate fields or `manual`,
+never both. `manual` contains `platformImageId`, `platformImageGeneration`, `templateFamilyId`,
+`description`, the full `spec`, a bounded review `reason`, and `confirmed: true`. The runtime
+must be Work; a catalog Container spec has no `build_context`. The selected current catalog
+entry must be active, have the exact repin generation, match the runtime and trust revision,
+and bind the reviewed registry digest or VM disk/capacity/format. Missing confirmation,
+mixed sources, changed catalog identity and insufficient project authority fail closed.
+
+This one human command records `manualApproval` and publishes through the existing release
+table, transactional idempotency ledger, Outbox and Environment projection. It does not create
+an Agent run, candidate, build request or project model policy. Imported Container artifacts use
+`kind: catalog_container`; built artifacts retain `kind: container`. VM artifacts retain their
+exact catalog disk identity. Only one evidence source is valid in a release: candidate/run/
+candidate approval or manual approval. Resource admission validates the same immutable release,
+spec digest, project membership and applied platform runtime policy for either source.
+
+Course Experiment publication still uses `CompleteAuthoringApprovalRequest`: its single teacher
+approval binds the Environment/Evaluation authoring package. The Work endpoint rejects Experiment
+specs and is not a second way to publish a course experiment.
+
+Release views expose `name`, `description`, `templateFamilyId`, `purpose` and `capabilities`
+(`terminal`, `desktop`, `ssh`, `applications`, `files`, `agent`). Capabilities describe template
+support, not live endpoint health or an available model. The project Agent configuration endpoint
+`GET /api/v1/projects/{projectId}/agent-capability` returns `configured`, `unconfigured`
+(`LW_AGENT_MODEL_NOT_CONFIGURED`), or `unavailable` (`LW_AGENT_MODEL_BINDING_UNAVAILABLE`).
+`configured` means the policy matches the deployment binding, not that a provider call or quota
+admission has succeeded. Unreadable/corrupt configuration is HTTP 503
+`LW_AGENT_CONFIGURATION_UNREADABLE`, never `unconfigured`.
+
+
 ## Build network posture
 
 `BuildRequest.network` is an explicit per-request posture:

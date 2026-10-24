@@ -151,6 +151,16 @@
         "state": {
           "$ref": "#/$defs/OperationState"
         },
+        "templateUpgrade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentTemplateUpgrade"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "terminalAt": {
           "anyOf": [
             {
@@ -306,6 +316,39 @@
       ],
       "type": "object"
     },
+    "EnvironmentTemplateUpgrade": {
+      "additionalProperties": false,
+      "description": "Accepted container Work cutover. The release is desired until the operation succeeds.",
+      "properties": {
+        "dataPolicy": {
+          "$ref": "#/$defs/WorkTemplateUpgradeDataPolicy"
+        },
+        "sourceReleaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "sourceReleaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targetReleaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "targetReleaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sourceReleaseId",
+        "sourceReleaseVersion",
+        "targetReleaseId",
+        "targetReleaseVersion",
+        "dataPolicy"
+      ],
+      "type": "object"
+    },
     "ObservedEnvironmentState": {
       "description": "Authoritative observed lifecycle state.",
       "enum": [
@@ -371,6 +414,15 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "WorkTemplateUpgradeDataPolicy": {
+      "oneOf": [
+        {
+          "const": "preserve_workspace",
+          "description": "Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.",
+          "type": "string"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

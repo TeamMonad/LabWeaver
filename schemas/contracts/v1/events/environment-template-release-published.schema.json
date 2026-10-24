@@ -178,7 +178,14 @@
           "additionalProperties": false,
           "properties": {
             "build_context": {
-              "$ref": "#/$defs/ArtifactRef"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "kind": {
               "const": "container",
@@ -207,7 +214,6 @@
           "required": [
             "kind",
             "provider_binding",
-            "build_context",
             "service_port"
           ],
           "type": "object"
@@ -332,19 +338,47 @@
       "description": "Immutable environment-first release.",
       "properties": {
         "agentRunId": {
-          "$ref": "#/$defs/AgentRunId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "approval": {
-          "$ref": "#/$defs/CandidateApproval"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "artifact": {
           "$ref": "#/$defs/ImageArtifact"
         },
         "candidateId": {
-          "$ref": "#/$defs/CandidateId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "candidateRevision": {
-          "$ref": "#/$defs/Revision"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "courseId": {
           "anyOf": [
@@ -358,6 +392,16 @@
         },
         "id": {
           "$ref": "#/$defs/ReleaseId"
+        },
+        "manualApproval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManualTemplateApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "projectId": {
           "$ref": "#/$defs/ProjectId"
@@ -381,11 +425,7 @@
         "id",
         "projectId",
         "version",
-        "candidateId",
-        "agentRunId",
-        "candidateRevision",
         "runtimeKind",
-        "approval",
         "artifact",
         "publishedBy",
         "publishedAt"
@@ -471,12 +511,93 @@
             "format"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Administrator-imported container, not an Agent build.",
+          "properties": {
+            "catalog_id": {
+              "$ref": "#/$defs/PlatformImageId"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "id": {
+              "$ref": "#/$defs/ImageArtifactId"
+            },
+            "kind": {
+              "const": "catalog_container",
+              "type": "string"
+            },
+            "repin_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "trust_revision": {
+              "$ref": "#/$defs/Revision"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "catalog_id",
+            "repin_generation",
+            "trust_revision",
+            "repository",
+            "digest"
+          ],
+          "type": "object"
         }
       ]
     },
     "ImageArtifactId": {
       "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
       "type": "string"
+    },
+    "ManualTemplateApproval": {
+      "additionalProperties": false,
+      "description": "Human-reviewed Work configuration. No model, Agent run, or LLM policy is fabricated.",
+      "properties": {
+        "approvedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "approvedBy": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "description": {
+          "type": "string"
+        },
+        "platformImage": {
+          "$ref": "#/$defs/PlatformImageEntry"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "spec": {
+          "$ref": "#/$defs/EnvironmentSpec"
+        },
+        "templateFamilyId": {
+          "type": "string"
+        },
+        "trustRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "templateFamilyId",
+        "description",
+        "platformImage",
+        "spec",
+        "reason",
+        "approvedBy",
+        "approvedAt",
+        "trustRevision"
+      ],
+      "type": "object"
     },
     "NetworkPolicySpec": {
       "description": "Network egress posture for a published environment.",
@@ -525,6 +646,116 @@
           "type": "object"
         }
       ]
+    },
+    "PlatformImageEntry": {
+      "additionalProperties": false,
+      "description": "One pinned platform image identity as persisted by the Agent authority.",
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "capacityBytes": {
+          "description": "Declared virtual-machine base-disk capacity in bytes; absent for container entries.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "catalogId": {
+          "$ref": "#/$defs/PlatformImageId"
+        },
+        "diskSha256": {
+          "description": "Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VirtualMachineDiskFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Declared virtual-machine base-disk encoding; absent for container entries."
+        },
+        "kind": {
+          "$ref": "#/$defs/PlatformImageKind"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "pinnedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "repinGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resolvedDigest": {
+          "type": "string"
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceReference": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/PlatformImageStatus"
+        },
+        "trustRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "catalogId",
+        "kind",
+        "binding",
+        "sourceReference",
+        "resolvedDigest",
+        "mediaType",
+        "sizeBytes",
+        "status",
+        "trustRevision",
+        "repinGeneration",
+        "pinnedAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "PlatformImageId": {
+      "description": "Strongly typed UUIDv7 identifier for `PlatformImageId`.",
+      "type": "string"
+    },
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "PlatformImageStatus": {
+      "description": "Catalog lifecycle status.",
+      "enum": [
+        "active",
+        "disabled"
+      ],
+      "type": "string"
     },
     "PolicyId": {
       "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",

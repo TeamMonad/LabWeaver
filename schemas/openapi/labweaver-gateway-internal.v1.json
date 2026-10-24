@@ -61,6 +61,9 @@
       "EnvironmentExecutionBindingRequest": {
         "$ref": "../contracts/v1/internal/environment-execution-binding-request.schema.json"
       },
+      "EnvironmentInstance": {
+        "$ref": "../contracts/v1/environment-instance.schema.json"
+      },
       "EnvironmentWorkConfigurationTarget": {
         "$ref": "../contracts/v1/environment-work-configuration-target.schema.json"
       },

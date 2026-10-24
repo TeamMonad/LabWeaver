@@ -787,7 +787,14 @@
           "additionalProperties": false,
           "properties": {
             "build_context": {
-              "$ref": "#/$defs/ArtifactRef"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "kind": {
               "const": "container",
@@ -816,7 +823,6 @@
           "required": [
             "kind",
             "provider_binding",
-            "build_context",
             "service_port"
           ],
           "type": "object"

@@ -49,7 +49,7 @@ export type ReleaseView = EnvironmentTemplateReleaseViewSchema
 export function activeReleasesByRun(releases: readonly ReleaseView[]): Map<string, ReleaseView> {
   const byRun = new Map<string, ReleaseView>()
   for (const release of releases) {
-    if (release.withdrawal) continue
+    if (release.withdrawal || !release.agentRunId) continue
     const current = byRun.get(release.agentRunId)
     if (!current || release.version > current.version) byRun.set(release.agentRunId, release)
   }

@@ -388,7 +388,17 @@ async fn control(
     {
         if method == Method::GET && uri.path() == format!("/api/v1/environments/{}", environment.id)
         {
-            return Json(environment.clone()).into_response();
+            return Json(contracts::environment::EnvironmentDetail {
+                instance: environment.clone(),
+                connection: contracts::environment::EnvironmentConnectionReadiness {
+                    instance_ready: false,
+                    state: contracts::environment::EnvironmentConnectionState::Preparing,
+                    reason_code: None,
+                    guest_instructions: Vec::new(),
+                    observed_at: None,
+                },
+            })
+            .into_response();
         }
         if method == Method::POST
             && uri.path() == format!("/api/v1/environments/{}/stop", environment.id)
@@ -2177,6 +2187,7 @@ async fn owned_environment_requests_use_current_control_actions_and_reject_remov
             retry_from_phase: None,
             reset_target: None,
             lease_authorization: None,
+            template_upgrade: None,
         },
         gpu_allocation: None,
         resource_reservation_released: false,

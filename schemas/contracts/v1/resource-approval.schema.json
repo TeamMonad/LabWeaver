@@ -8,10 +8,6 @@
       "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
       "type": "string"
     },
-    "CandidateId": {
-      "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
-      "type": "string"
-    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
@@ -263,12 +259,6 @@
         "authoringProjectId": {
           "$ref": "#/$defs/ProjectId"
         },
-        "candidateId": {
-          "$ref": "#/$defs/CandidateId"
-        },
-        "candidateRevision": {
-          "$ref": "#/$defs/Revision"
-        },
         "configurationSha256": {
           "type": "string"
         },
@@ -281,6 +271,14 @@
               "type": "null"
             }
           ]
+        },
+        "releaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "releaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "teacherScope": {
           "anyOf": [
@@ -295,8 +293,8 @@
       },
       "required": [
         "authoringProjectId",
-        "candidateId",
-        "candidateRevision",
+        "releaseId",
+        "releaseVersion",
         "configurationSha256"
       ],
       "type": "object"
