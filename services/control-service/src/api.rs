@@ -2767,6 +2767,7 @@ pub struct ApiError {
     status: StatusCode,
     diagnostic: String,
     retryable: bool,
+    detail: String,
 }
 
 impl ApiError {
@@ -2790,7 +2791,13 @@ impl ApiError {
             status,
             diagnostic: code.to_owned(),
             retryable,
+            detail: "The request was rejected by a fail-closed control-plane boundary.".to_owned(),
         }
+    }
+
+    fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
     }
 }
 
@@ -2908,7 +2915,7 @@ impl IntoResponse for ApiError {
             ),
             title: "Control request blocked".to_owned(),
             status: self.status.as_u16(),
-            detail: "The request was rejected by a fail-closed control-plane boundary.".to_owned(),
+            detail: self.detail,
             instance: format!("urn:labweaver:request:{request_id}"),
             diagnostic_code: diagnostic,
             request_id,

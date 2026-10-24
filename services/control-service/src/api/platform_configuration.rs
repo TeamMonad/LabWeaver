@@ -470,6 +470,14 @@ async fn report(
 
 impl From<ConfigurationError> for ApiError {
     fn from(error: ConfigurationError) -> Self {
+        let detail = match &error {
+            ConfigurationError::Contract(
+                contracts::platform_configuration::PlatformConfigurationContractError::PolicyUnsupported {
+                    field,
+                },
+            ) => format!("策略字段 {field} 尚无执行侧消费者（见 #207）"),
+            _ => "The request was rejected by a fail-closed control-plane boundary.".to_owned(),
+        };
         let status = match error {
             ConfigurationError::Invalid | ConfigurationError::Contract(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY
@@ -482,7 +490,9 @@ impl From<ConfigurationError> for ApiError {
             error,
             ConfigurationError::Persistence | ConfigurationError::OperationInProgress
         );
-        Self::new(status, &error.to_string(), retryable)
+        let diagnostic = error.to_string();
+        let diagnostic = diagnostic.split(':').next().unwrap_or(&diagnostic);
+        Self::new(status, diagnostic, retryable).with_detail(detail)
     }
 }
 

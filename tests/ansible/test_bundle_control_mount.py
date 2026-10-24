@@ -239,6 +239,7 @@ class BundleControlMountTests(unittest.TestCase):
                 self.assertNotEqual(rendered.returncode, 0, change)
                 self.assertNotIn(f.secret.decode(), rendered.stderr)
 
+
     def test_plain_derivation_and_initial_settings_do_not_claim_authenticated_source(
         self,
     ):

@@ -1125,6 +1125,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         CloudEvent<events::AuthoringApprovalCompleted>
     );
 
+    let unsupported_fields: Vec<_> =
+        crate::platform_configuration::PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.field)
+            .collect();
+    output.push(json_artifact(
+        "schemas/contracts/v1/platform-configuration-unsupported-fields.json",
+        json!({
+            "apiVersion": "platform-configuration-policy/v1",
+            "unsupportedFields": unsupported_fields,
+        }),
+    )?);
+    output.push(json_artifact(
+        "deploy/helm/labweaver/values.schema.json",
+        platform_values_schema()?,
+    )?);
     output.push(json_artifact(
         "schemas/openapi/labweaver-public.v1.json",
         openapi(ApiSurface::Public)?,
@@ -1135,6 +1151,150 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     )?);
     output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(output)
+}
+
+fn platform_values_schema() -> Result<Value, GenerationError> {
+    let desired = serde_json::to_value(schema_for!(
+        crate::platform_configuration::PlatformConfigurationDesired
+    ))?;
+    let mut policy = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["apiVersion", "configurationSha256", "lifecycle", "runtimePolicy", "builderPolicy"],
+        "properties": desired["properties"].clone(),
+    });
+    policy["properties"]["lifecycle"] = desired["$defs"]["PlatformLifecycleDefaults"].clone();
+    policy["properties"]["runtimePolicy"] = desired["$defs"]["PlatformRuntimePolicy"].clone();
+    policy["properties"]["builderPolicy"] = desired["$defs"]["BuilderSecurityPolicy"].clone();
+    policy["properties"]["apiVersion"] = json!({
+        "const": "deploy.labweaver.io/platform-policy/v1"
+    });
+    policy["properties"]["configurationSha256"] = json!({
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+    });
+    let lifecycle = &mut policy["properties"]["lifecycle"];
+    for field in ["readOnlyRetentionSeconds", "detailedLogRetentionSeconds"] {
+        lifecycle["properties"][field]["minimum"] = json!(1);
+        lifecycle["properties"][field]["maximum"] = json!(31_536_000);
+    }
+    lifecycle["properties"]["preemptionGraceSeconds"]["minimum"] = json!(1);
+    lifecycle["properties"]["preemptionGraceSeconds"]["maximum"] = json!(300);
+    lifecycle["properties"]["expiryReminderSeconds"]["maxItems"] = json!(16);
+    lifecycle["properties"]["expiryReminderSeconds"]["uniqueItems"] = json!(true);
+    lifecycle["properties"]["expiryReminderSeconds"]["items"]["minimum"] = json!(1);
+    lifecycle["properties"]["expiryReminderSeconds"]["items"]["maximum"] = json!(31_536_000);
+    let runtime = &mut policy["properties"]["runtimePolicy"];
+    runtime["properties"]["defaultContainerUid"] = json!({"const": 0, "type": "integer"});
+    runtime["properties"]["allowedCapabilities"]["maxItems"] = json!(0);
+    runtime["properties"]["preauthorizations"]["maxItems"] = json!(0);
+    let prefixed_shape = format!(
+        "^{} / {}$",
+        crate::platform_configuration::label_prefix_pattern()
+            .trim_start_matches('^')
+            .trim_end_matches('$'),
+        crate::platform_configuration::LABEL_NAME_PATTERN
+            .trim_start_matches('^')
+            .trim_end_matches('$')
+    )
+    .replace(" / ", "/");
+    let prefixed_length = format!(
+        "^[^/]{{1,{}}}/[^/]{{1,{}}}$",
+        crate::platform_configuration::LABEL_PREFIX_MAX_LENGTH,
+        crate::platform_configuration::LABEL_NAME_MAX_LENGTH
+    );
+    let label_key_schema = json!({
+        "anyOf": [
+            {"maxLength": crate::platform_configuration::LABEL_NAME_MAX_LENGTH, "pattern": crate::platform_configuration::LABEL_NAME_PATTERN},
+            {"allOf": [
+                {"pattern": crate::platform_configuration::LABEL_KEY_PATTERN},
+                {"pattern": prefixed_shape},
+                {"pattern": prefixed_length}
+            ]}
+        ],
+        "type": "string"
+    });
+    let mut dedicated_location =
+        desired["$defs"]["PrivilegedExecutionLocation"]["oneOf"][0].clone();
+    let node_selector = &mut dedicated_location["properties"]["nodeSelector"];
+    node_selector["minProperties"] =
+        json!(crate::platform_configuration::DEDICATED_NODE_SELECTOR_MIN_PROPERTIES);
+    node_selector["maxProperties"] =
+        json!(crate::platform_configuration::DEDICATED_NODE_SELECTOR_MAX_PROPERTIES);
+    node_selector["propertyNames"] = label_key_schema.clone();
+    node_selector["additionalProperties"] = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": crate::platform_configuration::LABEL_VALUE_MAX_LENGTH,
+        "pattern": crate::platform_configuration::LABEL_VALUE_PATTERN
+    });
+    dedicated_location["properties"]["taintKey"] = label_key_schema.clone();
+    dedicated_location["properties"]["taintKey"]["minLength"] = json!(1);
+    dedicated_location["properties"]["taintKey"]["maxLength"] =
+        json!(crate::platform_configuration::LABEL_KEY_MAX_LENGTH);
+    dedicated_location["properties"]["taintValue"] = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": crate::platform_configuration::LABEL_VALUE_MAX_LENGTH,
+        "pattern": crate::platform_configuration::LABEL_VALUE_PATTERN
+    });
+    runtime["properties"]["privilegedExecutionLocation"] = json!({
+        "anyOf": [
+            {"type": "null"},
+            dedicated_location
+        ]
+    });
+    runtime["allOf"] = json!([
+        {
+            "if": {
+                "properties": {"privilegedAllowed": {"const": true}},
+                "required": ["privilegedAllowed"]
+            },
+            "then": {
+                "required": ["privilegedExecutionLocation"],
+                "properties": {"privilegedExecutionLocation": {"not": {"type": "null"}}}
+            }
+        },
+        {
+            "if": {
+                "properties": {"privilegedAllowed": {"const": false}},
+                "required": ["privilegedAllowed"]
+            },
+            "then": {
+                "properties": {"privilegedExecutionLocation": {"type": "null"}}
+            }
+        }
+    ]);
+    let builder = &mut policy["properties"]["builderPolicy"];
+    builder["properties"]["capabilities"]["maxItems"] = json!(0);
+    builder["properties"]["entitlements"]["maxItems"] = json!(0);
+    builder["properties"]["allowPrivilegeEscalation"] = json!({"const": false, "type": "boolean"});
+    let mut defs = desired["$defs"].clone();
+    if defs.is_null() {
+        defs = json!({});
+    }
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$defs": defs,
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "platformConfigurationPolicy": {
+                "oneOf": [
+                    {"type": "object", "maxProperties": 0},
+                    policy
+                ]
+            }
+        }
+    });
+    let normalized = serde_json::to_string(&schema)?.replace("#/$defs/", "#/definitions/");
+    let mut schema: Value = serde_json::from_str(&normalized)?;
+    let definitions = schema["$defs"].take();
+    schema["definitions"] = definitions;
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$defs");
+    }
+    Ok(schema)
 }
 
 fn schema_artifact(path: &str, schema: Schema) -> Result<GeneratedArtifact, GenerationError> {
@@ -1374,7 +1534,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
                 "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
                 "LW_IDEMPOTENCY_CONFLICT",
-                "LW_OPERATION_IN_PROGRESS"
+                "LW_OPERATION_IN_PROGRESS",
+                "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED"
             ]);
         }
         if operation.operation_id == "resolveEnvironmentOwner" {

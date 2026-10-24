@@ -427,21 +427,28 @@ class DeploymentBundleTests(unittest.TestCase):
         self.assertNotIn(self.secret.decode(), stderr.getvalue())
 
     def test_policy_without_an_execution_consumer_fails_before_seal(self) -> None:
+        configurations = []
         for group, field, value in (
             ("runtimePolicy", "defaultContainerUid", 1000),
             ("runtimePolicy", "allowedCapabilities", ["NET_ADMIN"]),
+            ("runtimePolicy", "preauthorizations", [{"scope": {"kind": "project", "projectId": "0197f0e0-0000-7000-8000-000000000013"}, "capabilities": [], "privileged": False}]),
+            ("runtimePolicy", "privilegedExecutionLocation", {"kind": "virtual_machine_guest", "providerBinding": "kubevirt"}),
             ("builderPolicy", "capabilities", ["NET_ADMIN"]),
             ("builderPolicy", "entitlements", ["network.host"]),
+            ("builderPolicy", "allowPrivilegeEscalation", True),
         ):
+            configurations.append((group, field, value))
+        for group, field, value in configurations:
             original = self.configuration[group][field]
+            original_privileged = self.configuration["runtimePolicy"]["privilegedAllowed"]
             self.configuration[group][field] = value
+            if field == "privilegedExecutionLocation":
+                self.configuration["runtimePolicy"]["privilegedAllowed"] = True
             self.save_version()
-            with self.assertRaisesRegex(
-                bundle.BundleError,
-                "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED",
-            ):
+            with self.assertRaisesRegex(bundle.BundleError, f"LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:{group}.{field}"):
                 bundle.load_bundle(self.root)
             self.configuration[group][field] = original
+            self.configuration["runtimePolicy"]["privilegedAllowed"] = original_privileged
             self.save_version()
 
     def test_plain_helm_rejects_policy_without_authenticated_source(self) -> None:
@@ -480,6 +487,125 @@ class DeploymentBundleTests(unittest.TestCase):
             "platformConfigurationPolicy requires authenticated managedControlConfiguration",
             result.stderr,
         )
+    def test_real_helm_rejects_policy_artifact_wrong_types(self) -> None:
+        helm = shutil.which("helm")
+        self.assertIsNotNone(helm, "The pinned Helm renderer is required for Bundle input tests.")
+        self.save_version()
+        recipient = self.key()
+        bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+            values_path = loaded / "helm-policy-types.yaml"
+            original = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
+            for group, field, value in (
+                ("runtimePolicy", "allowedCapabilities", {}),
+                ("runtimePolicy", "allowedCapabilities", ["MADE_UP"]),
+                ("runtimePolicy", "preauthorizations", 0),
+                ("runtimePolicy", "preauthorizations", [{}]),
+                ("runtimePolicy", "defaultContainerUid", {}),
+                ("runtimePolicy", "defaultContainerUid", 1.0),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "virtual_machine_guest", "providerBinding": "kubevirt"}),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {}}),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {f"pool{i}": "x" for i in range(17)}, "taintKey": "labweaver.io/taint", "taintValue": "v"}),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"INVALID KEY": "x"}, "taintKey": "labweaver.io/taint", "taintValue": "v"}),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"pool": "bad value"}, "taintKey": "labweaver.io/taint", "taintValue": "v"}),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"a" * 254 + "/name": "x"}, "taintKey": "labweaver.io/taint", "taintValue": "v"}),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"pool": "x"}, "taintKey": "", "taintValue": "v"}),
+                ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {"pool": "x"}, "taintKey": "labweaver.io/taint", "taintValue": "bad value"}),
+                ("lifecycle", "expiryReminderSeconds", [1] * 17),
+                ("lifecycle", "expiryReminderSeconds", [1, 1]),
+                ("builderPolicy", "allowPrivilegeEscalation", 0),
+            ):
+                values = copy.deepcopy(original)
+                values["platformConfigurationPolicy"][group][field] = value
+                write(values_path, yaml.safe_dump(values, sort_keys=False).encode())
+                result = subprocess.run(
+                    [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0, field)
+                self.assertIn(field, result.stderr)
+            invalid_null = copy.deepcopy(original)
+            invalid_null["platformConfigurationPolicy"]["runtimePolicy"].update(
+                privilegedAllowed=True,
+                privilegedExecutionLocation=None,
+            )
+            write(values_path, yaml.safe_dump(invalid_null, sort_keys=False).encode())
+            result = subprocess.run(
+                [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("privilegedExecutionLocation", result.stderr)
+            valid_null = copy.deepcopy(original)
+            valid_null["platformConfigurationPolicy"]["runtimePolicy"].update(
+                privilegedAllowed=False,
+                privilegedExecutionLocation=None,
+            )
+            write(values_path, yaml.safe_dump(valid_null, sort_keys=False).encode())
+            result = subprocess.run(
+                [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.clean_runtime()
+    def test_location_samples_match_rust_and_helm_schema(self) -> None:
+        helm = shutil.which("helm")
+        self.assertIsNotNone(helm, "The pinned Helm renderer is required for Bundle input tests.")
+        cases = json.loads(
+            (REPOSITORY / "tests/fixtures/platform-configuration-location-cases.json").read_bytes()
+        )
+        recipient = self.key()
+        for sample in (case for case in cases if case["accepted"]):
+            self.configuration["runtimePolicy"].update(
+                privilegedAllowed=True,
+                privilegedExecutionLocation=sample["location"],
+            )
+            self.save_version()
+            if self.archive.exists():
+                self.archive.unlink()
+            bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+            with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+                result = subprocess.run(
+                    [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(loaded / "helm-values.yaml")],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, sample["name"] + ": " + result.stderr)
+
+        self.configuration["runtimePolicy"].update(
+            privilegedAllowed=False,
+            privilegedExecutionLocation=None,
+        )
+        self.save_version()
+        if self.archive.exists():
+            self.archive.unlink()
+        bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+            original = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
+            values_path = loaded / "location-case.yaml"
+            for sample in (case for case in cases if not case["accepted"]):
+                values = copy.deepcopy(original)
+                values["platformConfigurationPolicy"]["runtimePolicy"].update(
+                    privilegedAllowed=True,
+                    privilegedExecutionLocation=sample["location"],
+                )
+                write(values_path, yaml.safe_dump(values, sort_keys=False).encode())
+                result = subprocess.run(
+                    [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent), "--namespace", "labweaver-system", "--values", str(values_path)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0, sample["name"])
+                self.assertIn(
+                    "values don't meet the specifications of the schema",
+                    result.stderr,
+                    sample["name"] + ": " + result.stderr,
+                )
+        self.clean_runtime()
     def test_real_helm_uses_bundle_environment_without_legacy_fallback_or_builder_escalation(
         self,
     ) -> None:

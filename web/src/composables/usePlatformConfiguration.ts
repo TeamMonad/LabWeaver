@@ -19,14 +19,13 @@ import {
   canonicalJson,
   cloneConfiguration,
   parseRequestYaml,
-  unsupportedPolicyFields,
 } from '@/utils/platformConfiguration'
 
 /** Maximum encrypted Bundle upload accepted by Control (70 MiB). */
 export const PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES = 73_400_320
 
-/** Local fail-closed code; mirrors the Bundle/Helm rejection of settings without an execution-side consumer. */
-export const POLICY_UNSUPPORTED_CODE = 'LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED'
+/** Control diagnostic code shown when the server rejects an unsupported policy field. */
+export const POLICY_UNSUPPORTED_CODE = 'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED'
 
 export interface PlatformConfigurationConflict {
   /** The server facts read after the 409/412; the draft is kept untouched. */
@@ -65,6 +64,7 @@ const REASONS: Record<string, string> = {
   LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID: '特权执行位置无效。',
   LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID: '预授权超出平台允许清单或 scope 重复。',
   LW_PLATFORM_CONFIGURATION_NOT_FOUND: '请求的配置版本、登记或应用尝试不存在。',
+  LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: '当前策略字段尚无执行侧消费者，服务端拒绝保存或登记。',
   LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED: '平台配置存储暂时不可用。',
 }
 
@@ -78,6 +78,7 @@ const NEXT_STEPS: Record<string, string> = {
   LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID: '留存与提醒须在 1 秒到 365 天之间，提醒最多 16 个且不能重复，抢占宽限为 1–300 秒；草稿已保留。',
   LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID: '允许特权时必须声明专用节点池（合法的 nodeSelector 与 taint）；不允许特权时不能声明位置。草稿已保留。',
   LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID: '预授权只能使用平台允许清单内的 capability，且同一 scope 只能出现一次；草稿已保留。',
+  LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED: '将具体字段恢复为当前可部署的默认值后再保存；执行侧支持由 #207 等后续消费者提供。',
   LW_PLATFORM_CONFIGURATION_NOT_FOUND: '刷新页面读取当前事实。',
   LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED: '稍后按原样重试；草稿与所选文件已保留。',
 }
@@ -161,20 +162,11 @@ export function usePlatformConfiguration() {
     draft.value !== null && draftBase.value !== null && canonicalJson(draft.value) !== canonicalJson(draftBase.value),
   )
 
-  /** Draft settings the deployment path would reject; saving them is refused locally. */
-  const draftUnsupported = computed(() => (draft.value ? unsupportedPolicyFields(draft.value) : []))
-
-  /** Saved desired settings the deployment path would reject: no Bundle can be sealed for it. */
-  const desiredUnsupported = computed(() => {
-    const desired = status.value?.desired
-    return desired ? unsupportedPolicyFields(desired.configuration) : []
-  })
 
   const registeredBundle = computed(() => status.value?.registeredBundle ?? null)
 
   const canRegister = computed(() => Boolean(
     status.value?.desired
-    && desiredUnsupported.value.length === 0
     && selectedBundleFile.value
     && !registering.value
     && conflict.value === null,
@@ -187,7 +179,6 @@ export function usePlatformConfiguration() {
       current?.desired
       && registered
       && registered.desiredRevision === current.desired.revision
-      && desiredUnsupported.value.length === 0
       && !applying.value
       && !registering.value
       && conflict.value === null,
@@ -312,16 +303,6 @@ export function usePlatformConfiguration() {
       body = parsed.request
       yamlBody = yamlText ?? ''
     }
-    const unsupported = unsupportedPolicyFields(body.configuration)
-    if (unsupported.length > 0) {
-      const diagnostic = makeDiagnostic(
-        POLICY_UNSUPPORTED_CODE,
-        `以下设置尚无执行侧实现，Bundle 导出与部署渲染会拒绝：${unsupported.map((field) => field.label).join('、')}。`,
-        false,
-      )
-      diagnostic.nextStep = '将这些设置恢复为可部署值后再保存（见 #207）；内容未发送。'
-      return fail('save', diagnostic)
-    }
     const fingerprint = `${mode}:${yamlBody ?? canonicalJson(body)}`
     saving.value = true
     try {
@@ -398,15 +379,6 @@ export function usePlatformConfiguration() {
     actionFailure.value = null
     notice.value = null
 
-    if (desiredUnsupported.value.length > 0) {
-      const diagnostic = makeDiagnostic(
-        POLICY_UNSUPPORTED_CODE,
-        '当前 desired 含尚无执行侧实现的设置，无法为它导出或渲染 Bundle。',
-        false,
-      )
-      diagnostic.nextStep = '先在编辑器中恢复为可部署值并保存新的 desired，再导出并登记。'
-      return fail('register', diagnostic)
-    }
     if (bundle.size <= 0) {
       const diagnostic = makeDiagnostic('LW_PLATFORM_CONFIGURATION_BUNDLE_EMPTY', '所选文件为空，无法登记。', false)
       diagnostic.nextStep = '请选择实际导出的 .age 密文文件。'
@@ -468,15 +440,6 @@ export function usePlatformConfiguration() {
     if (!current?.desired || applying.value) return false
     actionFailure.value = null
     notice.value = null
-    if (desiredUnsupported.value.length > 0) {
-      const diagnostic = makeDiagnostic(
-        POLICY_UNSUPPORTED_CODE,
-        `当前 desired 含尚无执行侧实现的设置：${desiredUnsupported.value.map((field) => field.label).join('、')}，部署路径会拒绝此版本。`,
-        false,
-      )
-      diagnostic.nextStep = '应用请求未发送。先在编辑器中恢复为可部署值并保存新的 desired，再导出、登记并提交应用（见 #207）。'
-      return fail('apply', diagnostic)
-    }
     if (!current.registeredBundle || current.registeredBundle.desiredRevision !== current.desired.revision) {
       const diagnostic = makeDiagnostic('LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED', '当前 desired 尚无有效的 Bundle 登记。', false)
       diagnostic.nextStep = NEXT_STEPS.LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED
@@ -557,8 +520,6 @@ export function usePlatformConfiguration() {
     draftBase,
     baseRevision,
     draftDirty,
-    draftUnsupported,
-    desiredUnsupported,
     saving,
     registering,
     applying,

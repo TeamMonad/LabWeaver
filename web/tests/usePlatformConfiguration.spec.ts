@@ -239,26 +239,18 @@ describe('usePlatformConfiguration', () => {
     expect(call.bodySerializer?.(call.body)).toBe(yaml)
   })
 
-  it.each([
-    ['runtime capabilities', (c: PlatformConfigurationDesired) => { c.runtimePolicy.allowedCapabilities = ['NET_ADMIN'] }, '普通容器 capabilities 允许清单'],
-    ['preauthorizations', (c: PlatformConfigurationDesired) => { c.runtimePolicy.preauthorizations = [{ scope: { kind: 'project', projectId: 'p-1' }, capabilities: [], privileged: false }] }, '项目/课程预授权'],
-    ['VM guest location', (c: PlatformConfigurationDesired) => { c.runtimePolicy.privilegedAllowed = true; c.runtimePolicy.privilegedExecutionLocation = { kind: 'virtual_machine_guest', providerBinding: 'kubevirt' } }, 'VM guest 执行位置'],
-    ['builder entitlements', (c: PlatformConfigurationDesired) => { c.builderPolicy.entitlements = ['network.host'] }, 'builder entitlements'],
-    ['builder capabilities', (c: PlatformConfigurationDesired) => { c.builderPolicy.capabilities = ['SYS_ADMIN'] }, 'builder capabilities'],
-    ['builder escalation', (c: PlatformConfigurationDesired) => { c.builderPolicy.allowPrivilegeEscalation = true }, 'builder 提权'],
-    ['non-zero container UID', (c: PlatformConfigurationDesired) => { c.runtimePolicy.defaultContainerUid = 1000 }, '默认容器 UID'],
-  ])('fails closed on %s without sending YAML that the deployment path would reject', async (_name, mutate, label) => {
+  it('sends unsupported policy to Control and renders its diagnostic response', async () => {
     getMock.mockResolvedValue(ok(configured(3, 60)) as never)
+    updateMock.mockResolvedValue(problem(422, 'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED') as never)
     const config = usePlatformConfiguration()
     await config.load()
-    const configuration = structuredClone(defaults)
-    mutate(configuration)
+    config.draft!.runtimePolicy.allowedCapabilities = ['NET_ADMIN']
 
-    expect(await config.submitUpdate('yaml', requestToYaml({ expectedRevision: 3, configuration }))).toBe(false)
-    expect(updateMock).not.toHaveBeenCalled()
+    expect(await config.submitUpdate('form')).toBe(false)
+    expect(updateMock).toHaveBeenCalledTimes(1)
     expect(config.actionFailure?.diagnostic).toMatchObject({
       code: POLICY_UNSUPPORTED_CODE,
-      message: expect.stringContaining(label),
+      message: LOCALIZED,
       nextStep: expect.stringContaining('#207'),
     })
   })
@@ -271,7 +263,6 @@ describe('usePlatformConfiguration', () => {
     config.draft!.runtimePolicy.privilegedAllowed = true
     config.draft!.runtimePolicy.privilegedExecutionLocation = { kind: 'dedicated_node_pool', nodeSelector: { pool: 'privileged' }, taintKey: 'labweaver.io/privileged', taintValue: 'true' }
 
-    expect(config.draftUnsupported).toEqual([])
     expect(await config.submitUpdate('form')).toBe(true)
     expect(updateMock).toHaveBeenCalledTimes(1)
   })
@@ -334,6 +325,27 @@ describe('usePlatformConfiguration', () => {
     expect(getApplyMock).toHaveBeenCalledWith({ path: { applyId: 'apply-1' } })
     expect(config.applyHistory.map((item) => item.id)).toEqual(['apply-2', 'apply-1'])
   })
+  it('sends registration to Control and preserves the selected file on policy rejection', async () => {
+    getMock.mockResolvedValue(ok(configured(3, 60), '"rev-3"') as never)
+    registerMock.mockResolvedValue(problem(422, POLICY_UNSUPPORTED_CODE) as never)
+    const config = usePlatformConfiguration()
+    await config.load()
+    const file = ageFile()
+    config.selectBundleFile(file)
+
+    expect(await config.registerBundle()).toBe(false)
+    expect(registerMock).toHaveBeenCalledTimes(1)
+    expect(config.selectedBundleFile).toBe(file)
+    expect(config.actionFailure).toMatchObject({
+      action: 'register',
+      diagnostic: {
+        code: POLICY_UNSUPPORTED_CODE,
+        message: LOCALIZED,
+        nextStep: expect.stringContaining('#207'),
+      },
+    })
+    expect(config.notice).toBeNull()
+  })
 
   it('reuses the register idempotency key for the same file and keeps the file on a revision conflict', async () => {
     getMock
@@ -355,21 +367,6 @@ describe('usePlatformConfiguration', () => {
     expect(config.actionFailure?.diagnostic.nextStep).toContain('.age 文件已保留')
   })
 
-  it('refuses to register or apply a saved desired that carries settings without an execution-side consumer', async () => {
-    const configuration = structuredClone(defaults)
-    configuration.runtimePolicy.allowedCapabilities = ['SYS_PTRACE']
-    getMock.mockResolvedValue(ok(configured(3, 60, true, configuration), '"rev-3"') as never)
-    const config = usePlatformConfiguration()
-    await config.load()
-    config.selectBundleFile(ageFile())
-
-    expect(config.desiredUnsupported.map((field) => field.path)).toEqual(['runtimePolicy.allowedCapabilities'])
-    expect(config.canRegister).toBe(false)
-    expect(config.canApply).toBe(false)
-    expect(await config.registerBundle()).toBe(false)
-    expect(registerMock).not.toHaveBeenCalled()
-    expect(config.actionFailure).toMatchObject({ action: 'register', diagnostic: { code: POLICY_UNSUPPORTED_CODE } })
-  })
 
   it('blocks apply without registration and explains a server-side LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED', async () => {
     getMock.mockResolvedValue(ok(configured(3, 60), '"rev-3"') as never)
@@ -390,19 +387,6 @@ describe('usePlatformConfiguration', () => {
     expect(config.actionFailure?.diagnostic).toMatchObject({ code: 'LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED', requestId: 'req-1', message: LOCALIZED, nextStep: expect.stringContaining('.age') })
   })
 
-  it('fails closed before calling the SDK when an unsupported desired has a matching registration', async () => {
-    const configuration = structuredClone(defaults)
-    configuration.builderPolicy.entitlements = ['network.host']
-    getMock.mockResolvedValue(ok(configured(3, 60, true, configuration), '"rev-3"') as never)
-    const config = usePlatformConfiguration()
-    await config.load()
-
-    expect(config.status?.registeredBundle?.desiredRevision).toBe(3)
-    expect(config.canApply).toBe(false)
-    expect(await config.requestApply()).toBe(false)
-    expect(applyMock).not.toHaveBeenCalled()
-    expect(config.actionFailure).toMatchObject({ action: 'apply', diagnostic: { code: POLICY_UNSUPPORTED_CODE, message: LOCALIZED, nextStep: expect.stringContaining('#207') } })
-  })
 
   it('keeps the newest read when concurrent loads resolve out of order', async () => {
     const slow = deferred<unknown>()

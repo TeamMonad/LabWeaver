@@ -217,27 +217,24 @@ describe('PlatformConfigurationView', () => {
     const banner = expectDiagnosticOrder(wrapper.find('[data-testid="pc-save-failure"]'), 'LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID', 'req-9')
     expect(banner.find('.diagnostic-next-step').text()).toContain('1–300')
   })
-
-  it('marks a saved desired with unsupported settings and blocks registration and apply', async () => {
-    const unsupported = structuredClone(configuration)
-    unsupported.runtimePolicy.allowedCapabilities = ['SYS_PTRACE']
-    unsupported.builderPolicy.entitlements = ['network.host']
-    vi.mocked(getPlatformConfiguration).mockResolvedValue({ data: statusWithoutRegistration(unsupported), error: undefined } as never)
+  it('maps the server unsupported-policy diagnostic to a Chinese reason and next step', async () => {
+    vi.mocked(updatePlatformConfiguration).mockResolvedValue(
+      problem(422, 'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED') as never,
+    )
     const wrapper = await mountView()
-
-    const banner = wrapper.find('[data-testid="pc-desired-unsupported"]')
-    expect(banner.text()).toContain('普通容器 capabilities 允许清单')
-    expect(banner.text()).toContain('builder entitlements')
-    expect(wrapper.find('[data-testid="pc-bundle-file"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('[data-testid="pc-register"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('[data-testid="pc-apply"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('[data-testid="pc-save"]').attributes('disabled')).toBeDefined()
-
-    await wrapper.find('[data-testid="pc-reset-unsupported"]').trigger('click')
+    await wrapper.find('[data-testid="pc-preemption-grace"]').setValue('61')
+    await wrapper.find('[data-testid="pc-save"]').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-testid="pc-draft-unsupported"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="pc-save"]').attributes('disabled')).toBeUndefined()
+
+    const banner = expectDiagnosticOrder(
+      wrapper.find('[data-testid="pc-save-failure"]'),
+      'LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED',
+      'req-9',
+    )
+    expect(banner.text()).toContain('尚无执行侧消费者')
+    expect(banner.find('.diagnostic-next-step').text()).toContain('可部署的默认值')
   })
+
 
   it('shows the administrator-only reason when a non-administrator opens the page', async () => {
     vi.mocked(getPlatformConfiguration).mockResolvedValue(problem(403, 'LW_FORBIDDEN') as never)

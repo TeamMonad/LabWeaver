@@ -1,0 +1,560 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": true,
+  "definitions": {
+    "BuilderEntitlement": {
+      "enum": [
+        "network.host",
+        "security.insecure"
+      ],
+      "type": "string"
+    },
+    "BuilderSecurityPolicy": {
+      "additionalProperties": false,
+      "description": "Independently configured builder range. Runtime requests cannot change these fields.",
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/definitions/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "entitlements": {
+          "items": {
+            "$ref": "#/definitions/BuilderEntitlement"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "capabilities",
+        "allowPrivilegeEscalation",
+        "entitlements"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "LinuxCapability": {
+      "description": "Linux capability names from the kernel UAPI. `ALL` is never an addition.",
+      "enum": [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "DAC_READ_SEARCH",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "SETGID",
+        "SETUID",
+        "SETPCAP",
+        "LINUX_IMMUTABLE",
+        "NET_BIND_SERVICE",
+        "NET_BROADCAST",
+        "NET_ADMIN",
+        "NET_RAW",
+        "IPC_LOCK",
+        "IPC_OWNER",
+        "SYS_MODULE",
+        "SYS_RAWIO",
+        "SYS_CHROOT",
+        "SYS_PTRACE",
+        "SYS_PACCT",
+        "SYS_ADMIN",
+        "SYS_BOOT",
+        "SYS_NICE",
+        "SYS_RESOURCE",
+        "SYS_TIME",
+        "SYS_TTY_CONFIG",
+        "MKNOD",
+        "LEASE",
+        "AUDIT_WRITE",
+        "AUDIT_CONTROL",
+        "SETFCAP",
+        "MAC_OVERRIDE",
+        "MAC_ADMIN",
+        "SYSLOG",
+        "WAKE_ALARM",
+        "BLOCK_SUSPEND",
+        "AUDIT_READ",
+        "PERFMON",
+        "BPF",
+        "CHECKPOINT_RESTORE"
+      ],
+      "type": "string"
+    },
+    "PlatformLifecycleDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "detailedLogRetentionSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expiryReminderSeconds": {
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "preemptionGraceSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readOnlyRetentionSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "readOnlyRetentionSeconds",
+        "detailedLogRetentionSeconds",
+        "expiryReminderSeconds",
+        "preemptionGraceSeconds"
+      ],
+      "type": "object"
+    },
+    "PlatformRuntimePolicy": {
+      "additionalProperties": false,
+      "description": "Platform allowed range. This does not replace object authorization or actual placement.",
+      "properties": {
+        "allowedCapabilities": {
+          "items": {
+            "$ref": "#/definitions/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "defaultContainerUid": {
+          "description": "Zero means guest/container root, without host privileges.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preauthorizations": {
+          "items": {
+            "$ref": "#/definitions/RuntimePreauthorization"
+          },
+          "type": "array"
+        },
+        "privilegedAllowed": {
+          "type": "boolean"
+        },
+        "privilegedExecutionLocation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PrivilegedExecutionLocation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "defaultContainerUid",
+        "allowedCapabilities",
+        "preauthorizations",
+        "privilegedAllowed"
+      ],
+      "type": "object"
+    },
+    "PrivilegedExecutionLocation": {
+      "description": "An execution boundary declaration. The Environment consumer must prove exclusivity.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "dedicated_node_pool",
+              "type": "string"
+            },
+            "nodeSelector": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "taintKey": {
+              "type": "string"
+            },
+            "taintValue": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "nodeSelector",
+            "taintKey",
+            "taintValue"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "virtual_machine_guest",
+              "type": "string"
+            },
+            "providerBinding": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "providerBinding"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RuntimePreauthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/definitions/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "privileged": {
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/definitions/RuntimePreauthorizationScope"
+        }
+      },
+      "required": [
+        "scope",
+        "capabilities",
+        "privileged"
+      ],
+      "type": "object"
+    },
+    "RuntimePreauthorizationScope": {
+      "description": "Object scope for a runtime preauthorization, never a builder authorization.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "projectId": {
+              "$ref": "#/definitions/ProjectId"
+            }
+          },
+          "required": [
+            "kind",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "courseId": {
+              "$ref": "#/definitions/CourseId"
+            },
+            "kind": {
+              "const": "course",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "courseId"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "platformConfigurationPolicy": {
+      "oneOf": [
+        {
+          "maxProperties": 0,
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "apiVersion": {
+              "const": "deploy.labweaver.io/platform-policy/v1"
+            },
+            "builderPolicy": {
+              "additionalProperties": false,
+              "description": "Independently configured builder range. Runtime requests cannot change these fields.",
+              "properties": {
+                "allowPrivilegeEscalation": {
+                  "const": false,
+                  "type": "boolean"
+                },
+                "capabilities": {
+                  "items": {
+                    "$ref": "#/definitions/LinuxCapability"
+                  },
+                  "maxItems": 0,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "entitlements": {
+                  "items": {
+                    "$ref": "#/definitions/BuilderEntitlement"
+                  },
+                  "maxItems": 0,
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "capabilities",
+                "allowPrivilegeEscalation",
+                "entitlements"
+              ],
+              "type": "object"
+            },
+            "configurationSha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "lifecycle": {
+              "additionalProperties": false,
+              "properties": {
+                "detailedLogRetentionSeconds": {
+                  "format": "uint64",
+                  "maximum": 31536000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "expiryReminderSeconds": {
+                  "items": {
+                    "format": "uint64",
+                    "maximum": 31536000,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "maxItems": 16,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "preemptionGraceSeconds": {
+                  "format": "uint64",
+                  "maximum": 300,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "readOnlyRetentionSeconds": {
+                  "format": "uint64",
+                  "maximum": 31536000,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "readOnlyRetentionSeconds",
+                "detailedLogRetentionSeconds",
+                "expiryReminderSeconds",
+                "preemptionGraceSeconds"
+              ],
+              "type": "object"
+            },
+            "runtimePolicy": {
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "privilegedAllowed": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "privilegedAllowed"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "privilegedExecutionLocation": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "required": [
+                      "privilegedExecutionLocation"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "privilegedAllowed": {
+                        "const": false
+                      }
+                    },
+                    "required": [
+                      "privilegedAllowed"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "privilegedExecutionLocation": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              ],
+              "description": "Platform allowed range. This does not replace object authorization or actual placement.",
+              "properties": {
+                "allowedCapabilities": {
+                  "items": {
+                    "$ref": "#/definitions/LinuxCapability"
+                  },
+                  "maxItems": 0,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "defaultContainerUid": {
+                  "const": 0,
+                  "type": "integer"
+                },
+                "preauthorizations": {
+                  "items": {
+                    "$ref": "#/definitions/RuntimePreauthorization"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "privilegedAllowed": {
+                  "type": "boolean"
+                },
+                "privilegedExecutionLocation": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "dedicated_node_pool",
+                          "type": "string"
+                        },
+                        "nodeSelector": {
+                          "additionalProperties": {
+                            "maxLength": 63,
+                            "minLength": 1,
+                            "pattern": "^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$",
+                            "type": "string"
+                          },
+                          "maxProperties": 16,
+                          "minProperties": 1,
+                          "propertyNames": {
+                            "anyOf": [
+                              {
+                                "maxLength": 63,
+                                "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                              },
+                              {
+                                "allOf": [
+                                  {
+                                    "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                  },
+                                  {
+                                    "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                  },
+                                  {
+                                    "pattern": "^[^/]{1,253}/[^/]{1,63}$"
+                                  }
+                                ]
+                              }
+                            ],
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "taintKey": {
+                          "anyOf": [
+                            {
+                              "maxLength": 63,
+                              "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                            },
+                            {
+                              "allOf": [
+                                {
+                                  "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                },
+                                {
+                                  "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+                                },
+                                {
+                                  "pattern": "^[^/]{1,253}/[^/]{1,63}$"
+                                }
+                              ]
+                            }
+                          ],
+                          "maxLength": 317,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "taintValue": {
+                          "maxLength": 63,
+                          "minLength": 1,
+                          "pattern": "^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "nodeSelector",
+                        "taintKey",
+                        "taintValue"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "defaultContainerUid",
+                "allowedCapabilities",
+                "preauthorizations",
+                "privilegedAllowed"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "apiVersion",
+            "configurationSha256",
+            "lifecycle",
+            "runtimePolicy",
+            "builderPolicy"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "type": "object"
+}

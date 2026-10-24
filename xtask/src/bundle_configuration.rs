@@ -3,7 +3,8 @@
 use std::io::{Read, Write};
 
 use contracts::platform_configuration::{
-    PlatformConfigurationDesired, PlatformConfigurationVersion, UpdatePlatformConfigurationRequest,
+    PlatformConfigurationContractError, PlatformConfigurationDesired, PlatformConfigurationVersion,
+    UpdatePlatformConfigurationRequest,
 };
 use persistence_sqlx::Sha256Digest;
 
@@ -15,16 +16,22 @@ fn invalid(code: &'static str) -> AppError {
     AppError::BundleConfiguration { code }
 }
 
+fn policy_error(error: PlatformConfigurationContractError) -> AppError {
+    match error {
+        PlatformConfigurationContractError::PolicyUnsupported { field } => {
+            AppError::BundlePolicyUnsupported { field }
+        }
+        _ => invalid("LW_BUNDLE_CONFIGURATION_INVALID"),
+    }
+}
+
 pub fn validate(payload: &[u8]) -> Result<PlatformConfigurationVersion, AppError> {
     if payload.is_empty() || payload.len() as u64 > MAX_BYTES {
         return Err(invalid("LW_BUNDLE_CONFIGURATION_LIMIT"));
     }
     let version: PlatformConfigurationVersion = contracts::parse_strict_json(payload)
         .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_INVALID"))?;
-    version
-        .configuration
-        .validate()
-        .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_INVALID"))?;
+    version.configuration.validate().map_err(policy_error)?;
     if version.revision.get() > i64::MAX as u64 {
         return Err(invalid("LW_BUNDLE_CONFIGURATION_INVALID"));
     }
@@ -45,10 +52,7 @@ pub fn validate_initial(payload: &[u8]) -> Result<UpdatePlatformConfigurationReq
     if request.expected_revision != 0 {
         return Err(invalid("LW_BUNDLE_INITIAL_REVISION_INVALID"));
     }
-    request
-        .configuration
-        .validate()
-        .map_err(|_| invalid("LW_BUNDLE_CONFIGURATION_INVALID"))?;
+    request.configuration.validate().map_err(policy_error)?;
     Ok(request)
 }
 

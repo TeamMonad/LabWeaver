@@ -3102,7 +3102,8 @@
           "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
           "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_OPERATION_IN_PROGRESS"
+          "LW_OPERATION_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "control.platform_configuration.apply",

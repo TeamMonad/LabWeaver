@@ -156,6 +156,185 @@ pub struct PlatformConfigurationDesired {
     pub builder_policy: BuilderSecurityPolicy,
 }
 
+/// Shared Kubernetes placement limits consumed by both Control validation and generated Helm schema.
+pub const DEDICATED_NODE_SELECTOR_MIN_PROPERTIES: usize = 1;
+pub const DEDICATED_NODE_SELECTOR_MAX_PROPERTIES: usize = 16;
+pub const LABEL_PREFIX_MAX_LENGTH: usize = 253;
+pub const LABEL_NAME_MAX_LENGTH: usize = 63;
+pub const LABEL_VALUE_MAX_LENGTH: usize = 63;
+pub const LABEL_KEY_MAX_LENGTH: usize = LABEL_PREFIX_MAX_LENGTH + 1 + LABEL_NAME_MAX_LENGTH;
+pub const LABEL_KEY_PATTERN: &str = r"^([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$";
+/// DNS prefix expression with the same per-segment limit as `valid_label_key`.
+#[must_use]
+pub fn label_prefix_pattern() -> String {
+    let segment = format!(
+        "[a-z0-9]([-a-z0-9]{{0,{}}}[a-z0-9])?",
+        LABEL_VALUE_MAX_LENGTH - 2
+    );
+    format!("^{segment}(\\.{segment})*$")
+}
+pub const LABEL_NAME_PATTERN: &str = r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$";
+pub const LABEL_VALUE_PATTERN: &str = r"^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$";
+
+/// Fields with no execution-side consumer in the current platform deployment.
+pub const PLATFORM_CONFIGURATION_UNSUPPORTED_FIELDS: &[&str] = &[
+    "runtimePolicy.defaultContainerUid",
+    "runtimePolicy.allowedCapabilities",
+    "runtimePolicy.preauthorizations",
+    "runtimePolicy.privilegedExecutionLocation",
+    "builderPolicy.capabilities",
+    "builderPolicy.allowPrivilegeEscalation",
+    "builderPolicy.entitlements",
+];
+
+/// A policy field whose execution-side support is decided by the Control validator.
+#[derive(Clone, Copy)]
+pub struct PlatformConfigurationPolicyDescriptor {
+    pub field: &'static str,
+    pub is_unsupported: fn(&PlatformConfigurationDesired) -> bool,
+    #[cfg(test)]
+    pub rejected_sample: fn(&mut PlatformConfigurationDesired),
+    #[cfg(test)]
+    pub accepted_sample: fn(&mut PlatformConfigurationDesired),
+}
+
+fn unsupported_default_container_uid(configuration: &PlatformConfigurationDesired) -> bool {
+    configuration.runtime_policy.default_container_uid != 0
+}
+
+fn unsupported_allowed_capabilities(configuration: &PlatformConfigurationDesired) -> bool {
+    !configuration.runtime_policy.allowed_capabilities.is_empty()
+}
+
+fn unsupported_preauthorizations(configuration: &PlatformConfigurationDesired) -> bool {
+    !configuration.runtime_policy.preauthorizations.is_empty()
+}
+
+fn unsupported_privileged_execution_location(configuration: &PlatformConfigurationDesired) -> bool {
+    matches!(
+        configuration.runtime_policy.privileged_execution_location,
+        Some(PrivilegedExecutionLocation::VirtualMachineGuest { .. })
+    )
+}
+
+fn unsupported_builder_capabilities(configuration: &PlatformConfigurationDesired) -> bool {
+    !configuration.builder_policy.capabilities.is_empty()
+}
+
+fn unsupported_builder_privilege_escalation(configuration: &PlatformConfigurationDesired) -> bool {
+    configuration.builder_policy.allow_privilege_escalation
+}
+
+fn unsupported_builder_entitlements(configuration: &PlatformConfigurationDesired) -> bool {
+    !configuration.builder_policy.entitlements.is_empty()
+}
+
+pub const PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS: &[PlatformConfigurationPolicyDescriptor] = &[
+    PlatformConfigurationPolicyDescriptor {
+        field: "runtimePolicy.defaultContainerUid",
+        is_unsupported: unsupported_default_container_uid,
+        #[cfg(test)]
+        rejected_sample: |configuration| configuration.runtime_policy.default_container_uid = 1000,
+        #[cfg(test)]
+        accepted_sample: |configuration| configuration.runtime_policy.default_container_uid = 0,
+    },
+    PlatformConfigurationPolicyDescriptor {
+        field: "runtimePolicy.allowedCapabilities",
+        is_unsupported: unsupported_allowed_capabilities,
+        #[cfg(test)]
+        rejected_sample: |configuration| {
+            configuration
+                .runtime_policy
+                .allowed_capabilities
+                .insert(LinuxCapability::SysPtrace);
+        },
+        #[cfg(test)]
+        accepted_sample: |configuration| configuration.runtime_policy.allowed_capabilities.clear(),
+    },
+    PlatformConfigurationPolicyDescriptor {
+        field: "runtimePolicy.preauthorizations",
+        is_unsupported: unsupported_preauthorizations,
+        #[cfg(test)]
+        rejected_sample: |configuration| {
+            configuration
+                .runtime_policy
+                .preauthorizations
+                .push(RuntimePreauthorization {
+                    scope: RuntimePreauthorizationScope::Project {
+                        project_id: ProjectId::new(),
+                    },
+                    capabilities: BTreeSet::new(),
+                    privileged: false,
+                });
+        },
+        #[cfg(test)]
+        accepted_sample: |configuration| configuration.runtime_policy.preauthorizations.clear(),
+    },
+    PlatformConfigurationPolicyDescriptor {
+        field: "runtimePolicy.privilegedExecutionLocation",
+        is_unsupported: unsupported_privileged_execution_location,
+        #[cfg(test)]
+        rejected_sample: |configuration| {
+            configuration.runtime_policy.privileged_allowed = true;
+            configuration.runtime_policy.privileged_execution_location =
+                Some(PrivilegedExecutionLocation::VirtualMachineGuest {
+                    provider_binding: "kubevirt".to_owned(),
+                });
+        },
+        #[cfg(test)]
+        accepted_sample: |configuration| {
+            configuration.runtime_policy.privileged_allowed = true;
+            configuration.runtime_policy.privileged_execution_location =
+                Some(PrivilegedExecutionLocation::DedicatedNodePool {
+                    node_selector: BTreeMap::from([(
+                        String::from("pool"),
+                        String::from("privileged"),
+                    )]),
+                    taint_key: String::from("labweaver.io/privileged"),
+                    taint_value: String::from("true"),
+                });
+        },
+    },
+    PlatformConfigurationPolicyDescriptor {
+        field: "builderPolicy.capabilities",
+        is_unsupported: unsupported_builder_capabilities,
+        #[cfg(test)]
+        rejected_sample: |configuration| {
+            configuration
+                .builder_policy
+                .capabilities
+                .insert(LinuxCapability::SysAdmin);
+        },
+        #[cfg(test)]
+        accepted_sample: |configuration| configuration.builder_policy.capabilities.clear(),
+    },
+    PlatformConfigurationPolicyDescriptor {
+        field: "builderPolicy.allowPrivilegeEscalation",
+        is_unsupported: unsupported_builder_privilege_escalation,
+        #[cfg(test)]
+        rejected_sample: |configuration| {
+            configuration.builder_policy.allow_privilege_escalation = true;
+        },
+        #[cfg(test)]
+        accepted_sample: |configuration| {
+            configuration.builder_policy.allow_privilege_escalation = false;
+        },
+    },
+    PlatformConfigurationPolicyDescriptor {
+        field: "builderPolicy.entitlements",
+        is_unsupported: unsupported_builder_entitlements,
+        #[cfg(test)]
+        rejected_sample: |configuration| {
+            configuration
+                .builder_policy
+                .entitlements
+                .insert(BuilderEntitlement::NetworkHost);
+        },
+        #[cfg(test)]
+        accepted_sample: |configuration| configuration.builder_policy.entitlements.clear(),
+    },
+];
+
 impl PlatformConfigurationDesired {
     pub fn validate(&self) -> Result<(), PlatformConfigurationContractError> {
         let lifecycle = &self.lifecycle;
@@ -183,8 +362,8 @@ impl PlatformConfigurationDesired {
                     taint_key,
                     taint_value,
                 } => {
-                    if node_selector.is_empty()
-                        || node_selector.len() > 16
+                    if node_selector.len() < DEDICATED_NODE_SELECTOR_MIN_PROPERTIES
+                        || node_selector.len() > DEDICATED_NODE_SELECTOR_MAX_PROPERTIES
                         || node_selector
                             .iter()
                             .any(|(k, v)| !valid_label_key(k) || !valid_label_value(v))
@@ -211,13 +390,19 @@ impl PlatformConfigurationDesired {
         {
             return Err(PlatformConfigurationContractError::PreauthorizationInvalid);
         }
+        for descriptor in PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS {
+            if (descriptor.is_unsupported)(self) {
+                return Err(PlatformConfigurationContractError::PolicyUnsupported {
+                    field: descriptor.field,
+                });
+            }
+        }
         Ok(())
     }
 }
-
 fn valid_binding(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 63
+        && value.len() <= LABEL_VALUE_MAX_LENGTH
         && value
             .bytes()
             .all(|v| v.is_ascii_alphanumeric() || b"-_.".contains(&v))
@@ -229,7 +414,7 @@ fn valid_label_key(value: &str) -> bool {
         .map_or((None, value), |(prefix, name)| (Some(prefix), name));
     prefix.is_none_or(|v| {
         !v.is_empty()
-            && v.len() <= 253
+            && v.len() <= LABEL_PREFIX_MAX_LENGTH
             && v.split('.').all(|label| {
                 valid_label_value(label)
                     && label
@@ -241,6 +426,7 @@ fn valid_label_key(value: &str) -> bool {
 
 fn valid_label_value(value: &str) -> bool {
     valid_binding(value)
+        && value.len() <= LABEL_NAME_MAX_LENGTH
         && value.starts_with(|c: char| c.is_ascii_alphanumeric())
         && value.ends_with(|c: char| c.is_ascii_alphanumeric())
 }
@@ -470,6 +656,8 @@ pub enum PlatformConfigurationContractError {
     ExecutionLocationInvalid,
     #[error("LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID")]
     PreauthorizationInvalid,
+    #[error("LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:{field}")]
+    PolicyUnsupported { field: &'static str },
 }
 
 #[cfg(test)]
@@ -498,14 +686,18 @@ mod tests {
             Some(PrivilegedExecutionLocation::VirtualMachineGuest {
                 provider_binding: "kubevirt-dedicated".to_owned(),
             });
-        configuration.validate()?;
+        assert!(matches!(
+            configuration.validate(),
+            Err(PlatformConfigurationContractError::PolicyUnsupported {
+                field: "runtimePolicy.privilegedExecutionLocation"
+            })
+        ));
         assert_eq!(configuration.builder_policy, builder);
         Ok(())
     }
 
     #[test]
-    fn runtime_policy_rejects_unknown_capability_location_and_excess_preauthorization()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn runtime_policy_rejects_unknown_capability_location_and_excess_preauthorization() {
         assert!(serde_json::from_str::<LinuxCapability>("\"ALL\"").is_err());
         assert!(serde_json::from_str::<LinuxCapability>("\"MADE_UP\"").is_err());
         assert!(
@@ -522,21 +714,123 @@ mod tests {
                 scope: RuntimePreauthorizationScope::Project {
                     project_id: ProjectId::new(),
                 },
-                capabilities: BTreeSet::from([LinuxCapability::SysAdmin]),
+                capabilities: BTreeSet::new(),
                 privileged: false,
             });
-        assert!(configuration.validate().is_err());
-        configuration
-            .runtime_policy
-            .allowed_capabilities
-            .insert(LinuxCapability::SysAdmin);
-        configuration.validate()?;
+        assert!(matches!(
+            configuration.validate(),
+            Err(PlatformConfigurationContractError::PolicyUnsupported {
+                field: "runtimePolicy.preauthorizations"
+            })
+        ));
         configuration
             .runtime_policy
             .preauthorizations
             .push(configuration.runtime_policy.preauthorizations[0].clone());
         assert!(configuration.validate().is_err());
+    }
+
+    #[test]
+    fn location_samples_match_rust_validation() -> Result<(), Box<dyn std::error::Error>> {
+        for sample in serde_json::from_str::<Vec<serde_json::Value>>(include_str!(
+            "../../../tests/fixtures/platform-configuration-location-cases.json"
+        ))? {
+            let mut configuration = PlatformConfigurationDesired::default();
+            configuration.runtime_policy.privileged_allowed = true;
+            configuration.runtime_policy.privileged_execution_location =
+                Some(serde_json::from_value(sample["location"].clone())?);
+            let accepted = sample["accepted"].as_bool().ok_or("accepted")?;
+            assert_eq!(
+                configuration.validate().is_ok(),
+                accepted,
+                "{}",
+                sample["name"]
+            );
+        }
         Ok(())
+    }
+
+    #[test]
+    fn dedicated_node_pool_constraints_match_deployment_samples() {
+        fn configuration(
+            node_selector: BTreeMap<String, String>,
+            taint_key: &str,
+            taint_value: &str,
+        ) -> PlatformConfigurationDesired {
+            let mut configuration = PlatformConfigurationDesired::default();
+            configuration.runtime_policy.privileged_allowed = true;
+            configuration.runtime_policy.privileged_execution_location =
+                Some(PrivilegedExecutionLocation::DedicatedNodePool {
+                    node_selector,
+                    taint_key: taint_key.to_owned(),
+                    taint_value: taint_value.to_owned(),
+                });
+            configuration
+        }
+
+        let valid = configuration(
+            BTreeMap::from([(String::from("pool"), String::from("privileged"))]),
+            "labweaver.io/taint",
+            "reserved",
+        );
+        assert!(valid.validate().is_ok());
+        for invalid in [
+            configuration(BTreeMap::new(), "labweaver.io/taint", "reserved"),
+            configuration(
+                (0..17)
+                    .map(|i| (format!("pool{i}"), String::from("x")))
+                    .collect(),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("INVALID KEY"), String::from("x"))]),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("pool"), String::from("bad value"))]),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(format!("{}/name", "a".repeat(254)), String::from("x"))]),
+                "labweaver.io/taint",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("pool"), String::from("x"))]),
+                "",
+                "reserved",
+            ),
+            configuration(
+                BTreeMap::from([(String::from("pool"), String::from("x"))]),
+                "labweaver.io/taint",
+                "bad value",
+            ),
+        ] {
+            assert!(matches!(
+                invalid.validate(),
+                Err(PlatformConfigurationContractError::ExecutionLocationInvalid)
+            ));
+        }
+    }
+
+    #[test]
+    fn every_policy_descriptor_rejects_its_sample_and_accepts_its_supported_sample() {
+        for descriptor in PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS {
+            let mut rejected = PlatformConfigurationDesired::default();
+            (descriptor.rejected_sample)(&mut rejected);
+            assert!(matches!(
+                rejected.validate(),
+                Err(PlatformConfigurationContractError::PolicyUnsupported { field })
+                    if field == descriptor.field
+            ));
+
+            let mut accepted = PlatformConfigurationDesired::default();
+            (descriptor.accepted_sample)(&mut accepted);
+            assert!(accepted.validate().is_ok(), "{}", descriptor.field);
+        }
     }
 
     #[test]

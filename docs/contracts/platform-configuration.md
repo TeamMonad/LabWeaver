@@ -72,6 +72,8 @@ JSON 使用 `application/json`。高级 YAML 使用 `application/yaml`。两个�
 
 普通容器 capabilities 使用 [Linux UAPI 名称](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h)，不接受 `ALL` 或未知名称。项目/课程预授权不能超过平台允许清单，同一 scope 不能重复。特权准入必须声明专用节点池及其 selector/taint，或明确的 VM guest provider binding。仅声明 namespace 不构成执行位置。
 
+专用节点池的 nodeSelector 必须有 1–16 项。key 的可选 DNS prefix 总长最多 253 字符，每个点分段必须有 1–63 个小写字母、数字或连字符，段首尾只能为字母或数字；斜线后的 name 最长 63 字符。taintKey 使用相同规则。selector value 与 taintValue 最长 63 字符且必须非空：这是 LabWeaver 比原生 Kubernetes 更严格的 fail-closed 限制。Rust 校验与 Helm 原生 schema 共用长度常量；共享样例覆盖单段及中间段 63/64 字符边界。
+
 配置解析只验证声明和范围，不能证明节点已经专用或 VM guest 可用。#207 消费者必须验证实际对象授权、执行位置、Pod Security 和调度边界。此接口不会放宽 namespace 标签。
 
 `runtimePolicy` 与 `builderPolicy` 独立。更改特权运行或 runtime capabilities 不会增加 builder capabilities、提权或 entitlements。`impact` 比较 desired 与最后验证的 applied，分别提示运行、构建和生命周期设置变化。它不提供虚构的受影响资源数量。

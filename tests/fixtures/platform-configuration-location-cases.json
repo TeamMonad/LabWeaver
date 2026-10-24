@@ -1,0 +1,192 @@
+[
+  {
+    "name": "valid dedicated node pool",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "privileged"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": true
+  },
+  {
+    "name": "63 character name",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": true
+  },
+  {
+    "name": "64 character name",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "253 character prefix",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": true
+  },
+  {
+    "name": "254 character prefix",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "empty selector",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "17 selector entries",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool0": "x", "pool1": "x", "pool2": "x", "pool3": "x", "pool4": "x", "pool5": "x", "pool6": "x", "pool7": "x", "pool8": "x", "pool9": "x", "pool10": "x", "pool11": "x", "pool12": "x", "pool13": "x", "pool14": "x", "pool15": "x", "pool16": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "uppercase prefix",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"Example.com/name": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "prefix starts with hyphen",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"-example.com/name": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "prefix has consecutive dots",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"example..com/name": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "empty value",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": ""},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "empty taint key",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "invalid taint value",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "labweaver.io/taint",
+      "taintValue": "bad value"
+    },
+    "accepted": false
+  },
+  {
+    "name": "selector prefix segment 63",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name": "x"},
+      "taintKey": "pool",
+      "taintValue": "reserved"
+    },
+    "accepted": true
+  },
+  {
+    "name": "selector prefix segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name": "x"},
+      "taintKey": "pool",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "selector prefix middle segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"first.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.last/name": "x"},
+      "taintKey": "pool",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "taint prefix segment 63",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name",
+      "taintValue": "reserved"
+    },
+    "accepted": true
+  },
+  {
+    "name": "taint prefix segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "taint prefix middle segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "first.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.last/name",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  }
+]

@@ -495,21 +495,29 @@ def _configuration_version(
     except (OSError, subprocess.SubprocessError) as error:
         raise BundleError("LW_BUNDLE_CONFIGURATION_INVALID") from error
     if result.returncode:
+        stderr = result.stderr.decode(errors="replace")
         code = "LW_BUNDLE_CONFIGURATION_INVALID"
         for diagnostic in (
             "LW_BUNDLE_CONFIGURATION_DIGEST_MISMATCH",
             "LW_BUNDLE_CONFIGURATION_LIMIT",
             "LW_BUNDLE_CONFIGURATION_IO_FAILED",
             "LW_BUNDLE_INITIAL_REVISION_INVALID",
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED",
         ):
-            if diagnostic.encode() in result.stderr:
+            if diagnostic in stderr:
                 code = diagnostic
+                break
+        if code == "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED":
+            field = re.search(r"LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:([A-Za-z0-9_.]+)", stderr)
+            if field:
+                code = f"{code}:{field.group(1)}"
         raise BundleError(code)
+
+
     try:
         return json.loads(result.stdout)
     except (ValueError, UnicodeError) as error:
         raise BundleError("LW_BUNDLE_CONFIGURATION_INVALID") from error
-
 
 def _workload_inputs(
     application: dict[str, Any], manifest: dict[str, Any], names: set[str] | None = None
@@ -621,76 +629,13 @@ def _settings(model: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
     return dict(document, configurationMode=mode)
 
 def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
-    """Return the non-secret policy projection from the validated Rust model."""
+    """Project the configuration already validated by the Rust Control contract."""
     configuration = version.get("configuration")
     digest = version.get("configurationSha256")
     if not isinstance(configuration, dict):
         raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_INVALID: configuration")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise BundleError("LW_BUNDLE_CONFIGURATION_POLICY_INVALID: configurationSha256")
-    required_groups = {
-        "lifecycle": {
-            "readOnlyRetentionSeconds",
-            "detailedLogRetentionSeconds",
-            "expiryReminderSeconds",
-            "preemptionGraceSeconds",
-        },
-        "runtimePolicy": {
-            "defaultContainerUid",
-            "allowedCapabilities",
-            "preauthorizations",
-            "privilegedAllowed",
-            "privilegedExecutionLocation",
-        },
-        "builderPolicy": {
-            "capabilities",
-            "allowPrivilegeEscalation",
-            "entitlements",
-        },
-    }
-    for group, fields in required_groups.items():
-        value = configuration.get(group)
-        if not isinstance(value, dict):
-            raise BundleError(
-                f"LW_BUNDLE_CONFIGURATION_POLICY_INVALID: missing {group}"
-            )
-        missing = sorted(fields - set(value))
-        if missing:
-            raise BundleError(
-                "LW_BUNDLE_CONFIGURATION_POLICY_INVALID: "
-                f"{group} missing {','.join(missing)}"
-            )
-    runtime = configuration["runtimePolicy"]
-    builder = configuration["builderPolicy"]
-    if runtime["defaultContainerUid"] != 0:
-        raise BundleError(
-            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
-            f"runtimePolicy.defaultContainerUid={runtime['defaultContainerUid']} has no "
-            "execution-side consumer (see #207)"
-        )
-    unsupported = (
-        (runtime["allowedCapabilities"], "runtimePolicy.allowedCapabilities"),
-        (runtime["preauthorizations"], "runtimePolicy.preauthorizations"),
-        (builder["capabilities"], "builderPolicy.capabilities"),
-        (builder["entitlements"], "builderPolicy.entitlements"),
-    )
-    for value, field in unsupported:
-        if value:
-            raise BundleError(
-                "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
-                f"{field} has no execution-side consumer (see #207)"
-            )
-    if builder["allowPrivilegeEscalation"]:
-        raise BundleError(
-            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
-            "builderPolicy.allowPrivilegeEscalation has no execution-side consumer (see #207)"
-        )
-    location = runtime["privilegedExecutionLocation"]
-    if location is not None and location.get("kind") != "dedicated_node_pool":
-        raise BundleError(
-            "LW_BUNDLE_CONFIGURATION_POLICY_UNSUPPORTED: "
-            "runtimePolicy.privilegedExecutionLocation has no execution-side consumer (see #207)"
-        )
     return {
         "apiVersion": "deploy.labweaver.io/platform-policy/v1",
         "configurationSha256": digest,
