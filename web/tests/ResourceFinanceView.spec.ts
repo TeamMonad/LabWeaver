@@ -4,9 +4,15 @@ import { canonicalRateAmount, equivalentRatePrice, rateVersionState } from '@/ut
 import { navigationGroupsForRoles, navigationTarget } from '@/utils/navigation'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
 import {
+  createCreditAdminOperation,
   createResourceRate,
   endResourceRate,
+  estimateProjectBuildCost,
+  estimateProjectResourceCost,
+  getProjectCredits,
   listEnvironments,
+  listProjectCreditHolds,
+  listProjectCreditLedger,
   listProjectResourceLeases,
   listProjectResourceRequests,
   listProjectResourceUsage,
@@ -18,9 +24,15 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
+    createCreditAdminOperation: vi.fn(),
     createResourceRate: vi.fn(),
     endResourceRate: vi.fn(),
+    estimateProjectBuildCost: vi.fn(),
+    estimateProjectResourceCost: vi.fn(),
+    getProjectCredits: vi.fn(),
     listEnvironments: vi.fn(),
+    listProjectCreditHolds: vi.fn(),
+    listProjectCreditLedger: vi.fn(),
     listProjectResourceLeases: vi.fn(),
     listProjectResourceRequests: vi.fn(),
     listProjectResourceUsage: vi.fn(),
@@ -64,6 +76,46 @@ const routerMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/client', () => ({ apiClient: api }))
+
+function mockCreditsEmpty() {
+  vi.mocked(getProjectCredits).mockResolvedValue({
+    data: {
+      projectId: 'project-new',
+      currency: 'CREDITS',
+      balance: '0.000000',
+      available: '0.000000',
+      reserved: '0.000000',
+      spent: '0.000000',
+      pending: '0.000000',
+      unknown: '0.000000',
+      unknownCount: 0,
+      platformAbsorbed: '0.000000',
+      revision: 0,
+    },
+    error: undefined,
+  } as never)
+  vi.mocked(listProjectCreditLedger).mockResolvedValue({
+    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    error: undefined,
+  } as never)
+  vi.mocked(listProjectCreditHolds).mockResolvedValue({
+    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    error: undefined,
+  } as never)
+  vi.mocked(createCreditAdminOperation).mockResolvedValue({ data: [], error: undefined } as never)
+  vi.mocked(estimateProjectResourceCost).mockResolvedValue({
+    data: {
+      projectId: 'project-new',
+      input: {
+        compute: null,
+        storage: null,
+      },
+      lines: [],
+      total: { currency: 'CREDITS', amount: '0.000000' },
+    },
+    error: undefined,
+  } as never)
+}
 
 vi.mock('@/composables/useProjects', async () => {
   const { reactive } = await import('vue')
@@ -190,6 +242,7 @@ describe('ResourceFinanceView', () => {
     projectMocks.state!.projects = { kind: 'success', data: projectMocks.catalog }
     projectMocks.state!.selectedProjectId = 'project-new'
     projectMocks.state!.selectedProject = projectMocks.catalog[0]
+    mockCreditsEmpty()
   })
 
   it('keeps global rates usable with no project and does not infer project access from a global list', async () => {
@@ -204,8 +257,16 @@ describe('ResourceFinanceView', () => {
     vi.mocked(createResourceRate).mockResolvedValue({ data: existingRate as never, error: undefined as never })
     await form.trigger('submit')
     await flushPromises()
-    expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ gpuClass: 'nvidia-v100-2q', gpuMode: 'vm_vgpu', unitQuantity: 1, unitPrice: { amount: '0.250000', currency: 'USD' } }) }))
+    expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ gpuClass: 'nvidia-v100-2q', gpuMode: 'vm_vgpu', unitQuantity: 1, unitPrice: { amount: '0.250000', currency: 'CREDITS' } }) }))
     expect(api.get).not.toHaveBeenCalled()
+  })
+
+  it('embeds ProjectCreditsPanel when a project is selected', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('项目 Credits 账户')
+    expect(wrapper.find('[data-testid="credits-account-summary"]').exists()).toBe(true)
+    expect(getProjectCredits).toHaveBeenCalled()
   })
 
   it('shows measured and unknown project usage with human targets and advanced identifiers', async () => {
@@ -320,7 +381,7 @@ describe('ResourceFinanceView', () => {
     await flushPromises()
     expect(createResourceRate).toHaveBeenCalledWith({ headers: { 'Idempotency-Key': expect.any(String) }, body: {
       unit: 'gpu_unit_second', unitQuantity: 1, gpuClass: 'nvidia-cuda-shared', gpuMode: 'container_time_slice',
-      unitPrice: { currency: 'USD', amount: '0.000100' }, effectiveFrom: new Date('2030-01-01T00:00').toISOString(), effectiveUntil: null,
+      unitPrice: { currency: 'CREDITS', amount: '0.000100' }, effectiveFrom: new Date('2030-01-01T00:00').toISOString(), effectiveUntil: null,
     } })
   })
 
@@ -335,12 +396,120 @@ describe('ResourceFinanceView', () => {
     await form.get('select[aria-label="计费单位"]').setValue(unit)
     await form.get('input[aria-label="费率单价"]').setValue('9007199254740993.123457')
     await form.get('input[data-app-datetime]').setValue('2030-01-01T00:00')
-    expect(form.get('[role="status"]').text()).toContain(`9007199254740993.123457 USD / ${label}`)
+    expect(form.get('[role="status"]').text()).toContain(`9007199254740993.123457 CREDITS / ${label}`)
     expect(createResourceRate).not.toHaveBeenCalled()
     vi.mocked(createResourceRate).mockResolvedValue({ data: existingRate as never, error: undefined as never })
     await form.trigger('submit')
     await flushPromises()
-    expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ unit, unitQuantity: quantity, gpuClass: null, gpuMode: null, unitPrice: { amount: '9007199254740993.123457', currency: 'USD' } }) }))
+    expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ unit, unitQuantity: quantity, gpuClass: null, gpuMode: null, unitPrice: { amount: '9007199254740993.123457', currency: 'CREDITS' } }) }))
+  })
+
+  it('requires a builder for build-second rates and submits it with the per-hour quantity', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="resource-rate-form"]')
+    await form.get('select[aria-label="计费单位"]').setValue('build_second')
+    await form.get('input[aria-label="费率单价"]').setValue('1.2')
+    await form.get('input[data-app-datetime]').setValue('2030-01-01T00:00')
+    const submit = form.get('button[type="submit"]')
+    expect(submit.attributes('disabled')).toBeDefined()
+    await form.get('input[aria-label="构建器标识"]').setValue('buildkit primary')
+    expect(submit.attributes('disabled')).toBeDefined()
+    await form.get('input[aria-label="构建器标识"]').setValue('buildkit-primary-v1')
+    expect(submit.attributes('disabled')).toBeUndefined()
+    vi.mocked(createResourceRate).mockResolvedValue({ data: existingRate as never, error: undefined as never })
+    await form.trigger('submit')
+    await flushPromises()
+    expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({
+      unit: 'build_second', unitQuantity: 3600, builderBinding: 'buildkit-primary-v1',
+      unitPrice: { amount: '1.200000', currency: 'CREDITS' },
+    }) }))
+    const body = vi.mocked(createResourceRate).mock.calls[0]![0]!.body
+    expect(body).not.toHaveProperty('modelBinding')
+  })
+
+  it('requires model identity and a positive per-call preauthorization cap for model token rates', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="resource-rate-form"]')
+    await form.get('select[aria-label="计费单位"]').setValue('llm_output_token')
+    await form.get('input[aria-label="费率单价"]').setValue('15')
+    await form.get('input[data-app-datetime]').setValue('2030-01-01T00:00')
+    await form.get('input[aria-label="模型标识"]').setValue('claude-sonnet-4')
+    const submit = form.get('button[type="submit"]')
+    await form.get('input[aria-label="单次调用最多预占"]').setValue('0')
+    expect(submit.attributes('disabled')).toBeDefined()
+    await form.get('input[aria-label="单次调用最多预占"]').setValue('2.5')
+    expect(submit.attributes('disabled')).toBeUndefined()
+    expect(form.text()).toContain('四类费率都配置后')
+    vi.mocked(createResourceRate).mockResolvedValue({ data: existingRate as never, error: undefined as never })
+    await form.trigger('submit')
+    await flushPromises()
+    expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({
+      unit: 'llm_output_token', unitQuantity: 1_000_000, modelBinding: 'claude-sonnet-4', maxPreauthorization: '2.500000',
+      unitPrice: { amount: '15.000000', currency: 'CREDITS' },
+    }) }))
+  })
+
+  it('warns that non-CREDITS rates cannot fund project Credits admission', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="resource-rate-form"]')
+    expect(form.text()).not.toContain('项目 Credits 只按 CREDITS 费率')
+    await form.get('input[maxlength="32"]').setValue('USD')
+    expect(form.text()).toContain('项目 Credits 只按 CREDITS 费率')
+  })
+
+  it('offers build estimates only for builders that have a build rate and explains GPU unavailability', async () => {
+    vi.mocked(listResourceGpuCatalog).mockResolvedValue({ data: undefined as never, error: { diagnosticCode: 'GPU_CATALOG_DOWN', detail: 'down', retryable: true } as never })
+    const wrapper = mountView()
+    await flushPromises()
+    const panel = wrapper.get('[data-testid="project-resource-cost-estimate"]')
+    expect(panel.get('[data-testid="estimate-gpu-unavailable"]').text()).toContain('GPU 目录暂时无法读取')
+    expect(panel.get('[data-testid="build-estimate-no-rate"]').text()).toContain('还没有镜像构建费率')
+    expect(panel.get('[data-testid="build-cost-estimate-form"] button[type="submit"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('estimates a build on a rated builder and shows the platform total without recomputing it', async () => {
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [
+      { ...existingRate, id: 'rate-build', unit: 'build_second', unitQuantity: 3600, gpuClass: null, gpuMode: null, builderBinding: 'buildkit-primary-v1', unitPrice: { currency: 'CREDITS', amount: '1.200000' } },
+    ] as never, error: undefined as never })
+    vi.mocked(estimateProjectBuildCost).mockResolvedValue({ data: {
+      projectId: 'project-new', input: { builderBinding: 'buildkit-primary-v1', from: '2030-01-01T00:00:00.000Z', maxDurationMilliseconds: 1_800_000 },
+      until: '2030-01-01T00:30:00.000Z', total: { currency: 'CREDITS', amount: '0.600000' },
+      lines: [{ rateId: 'rate-build', rateRevision: 1, unit: 'build_second', quantity: 1_800_000, quantityDivisor: 1000, unitQuantity: 3600,
+        unitPrice: { currency: 'CREDITS', amount: '1.200000' }, amount: { currency: 'CREDITS', amount: '0.600000' } }],
+    } as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="build-cost-estimate-form"]')
+    expect((form.get('select[aria-label="构建器"]').element as HTMLSelectElement).value).toBe('buildkit-primary-v1')
+    await form.trigger('submit')
+    await flushPromises()
+    expect(estimateProjectBuildCost).toHaveBeenCalledWith({
+      path: { projectId: 'project-new' },
+      body: expect.objectContaining({ builderBinding: 'buildkit-primary-v1', maxDurationMilliseconds: 1_800_000 }),
+    })
+    const panel = wrapper.get('[data-testid="project-resource-cost-estimate"]')
+    expect(panel.get('[data-testid="cost-estimate-total"]').text()).toBe('0.600000 CREDITS')
+    expect(panel.text()).toContain('镜像构建 · 1,800 秒')
+  })
+
+  it('shows a missing-rate estimate as a Chinese reason before the diagnostic code, never as zero', async () => {
+    vi.mocked(estimateProjectResourceCost).mockResolvedValue({ data: undefined as never, error: {
+      type: 'about:blank', title: 'Conflict', status: 409, detail: 'rate missing', diagnosticCode: 'LW_RESOURCE_RATE_UNCONFIGURED', requestId: 'req-estimate-1', retryable: false,
+    } as never })
+    const wrapper = mountView()
+    await flushPromises()
+    const panel = wrapper.get('[data-testid="project-resource-cost-estimate"]')
+    await panel.get('form').trigger('submit')
+    await flushPromises()
+    const banner = panel.get('.diagnostic-banner')
+    expect(banner.get('.diagnostic-message').text()).toContain('缺少适用费率')
+    expect(banner.get('.diagnostic-details').text()).toContain('LW_RESOURCE_RATE_UNCONFIGURED')
+    expect(banner.get('.diagnostic-details').text()).toContain('req-estimate-1')
+    expect(banner.text().indexOf('缺少适用费率')).toBeLessThan(banner.text().indexOf('LW_RESOURCE_RATE_UNCONFIGURED'))
+    expect(panel.find('[data-testid="cost-estimate-total"]').exists()).toBe(false)
   })
 
   it('retries an unknown create response with the original payload and intent key even after editing the draft', async () => {

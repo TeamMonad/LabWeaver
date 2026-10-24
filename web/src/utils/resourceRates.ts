@@ -1,21 +1,27 @@
 import type { ResourceBillingUnit, ResourceRateSchema } from '@/generated/contracts'
 
 /**
- * Display metadata for billing units. Keys are derived from this object (includes
- * `build_second`) so TypeScript stays green before the generated SDK lands the new unit.
- * Existing four units keep the same base/label/quantity for Finance regressions.
+ * Display metadata for billing units: `quantity` base units make one `label`
+ * so administrators enter familiar prices (core-hour, GiB-hour, 1M tokens).
  */
 export const rateDisplayUnits = {
   cpu_millicore_second: { base: 'CPU millicore 秒', label: '核心小时', quantity: 1000n * 3600n },
   memory_byte_second: { base: '内存字节秒', label: 'GiB 小时', quantity: 1024n ** 3n * 3600n },
   storage_byte_second: { base: '存储字节秒', label: 'GiB 小时', quantity: 1024n ** 3n * 3600n },
   gpu_unit_second: { base: 'GPU 分配单位秒', label: 'GPU 分配单位秒', quantity: 1n },
-  build_second: { base: '构建秒', label: '构建秒', quantity: 1n },
-  llm_input_token: { base: 'LLM 输入 token', label: 'LLM 输入 token', quantity: 1n },
-  llm_output_token: { base: 'LLM 输出 token', label: 'LLM 输出 token', quantity: 1n },
-  llm_cache_read_token: { base: 'LLM cache-read token', label: 'LLM cache-read token', quantity: 1n },
-  llm_cache_write_token: { base: 'LLM cache-write token', label: 'LLM cache-write token', quantity: 1n },
-} as const satisfies Record<string, { readonly base: string; readonly label: string; readonly quantity: bigint }>
+  build_second: { base: '构建秒', label: '构建小时', quantity: 3600n },
+  llm_input_token: { base: '输入 token', label: '百万输入 token', quantity: 1_000_000n },
+  llm_output_token: { base: '输出 token', label: '百万输出 token', quantity: 1_000_000n },
+  llm_cache_read_token: { base: '缓存读取 token', label: '百万缓存读取 token', quantity: 1_000_000n },
+  llm_cache_write_token: { base: '缓存写入 token', label: '百万缓存写入 token', quantity: 1_000_000n },
+} as const satisfies Record<ResourceBillingUnit, { readonly base: string; readonly label: string; readonly quantity: bigint }>
+
+export const modelTokenUnits = ['llm_input_token', 'llm_output_token', 'llm_cache_read_token', 'llm_cache_write_token'] as const satisfies readonly ResourceBillingUnit[]
+
+/** Builder and model identities are opaque deployment identifiers: non-empty, no whitespace, bounded length (Resource rule). */
+export function validRateBinding(value: string, maxLength: number): boolean {
+  return value.length > 0 && value.length <= maxLength && !/\s/.test(value)
+}
 
 export type RateDisplayBillingUnit = keyof typeof rateDisplayUnits
 

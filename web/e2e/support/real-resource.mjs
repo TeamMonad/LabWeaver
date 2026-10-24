@@ -803,7 +803,7 @@ export async function releaseProjectLeaseByUi(page, { projectName, projectId = n
  */
 export async function assertProjectChargesByUi(page, project) {
   await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
+  await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   const projectSelect = page.locator('.project-strip select')
   await expect(projectSelect.locator(`option[value="${project.id}"]`)).toHaveCount(1, { timeout: RESOURCE_PAGE_TIMEOUT_MS })
   await projectSelect.selectOption(project.id)
@@ -820,7 +820,7 @@ export async function assertProjectChargesByUi(page, project) {
 
   const firstCharge = charges.first()
   const total = ((await firstCharge.locator('.charge-main > strong').textContent()) ?? '').trim()
-  expect(total, 'LW_ACCEPTANCE_FINANCE_CHARGE_TOTAL_INVALID').toMatch(/^\d+\.\d{6}\s+USD$/)
+  expect(total, 'LW_ACCEPTANCE_FINANCE_CHARGE_TOTAL_INVALID').toMatch(/^\d+\.\d{6}\s+CREDITS$/)
   const settlement = ((await firstCharge.locator('.charge-actions .state-chip').textContent()) ?? '').trim()
   expect(['已结算', '待结算', '未结算'], 'LW_ACCEPTANCE_FINANCE_SETTLEMENT_INVALID').toContain(settlement)
   if (settlement === '已结算') {
@@ -832,7 +832,7 @@ export async function assertProjectChargesByUi(page, project) {
     return { kind: 'usage', total, settlement, spent: null }
   }
   const spent = ((await budget.locator('div').filter({ hasText: '已花费' }).locator('strong').textContent()) ?? '').trim()
-  expect(spent, 'LW_ACCEPTANCE_FINANCE_SPENT_INVALID').toMatch(/^\d+\.\d{6}\s+USD$/)
+  expect(spent, 'LW_ACCEPTANCE_FINANCE_SPENT_INVALID').toMatch(/^\d+\.\d{6}\s+CREDITS$/)
   return { kind: 'usage', total, settlement, spent }
 }
 

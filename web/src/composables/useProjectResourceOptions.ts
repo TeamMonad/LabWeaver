@@ -2,6 +2,8 @@ import { computed, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import type {
   EnvironmentSummary,
   GpuAllocationMode,
+  ResourceBillingUnit,
+  ResourceRateSchema,
 } from '@/generated/contracts'
 import { apiClient } from '@/api/client'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
@@ -23,17 +25,15 @@ export interface ResourceGpuCatalogOption {
   active: boolean
 }
 
-export interface ResourceRateOption {
-  id: string
-  revision: number
-  unit: 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second'
-  unitQuantity: number
-  gpuClass?: string | null
-  gpuMode?: GpuAllocationMode | null
-  unitPrice: { currency: string; amount: string }
-  effectiveFrom: string
-  effectiveUntil?: string | null
-}
+/** A Resource rate version as returned by the generated contract. */
+export type ResourceRateOption = ResourceRateSchema
+
+/**
+ * Units that price a resource request (compute, storage, GPU). Build and model
+ * token rates are valid list entries too, but they never price a request, so
+ * the request page keeps only these.
+ */
+const RESOURCE_REQUEST_UNITS: readonly ResourceBillingUnit[] = ['cpu_millicore_second', 'memory_byte_second', 'storage_byte_second', 'gpu_unit_second']
 
 export interface ResourceGpuRateSelection {
   rate: ResourceRateOption | null
@@ -118,34 +118,6 @@ function isCatalogOption(value: unknown): value is ResourceGpuCatalogOption {
   )
 }
 
-function isRateOption(value: unknown): value is ResourceRateOption {
-  if (!value || typeof value !== 'object') return false
-  const item = value as Record<string, unknown>
-  const price = item.unitPrice
-  const unit = String(item.unit)
-  const gpuMode = item.gpuMode
-  const hasGpuDimension = typeof item.gpuClass === 'string' && gpuMode !== null && gpuMode !== undefined
-  const validGpuMode = gpuMode === null || gpuMode === undefined || ['exclusive', 'container_time_slice', 'vm_vgpu'].includes(String(gpuMode))
-  const effectiveUntil = item.effectiveUntil
-  return (
-    typeof item.id === 'string' &&
-    Number.isSafeInteger(item.revision) &&
-    Number(item.revision) > 0 &&
-    ['cpu_millicore_second', 'memory_byte_second', 'storage_byte_second', 'gpu_unit_second'].includes(unit) &&
-    validGpuMode &&
-    ((unit === 'gpu_unit_second' && hasGpuDimension) || (unit !== 'gpu_unit_second' && !hasGpuDimension)) &&
-    Number.isSafeInteger(item.unitQuantity) &&
-    Number(item.unitQuantity) > 0 &&
-    typeof price === 'object' &&
-    price !== null &&
-    typeof (price as Record<string, unknown>).currency === 'string' &&
-    typeof (price as Record<string, unknown>).amount === 'string' &&
-    typeof item.effectiveFrom === 'string' &&
-    Number.isFinite(Date.parse(item.effectiveFrom)) &&
-    (effectiveUntil === null || effectiveUntil === undefined || (typeof effectiveUntil === 'string' && Number.isFinite(Date.parse(effectiveUntil))))
-  )
-}
-
 export function useProjectResourceOptions(
   projectId: Ref<string | null>,
   courseId: Ref<string | null | undefined>,
@@ -196,7 +168,7 @@ export function useProjectResourceOptions(
     const [releaseResult, catalogResult, rateResult] = await Promise.all([
       releasePromise,
       apiClient.get<unknown[], unknown>({ url: '/api/v1/resource/gpu-catalog' }),
-      apiClient.get<unknown[], unknown>({ url: '/api/v1/resource/rates' }),
+      apiClient.get<ResourceRateSchema[], unknown>({ url: '/api/v1/resource/rates' }),
     ])
     if (generation !== loadGeneration) return
 
@@ -242,10 +214,7 @@ export function useProjectResourceOptions(
     } else if (!Array.isArray(rateResult.data)) {
       rates.value = { kind: 'error', diagnostic: makeDiagnostic('RESOURCE_RATES_INVALID', 'Resource 返回了无法识别的费率响应。', false) }
     } else {
-      const items = rateResult.data.filter(isRateOption)
-      rates.value = items.length === rateResult.data.length
-        ? stateFromItems(items)
-        : { kind: 'error', diagnostic: makeDiagnostic('RESOURCE_RATES_INVALID', 'Resource 返回了无法识别的费率。', false) }
+      rates.value = stateFromItems(rateResult.data.filter((rate) => RESOURCE_REQUEST_UNITS.includes(rate.unit)))
     }
   }
 

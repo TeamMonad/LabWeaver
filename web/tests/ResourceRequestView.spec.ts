@@ -3,6 +3,34 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import ResourceRequestView from '@/views/researcher/ResourceRequestView.vue'
+import {
+  createCreditAdminOperation,
+  estimateProjectResourceCost,
+  getProjectCredits,
+  listProjectCreditHolds,
+  listProjectCreditLedger,
+} from '@/generated/contracts'
+
+vi.mock('@/generated/contracts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/generated/contracts')>()
+  return {
+    ...actual,
+    createCreditAdminOperation: vi.fn(),
+    estimateProjectResourceCost: vi.fn(),
+    getProjectCredits: vi.fn(),
+    listProjectCreditHolds: vi.fn(),
+    listProjectCreditLedger: vi.fn(),
+  }
+})
+
+const creditAccount = {
+  projectId: 'project-1', currency: 'CREDITS', balance: '20.000000', available: '15.000000', reserved: '5.000000',
+  spent: '3.000000', pending: '5.000000', unknown: '0.000000', unknownCount: 0, platformAbsorbed: '0.000000', revision: 2,
+}
+const grantEntry = {
+  id: 'entry-grant', kind: 'grant', operationId: 'op-1', reason: '课程额度', balanceDelta: '20.000000', reservedDelta: '0.000000',
+  spentDelta: '0.000000', platformAbsorbed: '0.000000', createdAt: '2026-10-12T08:00:00.000Z', rateSnapshots: [],
+}
 
 const mocks = vi.hoisted(() => ({
   requests: { kind: 'success', data: [] as unknown[] } as unknown,
@@ -135,6 +163,11 @@ describe('ResourceRequestView', () => {
     mocks.gpuRateSelection.mockReset()
     mocks.gpuRateSelection.mockReturnValue({ rate: null, ambiguous: false })
     authState.user.value = null
+    vi.mocked(getProjectCredits).mockReset().mockResolvedValue({ data: creditAccount, error: undefined } as never)
+    vi.mocked(listProjectCreditLedger).mockReset().mockResolvedValue({ data: { items: [grantEntry], page: 1, pageSize: 25, hasMore: false }, error: undefined } as never)
+    vi.mocked(listProjectCreditHolds).mockReset().mockResolvedValue({ data: { items: [], page: 1, pageSize: 25, hasMore: false }, error: undefined } as never)
+    vi.mocked(createCreditAdminOperation).mockReset()
+    vi.mocked(estimateProjectResourceCost).mockReset()
     projectsState.selectedProjectId = projectOne.id
     projectsState.selectedProject = projectOne
   })
@@ -342,6 +375,8 @@ describe('ResourceRequestView', () => {
     expect(wrapper.text()).toContain('已保留先前选择')
     expect(gpuSelect.findAll('option').map((option) => option.text())).toContain('先前选择的 GPU（当前不可用）')
     expect((submit.element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.get('[data-testid="request-estimate-gpu-blocked"]').text()).toContain('所选 GPU 当前不可用')
+    expect((wrapper.findAll('button').find((button) => button.text() === '估算费用')!.element as HTMLButtonElement).disabled).toBe(true)
 
     catalogState.kind = 'success'
     catalogState.data = []
@@ -439,5 +474,51 @@ describe('ResourceRequestView', () => {
     expect(wrapper.text()).toContain('PROJECT_CONTEXT_INVALID')
     expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('')
     expect(projectsState.selectedProjectId).toBe('project-1')
+  })
+
+  it('shows project Credits read-only to an ordinary member', async () => {
+    authState.user.value = { profile: { roles: ['student'] } }
+    const wrapper = await mountView()
+    const panel = wrapper.get('[data-testid="project-credits-panel"]')
+    expect(getProjectCredits).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(panel.get('[data-testid="credits-account-summary"]').text()).toContain('15.000000 CREDITS')
+    expect(panel.text()).toContain('管理员发放')
+    expect(panel.find('[data-testid="credits-admin-form"]').exists()).toBe(false)
+    expect(panel.findAll('button').some((button) => button.text() === '冲正此条')).toBe(false)
+    expect(panel.get('[data-testid="credits-read-only-note"]').text()).toContain('由平台管理员执行')
+    wrapper.unmount()
+  })
+
+  it('lets a platform admin manage Credits from the same panel', async () => {
+    authState.user.value = { profile: { roles: ['admin'] } }
+    const wrapper = await mountView()
+    const panel = wrapper.get('[data-testid="project-credits-panel"]')
+    expect(panel.find('[data-testid="credits-admin-form"]').exists()).toBe(true)
+    expect(panel.findAll('button').some((button) => button.text() === '冲正此条')).toBe(true)
+    expect(panel.find('[data-testid="credits-read-only-note"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('requests a server estimate for the submitted specification and shows its total', async () => {
+    mocks.releases = {
+      kind: 'success',
+      data: [{ id: 'release-container', version: 1, runtimeKind: 'container', label: 'Container release', source: 'control' }],
+    }
+    vi.mocked(estimateProjectResourceCost).mockResolvedValue({ data: {
+      projectId: 'project-1', input: {}, total: { currency: 'CREDITS', amount: '16.000000' },
+      lines: [{ rateId: 'rate-cpu', rateRevision: 2, unit: 'cpu_millicore_second', quantity: 57_600_000_000, quantityDivisor: 1000, unitQuantity: 3_600_000,
+        unitPrice: { currency: 'CREDITS', amount: '1.000000' }, amount: { currency: 'CREDITS', amount: '16.000000' } }],
+    }, error: undefined } as never)
+    const wrapper = await mountView()
+    await wrapper.findAll('button').find((button) => button.text() === '估算费用')!.trigger('click')
+    await flushPromises()
+    expect(estimateProjectResourceCost).toHaveBeenCalledWith({
+      path: { projectId: 'project-1' },
+      body: expect.objectContaining({ resources: { cpuMillicores: 2000, memoryBytes: 4 * 1024 ** 3, storageBytes: 20 * 1024 ** 3 } }),
+    })
+    const estimate = wrapper.get('[data-testid="request-cost-estimate"]')
+    expect(estimate.get('[data-testid="cost-estimate-total"]').text()).toBe('16.000000 CREDITS')
+    expect(estimate.text()).toContain('CPU · 16 核·小时')
+    wrapper.unmount()
   })
 })

@@ -82,6 +82,37 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '任务缺少原始的模型输入授权，未开始新的模型调用。'
     case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
       return '平台暂时无法核验模型输入授权，未开始模型调用。'
+    // Costing and Credits codes from Resource (#209/#210).
+    case 'LW_RESOURCE_RATE_UNCONFIGURED':
+      return '缺少适用费率：当前规格或时间段没有可计价的费率，估价或扣收无法完成，不会按免费处理。'
+    case 'LW_RESOURCE_RATE_CURRENCY_CONFLICT':
+      return '适用费率的币种不一致，无法形成统一的 CREDITS 金额。'
+    case 'LW_RESOURCE_RATE_OVERLAP':
+      return '同一计费维度的费率时间段重叠，无法确定该用哪一个费率。'
+    case 'LW_RESOURCE_RATE_DIMENSION_INVALID':
+      return '费率维度不完整：构建费率必须填写构建器标识，模型 token 费率必须填写模型标识和单次最大预占，其他费率不能填写这些字段。'
+    case 'LW_RESOURCE_GPU_CATALOG_MISSING':
+      return '所选 GPU 类型不在当前 GPU 目录中，当前不可用，无法计价或分配。'
+    case 'LW_RESOURCE_GPU_CATALOG_AMBIGUOUS':
+      return 'GPU 目录中同一类型对应多种分配方式，无法确定计价方式。'
+    case 'LW_RESOURCE_GPU_CATALOG_INVALID':
+      return 'GPU 目录配置无效，当前无法使用 GPU 计价。'
+    case 'LW_RESOURCE_ESTIMATE_CHANGED':
+      return '规格或费率在估价后发生了变化，原估价已失效。'
+    case 'LW_CREDITS_INSUFFICIENT':
+      return '项目 Credits 可用余额不足，本次操作没有执行。已预占的资金不能用于转出或新的申请。'
+    case 'LW_CREDITS_CONFLICT':
+      return '这笔 Credits 操作与已有记录冲突：可能已提交过、原账目已冲正，或涉及的资金已被预占或消费。'
+    case 'LW_CREDITS_SCOPE_DENIED':
+      return '当前账号无权查看或修改这个项目的 Credits。普通成员只能查看自己所在项目；发放、转移、调整和冲正只能由平台管理员执行。'
+    case 'LW_CREDITS_NOT_FOUND':
+      return '没有找到对应的项目账户或账目。'
+    case 'LW_CREDITS_INVALID':
+    case 'LW_CREDITS_PRECISION':
+      return 'Credits 金额或原因无效：金额必须是最多六位小数的数值，原因不能为空。'
+    case 'LW_CREDITS_STORAGE':
+    case 'LW_CREDITS_PERSISTENCE':
+      return 'Credits 账本暂时无法写入或读取，本次操作没有完成。'
     default:
       return message
   }
@@ -110,6 +141,12 @@ function codeNextStep(code: string): string | undefined {
       return '请确认仍有该项目的相应权限且登录未过期；需要时重新登录后再操作。'
     case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
       return '请稍后新建任务；多次失败请把下方诊断信息发给管理员。'
+    case 'LW_RESOURCE_ESTIMATE_CHANGED':
+      return '请重新估价，确认新的金额后再继续。'
+    case 'LW_CREDITS_INSUFFICIENT':
+      return '请联系平台管理员为项目发放 Credits，或等待已有资源回收释放预占后再试。'
+    case 'LW_CREDITS_CONFLICT':
+      return '请先刷新账目确认这笔操作是否已经生效，不要换一笔新操作重复提交。'
     default:
       return undefined
   }

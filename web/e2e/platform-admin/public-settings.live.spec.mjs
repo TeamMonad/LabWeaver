@@ -213,9 +213,9 @@ test('platform administrator reads public project settings and resource pages', 
   await navigateFromHomeByUi(page, 'GPU 目录')
   const gpuCatalog = await readGpuCatalog(page)
 
-  await navigateFromHomeByUi(page, '预算与费用')
+  await navigateFromHomeByUi(page, 'Credits、预算与费用')
   await expect(page).toHaveURL(new RegExp(`/admin/resource-finance[?]projectId=${PROJECT_ID}$`))
-  await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible()
   const projectSelect = page.locator('.project-strip select')
   await expect(projectSelect.locator(`option[value="${PROJECT_ID}"]`)).toHaveCount(1)
   await expect(projectSelect).toHaveValue(PROJECT_ID)

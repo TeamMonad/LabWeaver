@@ -3,6 +3,7 @@ import { createResourceRate, endResourceRate, listResourceRates } from '@/genera
 import type { CreateResourceRateRequestSchema, EndResourceRateRequestSchema, ResourceRateSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey } from '@/utils/format'
+import { billingUnitLabel } from '@/composables/useProjectResourceCostEstimate'
 
 export interface ResourceRateMutationOutcome {
   kind: 'success' | 'error'
@@ -30,6 +31,8 @@ function resourceRateLabel(rate: ResourceRateSchema | undefined): string {
     const mode = ({ exclusive: '独占', container_time_slice: '容器时间片', vm_vgpu: 'VM vGPU' } as Record<string, string>)[rate.gpuMode ?? ''] ?? 'GPU 分配'
     return rate.gpuClass ? `GPU ${rate.gpuClass}（${mode}）` : `GPU 费率（${mode}）`
   }
+  if (rate.unit === 'build_second') return `镜像构建费率（${rate.builderBinding ?? '未指定构建器'}）`
+  if (rate.modelBinding) return `模型 ${rate.modelBinding} 的${billingUnitLabel(rate.unit)}费率`
   return ({
     cpu_millicore_second: 'CPU 费率',
     memory_byte_second: '内存费率',

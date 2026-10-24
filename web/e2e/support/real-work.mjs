@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { expect } from '@playwright/test'
 import {
   AUTH_STATE,
+  csrfHeaders,
   expectJson,
   navigateFromHomeByUi,
   pollJson,
@@ -18,13 +19,17 @@ const BILLING_UNITS = Object.freeze([
   'memory_byte_second',
   'storage_byte_second',
 ])
-// Acceptance demonstration prices only: USD 1 per core-hour / GiB-hour.
-// Existing operator-selected prices remain authoritative; these are not market recommendations.
+// Acceptance demonstration prices only: 1 CREDITS per core-hour / GiB-hour.
+// Project Credits admission prices only CREDITS rates, so the demonstration
+// rates use that currency. Existing operator-selected prices remain
+// authoritative; these are not market recommendations.
 export const DEFAULT_RATE_INPUTS = Object.freeze([
-  Object.freeze({ unit: 'cpu_millicore_second', unitQuantity: 1000 * 3600, amount: '1.000000', currency: 'USD' }),
-  Object.freeze({ unit: 'memory_byte_second', unitQuantity: 1024 ** 3 * 3600, amount: '1.000000', currency: 'USD' }),
-  Object.freeze({ unit: 'storage_byte_second', unitQuantity: 1024 ** 3 * 3600, amount: '1.000000', currency: 'USD' }),
+  Object.freeze({ unit: 'cpu_millicore_second', unitQuantity: 1000 * 3600, amount: '1.000000', currency: 'CREDITS' }),
+  Object.freeze({ unit: 'memory_byte_second', unitQuantity: 1024 ** 3 * 3600, amount: '1.000000', currency: 'CREDITS' }),
+  Object.freeze({ unit: 'storage_byte_second', unitQuantity: 1024 ** 3 * 3600, amount: '1.000000', currency: 'CREDITS' }),
 ])
+/** Available project Credits the live Work journey needs before its resource request is funded. */
+const REAL_WORK_CREDITS_TARGET = process.env.LABWEAVER_E2E_WORK_CREDITS_TARGET?.trim() || '1000.000000'
 const GPU_MODES = Object.freeze(['exclusive', 'container_time_slice', 'vm_vgpu'])
 const FIXED_DECIMAL = /^(0|[1-9][0-9]*)\.[0-9]{6}$/
 const GPU_CLASS = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
@@ -1373,6 +1378,8 @@ export async function ensureRateByUi(page, context, target) {
   if (current.length > 1) throw new Error(`REAL_WORK_RATE_ACTIVE_AMBIGUOUS:${target.unit}`)
   if (current.length === 1) {
     if (!hasPositiveRatePrice(current[0])) throw new Error(`REAL_WORK_RATE_ACTIVE_INVALID:${target.unit}`)
+    // An operator price is never replaced; a non-CREDITS one cannot fund Credits admission, so fail closed.
+    if (current[0].unitPrice?.currency !== 'CREDITS') throw new Error(`REAL_WORK_RATE_ACTIVE_NOT_CREDITS:${target.unit}:${current[0].unitPrice?.currency}`)
     if (target.unit === 'gpu_unit_second' && !rateMatchesInput(current[0], target)) {
       throw new Error(`REAL_WORK_GPU_RATE_ACTIVE_CONFLICT:${target.gpuClass}`)
     }
@@ -1407,8 +1414,8 @@ export async function ensureRealWorkRates(browser, baseURL, { gpu = null } = {})
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     await waitForRateListUi(page, 'resource')
     const targets = [...DEFAULT_RATE_INPUTS, ...(gpu ? [gpu.rate] : [])]
     const rates = []
@@ -1423,8 +1430,8 @@ export async function configureRealWorkBudgetByUi(browser, baseURL, projectId) {
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)
@@ -1433,9 +1440,9 @@ export async function configureRealWorkBudgetByUi(browser, baseURL, projectId) {
     await expect(inputs).toHaveCount(3)
     const currency = inputs.nth(0)
     if (!(await currency.isEditable())) {
-      await expect(currency).toHaveValue('USD')
+      await expect(currency).toHaveValue('CREDITS')
     } else {
-      await currency.fill('USD')
+      await currency.fill('CREDITS')
     }
     await inputs.nth(1).fill('1000000000.000000')
     await inputs.nth(2).fill('900000000.000000')
@@ -1450,6 +1457,127 @@ export async function configureRealWorkBudgetByUi(browser, baseURL, projectId) {
   } finally {
     await context.close()
   }
+}
+
+async function readProjectCredits(request, projectId, diagnosticCode = 'REAL_WORK_CREDITS_READ_FAILED') {
+  const account = await expectJson(await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/credits`), diagnosticCode)
+  if (!account || account.projectId !== projectId || account.currency !== 'CREDITS') throw new Error('REAL_WORK_CREDITS_ACCOUNT_INVALID')
+  return {
+    account,
+    balanceScaled: fixedDecimalScaled(account.balance, 'REAL_WORK_CREDITS_BALANCE'),
+    availableScaled: fixedDecimalScaled(account.available, 'REAL_WORK_CREDITS_AVAILABLE'),
+  }
+}
+
+async function postCreditOperation(request, baseURL, body, idempotencyKey) {
+  return request.post('/api/v1/resource/credits/operations', {
+    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': idempotencyKey, 'Content-Type': 'application/json' }),
+    data: body,
+  })
+}
+
+/**
+ * Fund the live project through the real Credits admin entry points and prove
+ * three ledger rules on the way:
+ * 1. a debit beyond the balance is refused with LW_CREDITS_INSUFFICIENT and books nothing;
+ * 2. the administrator grants Credits from the finance page panel (createCreditAdminOperation);
+ * 3. replaying that exact request with its Idempotency-Key returns success without booking twice.
+ * Only the shortfall to REAL_WORK_CREDITS_TARGET is granted (at least 1 CREDITS so the grant step always runs).
+ */
+export async function ensureRealWorkCreditsByUi(browser, baseURL, projectId) {
+  const targetScaled = fixedDecimalScaled(REAL_WORK_CREDITS_TARGET, 'REAL_WORK_CREDITS_TARGET')
+  const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+  const page = await context.newPage()
+  try {
+    const before = await readProjectCredits(page.request, projectId)
+
+    const overdraft = formatFixedDecimalScaled(-(before.balanceScaled + FIXED_DECIMAL_SCALE))
+    const refused = await postCreditOperation(page.request, baseURL, {
+      action: 'adjust', projectId, amount: overdraft, reason: '验收：超额扣减应被拒绝',
+    }, uuidv7())
+    const refusal = await refused.json().catch(() => null)
+    if (refused.status() !== 409 || refusal?.diagnosticCode !== 'LW_CREDITS_INSUFFICIENT') {
+      throw new Error(`REAL_WORK_CREDITS_OVERDRAFT_NOT_REFUSED:${refused.status()}:${refusal?.diagnosticCode ?? 'none'}`)
+    }
+    const afterRefusal = await readProjectCredits(page.request, projectId)
+    if (afterRefusal.balanceScaled !== before.balanceScaled) throw new Error('REAL_WORK_CREDITS_REFUSAL_BOOKED')
+
+    const shortfall = targetScaled - before.availableScaled
+    const grantAmount = formatFixedDecimalScaled(shortfall > FIXED_DECIMAL_SCALE ? shortfall : FIXED_DECIMAL_SCALE)
+    const grantScaled = fixedDecimalScaled(grantAmount, 'REAL_WORK_CREDITS_GRANT')
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    const projectSelect = page.locator('.project-strip select')
+    await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
+    await projectSelect.selectOption(projectId)
+    const form = page.getByTestId('credits-admin-form')
+    await expect(form).toBeVisible({ timeout: 120_000 })
+    await form.getByLabel('Credits 操作', { exact: true }).selectOption('grant')
+    await form.getByLabel('Credits 金额', { exact: true }).fill(grantAmount)
+    await form.getByLabel('操作原因', { exact: true }).fill('验收：为 Work 旅程发放项目 Credits')
+    const grantRequest = page.waitForRequest((request) => request.method() === 'POST'
+      && new URL(request.url()).pathname === '/api/v1/resource/credits/operations')
+    const grantResponse = waitForResponseSafely(page, (response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/v1/resource/credits/operations')
+    await form.getByRole('button', { name: '提交发放', exact: true }).click()
+    const sent = await grantRequest
+    await expectJson(await grantResponse, 'REAL_WORK_CREDITS_GRANT_FAILED')
+    await expect(page.locator('.diagnostic-banner').filter({ hasText: '发放已入账' })).toBeVisible({ timeout: 120_000 })
+    const afterGrant = await readProjectCredits(page.request, projectId)
+    if (afterGrant.balanceScaled !== before.balanceScaled + grantScaled) throw new Error('REAL_WORK_CREDITS_GRANT_READBACK_MISMATCH')
+
+    const sentKey = sent.headers()['idempotency-key']
+    if (!sentKey) throw new Error('REAL_WORK_CREDITS_GRANT_KEY_MISSING')
+    await expectJson(await postCreditOperation(page.request, baseURL, sent.postDataJSON(), sentKey), 'REAL_WORK_CREDITS_REPLAY_FAILED')
+    const afterReplay = await readProjectCredits(page.request, projectId)
+    if (afterReplay.balanceScaled !== afterGrant.balanceScaled) throw new Error('REAL_WORK_CREDITS_REPLAY_BOOKED_TWICE')
+    return afterReplay.account
+  } finally {
+    await context.close()
+  }
+}
+
+const REAL_WORK_FUNDING_STEPS = {
+  ensureRates: ensureRealWorkRates,
+  configureBudget: configureRealWorkBudgetByUi,
+  ensureCredits: ensureRealWorkCreditsByUi,
+}
+
+// Publishing a template already starts metered work (template build), so rates,
+// budget and project Credits must be in place before `publish` runs. Existing
+// operator rates are only read back (ensureRealWorkRates never replaces them).
+export async function fundAndPublishRealWork({
+  adminRequest,
+  baseURL,
+  browser,
+  configureBudget,
+  gpu = null,
+  projectId,
+  publish,
+}, steps = REAL_WORK_FUNDING_STEPS) {
+  const workRates = await steps.ensureRates(browser, baseURL, { gpu })
+  let gpuRate = null
+  if (gpu) {
+    const matchingGpuRates = workRates.filter((rate) => (
+      rate.unit === 'gpu_unit_second'
+      && rate.gpuClass === gpu.class
+      && rate.gpuMode === gpu.mode
+    ))
+    if (matchingGpuRates.length !== 1) {
+      throw new Error(`REAL_WORK_GPU_RATE_READBACK_AMBIGUOUS:${gpu.class}:${gpu.mode}`)
+    }
+    [gpuRate] = matchingGpuRates
+  }
+  const baselineCharges = await expectJson(
+    await adminRequest.get(`/api/v1/projects/${encodeURIComponent(projectId)}/charges`),
+    'REAL_WORK_BASELINE_CHARGES_READ_FAILED',
+  )
+  if (!Array.isArray(baselineCharges)) throw new Error('REAL_WORK_BASELINE_CHARGES_INVALID')
+  const baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
+  if (configureBudget) await steps.configureBudget(browser, baseURL, projectId)
+  await steps.ensureCredits(browser, baseURL, projectId)
+  const published = await publish()
+  return { baselineChargeIds, gpuRate, published, workRates }
 }
 
 export function assertRealWorkCharges(charges, gpu = null) {
@@ -1482,7 +1610,7 @@ export async function waitForRealWorkCharges(browser, baseURL, projectId, { gpu 
       await context.request.get(`/api/v1/projects/${projectId}/resource-budget`),
       'REAL_WORK_BUDGET_READ_FAILED',
     )
-    if (budget.limit?.currency !== 'USD' || Number(budget.spent?.amount) <= 0) {
+    if (budget.limit?.currency !== 'CREDITS' || Number(budget.spent?.amount) <= 0) {
       throw new Error('REAL_WORK_BUDGET_SPENT_NOT_POSITIVE')
     }
     return { charges: latest, budget }
@@ -1504,8 +1632,8 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)
@@ -1528,7 +1656,7 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
         async () => {
           const text = (await spent.textContent())?.trim() ?? ''
           const [amount, currency] = text.split(/\s+/)
-          return currency === 'USD'
+          return currency === 'CREDITS'
             && /^\d+\.\d{6}$/.test(amount ?? '')
             && /[1-9]/.test((amount ?? '').replace('.', ''))
         },
@@ -1672,7 +1800,7 @@ async function saveRealWorkBudgetByUi(page, projectId, limit, warningAt) {
   await expect(form).toBeVisible({ timeout: 120_000 })
   const inputs = form.locator('input')
   await expect(inputs).toHaveCount(3)
-  await expect(inputs.nth(0)).toHaveValue('USD')
+  await expect(inputs.nth(0)).toHaveValue('CREDITS')
   await inputs.nth(1).fill(limit)
   await inputs.nth(2).fill(warningAt)
   const responsePromise = waitForResponseSafely(page, (response) => {
@@ -1745,8 +1873,8 @@ export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, proj
   let failure = null
   let result = null
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)
@@ -1754,8 +1882,8 @@ export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, proj
     const initial = await readRealWorkFinanceSnapshot(page.request, projectId)
     const initialBudgetNumbers = validateRealWorkBudget(initial.budget, projectId)
     initialBudget = initial.budget
-    if (initial.budget.limit.currency !== 'USD' || settledCharge.total.currency !== 'USD') {
-      throw new Error('REAL_WORK_FINANCE_USD_REQUIRED')
+    if (initial.budget.limit.currency !== 'CREDITS' || settledCharge.total.currency !== 'CREDITS') {
+      throw new Error('REAL_WORK_FINANCE_CREDITS_REQUIRED')
     }
     const original = findRealWorkCharge(initial.charges, settledCharge.id)
     if (!sameRealWorkCharge(original, settledCharge)) throw new Error('REAL_WORK_FINANCE_CHARGE_READBACK_MISMATCH')
@@ -1800,7 +1928,7 @@ export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, proj
 
     const adjusted = await waitForRealWorkAdjustment(page.request, projectId, original, expectedSpent, adjustmentReason)
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     await expect(page.getByTestId('budget-threshold-warning')).toHaveCount(0)
     await expect(page.getByTestId('budget-limit-warning')).toHaveCount(0)
     const originalRowAfterAdjustment = realWorkChargeRow(page, original.id)
@@ -1825,7 +1953,7 @@ export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, proj
       || finalSnapshot.budget.spent.amount !== expectedSpent
     ) throw new Error('REAL_WORK_FINANCE_BUDGET_RESTORE_READBACK_MISMATCH')
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.budget-summary')).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.budget-form input').nth(2)).toHaveValue(initial.budget.warningAt.amount)
     await expect(realWorkChargeRow(page, original.id)).toHaveCount(1, { timeout: 120_000 })

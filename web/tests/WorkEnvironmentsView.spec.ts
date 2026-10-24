@@ -4,6 +4,7 @@ import { reactive } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkEnvironmentsView from '@/views/researcher/WorkEnvironmentsView.vue'
 import { useAuth } from '@/composables/useAuth'
+import { listPendingCommands, syncPendingCommandOwner } from '@/utils/pendingCommands'
 import {
   createEnvironmentTemplateRelease,
   getProjectAgentCapability,
@@ -558,6 +559,62 @@ describe('WorkEnvironmentsView', () => {
       expect(wrapper.find('[data-testid="manual-accepted"]').exists()).toBe(false)
       expect(wrapper.get('[data-testid="manual-unconfirmed"]').exists()).toBe(true)
       expect((field(wrapper, '模板名称').element as HTMLInputElement).value).toBe('Python 分析（第二版）')
+      wrapper.unmount()
+    })
+
+    it('keeps using a newer memory-only command over an older stored one, also after the older answer arrives late', async () => {
+      let finishA: (value: unknown) => void = () => undefined
+      vi.mocked(createEnvironmentTemplateRelease)
+        .mockImplementationOnce(() => new Promise((resolve) => { finishA = resolve }) as never)
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const { wrapper } = await mountEmpty()
+      await fillContainerDraft(wrapper)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      // A (K1) is stored; from now on session storage refuses every write.
+      const quota = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })
+      try {
+        const section = wrapper.get<HTMLDetailsElement>('[data-testid="manual-section"]')
+        section.element.open = false
+        await section.trigger('toggle')
+        section.element.open = true
+        await section.trigger('toggle')
+        await flushPromises()
+        await field(wrapper, '模板名称').setValue('Python 分析（第二版）')
+        await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+        await wrapper.get('.manual-form').trigger('submit')
+        await flushPromises()
+        // Unchanged B again: must replay B's memory-only key and retention identity, not A's.
+        await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+        await wrapper.get('.manual-form').trigger('submit')
+        await flushPromises()
+
+        // A's answer arrives late; its cleanup must not remove B.
+        finishA({ data: { operationId: 'op-a', statusUrl: '/a' }, error: undefined })
+        await flushPromises()
+        await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+        await wrapper.get('.manual-form').trigger('submit')
+        await flushPromises()
+
+        const [a, b1, b2, b3] = vi.mocked(createEnvironmentTemplateRelease).mock.calls.map(([options]) => options)
+        expect(b1.headers['Idempotency-Key']).not.toBe(a.headers['Idempotency-Key'])
+        expect(b2.headers['Idempotency-Key']).toBe(b1.headers['Idempotency-Key'])
+        expect(b3.headers['Idempotency-Key']).toBe(b1.headers['Idempotency-Key'])
+        const policyId = (options: typeof a) => options.body.manual?.spec.retention.policyId
+        expect(policyId(b2)).toBe(policyId(b1))
+        expect(policyId(b3)).toBe(policyId(b1))
+        expect(policyId(b1)).not.toBe(policyId(a))
+        // The older stored A no longer competes with B.
+        expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:owner-1:manual-work-template:'))).toEqual([])
+        expect(listPendingCommands('owner-1', 'manual-work-template:')).toEqual([
+          expect.objectContaining({ persisted: false, command: expect.objectContaining({ idempotencyKey: b1.headers['Idempotency-Key'] }) }),
+        ])
+      } finally {
+        quota.mockRestore()
+        syncPendingCommandOwner(null)
+      }
       wrapper.unmount()
     })
   })
