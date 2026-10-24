@@ -517,6 +517,7 @@ impl SandboxAuthoringProcess {
                 command.env(),
                 self.configuration.model_gateway.as_ref(),
                 scope,
+                remaining,
             )?,
             expected_claude_version: scope.claude_code_version.clone(),
             material_download_url: material_download.url,
@@ -2068,6 +2069,7 @@ fn scoped_attempt_environment(
     command_environment: &BTreeMap<String, String>,
     gateway: Option<&crate::model_gateway::ModelGatewayRuntime>,
     scope: &AuthoringAttemptScope,
+    valid_for: Duration,
 ) -> Result<BTreeMap<String, String>, ClaudeCodeProcessError> {
     let gateway = gateway.ok_or(ClaudeCodeProcessError::Unavailable)?;
     for environment in [worker_environment, command_environment] {
@@ -2084,6 +2086,7 @@ fn scoped_attempt_environment(
         scope.project_id,
         scope.run_id.as_uuid(),
         scope.attempt,
+        valid_for,
     ));
     Ok(environment)
 }
@@ -2223,13 +2226,18 @@ mod tests {
             base_url: "http://agent-service:9460/".parse()?,
             issuer: crate::model_gateway::ScopedTokenIssuer::new(
                 vec![3; 32],
-                Duration::from_mins(5),
+                Duration::from_hours(24),
             )
             .ok_or("signer")?,
         };
         let worker = BTreeMap::from([("ANTHROPIC_MODEL".to_owned(), "fixture-model".to_owned())]);
-        let environment =
-            scoped_attempt_environment(&worker, &BTreeMap::new(), Some(&gateway), &scope)?;
+        let environment = scoped_attempt_environment(
+            &worker,
+            &BTreeMap::new(),
+            Some(&gateway),
+            &scope,
+            Duration::from_hours(1),
+        )?;
         let output = tokio::process::Command::new("/bin/sh")
             .args(["-c", "test \"$ANTHROPIC_BASE_URL\" = 'http://agent-service:9460/' && test -n \"$ANTHROPIC_API_KEY\" && test -z \"$ANTHROPIC_AUTH_TOKEN\" && printf '%s' \"$ANTHROPIC_API_KEY\""])
             .env_clear().envs(environment).output().await?;
@@ -2246,9 +2254,25 @@ mod tests {
             "https://provider.invalid/".to_owned(),
         )]);
         assert!(
-            scoped_attempt_environment(&direct, &BTreeMap::new(), Some(&gateway), &scope).is_err()
+            scoped_attempt_environment(
+                &direct,
+                &BTreeMap::new(),
+                Some(&gateway),
+                &scope,
+                Duration::from_hours(1)
+            )
+            .is_err()
         );
-        assert!(scoped_attempt_environment(&worker, &BTreeMap::new(), None, &scope).is_err());
+        assert!(
+            scoped_attempt_environment(
+                &worker,
+                &BTreeMap::new(),
+                None,
+                &scope,
+                Duration::from_hours(1)
+            )
+            .is_err()
+        );
         Ok(())
     }
 

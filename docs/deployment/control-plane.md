@@ -31,6 +31,11 @@ Agent 启动时必须从 Secret 文件读取 `model-gateway-upstream-url`、
 副本挂载同一签名 key。HMAC 验签不依赖单副本内存；每个请求仍检查 Agent 数据库中的运行租约和
 终态。上游 API key 只由网关读取，既不注入 Claude 子进程，也不写入 attempt Secret。
 
+能力在真正开始执行前按剩余执行期限签发，最长 24 小时（与 sandbox 上限一致，advisory review 的
+总 deadline 也必须在 24 小时内）；不再有固定五分钟限制。取消/终态/租约失效仍立即阻止新调用。
+原生 SDK 重试元数据缺失或不能唯一识别原请求时网关 fail-closed，部署不得移除
+`x-stainless-retry-count` header。
+
 沙箱命名空间的 Cilium NetworkPolicy 只允许到 `agent-service:9460`（以及其已批准的对象存储），
 不允许 host、FQDN 或提供商 CIDR。更新 upstream 时只替换 Secret 并重启 Agent；不把 key 写入
 YAML、命令参数、日志或 bundle 报告。
@@ -159,14 +164,17 @@ The build-executor configuration requires the `resource` block from
 `deploy/config/build-executor.yaml.example`: HTTPS URI, trusted Resource CA,
 request/response size bounds, timeout, and `labweaver-resource` audience.
 Its existing Agent service account requests `resource.credits.hold` and
-`resource.usage.record`. Mount the OIDC CA, Resource CA and service-client-secret;
+`resource.usage.record`. `build-executor-secrets` must contain `oidc-ca.pem`,
+`mtls-ca.pem` (Resource CA), and `service-client-secret` for that same Agent identity;
+the chart mounts them read-only under `/etc/labweaver/secrets`. The local renderer reuses the
+Agent client's credential instead of inventing a separate unprovisioned executor principal.
 configure `LABWEAVER_SERVICE_OIDC_ISSUER`, `LABWEAVER_SERVICE_OIDC_CA`,
 `LABWEAVER_SERVICE_CLIENT_ID`, `LABWEAVER_SERVICE_CLIENT_SECRET_FILE`,
 `LABWEAVER_SERVICE_SCOPES` and token refresh skew. Resource separately sets
 `LABWEAVER_AGENT_SERVICE_CLIENT_ID` to the authorized client. Missing configuration
 rejects BuildKit execution; it does not select a free or anonymous path.
 
-Apply Resource migration 0019 and Agent migration 0021. Agent 0021 grants Resource
+Apply Resource migration 0020 and Agent migration 0022. Agent 0022 grants Resource
 only the specific read columns needed to verify the authoritative build command;
 Agent has no wallet write access. Bundle/profile configuration must provide the
 same Resource client block and secret mounts before connected deployment validation.
@@ -176,7 +184,7 @@ price this operation and are not automatically changed.
 
 ### Original Environment lease funding
 
-Apply Resource migration 0020 with the verified migration catalog before starting
+Apply Resource migration 0021 with the verified migration catalog before starting
 Resource. It adds immutable funding windows and seeds no operating rates or
 balances. The existing LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID binds the original
 hold owner and the grant reader; service JWT/TLS and resource.environment.resolve

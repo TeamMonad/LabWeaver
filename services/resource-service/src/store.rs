@@ -3663,6 +3663,10 @@ impl PgResourceStore {
         let mut transaction = self.pool.begin().await?;
         crate::costing::rate_lock(&mut transaction).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
+        if matches!(request.target, ResourceTarget::Task { .. }) {
+            return Err(ResourceStoreError::TaskRenewalUnsupported);
+        }
         let hash = match &intent {
             LeaseRenewalIntent::Absolute {
                 expected_revision,
@@ -3704,14 +3708,6 @@ impl PgResourceStore {
                 };
                 let next =
                     ResourceLifecycle::renew_lease(&lease, expected_revision, expires_at, now)?;
-                let request = load_locked(&mut transaction, lease.request_id).await?;
-                if matches!(request.target, ResourceTarget::Task { .. })
-                    && (lease.expires_at.is_some_and(|expiry| expiry <= now)
-                        || request.diagnostic_code.as_deref()
-                            == Some("LW_RESOURCE_TASK_LEASE_EXPIRED"))
-                {
-                    return Err(ResourceStoreError::TaskLeaseExpired);
-                }
                 if matches!(request.target, ResourceTarget::Environment { .. }) {
                     let from = lease.expires_at.ok_or(ResourceStoreError::ScopeConflict)?;
                     crate::environment_funding::fund_window(
@@ -6367,6 +6363,8 @@ pub enum ResourceStoreError {
     TaskApprovalDeadlineMissing,
     #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
     TaskLeaseExpired,
+    #[error("LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED")]
+    TaskRenewalUnsupported,
     #[error("LW_RESOURCE_WIRE_INVALID")]
     Wire,
     #[error("LW_RESOURCE_EVENT_CONTRACT_INVALID")]

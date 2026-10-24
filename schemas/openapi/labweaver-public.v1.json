@@ -14274,10 +14274,12 @@
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED",
+          "LW_RESOURCE_REVISION_CONFLICT",
+          "LW_CREDITS_INSUFFICIENT",
+          "LW_RESOURCE_ESTIMATE_CHANGED",
+          "LW_RESOURCE_SCOPE_CONFLICT",
+          "LW_IDEMPOTENCY_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-object-action": "start",

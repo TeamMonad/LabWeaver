@@ -171,3 +171,24 @@ Resource 的容量 shell 就绪后，激活 Environment lease 前读取原 lease
 
 
 升级前以 ResourceRequest JSON 保存的审批结果继续支持只读重放：旧回执的 requestId 与 revision 必须匹配原批准版本，再沿原 lease→claim→approval 的关系唯一查回实际 leaseId。后来更新的批准不会替换该版本。关系缺失或版本不匹配明确拒绝，不选择当前任意租约；旧幂等 JSON 保留，不删除或覆盖。
+
+## 模型调用准入与不可变观察
+
+| operationId | 内部路径 | 权限 | 幂等身份 |
+| --- | --- | --- | --- |
+| admitModelCost | POST /internal/v1/credits/model/admit | resource.credits.hold | Idempotency-Key + callId、projectId、modelBinding |
+| settleModelCost | POST /internal/v1/credits/model/{holdId}/settle | resource.usage.record | callId + eventId；变更观察使用新 eventId |
+
+两路均只允许已配置的 Agent service client JWT，不对浏览器/BFF 开放。Rust 真源为
+`resource::model_costing`，操作在 `http::OPERATIONS` 和 internal OpenAPI 中登记，包含请求/响应及观察 Schema。
+准入要求模型四类价格、token 基数和单次最大预占全部配置。在同一事务内创建 hold、绑定四类费率快照、
+进入 Unknown 并保存首次核实期限；即使响应丢失或网关未发任何后续 RPC，Resource 仍能独立按一小时规则释放。
+过期、释放、已结算的历史 admission 回执不构成新的执行资金授权。
+
+`ModelUsageMeasurement::Known` 只用于可信完整终态 usage；断流时发送 `Unknown` 和可选
+`observedQuantities`，不把缺失输出补作最终零值。`model_cost_observations` 追加保存 call/event/hold、
+观察、四类费率数量/金额明细、观察总额和实际扣收额，runtime 无 UPDATE/DELETE 权限。
+完全缺失 usage 时 `observedTotal=null` 且没有数量明细；这与真实零用量不同。
+
+一次性 Task 不支持续租。`renewResourceLease` 对 Task 返回 409 /
+`LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED`；即使账户有余额、重放同 key，也不扩张原付费覆盖窗口。

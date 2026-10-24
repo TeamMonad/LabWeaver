@@ -95,11 +95,21 @@ URL 或长期 API key；每个 run/attempt 取得限定 project、run、attempt 
 
 模型费率是四个独立的 CREDITS 单价：input、output、cache-read、cache-write，并各自使用配置的
 token 基数；cache read 和 cache write 不折算成 input，也不从 USD 推导。准入绑定单次最大预占和
-四类费率快照，新费率不会改写已接受调用。Gateway 在外部副作用前持久化 Unknown 观察与调用 fence：
-进程崩溃或请求取消也不会留下无期限 Pending。非流式、SSE 正常结束或两端中断时，有已观察的 usage
-就按该用量结算；没有 usage 则保持 Unknown，不按零结算。首次未知一小时后释放剩余预占，迟到费用
-由平台承担。`x-labweaver-call-id`（或 provider `idempotency-key`）绑定签名能力范围；相同调用只预占一次，
-返回 `LW_MODEL_CALL_OUTCOME_UNKNOWN` 的重试只能查询原 hold，不能重放上游副作用。
+四类费率快照，新费率不会改写已接受调用。Resource 在准入的同一 SQLx 事务中写 Unknown 和首次
+核实期限；即使 admission 响应丢失、Agent 尚未发送任何观察就崩溃，也不会留下无期限 Pending。
+只有完整非流式终态，或具有最终 message_delta usage 和 message_stop 的 SSE 才能 Known 最终结算。
+message_start、部分 delta 后断流或客户端取消只保存 Unknown 与已观察的四类数量，不把未观察输出
+当作零。Resource 在账务事务中追加 `model_cost_observations`，保存 call/event/hold、四类数量、原费率
+和逐项金额、实际扣收额。首次未知一小时后释放剩余预占，迟到费用由平台承担。
+
+显式 `x-labweaver-call-id`（或 provider `idempotency-key`）在签名 project/run/attempt 范围内稳定。
+生产 CLI 无显式调用 ID 时使用 SDK 原生 `x-stainless-retry-count`：首次请求取得 capability 范围内的
+持久化序号，传输重试仅在原调用唯一可辨认时复用该序号；多个候选或缺 SDK 重试元数据直接拒绝，
+不按 body hash 合并不同调用。重复调用不重放上游；只能查询原 hold/观察。Capability 在实际执行前
+按剩余总期限签发（最大 24 小时），而不是固定五分钟；数据库 run/lease 检查仍可提前撤销。
+
+一次性 Task 的已预占窗口不可续期：native 和 HTTP renew 均返回 `LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED`，
+同键重放不改变 lease、hold 或覆盖窗口。需要更长执行必须重新申请并通过正常资金准入。
 
 ## BuildKit 构建
 

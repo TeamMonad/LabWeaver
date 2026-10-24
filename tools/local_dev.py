@@ -3313,6 +3313,7 @@ def make_app_input(
                 values[key]=(identities/cert_service/"key.pem").read_bytes()
             elif key=="service-client-secret":
                 client_service = {"container-executor":"environment-service",
+                                  "build-executor":"agent-service",
                                   "openssh-gateway":"access-service"}.get(service, service)
                 values[key]=clients[client_service]
             elif key in ("cursor-signing-key-current", "cursor-signing-key-previous"):

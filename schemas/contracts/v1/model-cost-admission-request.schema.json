@@ -1,0 +1,29 @@
+{
+  "$defs": {
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "callId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "modelBinding": {
+      "type": "string"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    }
+  },
+  "required": [
+    "callId",
+    "projectId",
+    "modelBinding"
+  ],
+  "title": "ModelCostAdmissionRequest",
+  "type": "object"
+}

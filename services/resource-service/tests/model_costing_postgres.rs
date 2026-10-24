@@ -126,7 +126,7 @@ fn admission(project: ProjectId, call_id: Uuid) -> ModelCostAdmissionRequest {
 #[tokio::test]
 async fn model_pg_normal_settlement_charges_all_four_dimensions()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_container, _pool, store, credits) = fixture().await?;
+    let (_container, pool, store, credits) = fixture().await?;
     configure_rates(&store, Some("claude-test")).await?;
     let project = ProjectId::new();
     grant(&credits, project, "100.000000").await?;
@@ -158,6 +158,32 @@ async fn model_pg_normal_settlement_charges_all_four_dimensions()
     );
     assert_eq!(settled.remaining, amount("0.000000"));
     assert_eq!(credits.account(project).await?.spent, amount("10.000000"));
+    let value: serde_json::Value = sqlx::query_scalar("SELECT contract FROM resource.model_cost_observations WHERE call_id=$1 AND contract->'measurement'->>'state'='known'")
+        .bind(call).fetch_one(&pool).await?;
+    let observation: contracts::resource::model_costing::ModelCostObservation =
+        serde_json::from_value(value)?;
+    assert_eq!(observation.hold_id, accepted.hold.id);
+    assert_eq!(observation.lines.len(), 4);
+    assert!(observation.lines.iter().all(|line| line.quantity == 1));
+    assert_eq!(
+        observation
+            .observed_total
+            .ok_or("known observation cost")?
+            .amount,
+        amount("10.000000")
+    );
+    assert_eq!(observation.charged_amount, amount("10.000000"));
+    assert!(observation.lines.iter().all(|line| {
+        accepted
+            .hold
+            .model_rate_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot.iter().any(|rate| {
+                    rate.rate_id == line.rate_id && rate.rate_revision == line.rate_revision
+                })
+            })
+    }));
     Ok(())
 }
 
@@ -232,6 +258,7 @@ async fn model_pg_duplicate_settlement_event_is_idempotent()
             "claude-test",
             &ModelUsageMeasurement::Unknown {
                 reason: "out-of-order observation".into(),
+                observed_quantities: None,
             },
         )
         .await?;
@@ -329,6 +356,7 @@ async fn model_pg_unknown_settlement_keeps_hold_reconcilable()
             "claude-test",
             &ModelUsageMeasurement::Unknown {
                 reason: "stream interrupted".into(),
+                observed_quantities: None,
             },
         )
         .await?;
@@ -409,5 +437,50 @@ async fn model_pg_rate_changes_do_not_replace_admitted_snapshot()
         )
         .await?;
     assert_eq!(credits.account(project).await?.spent, amount("1.000000"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_pg_admission_is_bounded_when_agent_crashes_before_first_settlement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool, store, credits) = fixture().await?;
+    configure_rates(&store, Some("claude-test")).await?;
+    let project = ProjectId::new();
+    grant(&credits, project, "100.000000").await?;
+    let call = Uuid::now_v7();
+    let admitted = store
+        .admit_model_cost("crash-after-admission", "agent", &admission(project, call))
+        .await?;
+    // No Agent Unknown/settle RPC is ever issued: admission itself must have committed this state.
+    let persisted = credits.holds(project, 1, 100, 0).await?.items.remove(0);
+    assert_eq!(
+        persisted.state,
+        contracts::resource::credits::CreditHoldState::Unknown
+    );
+    assert_eq!(persisted.id, admitted.hold.id);
+    let first = persisted.unknown_since.ok_or("initial Unknown")?;
+    let due = persisted.reconciliation_due_at.ok_or("atomic deadline")?;
+    assert_eq!((due.get() - first.get()).whole_seconds(), 3600);
+    assert_eq!(credits.expire_unknown_at(due).await?, 1);
+    let account = credits.account(project).await?;
+    assert_eq!(account.reserved, amount("0.000000"));
+    assert_eq!(account.spent, amount("0.000000"));
+    assert!(
+        store
+            .admit_model_cost("crash-after-admission", "agent", &admission(project, call))
+            .await
+            .is_err(),
+        "a cached admission receipt cannot resurrect released funds"
+    );
+    let fact_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource.model_cost_observations WHERE call_id=$1",
+    )
+    .bind(call)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        fact_count, 1,
+        "admission observation commits without the gateway"
+    );
     Ok(())
 }

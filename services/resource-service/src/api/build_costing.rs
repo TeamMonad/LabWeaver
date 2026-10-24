@@ -38,7 +38,7 @@ pub(super) fn internal_routes() -> Router<ResourceApiState> {
             get(reconciliations),
         )
 }
-fn owner(
+pub(super) fn owner(
     state: &ResourceApiState,
     identity: &auth::ServiceIdentity,
 ) -> Result<(), ResourceApiError> {

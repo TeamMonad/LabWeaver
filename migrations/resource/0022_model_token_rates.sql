@@ -29,3 +29,17 @@ ALTER TABLE resource.credit_holds ADD CONSTRAINT credit_holds_target_check CHECK
     num_nonnulls(request_id, build_request_id, model_call_id) = 1
     AND (build_request_id IS NULL) = (build_attempt IS NULL)
 );
+
+CREATE TABLE resource.model_cost_observations (
+    event_id uuid PRIMARY KEY,
+    call_id uuid NOT NULL,
+    hold_id uuid NOT NULL REFERENCES resource.credit_holds(hold_id),
+    contract jsonb NOT NULL CHECK (jsonb_typeof(contract) = 'object'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX model_cost_observations_call_idx ON resource.model_cost_observations(call_id,created_at,event_id);
+DO $$ BEGIN
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname='lw_resource_runtime') THEN
+        REVOKE UPDATE, DELETE ON resource.model_cost_observations FROM lw_resource_runtime;
+    END IF;
+END $$;

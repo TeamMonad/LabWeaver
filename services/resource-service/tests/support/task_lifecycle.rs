@@ -1068,3 +1068,133 @@ async fn cancellation_after_approval_and_committed_ack_converges_with_retry() ->
     );
     Ok(())
 }
+
+async fn active_task_for_renewal() -> TestResult<(Fixture, TaskResourceStatus)> {
+    let fixture = Fixture::start().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    approve(&fixture.faults.store, &request).await?;
+    let claimed = fixture.wait_for_claim().await?;
+    let active = fixture
+        .lifecycle
+        .acknowledge(&claimed, "labweaver-evaluation")
+        .await?;
+    Ok((fixture, active))
+}
+
+#[tokio::test]
+async fn one_shot_task_renewal_cannot_spend_beyond_an_exhausted_account() -> TestResult {
+    let (fixture, active) = active_task_for_renewal().await?;
+    let credits = PgCreditStore::new(fixture.pool.clone());
+    let account = credits.account(active.project_id).await?;
+    credits
+        .admin(
+            "exhaust-task-available",
+            ActorId::new(),
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Adjust {
+                project_id: active.project_id,
+                amount: FixedDecimal::from_scaled(-account.available.scaled())?,
+                reason: "isolate insufficient renewal funds".into(),
+            },
+        )
+        .await?;
+    let before = credits.account(active.project_id).await?;
+    assert_eq!(before.available, FixedDecimal::parse("0.000000")?);
+    let expiry = active.lease.expires_at.ok_or("expiry")?;
+    let error = fixture
+        .faults
+        .store
+        .renew_lease(
+            "unsupported-task-renewal",
+            active.lease.id,
+            active.lease.revision,
+            UtcTimestamp::from_utc(expiry.get() + time::Duration::minutes(1))?,
+            "task-renew",
+        )
+        .await
+        .expect_err("one-shot Task cannot renew");
+    assert!(matches!(error, ResourceStoreError::TaskRenewalUnsupported));
+    assert_eq!(credits.account(active.project_id).await?, before);
+    assert_eq!(
+        fixture.faults.store.load_lease(active.lease.id).await?,
+        active.lease
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_shot_task_renewal_replay_never_mutates_lease_hold_or_events() -> TestResult {
+    let (fixture, active) = active_task_for_renewal().await?;
+    let before = fixture.event_count().await?;
+    let credits = PgCreditStore::new(fixture.pool.clone());
+    let account = credits.account(active.project_id).await?;
+    let body = contracts::http::RenewResourceLease {
+        expected_revision: active.lease.revision,
+        duration_seconds: 600,
+        reason: "one-shot retry".into(),
+    };
+    for _ in 0..2 {
+        let error = fixture
+            .faults
+            .store
+            .renew_lease_for_duration(
+                "same-task-renew-key",
+                active.lease.id,
+                &body,
+                "task-renew-replay",
+            )
+            .await
+            .expect_err("replay remains rejected");
+        assert!(matches!(error, ResourceStoreError::TaskRenewalUnsupported));
+    }
+    assert_eq!(credits.account(active.project_id).await?, account);
+    assert_eq!(fixture.event_count().await?, before);
+    assert_eq!(
+        fixture.faults.store.load_lease(active.lease.id).await?,
+        active.lease
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_shot_task_renewal_cannot_extend_the_paid_snapshot_window() -> TestResult {
+    let (fixture, active) = active_task_for_renewal().await?;
+    let before: serde_json::Value = sqlx::query_scalar(
+        "SELECT snapshot FROM resource.credit_cost_snapshots WHERE request_id=$1",
+    )
+    .bind(active.request.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        before["estimate"]["input"]["computeUntil"],
+        serde_json::to_value(active.lease.expires_at.ok_or("expiry")?)?
+    );
+    let error = fixture
+        .faults
+        .store
+        .renew_lease_for_duration(
+            "task-paid-window",
+            active.lease.id,
+            &contracts::http::RenewResourceLease {
+                expected_revision: active.lease.revision,
+                duration_seconds: 900,
+                reason: "cannot enlarge original approval".into(),
+            },
+            "task-renew-window",
+        )
+        .await
+        .expect_err("one-shot paid window is fixed");
+    assert!(matches!(error, ResourceStoreError::TaskRenewalUnsupported));
+    let after: serde_json::Value = sqlx::query_scalar(
+        "SELECT snapshot FROM resource.credit_cost_snapshots WHERE request_id=$1",
+    )
+    .bind(active.request.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(after, before);
+    assert_eq!(
+        fixture.faults.store.load_lease(active.lease.id).await?,
+        active.lease
+    );
+    Ok(())
+}

@@ -412,6 +412,26 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::build_costing::ObserveBuildCostRequest
     );
     document!(
+        "schemas/contracts/v1/model-cost-admission-request.schema.json",
+        crate::resource::model_costing::ModelCostAdmissionRequest
+    );
+    document!(
+        "schemas/contracts/v1/model-cost-admission.schema.json",
+        crate::resource::model_costing::ModelCostAdmission
+    );
+    document!(
+        "schemas/contracts/v1/model-cost-settlement-request.schema.json",
+        crate::resource::model_costing::ModelCostSettlementRequest
+    );
+    document!(
+        "schemas/contracts/v1/model-usage-measurement.schema.json",
+        crate::resource::model_costing::ModelUsageMeasurement
+    );
+    document!(
+        "schemas/contracts/v1/model-cost-observation.schema.json",
+        crate::resource::model_costing::ModelCostObservation
+    );
+    document!(
         "schemas/contracts/v1/resource-cost-estimate-request.schema.json",
         crate::resource::costing::ResourceCostEstimateRequest
     );
@@ -1568,6 +1588,33 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ,"x-labweaver-problem-content-type":"application/problem+json"
             ,"x-labweaver-errors":["LW_CONTRACT_DOCUMENT_INVALID","LW_ACCESS_DENIED","LW_IDEMPOTENCY_CONFLICT","LW_REVISION_CONFLICT"]
         });
+        if operation.operation_id == "renewResourceLease" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED",
+                "LW_RESOURCE_REVISION_CONFLICT",
+                "LW_CREDITS_INSUFFICIENT",
+                "LW_RESOURCE_ESTIMATE_CHANGED",
+                "LW_RESOURCE_SCOPE_CONFLICT",
+                "LW_IDEMPOTENCY_CONFLICT"
+            ]);
+        }
+        if matches!(operation.operation_id, "admitModelCost" | "settleModelCost") {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CREDITS_INSUFFICIENT",
+                "LW_CREDITS_SCOPE_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_CREDITS_CONFLICT",
+                "LW_RESOURCE_SCOPE_CONFLICT",
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+                "LW_RESOURCE_RATE_CURRENCY_CONFLICT",
+                "LW_RESOURCE_RATE_SETTLED_CONFLICT",
+                "LW_RESOURCE_REQUEST_INVALID",
+                "LW_IDEMPOTENCY_CONFLICT"
+            ]);
+            operation_json["description"] = json!(
+                "Agent-only model accounting. Admission atomically reserves the configured maximum and starts the finite Unknown reconciliation deadline; callId and Idempotency-Key bind an immutable input. Settlement is idempotent by callId/eventId, stores complete or partial token observations and price details, and only complete terminal Known usage finalizes the hold."
+            );
+        }
         if matches!(
             operation.operation_id,
             "getPlatformConfiguration"
@@ -2176,6 +2223,8 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "estimateProjectBuildCost" => "build-cost-estimate-request",
         "admitBuildCost" => "build-cost-admission-request",
         "observeBuildCost" => "observe-build-cost-request",
+        "admitModelCost" => "model-cost-admission-request",
+        "settleModelCost" => "model-cost-settlement-request",
         "createEstimatedCreditHold" => "estimated-credit-hold-request",
         "resolveCreditHold" => "credit-hold-resolution-request",
         "createResourceRate" => "http/create-resource-rate-request",
@@ -2360,12 +2409,13 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "getProjectBuildCost" | "getBuildCost" | "admitBuildCost" | "observeBuildCost" => {
             contract_ref("build-cost-record")
         }
+        "admitModelCost" => contract_ref("model-cost-admission"),
         "createEstimatedCreditHold" => contract_ref("estimated-credit-hold"),
         "listProjectCreditLedger" => contract_ref("credit-ledger-page"),
         "createCreditAdminOperation" => {
             json!({"type":"array","items":contract_ref("credit-ledger-entry")})
         }
-        "createCreditHold" | "resolveCreditHold" => contract_ref("credit-hold"),
+        "settleModelCost" | "createCreditHold" | "resolveCreditHold" => contract_ref("credit-hold"),
         "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
             contract_ref("resource-budget")
         }

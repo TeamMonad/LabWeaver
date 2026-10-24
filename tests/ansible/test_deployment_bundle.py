@@ -679,6 +679,49 @@ class DeploymentBundleTests(unittest.TestCase):
             policy = next(item for item in objects if item and item.get("kind") == "NetworkPolicy" and item["metadata"]["name"] == "agent-service")
             sandbox_rule = next(rule for rule in policy["spec"]["ingress"] if any(source.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name") == "labweaver-authoring" for source in rule["from"]))
             self.assertEqual(sandbox_rule["ports"], [{"protocol": "TCP", "port": 9460}])
+            sources = {(item["kind"], item["metadata"]["name"]): item
+                       for item in [*objects, *yaml.safe_load_all((loaded / "application.yaml").read_bytes())]
+                       if item and item.get("kind") in {"Secret", "ConfigMap"}}
+
+            def locators(value):
+                if isinstance(value, dict):
+                    for nested in value.values():
+                        yield from locators(nested)
+                elif isinstance(value, list):
+                    for nested in value:
+                        yield from locators(nested)
+                elif isinstance(value, str) and value.startswith(("/etc/labweaver/secrets/", "/etc/labweaver/config/")):
+                    yield value
+
+            # These two process modes consume every file in their respective startup documents.
+            # Other executor modes intentionally share documents containing unused listener fields.
+            for workload in ("agent-service", "build-executor"):
+                pod = deployments[workload]["spec"]["template"]["spec"]
+                volumes = {volume["name"]: volume for volume in pod.get("volumes", [])}
+                for container in pod["containers"]:
+                    mounts = container.get("volumeMounts", [])
+
+                    def resolve(path):
+                        mount = next((mount for mount in mounts if path == mount["mountPath"] or path.startswith(mount["mountPath"].rstrip("/") + "/")), None)
+                        self.assertIsNotNone(mount, f"{workload} does not mount startup file {path}")
+                        volume = volumes[mount["name"]]
+                        if "secret" in volume:
+                            kind, name = "Secret", volume["secret"]["secretName"]
+                        else:
+                            kind, name = "ConfigMap", volume["configMap"]["name"]
+                        key = mount.get("subPath") or path[len(mount["mountPath"]):].lstrip("/")
+                        source = sources[(kind, name)]
+                        self.assertIn(key, source.get("data", {}), f"{workload} startup file {path} missing from {kind}/{name}")
+                        return source["data"][key]
+
+                    for path in locators(container.get("env", [])):
+                        content = resolve(path)
+                        if path.startswith("/etc/labweaver/config/") and path.endswith((".yaml", ".json")):
+                            for dependency in locators(yaml.safe_load(content)):
+                                resolve(dependency)
+            executor_secret = sources[("Secret", "build-executor-secrets")]["data"]
+            for dependency in ("oidc-ca.pem", "service-client-secret", "mtls-ca.pem"):
+                self.assertIn(dependency, executor_secret)
         self.clean_runtime()
 
     def key(self, path: Path | None = None) -> str:

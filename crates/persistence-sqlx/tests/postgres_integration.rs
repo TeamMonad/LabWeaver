@@ -228,6 +228,8 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         "UPDATE control.project_memberships SET object_role='owner'",
         "UPDATE control.platform_configuration_state SET contract='{}'::jsonb",
         "UPDATE control.runtime_authorization_policy SET contract='{}'::jsonb",
+        "UPDATE resource.model_cost_observations SET contract='{}'::jsonb",
+        "DELETE FROM resource.model_cost_observations",
     ] {
         assert!(
             sqlx::query(query).execute(resource).await.is_err(),

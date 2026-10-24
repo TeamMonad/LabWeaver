@@ -2203,6 +2203,10 @@ class LocalDevBundleTests(unittest.TestCase):
                 if document["kind"] == "Secret"
                 and document["metadata"]["name"] == "build-executor-secrets"
             )
+            agent_secret = next(document for document in documents if document["kind"] == "Secret" and document["metadata"]["name"] == "agent-service-secrets")
+            for startup_file in ("oidc-ca.pem", "mtls-ca.pem", "service-client-secret"):
+                self.assertIn(startup_file, build_secret["data"])
+                self.assertEqual(build_secret["data"][startup_file], agent_secret["data"][startup_file])
             self.assertEqual(
                 base64.b64decode(build_secret["data"]["harbor-ca.crt"]),
                 b"harbor-ca",

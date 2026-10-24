@@ -77,6 +77,9 @@
       "portal-public-root.crt"
     ],
     "build-executor-secrets": [
+      "oidc-ca.pem",
+      "service-client-secret",
+      "mtls-ca.pem",
       "outbound-ca.pem",
       "buildkit-ca.pem",
       "buildkit-client.crt",

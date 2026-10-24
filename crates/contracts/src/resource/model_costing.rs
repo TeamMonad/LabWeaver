@@ -15,11 +15,6 @@ pub struct ModelTokenQuantities {
     pub cache_write_tokens: u64,
 }
 
-impl ModelTokenQuantities {
-    pub fn validate(&self) -> Result<(), super::ResourceError> {
-        Ok(())
-    }
-}
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelRateSnapshot {
@@ -78,8 +73,35 @@ pub struct ModelCostSettlementRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ModelUsageMeasurement {
-    Known { quantities: ModelTokenQuantities },
-    Unknown { reason: String },
+    Known {
+        quantities: ModelTokenQuantities,
+    },
+    Unknown {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_quantities: Option<ModelTokenQuantities>,
+    },
+}
+
+/// Immutable Resource-owned observation and the exact price arithmetic used for reconciliation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelCostObservation {
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub hold_id: Uuid,
+    #[schemars(with = "String", extend("format" = "uuid"))]
+    pub call_id: Uuid,
+    pub event_id: EventId,
+    pub model_binding: String,
+    pub measurement: ModelUsageMeasurement,
+    pub lines: Vec<ResourceChargeLine>,
+    pub observed_total: Option<super::Money>,
+    pub charged_amount: FixedDecimal,
 }

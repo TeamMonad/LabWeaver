@@ -864,10 +864,15 @@ impl LlmReviewWorker {
             .model_gateway
             .as_ref()
             .ok_or_else(|| review_execution_failure("LW_MODEL_GATEWAY_UNCONFIGURED", None))?;
+        let remaining = Duration::try_from(request.deadline_at.get() - OffsetDateTime::now_utc())
+            .map_err(|_| review_execution_failure(REVIEW_DEADLINE_EXCEEDED, None))?;
         let runtime = runtime.with_process_environment(gateway.environment(
             request.project_id,
             request.task_run_id.as_uuid(),
             lease.attempt,
+            remaining.min(Duration::from_millis(
+                request.policy.budget.timeout_milliseconds,
+            )),
         ));
         // Keep the runtime future alive after cancellation is requested. It owns the provider
         // invocation and must let the process boundary perform its cancellation cleanup before
@@ -943,7 +948,9 @@ fn validate_request_deadline(
     request: &InternalAgentLlmReviewRequest,
     now: UtcTimestamp,
 ) -> Result<(), LlmReviewStoreError> {
-    if request.deadline_at <= now {
+    if request.deadline_at <= now
+        || request.deadline_at.get() - now.get() > time::Duration::hours(24)
+    {
         return Err(LlmReviewStoreError::InvalidContract);
     }
     Ok(())
@@ -1417,7 +1424,7 @@ mod tests {
             base_url: "http://agent-service:9460/".parse().expect("gateway URL"),
             issuer: crate::model_gateway::ScopedTokenIssuer::new(
                 vec![7; 32],
-                Duration::from_mins(5),
+                Duration::from_hours(24),
             )
             .expect("signer"),
         }

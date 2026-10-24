@@ -1828,6 +1828,225 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/internal/v1/credits/model/admit": {
+      "post": {
+        "description": "Agent-only model accounting. Admission atomically reserves the configured maximum and starts the finite Unknown reconciliation deadline; callId and Idempotency-Key bind an immutable input. Settlement is idempotent by callId/eventId, stores complete or partial token observations and price details, and only complete terminal Known usage finalizes the hold.",
+        "operationId": "admitModelCost",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/model-cost-admission-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/model-cost-admission.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.credits.hold"
+            ]
+          }
+        ],
+        "summary": "admitModelCost",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CREDITS_INSUFFICIENT",
+          "LW_CREDITS_SCOPE_DENIED",
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_CREDITS_CONFLICT",
+          "LW_RESOURCE_SCOPE_CONFLICT",
+          "LW_RESOURCE_RATE_UNCONFIGURED",
+          "LW_RESOURCE_RATE_CURRENCY_CONFLICT",
+          "LW_RESOURCE_RATE_SETTLED_CONFLICT",
+          "LW_RESOURCE_REQUEST_INVALID",
+          "LW_IDEMPOTENCY_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "resource.credits.hold",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/credits/model/{holdId}/settle": {
+      "post": {
+        "description": "Agent-only model accounting. Admission atomically reserves the configured maximum and starts the finite Unknown reconciliation deadline; callId and Idempotency-Key bind an immutable input. Settlement is idempotent by callId/eventId, stores complete or partial token observations and price details, and only complete terminal Known usage finalizes the hold.",
+        "operationId": "settleModelCost",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "holdId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/model-cost-settlement-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/credit-hold.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.usage.record"
+            ]
+          }
+        ],
+        "summary": "settleModelCost",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CREDITS_INSUFFICIENT",
+          "LW_CREDITS_SCOPE_DENIED",
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_CREDITS_CONFLICT",
+          "LW_RESOURCE_SCOPE_CONFLICT",
+          "LW_RESOURCE_RATE_UNCONFIGURED",
+          "LW_RESOURCE_RATE_CURRENCY_CONFLICT",
+          "LW_RESOURCE_RATE_SETTLED_CONFLICT",
+          "LW_RESOURCE_REQUEST_INVALID",
+          "LW_IDEMPOTENCY_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.usage.record",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/internal/v1/environment-credit-grants/{leaseId}": {
       "get": {
         "description": "Permission: resource.environment.resolve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.",

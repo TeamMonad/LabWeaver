@@ -8,7 +8,7 @@ use contracts::resource::{
     credits::{CreditHold, CreditHoldResolutionRequest},
     model_costing::{
         ModelCostAdmission, ModelCostAdmissionRequest, ModelCostEstimate, ModelCostEstimateRequest,
-        ModelTokenQuantities, ModelUsageMeasurement,
+        ModelCostObservation, ModelRateSnapshot, ModelTokenQuantities, ModelUsageMeasurement,
     },
 };
 use sqlx::{Postgres, Row, Transaction};
@@ -40,10 +40,6 @@ async fn estimate_in_transaction(
     input: &ModelCostEstimateRequest,
     project_id: contracts::ProjectId,
 ) -> Result<ModelCostEstimate, ResourceStoreError> {
-    input
-        .quantities
-        .validate()
-        .map_err(ResourceStoreError::Contract)?;
     if input.model_binding.trim().is_empty() || input.model_binding.len() > 256 {
         return Err(ResourceStoreError::Contract(
             contracts::resource::ResourceError::InvalidRate,
@@ -112,7 +108,14 @@ impl PgResourceStore {
         if let Some(replay) =
             credits::reserve(&mut tx, "model_cost_admission", key, &(owner, input)).await?
         {
-            return Ok(serde_json::from_value(replay)?);
+            let original: ModelCostAdmission = serde_json::from_value(replay)?;
+            let funded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource.credit_holds WHERE hold_id=$1 AND owner_client_id=$2 AND model_call_id=$3 AND state='unknown' AND remaining >= $4::text::numeric AND reconciliation_due_at>clock_timestamp() AND expired_unknown_at IS NULL)")
+                .bind(original.hold.id).bind(owner).bind(input.call_id).bind(original.estimate.max_preauthorization.scaled().to_string())
+                .fetch_one(&mut *tx).await?;
+            if !funded {
+                return Err(credits::CreditError::Insufficient.into());
+            }
+            return Ok(original);
         }
         let project = input.project_id;
         let estimate = estimate_in_transaction(
@@ -157,6 +160,41 @@ impl PgResourceStore {
             &estimate.max_preauthorization,
         )
         .await?;
+        let admission_event = contracts::EventId::new();
+        let measurement = ModelUsageMeasurement::Unknown {
+            reason:
+                "admitted model invocation has not supplied a complete terminal usage observation"
+                    .into(),
+            observed_quantities: None,
+        };
+        // The finite reconciliation deadline commits with the hold. A lost admission response or
+        // killed Agent cannot strand a Pending hold before a second RPC arrives.
+        hold = credits::resolve_in_transaction(
+            &mut tx,
+            owner,
+            hold.id,
+            &CreditHoldResolutionRequest::Unknown {
+                event_id: Some(admission_event),
+                reason: "model invocation admitted; terminal usage not yet known".into(),
+            },
+            None,
+            Some(admission_event),
+        )
+        .await?;
+        insert_observation(
+            &mut tx,
+            &ModelCostObservation {
+                hold_id: hold.id,
+                call_id: input.call_id,
+                event_id: admission_event,
+                model_binding: input.model_binding.clone(),
+                measurement,
+                lines: Vec::new(),
+                observed_total: None,
+                charged_amount: FixedDecimal::from_scaled(0)?,
+            },
+        )
+        .await?;
         let result = ModelCostAdmission { hold, estimate };
         credits::complete(&mut tx, "model_cost_admission", key, &result).await?;
         tx.commit().await?;
@@ -199,46 +237,32 @@ impl PgResourceStore {
                 row.try_get::<Option<serde_json::Value>, _>("model_rate_snapshot")?
                     .ok_or(ResourceStoreError::RateUnconfigured)?,
             )?;
+        let observed = match measurement {
+            ModelUsageMeasurement::Known { quantities } => Some(quantities),
+            ModelUsageMeasurement::Unknown {
+                observed_quantities,
+                ..
+            } => observed_quantities.as_ref(),
+        };
+        let lines = if let Some(observed) = observed {
+            snapshot_lines(&mut tx, &snapshot, model_binding, *observed).await?
+        } else {
+            Vec::new()
+        };
+        let total = lines.iter().try_fold(0_i128, |sum, line| {
+            sum.checked_add(line.amount.amount.scaled())
+                .ok_or(ResourceStoreError::NumericOverflow)
+        })?;
         let resolution = match measurement {
-            ModelUsageMeasurement::Unknown { reason } => CreditHoldResolutionRequest::Unknown {
+            ModelUsageMeasurement::Unknown { reason, .. } => CreditHoldResolutionRequest::Unknown {
                 event_id: Some(event_id),
                 reason: reason.clone(),
             },
-            ModelUsageMeasurement::Known { quantities: usage } => {
-                let mut total = 0_i128;
-                for ((unit, _), quantity) in UNITS.into_iter().zip(quantities(usage)) {
-                    if quantity == 0 {
-                        continue;
-                    }
-                    let saved = snapshot
-                        .iter()
-                        .find(|entry| entry.unit == unit)
-                        .ok_or(ResourceStoreError::RateUnconfigured)?;
-                    let rate_row = sqlx::query("SELECT contract FROM resource.resource_rates WHERE rate_id=$1 AND model_binding=$2").bind(saved.rate_id.as_uuid()).bind(model_binding).fetch_one(&mut *tx).await?;
-                    let rate: contracts::resource::ResourceRate =
-                        serde_json::from_value(rate_row.try_get("contract")?)?;
-                    if rate.revision != saved.rate_revision {
-                        return Err(ResourceStoreError::RateSettledConflict);
-                    }
-                    total = total
-                        .checked_add(
-                            pricing::multiply_money(
-                                &rate.unit_price,
-                                quantity,
-                                rate.unit_quantity,
-                                1,
-                            )?
-                            .amount
-                            .scaled(),
-                        )
-                        .ok_or(ResourceStoreError::NumericOverflow)?;
-                }
-                CreditHoldResolutionRequest::Settle {
-                    event_id,
-                    amount: FixedDecimal::from_scaled(total)?,
-                    finalize: true,
-                }
-            }
+            ModelUsageMeasurement::Known { .. } => CreditHoldResolutionRequest::Settle {
+                event_id,
+                amount: FixedDecimal::from_scaled(total)?,
+                finalize: true,
+            },
         };
         let hold = credits::resolve_in_transaction(
             &mut tx,
@@ -247,6 +271,33 @@ impl PgResourceStore {
             &resolution,
             None,
             Some(event_id),
+        )
+        .await?;
+        let charged_scaled: String = sqlx::query_scalar("SELECT COALESCE(sum(spent_delta),0)::text FROM resource.credit_ledger_entries WHERE hold_id=$1 AND source_event_id=$2 AND project_id IS NOT NULL")
+            .bind(hold_id).bind(event_id.as_uuid()).fetch_one(&mut *tx).await?;
+        insert_observation(
+            &mut tx,
+            &ModelCostObservation {
+                hold_id,
+                call_id,
+                event_id,
+                model_binding: model_binding.to_owned(),
+                measurement: measurement.clone(),
+                lines,
+                observed_total: if observed.is_some() {
+                    Some(Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::from_scaled(total)?,
+                    })
+                } else {
+                    None
+                },
+                charged_amount: FixedDecimal::from_scaled(
+                    charged_scaled
+                        .parse()
+                        .map_err(|_| ResourceStoreError::NumericOverflow)?,
+                )?,
+            },
         )
         .await?;
         credits::complete(
@@ -259,4 +310,53 @@ impl PgResourceStore {
         tx.commit().await?;
         Ok(hold)
     }
+}
+
+async fn snapshot_lines(
+    tx: &mut Transaction<'_, Postgres>,
+    snapshot: &[ModelRateSnapshot],
+    model: &str,
+    usage: ModelTokenQuantities,
+) -> Result<Vec<ResourceChargeLine>, ResourceStoreError> {
+    let mut lines = Vec::with_capacity(4);
+    for ((unit, _), quantity) in UNITS.into_iter().zip(quantities(&usage)) {
+        let saved = snapshot
+            .iter()
+            .find(|entry| entry.unit == unit)
+            .ok_or(ResourceStoreError::RateUnconfigured)?;
+        let row = sqlx::query(
+            "SELECT contract FROM resource.resource_rates WHERE rate_id=$1 AND model_binding=$2",
+        )
+        .bind(saved.rate_id.as_uuid())
+        .bind(model)
+        .fetch_one(&mut **tx)
+        .await?;
+        let rate: contracts::resource::ResourceRate =
+            serde_json::from_value(row.try_get("contract")?)?;
+        if rate.revision != saved.rate_revision {
+            return Err(ResourceStoreError::RateSettledConflict);
+        }
+        let amount = pricing::multiply_money(&rate.unit_price, quantity, rate.unit_quantity, 1)?;
+        lines.push(ResourceChargeLine {
+            quantity_divisor: 1,
+            rate_id: rate.id,
+            rate_revision: rate.revision,
+            unit,
+            quantity,
+            unit_quantity: rate.unit_quantity,
+            unit_price: rate.unit_price,
+            amount,
+        });
+    }
+    Ok(lines)
+}
+
+async fn insert_observation(
+    tx: &mut Transaction<'_, Postgres>,
+    observation: &ModelCostObservation,
+) -> Result<(), ResourceStoreError> {
+    sqlx::query("INSERT INTO resource.model_cost_observations(event_id,call_id,hold_id,contract) VALUES($1,$2,$3,$4)")
+        .bind(observation.event_id.as_uuid()).bind(observation.call_id).bind(observation.hold_id)
+        .bind(serde_json::to_value(observation)?).execute(&mut **tx).await?;
+    Ok(())
 }

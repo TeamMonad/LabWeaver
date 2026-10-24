@@ -414,7 +414,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         .map_err(|_| StartupError::Configuration)?;
     let gateway_key = read_trimmed(&deployment.model_gateway.upstream_key_file)?;
     let signing_key = read_trimmed(&deployment.model_gateway.signing_key_file)?;
-    let gateway_issuer = ScopedTokenIssuer::new(signing_key.into_bytes(), Duration::from_mins(5))
+    let gateway_issuer = ScopedTokenIssuer::new(signing_key.into_bytes(), Duration::from_hours(24))
         .ok_or(StartupError::Configuration)?;
     let gateway_runtime = ModelGatewayRuntime {
         base_url: gateway_public_url,
@@ -495,7 +495,6 @@ async fn run_agent_service() -> Result<(), StartupError> {
         upstream_key: gateway_key,
         pool: store.pool().clone(),
         resource: resource_client,
-        sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         http: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_mins(5))
