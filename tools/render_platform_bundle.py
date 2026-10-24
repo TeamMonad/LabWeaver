@@ -37,9 +37,11 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID") from error
-    if not isinstance(value, dict) or set(value) not in ({"apiVersion", "namespace", "configMaps", "secrets"}, {"apiVersion", "namespace", "configMaps", "secrets", "optionalSecrets"}):
+    required = {"apiVersion", "namespace", "configMaps", "secrets"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"optionalSecrets", "optionalConfigMaps"}:
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     value.setdefault("optionalSecrets", {})
+    value.setdefault("optionalConfigMaps", {})
     if value["apiVersion"] != API_VERSION or not DNS_LABEL.fullmatch(value["namespace"]):
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     for group in ("configMaps", "secrets"):
@@ -56,13 +58,19 @@ def _load_manifest(path: Path) -> dict[str, Any]:
                 or any(not isinstance(key, str) or not DATA_KEY.fullmatch(key) for key in keys)
             ):
                 raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
+    optional_configmaps = value["optionalConfigMaps"]
+    if not isinstance(optional_configmaps, dict) or set(optional_configmaps) & set(value["configMaps"]):
+        raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
+    for name, keys in optional_configmaps.items():
+        if not isinstance(name, str) or not DNS_LABEL.fullmatch(name) or not isinstance(keys, list) or not keys or len(keys) != len(set(keys)) or any(not isinstance(key, str) or not DATA_KEY.fullmatch(key) for key in keys):
+            raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     optional = value["optionalSecrets"]
     if not isinstance(optional, dict):
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     for name, keys in optional.items():
         if name not in value["secrets"] or not isinstance(keys, list) or len(keys) != len(set(keys)) or any(not isinstance(key, str) or not DATA_KEY.fullmatch(key) for key in keys):
             raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
-    if set(value["configMaps"]) & set(value["secrets"]):
+    if (set(value["configMaps"]) | set(optional_configmaps)) & set(value["secrets"]):
         raise BundleError("LW_PLATFORM_BUNDLE_MANIFEST_INVALID")
     return value
 
@@ -123,14 +131,17 @@ def render_bundle(manifest_path: Path, input_root: Path) -> bytes:
         group_root = input_root / directory_name
         if not group_root.is_dir() or group_root.is_symlink():
             raise BundleError("LW_PLATFORM_BUNDLE_INPUT_INVALID")
-        expected_names = set(manifest[manifest_key])
-        if {entry.name for entry in group_root.iterdir()} != expected_names:
+        required = manifest[manifest_key]
+        optional = manifest["optionalConfigMaps"] if kind == "ConfigMap" else {}
+        names = {entry.name for entry in group_root.iterdir()}
+        if not set(required) <= names or not names <= set(required) | set(optional):
             raise BundleError("LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE")
-        for name in sorted(expected_names):
+        for name in sorted(names):
             if kind == "Secret":
                 _validate_jetstream_ack_permission(name, group_root / name)
             optional_keys = manifest.get("optionalSecrets", {}).get(name, []) if kind == "Secret" else []
-            data = _read_exact_files(group_root / name, manifest[manifest_key][name], binary, optional_keys)
+            keys = required[name] if name in required else optional[name]
+            data = _read_exact_files(group_root / name, keys, binary, optional_keys)
             value: dict[str, Any] = {
                 "apiVersion": "v1",
                 "kind": kind,

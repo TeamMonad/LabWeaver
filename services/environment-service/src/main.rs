@@ -200,18 +200,24 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                     .ok_or(MainError::Configuration)?,
                 &deployment.executor,
                 service_verifier.clone().ok_or(MainError::Configuration)?,
+                pool.clone(),
             )
             .await?,
         ),
         RuntimeKind::KubeVirt => None,
     };
-    let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
+    let namespace_profile = environment_service::ContainerNamespaceProfile::from_env()
         .map_err(|_| MainError::Configuration)?;
+    let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
+        .map_err(|_| MainError::Configuration)?
+        .with_namespace_profile(namespace_profile.clone());
     match kind {
         RuntimeKind::Container => {
             let terminal = terminal.ok_or(MainError::Configuration)?;
-            let executor =
-                FencedContainerExecutor::new(PgContainerExecutorFenceStore::new(pool), backend);
+            let executor = FencedContainerExecutor::new(
+                PgContainerExecutorFenceStore::new(pool).with_namespace_profile(namespace_profile),
+                backend,
+            );
             let server = NatsContainerExecutorServer::new(
                 nats,
                 deployment.nats.container_request_subject,

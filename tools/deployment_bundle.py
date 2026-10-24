@@ -542,6 +542,7 @@ def _workload_inputs(
         "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_DIR",
         "LABWEAVER_PLATFORM_CONFIGURATION_RUNTIME_DIR",
         "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_SHA256",
+        "LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE",
     }
     result = {}
     for name, defaults in workloads.items():
@@ -956,8 +957,13 @@ def load_bundle(
     )
     manifest = objects._load_manifest(manifest_path)
     for group, prefix in (("configMaps", "config"), ("secrets", "secrets")):
-        bindings = _exact(application[group], set(manifest[group]))
-        for name, keys in manifest[group].items():
+        bindings = application[group]
+        optional = manifest["optionalConfigMaps"] if group == "configMaps" else {}
+        if not isinstance(bindings, dict) or not set(manifest[group]) <= set(bindings) or set(bindings) - set(manifest[group]) - set(optional):
+            raise BundleError("LW_BUNDLE_MODEL_INVALID")
+        declared = dict(manifest[group], **optional)
+        for name in bindings:
+            keys = declared[name]
             for ref in _exact(bindings[name], set(keys)).values():
                 references.add(_relative(ref, prefix))
     if not isinstance(application["helmValues"], dict) or not isinstance(
@@ -971,6 +977,7 @@ def load_bundle(
         "managedControlConfiguration",
         "environmentExecutorAuthority",
         "platformConfigurationPolicy",
+        "containerPlacementProfileConfigMap",
     } & set(application["helmValues"]):
         raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
     for key in application["ansibleVariables"]:
@@ -1108,6 +1115,8 @@ def derive_bundle(
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     values = dict(application["helmValues"])
     values["workloadInputs"] = workload_inputs
+    if "container-placement-config" in application["configMaps"]:
+        values["containerPlacementProfileConfigMap"] = "container-placement-config"
     if executor_authority:
         values["environmentExecutorAuthority"] = executor_authority
     package = _document(files[model["versions"]["packageFile"]])

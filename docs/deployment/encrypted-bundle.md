@@ -59,7 +59,7 @@ Bundle 目录、`.private` 目录及其内部目录必须由当前用户持有�
 | `application.ansibleVariables` | 应用角色参数。只接受 `platform_application_` 前缀 |
 | `application.workloadInputs` | chart 中每个 workload 的 `env` 和 `secretEnv`。启用的服务必须提供全部已声明必需键及所用镜像 |
 
-`configMaps` 和 `secrets` 必须完整匹配应用 manifest 的对象与键。工具拒绝缺项和额外对象。所有文件都必须被模型引用，不能把未使用的私钥顺带加入归档。两个对象可以引用同一文件。
+`configMaps` 和 `secrets` 必须包含应用 manifest 的全部必需对象和完整键。`optionalConfigMaps` 中登记的对象可以整体省略；提供时仍必须完整匹配其键，未知对象或额外键被拒绝。所有文件都必须被模型引用，不能把未使用的私钥顺带加入归档。两个对象可以引用同一文件。
 
 以下片段说明引用语法，不是完整部署输入：
 
@@ -108,6 +108,23 @@ nats:
 `environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。Environment 的实际启动消费和资金授权属于 #207，当前 PR 只交付绑定输入和明确的外部前置条件。
 
 原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照，不把 Environment 配置渲染当作已加载或已应用事实。
+
+### 既有 namespace 的 Container Work 落点
+
+默认每个环境继续使用专用 namespace。若部署只允许一个指定项目的普通容器 Work 使用既有 namespace，在 Bundle 的 `application.configMaps` 中增加可选对象：
+
+```yaml
+container-placement-config:
+  profile.json: config/runtime/container-placement/profile.json
+```
+
+把审核后的配置保存到该引用文件。格式见 `deploy/config/container-placement.json.example`；`namespace`、`namespaceUid` 和 `projectId` 取自管理员批准的实际空间及项目，不从用户请求推导。该 profile 不支持 Experiment 或 VM，不开放额外容器能力或特权。
+
+Bundle 同时派生该 ConfigMap 和 `containerPlacementProfileConfigMap`。Helm 只把同一 `profile.json` 只读挂载到 Environment owner 与 Container executor。不要在 `helmValues` 再指定引用，也不要在 `workloadInputs` 的 env/secretEnv 中设置 `LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE`；独立覆盖会被拒绝。不提供可选对象即使用默认专用空间。外部直接 Helm 调用者可指定已审核的 ConfigMap 引用，但不能同时覆盖文件环境变量。
+
+部署前确认 executor 有读取该 namespace UID、完整列出 Pod 以及管理本 Work 对象所需的权限，并检查实际 PSA、quota、LimitRange、网络与存储策略。此配置不会创建或改写这些管理员对象，不会授予 RBAC。Environment 只管理该 Work 的 Deployment、Service、ServiceAccount、拉取 Secret 和 PVC；对象名称按 Work 隔离，更新与清理校验归属及 UID/resourceVersion。清盘前先退役计算，并确认本 Work Pod 或仍引用该 PVC 的 Pod 已消失；观测不完整或超时则保留盘并返回失败，不清 finalizer。
+
+Environment 在首次 Kubernetes 效果前把落点固定到已有幂等账本。重复请求和进程恢复沿用该事实；变更配置或重建同名空间不能迁移原 Work。回滚前先用当前配置收尾已固定的 Work，不能删除账本或切默认 profile 冒充迁移。Pod 退役观测不等于 CSI/node fencing；七天保留、只读导出和跨节点重建仍不属于当前能力。
 
 ## Agent 的当前模型输入复核连接
 

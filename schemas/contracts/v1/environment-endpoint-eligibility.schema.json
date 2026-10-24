@@ -6,7 +6,7 @@
     },
     "ConsoleLeaseFence": {
       "additionalProperties": false,
-      "description": "Resource-owned Lease identity that fences a Work console capability.",
+      "description": "Resource-owned Lease identity that fences a funded environment console capability.",
       "properties": {
         "expiresAt": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -22,6 +22,23 @@
         "leaseId",
         "leaseRevision",
         "expiresAt"
+      ],
+      "type": "object"
+    },
+    "ContainerServiceTarget": {
+      "additionalProperties": false,
+      "description": "Internal, credential-free Container Service locator supplied by Environment.",
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "serviceName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "serviceName"
       ],
       "type": "object"
     },
@@ -106,7 +123,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Environment-authoritative endpoint facts safe for Access Service.\n\nHost, port, credential, provider and network-policy data are deliberately absent.",
+  "description": "Environment-authoritative endpoint facts safe for Access Service.\n\nCredentials, provider and network-policy data are deliberately absent.",
   "properties": {
     "courseId": {
       "anyOf": [
@@ -151,6 +168,16 @@
     },
     "projectId": {
       "$ref": "#/$defs/ProjectId"
+    },
+    "runtimeTarget": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContainerServiceTarget"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [

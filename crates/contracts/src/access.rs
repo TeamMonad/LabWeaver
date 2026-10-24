@@ -155,7 +155,7 @@ impl ConsoleKind {
     }
 }
 
-/// Resource-owned Lease identity that fences a Work console capability.
+/// Resource-owned Lease identity that fences a funded environment console capability.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConsoleLeaseFence {
@@ -188,7 +188,7 @@ impl ConsoleCapabilityAvailability {
             return Err(AccessError::InvalidConsoleCapability);
         }
         match (&self.lease_fence, work) {
-            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (Some(fence), _) if self.expires_at <= fence.expires_at => Ok(()),
             (None, false) => Ok(()),
             _ => Err(AccessError::InvalidConsoleCapability),
         }
@@ -227,7 +227,7 @@ impl ConsoleCapability {
             return Err(AccessError::InvalidConsoleCapability);
         }
         match (&self.lease_fence, work) {
-            (Some(fence), true) if self.expires_at <= fence.expires_at => Ok(()),
+            (Some(fence), _) if self.expires_at <= fence.expires_at => Ok(()),
             (None, false) => Ok(()),
             _ => Err(AccessError::InvalidConsoleCapability),
         }
@@ -1106,10 +1106,43 @@ mod tests {
             Err(AccessError::InvalidConsoleCapability)
         );
 
-        let mut invalid_experiment = capability.clone();
-        invalid_experiment.lease_fence = Some(fence.clone());
+        let mut funded_experiment = capability.clone();
+        funded_experiment.lease_fence = Some(fence.clone());
+        assert!(funded_experiment.validate().is_ok());
+        let mut funded_availability = availability.clone();
+        funded_availability.kinds = vec![ConsoleKind::Novnc];
+        funded_availability.lease_fence = Some(fence.clone());
+        assert!(funded_availability.validate().is_ok());
+        assert!(
+            funded_experiment
+                .validate_against(&funded_availability)
+                .is_ok()
+        );
+        funded_availability.lease_fence = Some(ConsoleLeaseFence {
+            lease_id: LeaseId::new(),
+            ..fence.clone()
+        });
         assert_eq!(
-            invalid_experiment.validate(),
+            funded_experiment.validate_against(&funded_availability),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+        funded_experiment.lease_fence = Some(ConsoleLeaseFence {
+            expires_at: timestamp("2026-07-29T00:00:29.999Z"),
+            ..fence.clone()
+        });
+        assert_eq!(
+            funded_experiment.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+        funded_availability.expires_at = timestamp("2026-07-29T00:00:30.001Z");
+        assert_eq!(
+            funded_availability.validate(),
+            Err(AccessError::InvalidConsoleCapability)
+        );
+        let mut unfunded_work = work_capability.clone();
+        unfunded_work.lease_fence = None;
+        assert_eq!(
+            unfunded_work.validate(),
             Err(AccessError::InvalidConsoleCapability)
         );
 

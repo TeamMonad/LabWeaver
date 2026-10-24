@@ -45,6 +45,17 @@ existing infrastructure component.
 The checked-in `*.example` files document non-secret runtime configuration fields. They are not a
 deployable bundle and must not contain credentials.
 
+For the bounded existing-namespace Container Work profile, see
+[Environment lifecycle](../../docs/contracts/environment-lifecycle-v1.md#既有-namespace-运行落点).
+`container-placement.json.example` contains synthetic identifiers. To include this profile in
+an encrypted Bundle, add `container-placement-config: {profile.json: config/runtime/container-placement/profile.json}`
+under `application.configMaps`, and put the reviewed JSON at that referenced path. The optional
+ConfigMap is rendered from the same archive; its presence derives the single Helm value
+`containerPlacementProfileConfigMap` for Environment and the Container executor. Omit the object
+to retain dedicated namespaces. Do not override that Helm value or either workload's placement
+file environment variable. The profile does not grant RBAC or change namespace policy. Do not
+copy a live namespace, UID, project identifier or credential into the checked-in example.
+
 The Control upload lifetime is configured only by the reviewed
 `control-service-config/config.yaml` document in the bundle. Keep
 `object_store.uploadTtlSeconds` and `control.uploadTtlSeconds` equal; the checked-in Control

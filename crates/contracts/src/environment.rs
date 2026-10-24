@@ -1724,7 +1724,7 @@ pub enum EnvironmentAccessSubjectKind {
 
 /// Environment-authoritative endpoint facts safe for Access Service.
 ///
-/// Host, port, credential, provider and network-policy data are deliberately absent.
+/// Credentials, provider and network-policy data are deliberately absent.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentEndpointEligibility {
@@ -1741,6 +1741,58 @@ pub struct EnvironmentEndpointEligibility {
     pub eligibility_expires_at: Option<UtcTimestamp>,
     pub lease_fence: Option<ConsoleLeaseFence>,
     pub endpoints: Vec<EnvironmentEndpoint>,
+    pub runtime_target: Option<ContainerServiceTarget>,
+}
+
+/// Internal, credential-free Container Service locator supplied by Environment.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerServiceTarget {
+    pub namespace: String,
+    pub service_name: String,
+}
+
+impl ContainerServiceTarget {
+    #[must_use]
+    pub fn valid_for(&self, environment_id: EnvironmentId) -> bool {
+        let names_valid = [&self.namespace, &self.service_name].iter().all(|s| {
+            !s.is_empty()
+                && s.len() <= 63
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && s.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+        });
+        names_valid
+            && (self.service_name == format!("lw-{environment_id}-runtime")
+                || (self.service_name == "runtime"
+                    && self.namespace == format!("lw-env-{environment_id}")))
+    }
+}
+
+#[cfg(test)]
+mod container_service_target_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_service_target_rejects_cross_environment_and_url_injection() {
+        let id = EnvironmentId::new();
+        let mut target = ContainerServiceTarget {
+            namespace: "synthetic-work-tests".to_owned(),
+            service_name: format!("lw-{id}-runtime"),
+        };
+        assert!(target.valid_for(id));
+        assert!(!target.valid_for(EnvironmentId::new()));
+        target.namespace = "attacker.example/path".to_owned();
+        assert!(!target.valid_for(id));
+        target.namespace = format!("lw-env-{id}");
+        target.service_name = "runtime".to_owned();
+        assert!(target.valid_for(id));
+        target.namespace = "default".to_owned();
+        assert!(!target.valid_for(id));
+        target.service_name = "kubernetes".to_owned();
+        assert!(!target.valid_for(id));
+    }
 }
 
 impl EnvironmentEndpointEligibility {
@@ -1759,7 +1811,11 @@ impl EnvironmentEndpointEligibility {
             .iter()
             .map(|endpoint| endpoint.id)
             .collect::<BTreeSet<_>>();
-        if request.endpoint_ids.is_empty()
+        if self
+            .runtime_target
+            .as_ref()
+            .is_some_and(|target| !target.valid_for(request.environment_id))
+            || request.endpoint_ids.is_empty()
             || requested.len() != request.endpoint_ids.len()
             || self.environment_id != request.environment_id
             || self.project_id != request.project_id
