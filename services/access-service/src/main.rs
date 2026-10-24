@@ -475,6 +475,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
             axum::routing::any(proxy::forward_control),
         )
         .route(
+            "/api/v1/projects/{project_id}/llm-egress-policies/active/rubric-rules",
+            get(proxy::forward_rubric_rules).post(proxy::forward_rubric_rules),
+        )
+        .route(
             "/api/v1/projects/{project_id}/llm-egress-policy-options",
             axum::routing::any(proxy::forward_control),
         )

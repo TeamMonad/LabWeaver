@@ -22,7 +22,11 @@ binding 的 `source.kind` 区分 `problem_package` 和 `frozen_submission`。冻
 
 Control 每次创建/复核通过现有 `evaluation.control.invoke` 请求任务限定 metadata 路径 `/internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`，携带原 scope、release If-Match 及 `x-labweaver-evaluation-lease-sha256`。旧无任务路径不作 fallback，拒绝/404/错误均阻止绑定。Evaluation 在返回事实前核父 run/step/attempt 关联、当前 lease 摘要/到期、持久取消和原执行期限。摘要不是许可，不返回原 lease token。Agent 首次/repair 复核使用原摘要，自己的取消与 lease 检查仍独立执行。响应丢失时先读取原 Agent receipt，不能重新选择内容、刷新截止或重复发送。
 
-课程当前教师兼 instructor 且具有材料项目 Edit 权限时，可以通过 `POST /api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules` 单独设置 rubric 可见性、批准目标模型使用或撤回批准。GET 同路径返回教师可见的元数据规则。请求必须提供现行 policy 的 If-Match 和 Idempotency-Key。规则保存在现有 policy 的版本化 JSON 内，批准者和课程成员 revision 从当前真源获取；请求不能自报许可。每次改变可见性都会清除模型批准。只有 `course_public` 且存在当前 instructor 的有效批准时才允许外发；hidden、未知、离任、成员 revision 变化或撤回均拒绝。Browse 和模型许可分别检查。
+课程当前教师兼 instructor 且具有材料项目 Edit 权限时，可以通过 `POST /api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules` 单独设置 rubric 可见性、批准目标模型使用或撤回批准。GET 同路径返回教师可见的元数据规则。POST 必须提供现行 policy 的 If-Match 和 Idempotency-Key。规则保存在现有 policy 的版本化 JSON 内，批准者和课程成员 revision 从当前真源获取；请求不能自报许可。每次改变可见性都会清除模型批准。只有 `course_public` 且存在当前 instructor 的有效批准时才允许外发；hidden、未知、离任、成员 revision 变化或撤回均拒绝。Browse 和模型许可分别检查。
+
+浏览器通过 Access BFF 的同名 GET/POST 路径访问 rubric 规则，不直连 Control。Access 先检查当前项目成员事实：GET 要求 Browse，POST 要求 Edit；POST 还必须携带本站 Origin 和当前 BFF 会话 CSRF token。Access 覆盖用户自报的身份 header，向 Control 转发真实 actor/session，并保留请求方法、路径、If-Match、Idempotency-Key 和响应 ETag。Control 继续独立检查当前教师/instructor、课程和精确 rubric 事实。冻结 HTTP 请求即使 absolute 会话期限尚未到达，也会在 idle 到期后停止转发。
+
+父 Evaluation lease 接管后的 advisory 恢复只读取原 Agent receipt。存在终态 receipt 时复用其结果和用量，不新建模型请求；receipt 缺失且原 parent lease 已被替换时，旧 binding 被拒绝。恢复保留首次 request、摘要和 deadline，不重新读取对象或向 Control 申请新 binding。
 
 冻结实时复核使用 `POST /internal/v1/authoring/model-input-authorizations/resolve`（现有 `control.authoring.read`）。Control 重核原会话、冻结 Edit、对象 Browse、ConfigureAgent 和当前 rubric 规则，重建完整 binding 后做全等比较。Agent 首次及 repair 进程调用前均复核，保留原任务截止和累计用量；取消完成与中断恢复保留已经观测到的用量，不重放旧模型调用。
 

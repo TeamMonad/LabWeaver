@@ -49,6 +49,7 @@ seccompiler.workspace = true
 [dev-dependencies]
 agent-service = { path = "../agent-service" }
 control-service = { path = "../control-service" }
+jsonwebtoken.workspace = true
 task-execution = { path = "../../crates/task-execution", features = ["test-support"] }
 tempfile.workspace = true
 testcontainers = "=0.25.0"

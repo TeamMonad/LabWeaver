@@ -2270,6 +2270,7 @@ dependencies = [
  "control-service",
  "futures-util",
  "hyper-util",
+ "jsonwebtoken",
  "landlock",
  "nix",
  "persistence-sqlx",
