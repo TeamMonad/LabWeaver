@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE, configureProjectPolicyByUi, createProjectByUi,
-  expectJson, navigateFromHomeByUi, pollJson, selectProjectByUi, uuidv7,
+  expectJson, pollJson, selectProjectByUi, uuidv7,
 } from '../support/live.mjs'
 import {
   addProjectStudentByUi, cancelAgentRunByUi, readActorId, snapshotProjectResourceRequestIds,
@@ -14,7 +14,8 @@ import {
   waitForFrozenSubmission, waitForProjectEvaluationResultWithResourceApproval,
 } from '../support/real-experiment.mjs'
 import {
-  approveResourceRequestByUi, cancelProjectResourceRequestByUi, releaseProjectLeaseByUi,
+  cancelProjectResourceRequestByUi, experimentResourceRequest, releaseProjectLeaseByUi,
+  requestAndEnterExperimentEnvironmentByUi,
 } from '../support/real-resource.mjs'
 import { createRealWorkSshIdentity, runPinnedSsh } from '../support/real-work-ssh.mjs'
 import {
@@ -279,41 +280,24 @@ async function authorAndPublish(page, adminPage, project, environmentSpec, evalu
   return publication
 }
 
-async function startStudentEnvironment(page, adminPage, projectId, releaseId, actorId, providerBinding, onAccepted) {
-  if (page.url() === 'about:blank') await navigateFromHomeByUi(page, '我的实验')
-  else await page.goto(`/student/labs?projectId=${projectId}`, { waitUntil: 'domcontentloaded' })
-  await selectProjectByUi(page, projectId)
-  await page.getByRole('button', { name: /创建项目环境/ }).first().click()
-  const dialog = page.getByRole('dialog', { name: '创建项目环境', exact: true })
-  await expect(dialog).toBeVisible()
-  const card = dialog.locator('.release-card').filter({ hasText: releaseId })
-  await expect(card).toHaveCount(1, { timeout: 120_000 })
-  const createResponse = page.waitForResponse((response) => response.request().method() === 'POST'
-    && new URL(response.url()).pathname === '/api/v1/environments')
-  await card.getByRole('button', { name: '选择并创建', exact: true }).click()
-  const response = await createResponse
-  const accepted = await expectJson(response, 'CONFIG_PROBE_ENVIRONMENT_CREATE_FAILED')
-  expect(accepted).toMatchObject({ environmentId: expect.any(String), operationId: expect.any(String) })
-  onAccepted(accepted.environmentId)
-  expect(response.request().postDataJSON()).toMatchObject({ projectId, releaseId })
-  return await pollJson(page.request, `/api/v1/environments/${accepted.environmentId}`, async (environment) => {
-    expect(environment).toMatchObject({ id: accepted.environmentId, projectId, releaseId })
+/**
+ * The student requests the VM resources the probe's environment.yaml asks for,
+ * an admin approves them on the probe's provider binding, and the student
+ * enters the environment from "已批准的申请".
+ */
+async function startStudentEnvironment(page, adminPage, projectId, releaseId, actorId, environmentSpec, onAccepted) {
+  const { environmentId } = await requestAndEnterExperimentEnvironmentByUi(page, adminPage, {
+    projectId,
+    releaseId,
+    requesterId: actorId,
+    providerBinding: environmentSpec.runtime.provider_binding,
+    ...experimentResourceRequest(environmentSpec.resources),
+    onAccepted: (accepted) => onAccepted(accepted.environmentId),
+  })
+  return await pollJson(page.request, `/api/v1/environments/${environmentId}`, async (environment) => {
+    expect(environment).toMatchObject({ id: environmentId, projectId, releaseId })
     if (environment.observedState === 'ready') return true
     if (['failed', 'deleted'].includes(environment.observedState)) throw new Error('CONFIG_PROBE_ENVIRONMENT_FAILED')
-    const requests = await expectJson(await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`),
-      'CONFIG_PROBE_ENVIRONMENT_REQUESTS_READ_FAILED')
-    for (const request of requests.filter((item) => item.projectId === projectId && item.requesterId === actorId
-      && item.target?.kind === 'environment' && item.target.environmentId === accepted.environmentId && item.state === 'reviewing')) {
-      if (request.target.releaseId !== releaseId || request.target.releaseVersion !== environment.releaseVersion
-        || !['cpuMillicores', 'memoryBytes', 'storageBytes'].every((field) =>
-          Number.isSafeInteger(request.requestedResources?.[field]) && request.requestedResources[field] > 0)
-        || request.requestedResources?.gpu != null || !Number.isSafeInteger(request.requestedDurationSeconds)
-        || request.requestedDurationSeconds <= 0) throw new Error('CONFIG_PROBE_ENVIRONMENT_REQUEST_SCOPE_INVALID')
-      await approveResourceRequestByUi(adminPage, {
-        projectId, requestId: request.id, requestKey: request.requestKey, environmentId: accepted.environmentId,
-        requesterId: actorId, durationSeconds: request.requestedDurationSeconds, providerBinding,
-      })
-    }
     return false
   }, 'CONFIG_PROBE_ENVIRONMENT_STATUS_FAILED', ENVIRONMENT_READY_TIMEOUT_MS)
 }
@@ -449,7 +433,7 @@ test('teacher publishes a configuration experiment and student repairs live VM f
     identity = await createRealWorkSshIdentity()
     key = await addSshPublicKeyByUi(studentPage, identity, (accepted) => { key = accepted })
     const environment = await startStudentEnvironment(studentPage, adminPage, project.id,
-      publication.environmentReleaseId, studentActorId, environmentSpec.runtime.provider_binding,
+      publication.environmentReleaseId, studentActorId, environmentSpec,
       (accepted) => { environmentId = accepted })
     expect(environment.gpuAllocation ?? null).toBeNull()
     const connection = await issueEnvironmentSshAccessGrantByUi(
