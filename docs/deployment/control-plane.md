@@ -178,6 +178,11 @@ Apply Resource migration 0020 and Agent migration 0022. Agent 0022 grants Resour
 only the specific read columns needed to verify the authoritative build command;
 Agent has no wallet write access. Bundle/profile configuration must provide the
 same Resource client block and secret mounts before connected deployment validation.
+Both migrations must be registered in `migrations/catalog.yaml` with their exact
+SHA-256; SQL files present under the migration root but absent from the catalog
+now fail catalog validation. Agent 0022 is applied through catalog replay, not a
+separate manual grant. The PostgreSQL permission regression pre-creates only the
+runtime roles, then replays the catalog before checking Resource's column access.
 Configure an explicit `CREDITS` price with `build_second`, `builderBinding` and
 `unitQuantity` before admitting builds. Existing USD compute/storage rates do not
 price this operation and are not automatically changed.

@@ -175,6 +175,9 @@ domains:
       - id: 21
         file: agent/0021_project_run_pagination_index.sql
         sha256: eff5e618d44ebdc00ec5f77852febc889be283b2e94e0b0cd44aa240e3137615
+      - id: 22
+        file: agent/0022_resource_build_authority_read.sql
+        sha256: d0a2ed8ede540f6df2620df505b9c594895e0d2945d48a1de536cc7e4a9a829a
   - name: evaluation
     migrations:
       - id: 1

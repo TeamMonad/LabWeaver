@@ -46,7 +46,7 @@ pub struct MigrationCatalog {
 }
 
 impl MigrationCatalog {
-    /// Loads a catalog and verifies every declared file hash.
+    /// Loads a catalog and verifies declared hashes and complete SQL file registration.
     pub fn load(path: &Path) -> Result<Self, PersistenceError> {
         let bytes = fs::read(path).map_err(|error| {
             PersistenceError::Catalog(format!("cannot read {}: {error}", path.display()))
@@ -68,7 +68,12 @@ impl MigrationCatalog {
 
     /// Verifies the complete catalog shape and every checked-in SQL file.
     pub fn verify_files(&self, root: &Path) -> Result<(), PersistenceError> {
-        self.validate(root)
+        self.validate(root)?;
+        let registered = std::iter::once(&self.bootstrap)
+            .chain(self.domains.iter().flat_map(|domain| &domain.migrations))
+            .map(|migration| Path::new(&migration.file))
+            .collect();
+        Self::reject_unregistered_sql(root, root, &registered)
     }
 
     /// Reads one SQL file and verifies its exact bytes immediately before use.
@@ -166,6 +171,36 @@ impl MigrationCatalog {
         Ok(())
     }
 
+    fn reject_unregistered_sql(
+        root: &Path,
+        directory: &Path,
+        registered: &BTreeSet<&Path>,
+    ) -> Result<(), PersistenceError> {
+        let entries = fs::read_dir(directory)
+            .map_err(|error| PersistenceError::Catalog(error.to_string()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| PersistenceError::Catalog(error.to_string()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| PersistenceError::Catalog(error.to_string()))?;
+            if file_type.is_dir() {
+                Self::reject_unregistered_sql(root, &path, registered)?;
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("sql") {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| PersistenceError::Catalog(error.to_string()))?;
+                if !registered.contains(relative) {
+                    return Err(PersistenceError::Catalog(format!(
+                        "Migration SQL file is not registered in catalog: {}",
+                        relative.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn verify_file(root: &Path, migration: &CatalogMigration) -> Result<(), PersistenceError> {
         Self::read_verified_sql(root, migration).map(|_| ())
     }
@@ -200,6 +235,26 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
         let catalog = MigrationCatalog::load(&root.join("catalog.yaml"))?;
         assert_eq!(catalog.sha256()?, catalog.sha256()?);
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_rejects_unregistered_migration_files() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut catalog = MigrationCatalog::load(&root.join("catalog.yaml"))?;
+        // Leave the real SQL file in place, removing only its otherwise-contiguous registration.
+        let orphan = catalog
+            .domains
+            .iter_mut()
+            .find(|domain| domain.name == crate::Domain::Agent)
+            .and_then(|domain| domain.migrations.pop())
+            .ok_or("missing Agent migration")?;
+        let error = catalog
+            .verify_files(&root)
+            .err()
+            .ok_or("unregistered SQL file was accepted")?;
+        assert!(error.to_string().contains("not registered in catalog"));
+        assert!(error.to_string().contains(&orphan.file));
         Ok(())
     }
 

@@ -40,6 +40,9 @@ async fn fixture() -> Result<(
             container.get_host_port_ipv4(5432).await?
         ))
         .await?;
+    sqlx::raw_sql("CREATE ROLE lw_resource_runtime;CREATE ROLE lw_agent_runtime;")
+        .execute(&pool)
+        .await?;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
     let catalog = persistence_sqlx::MigrationCatalog::load(&root.join("catalog.yaml"))?;
     for (name, kind) in [
@@ -447,14 +450,6 @@ async fn stale_nonce_changed_grant_and_cancelled_authority_never_create_a_second
 #[tokio::test]
 async fn resource_build_authority_grant_has_only_the_needed_agent_read_columns() -> Result<()> {
     let (_c, pool, _store, _credits, _input) = fixture().await?;
-    sqlx::raw_sql("CREATE ROLE lw_resource_runtime;CREATE ROLE lw_agent_runtime;")
-        .execute(&pool)
-        .await?;
-    sqlx::raw_sql(include_str!(
-        "../../../migrations/agent/0022_resource_build_authority_read.sql"
-    ))
-    .execute(&pool)
-    .await?;
     let mut conn = pool.acquire().await?;
     sqlx::query("SET ROLE lw_resource_runtime")
         .execute(&mut *conn)
