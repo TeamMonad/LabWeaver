@@ -1,6 +1,9 @@
 import { activeScene, fixtureProjectId } from './scenes'
 import { agentRunHistory, authoringPublicationStatus, authoringReleases, authoringRubricRules, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
 import type {
+  CreditAccountSchema,
+  CreditHoldPageSchema,
+  CreditLedgerPageSchema,
   AvailableObjectActionsSchema,
   ObjectAction,
   AccessGrantSchema,
@@ -1092,72 +1095,78 @@ export async function appendProjectEnvironmentCandidateDecision(_options?: unkno
 export async function createEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('发布环境模板') }
 export async function getEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取环境模板版本') }
 
-/** #209/#210 Credits + estimate: restricted preview reads; writes/估价 stay unsupported. */
-const zeroCredits = '0.000000'
-
-export async function getProjectCredits(options?: FixtureOptions): Promise<FixtureResult<{
-  available: string
-  balance: string
-  currency: string
-  pending: string
-  platformAbsorbed: string
-  projectId: string
-  reserved: string
-  revision: number
-  spent: string
-  unknown: string
-  unknownCount: number
-}>> {
+/**
+ * #209/#210 Credits preview: one granted account with a usage whose
+ * measurement is still unknown after its hold was released, so the gallery
+ * shows the "待核实，预占已释放" state instead of a zero. Writes and estimates
+ * stay unsupported.
+ */
+export async function getProjectCredits(options?: FixtureOptions): Promise<FixtureResult<CreditAccountSchema>> {
   const projectId = options?.path?.projectId
-  if (!projectId) return notFoundResponse('读取项目 Credits', projectId)
   if (projectId !== fixtureProjectId) return notFoundResponse('读取项目 Credits', projectId)
   return fixtureResponse({
     projectId,
     currency: 'CREDITS',
-    balance: zeroCredits,
-    available: zeroCredits,
-    reserved: zeroCredits,
-    spent: zeroCredits,
-    pending: zeroCredits,
-    unknown: zeroCredits,
-    platformAbsorbed: zeroCredits,
-    unknownCount: 0,
-    revision: 1,
+    balance: '20.000000',
+    available: '20.000000',
+    reserved: '0.000000',
+    spent: '0.000000',
+    pending: '0.000000',
+    unknown: '0.000000',
+    platformAbsorbed: '0.000000',
+    unknownCount: 1,
+    revision: 3,
   })
 }
 
-export async function listProjectCreditHolds(options?: FixtureOptions): Promise<FixtureResult<{
-  items: unknown[]
-  page: number
-  pageSize: number
-  hasMore: boolean
-}>> {
+export async function listProjectCreditHolds(options?: FixtureOptions): Promise<FixtureResult<CreditHoldPageSchema>> {
   const projectId = options?.path?.projectId
-  if (!projectId) return notFoundResponse('读取 Credits 预占', projectId)
   if (projectId !== fixtureProjectId) return notFoundResponse('读取 Credits 预占', projectId)
-  const page = typeof options?.query?.page === 'number' ? options.query.page : 1
-  const pageSize = typeof options?.query?.pageSize === 'number' ? options.query.pageSize : 20
-  return fixtureResponse({ items: [], page, pageSize, hasMore: false })
+  return fixtureResponse({
+    items: [{
+      id: '01900000-0000-7000-8000-00000000c101',
+      projectId,
+      requestId: '01900000-0000-7000-8000-00000000c201',
+      businessKey: 'metered-usage',
+      ownerClientId: 'environment-service',
+      amount: '4.000000',
+      remaining: '0.000000',
+      state: 'released',
+      measurementUnknown: true,
+      createdAt: '2026-10-12T08:00:00.000Z',
+      unknownSince: '2026-10-12T09:00:00.000Z',
+      reconciliationDueAt: '2026-10-12T10:00:00.000Z',
+      expiredUnknownAt: '2026-10-12T10:00:00.000Z',
+    }],
+    page: 1,
+    pageSize: 25,
+    hasMore: false,
+  })
 }
 
-export async function listProjectCreditLedger(options?: FixtureOptions): Promise<FixtureResult<{
-  items: unknown[]
-  page: number
-  pageSize: number
-  hasMore: boolean
-}>> {
+export async function listProjectCreditLedger(options?: FixtureOptions): Promise<FixtureResult<CreditLedgerPageSchema>> {
   const projectId = options?.path?.projectId
-  if (!projectId) return notFoundResponse('读取 Credits 账目', projectId)
   if (projectId !== fixtureProjectId) return notFoundResponse('读取 Credits 账目', projectId)
-  const page = typeof options?.query?.page === 'number' ? options.query.page : 1
-  const pageSize = typeof options?.query?.pageSize === 'number' ? options.query.pageSize : 20
-  return fixtureResponse({ items: [], page, pageSize, hasMore: false })
+  return fixtureResponse({
+    items: [{
+      id: '01900000-0000-7000-8000-00000000c001',
+      projectId,
+      kind: 'grant',
+      operationId: '01900000-0000-7000-8000-00000000c301',
+      reason: '课程合成额度',
+      balanceDelta: '20.000000',
+      reservedDelta: '0.000000',
+      spentDelta: '0.000000',
+      platformAbsorbed: '0.000000',
+      rateSnapshots: [],
+      createdAt: '2026-10-12T07:00:00.000Z',
+    }],
+    page: 1,
+    pageSize: 25,
+    hasMore: false,
+  })
 }
 
-export async function createCreditAdminOperation(_options?: FixtureOptions) {
-  return unsupportedResponse('Credits 管理员操作')
-}
-
-export async function estimateProjectResourceCost(_options?: FixtureOptions) {
-  return unsupportedResponse('项目资源估价')
-}
+export async function createCreditAdminOperation(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('Credits 管理员操作') }
+export async function estimateProjectResourceCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('资源费用估价') }
+export async function estimateProjectBuildCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('镜像构建费用估价') }

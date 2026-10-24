@@ -1407,8 +1407,8 @@ export async function ensureRealWorkRates(browser, baseURL, { gpu = null } = {})
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     await waitForRateListUi(page, 'resource')
     const targets = [...DEFAULT_RATE_INPUTS, ...(gpu ? [gpu.rate] : [])]
     const rates = []
@@ -1423,8 +1423,8 @@ export async function configureRealWorkBudgetByUi(browser, baseURL, projectId) {
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)
@@ -1504,8 +1504,8 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)
@@ -1745,8 +1745,8 @@ export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, proj
   let failure = null
   let result = null
   try {
-    await navigateFromHomeByUi(page, '预算与费用')
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, 'Credits、预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)
@@ -1800,7 +1800,7 @@ export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, proj
 
     const adjusted = await waitForRealWorkAdjustment(page.request, projectId, original, expectedSpent, adjustmentReason)
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     await expect(page.getByTestId('budget-threshold-warning')).toHaveCount(0)
     await expect(page.getByTestId('budget-limit-warning')).toHaveCount(0)
     const originalRowAfterAdjustment = realWorkChargeRow(page, original.id)
@@ -1825,7 +1825,7 @@ export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, proj
       || finalSnapshot.budget.spent.amount !== expectedSpent
     ) throw new Error('REAL_WORK_FINANCE_BUDGET_RESTORE_READBACK_MISMATCH')
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.budget-summary')).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.budget-form input').nth(2)).toHaveValue(initial.budget.warningAt.amount)
     await expect(realWorkChargeRow(page, original.id)).toHaveCount(1, { timeout: 120_000 })

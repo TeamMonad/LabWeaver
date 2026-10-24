@@ -11,17 +11,8 @@ import {
   type CreditLedgerEntry,
   type CreditLedgerPageSchema,
 } from '@/generated/contracts'
-import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
+import { diagnosticFromError, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey } from '@/utils/format'
-
-function diagnostic(error: unknown, fallbackCode: string, fallbackMessage: string): DiagnosticViewModel {
-  const problem = extractProblemDetails(error)
-  return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
 
 const fixedDecimalPattern = /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/
 
@@ -33,97 +24,17 @@ export function isPositiveCreditsAmount(value: string): boolean {
   return /^(0|[1-9][0-9]*)\.[0-9]{6}$/.test(value) && value !== '0.000000'
 }
 
-function asAccount(value: unknown): CreditAccountSchema {
-  if (
-    !isRecord(value)
-    || typeof value.projectId !== 'string'
-    || typeof value.currency !== 'string'
-    || typeof value.balance !== 'string'
-    || typeof value.available !== 'string'
-    || typeof value.reserved !== 'string'
-    || typeof value.spent !== 'string'
-    || typeof value.pending !== 'string'
-    || typeof value.unknown !== 'string'
-    || typeof value.platformAbsorbed !== 'string'
-    || typeof value.unknownCount !== 'number'
-    || !Number.isSafeInteger(value.unknownCount)
-    || typeof value.revision !== 'number'
-    || !Number.isSafeInteger(value.revision)
-  ) {
-    throw new Error('Credits 账户返回了无法识别的数据。')
-  }
-  return value as CreditAccountSchema
+/**
+ * Pad, never round, a typed amount into the contract's exact six-decimal
+ * string ("20" → "20.000000"). Returns null for anything with more than six
+ * decimals or a sign the operation does not allow.
+ */
+export function canonicalCreditsAmount(value: string, allowNegative: boolean): string | null {
+  const trimmed = value.trim()
+  const match = /^(-?)(0|[1-9][0-9]*)(?:\.([0-9]{1,6}))?$/.exec(trimmed)
+  if (!match || (match[1] && !allowNegative)) return null
+  return `${match[1]}${match[2]}.${(match[3] ?? '').padEnd(6, '0')}`
 }
-
-function asLedgerPage(value: unknown): CreditLedgerPageSchema {
-  if (
-    !isRecord(value)
-    || !Array.isArray(value.items)
-    || typeof value.page !== 'number'
-    || !Number.isSafeInteger(value.page)
-    || value.page < 1
-    || typeof value.pageSize !== 'number'
-    || !Number.isSafeInteger(value.pageSize)
-    || value.pageSize < 1
-    || typeof value.hasMore !== 'boolean'
-  ) {
-    throw new Error('Credits 账目返回了无法识别的数据。')
-  }
-  for (const item of value.items) {
-    if (
-      !isRecord(item)
-      || typeof item.id !== 'string'
-      || typeof item.kind !== 'string'
-      || typeof item.operationId !== 'string'
-      || typeof item.reason !== 'string'
-      || typeof item.balanceDelta !== 'string'
-      || typeof item.reservedDelta !== 'string'
-      || typeof item.spentDelta !== 'string'
-      || typeof item.platformAbsorbed !== 'string'
-      || typeof item.createdAt !== 'string'
-    ) {
-      throw new Error('Credits 账目条目返回了无法识别的数据。')
-    }
-  }
-  return value as CreditLedgerPageSchema
-}
-
-function asHoldPage(value: unknown): CreditHoldPageSchema {
-  if (
-    !isRecord(value)
-    || !Array.isArray(value.items)
-    || typeof value.page !== 'number'
-    || !Number.isSafeInteger(value.page)
-    || value.page < 1
-    || typeof value.pageSize !== 'number'
-    || !Number.isSafeInteger(value.pageSize)
-    || value.pageSize < 1
-    || typeof value.hasMore !== 'boolean'
-  ) {
-    throw new Error('Credits 预占返回了无法识别的数据。')
-  }
-  for (const item of value.items) {
-    if (
-      !isRecord(item)
-      || typeof item.id !== 'string'
-      || typeof item.projectId !== 'string'
-      || (item.requestId != null && typeof item.requestId !== 'string')
-      || (item.buildRequestId != null && typeof item.buildRequestId !== 'string')
-      || (item.buildAttempt != null && typeof item.buildAttempt !== 'number')
-      || typeof item.businessKey !== 'string'
-      || typeof item.ownerClientId !== 'string'
-      || typeof item.amount !== 'string'
-      || typeof item.remaining !== 'string'
-      || typeof item.state !== 'string'
-      || typeof item.measurementUnknown !== 'boolean'
-      || typeof item.createdAt !== 'string'
-    ) {
-      throw new Error('Credits 预占条目返回了无法识别的数据。')
-    }
-  }
-  return value as CreditHoldPageSchema
-}
-
 
 export type CreditHoldUnknownStatus =
   | { kind: 'none' }
@@ -162,6 +73,53 @@ export interface CreditAdminFormInput {
   entryId: string
 }
 
+/** Operations that take Credits away from a project or undo a booked entry; the UI confirms them first. */
+export function isDestructiveCreditOperation(input: Pick<CreditAdminFormInput, 'action' | 'amount'>): boolean {
+  if (input.action === 'transfer' || input.action === 'reverse') return true
+  return input.action === 'adjust' && input.amount.trim().startsWith('-')
+}
+
+const creditActionLabels: Record<CreditAdminAction, string> = {
+  grant: '发放',
+  transfer: '转移',
+  adjust: '调整',
+  reverse: '冲正',
+}
+
+export function creditActionLabel(action: CreditAdminAction): string {
+  return creditActionLabels[action]
+}
+
+const creditHoldStateLabels: Record<CreditHold['state'], string> = {
+  pending: '预占中',
+  unknown: '用量待核实',
+  settled: '已结算',
+  released: '已释放',
+}
+
+export function creditHoldStateLabel(state: string): string {
+  return creditHoldStateLabels[state as CreditHold['state']] ?? `未识别状态（${state}）`
+}
+
+/**
+ * Ledger kinds written by Resource credits. An unrecognised kind is shown
+ * verbatim so a new server kind is never mislabelled as a known one.
+ */
+const creditLedgerKindLabels: Record<string, string> = {
+  grant: '管理员发放',
+  transfer: '转移',
+  adjust: '管理员调整',
+  reverse: '冲正',
+  hold: '预占',
+  release: '释放预占',
+  settle: '扣收',
+  unknown: '用量待核实',
+}
+
+export function creditLedgerKindLabel(kind: string): string {
+  return creditLedgerKindLabels[kind] ?? kind
+}
+
 export function useProjectCredits(projectId: Ref<string | null>) {
   const account = ref<AsyncState<CreditAccountSchema>>({ kind: 'idle' })
   const ledger = ref<AsyncState<CreditLedgerPageSchema>>({ kind: 'idle' })
@@ -173,6 +131,9 @@ export function useProjectCredits(projectId: Ref<string | null>) {
   const outcome = ref<{ kind: 'success' | 'error'; diagnostic: DiagnosticViewModel } | null>(null)
   let loadGeneration = 0
   let disposed = false
+  // One Idempotency-Key per operation body. A failed or lost response keeps the
+  // key, so resubmitting the same operation replays it instead of booking twice.
+  let pendingOperation: { fingerprint: string; key: string } | null = null
 
   onScopeDispose(() => {
     disposed = true
@@ -191,7 +152,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
       })
       if (!current(id, generation)) return
       if (result.error) throw result.error
-      const pageData = asLedgerPage(result.data)
+      const pageData = result.data
       ledger.value = pageData.items.length || pageData.page > 1
         ? { kind: 'success', data: pageData }
         : { kind: 'empty' }
@@ -200,7 +161,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
       if (!current(id, generation)) return
       ledger.value = {
         kind: 'error',
-        diagnostic: diagnostic(error, 'CREDITS_LEDGER_LOAD_FAILED', '无法加载 Credits 账目。'),
+        diagnostic: diagnosticFromError(error, 'CREDITS_LEDGER_LOAD_FAILED', '无法加载 Credits 账目。'),
       }
     }
   }
@@ -214,7 +175,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
       })
       if (!current(id, generation)) return
       if (result.error) throw result.error
-      const pageData = asHoldPage(result.data)
+      const pageData = result.data
       holds.value = pageData.items.length || pageData.page > 1
         ? { kind: 'success', data: pageData }
         : { kind: 'empty' }
@@ -223,7 +184,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
       if (!current(id, generation)) return
       holds.value = {
         kind: 'error',
-        diagnostic: diagnostic(error, 'CREDITS_HOLDS_LOAD_FAILED', '无法加载 Credits 预占。'),
+        diagnostic: diagnosticFromError(error, 'CREDITS_HOLDS_LOAD_FAILED', '无法加载 Credits 预占。'),
       }
     }
   }
@@ -247,12 +208,12 @@ export function useProjectCredits(projectId: Ref<string | null>) {
       const result = await getProjectCredits({ path: { projectId: id } })
       if (!current(id, generation)) return
       if (result.error) throw result.error
-      account.value = { kind: 'success', data: asAccount(result.data) }
+      account.value = { kind: 'success', data: result.data }
     } catch (error) {
       if (!current(id, generation)) return
       account.value = {
         kind: 'error',
-        diagnostic: diagnostic(error, 'CREDITS_ACCOUNT_LOAD_FAILED', '无法加载 Credits 账户。'),
+        diagnostic: diagnosticFromError(error, 'CREDITS_ACCOUNT_LOAD_FAILED', '无法加载 Credits 账户。'),
       }
     }
     await Promise.all([
@@ -341,23 +302,26 @@ export function useProjectCredits(projectId: Ref<string | null>) {
 
     acting.value = input.action
     outcome.value = null
-    const requestKey = idempotencyKey()
+    const fingerprint = JSON.stringify(body)
+    if (pendingOperation?.fingerprint !== fingerprint) pendingOperation = { fingerprint, key: idempotencyKey() }
+    const requestKey = pendingOperation.key
     try {
       const result = await createCreditAdminOperation({
         headers: { 'Idempotency-Key': requestKey },
         body,
       })
       if (result.error) throw result.error
+      pendingOperation = null
       await load({ clearOutcome: false })
       outcome.value = {
         kind: 'success',
-        diagnostic: makeDiagnostic('CREDITS_ADMIN_OPERATION_SUCCEEDED', 'Credits 管理员操作已提交。', false),
+        diagnostic: makeDiagnostic('CREDITS_ADMIN_OPERATION_SUCCEEDED', `${creditActionLabel(input.action)}已入账，账户和账目已刷新。`, false),
       }
       return true
     } catch (error) {
       outcome.value = {
         kind: 'error',
-        diagnostic: diagnostic(error, 'CREDITS_ADMIN_OPERATION_FAILED', 'Credits 管理员操作失败。'),
+        diagnostic: diagnosticFromError(error, 'CREDITS_ADMIN_OPERATION_FAILED', `${creditActionLabel(input.action)}没有完成。重新提交同一操作不会重复入账。`),
       }
       return false
     } finally {

@@ -190,8 +190,8 @@ test('platform administrator configures one explicitly requested GPU rate throug
   test.setTimeout(120_000)
   if (!INPUT) throw new Error('LW_RESOURCE_RATE_INPUT_REQUIRED')
 
-  await navigateFromHomeByUi(page, '预算与费用')
-  await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible()
+  await navigateFromHomeByUi(page, 'Credits、预算与费用')
+  await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible()
   await waitForRateListSettled(page, 'LOAD')
 
   const before = await readCurrentRates(page)

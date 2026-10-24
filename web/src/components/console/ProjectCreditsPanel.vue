@@ -2,6 +2,7 @@
   <section
     class="credits-card md-card"
     aria-labelledby="credits-heading"
+    data-testid="project-credits-panel"
   >
     <div class="section-heading">
       <div>
@@ -9,14 +10,14 @@
           项目 Credits 账户
         </h3>
         <p>
-          余额与预占用于资源准入；预算提醒独立存在，不能替代账户余额。金额为六位小数字符串，页面不做浮点换算。
+          项目的 Work、课程实验、构建和模型调用从这个账户预占和扣收 Credits。预算提醒独立于账户，不能代替账户余额。
         </p>
       </div>
       <button
         type="button"
         class="outlined-button small"
         :disabled="credits.acting !== null || !projectId"
-        @click="credits.load"
+        @click="credits.load()"
       >
         刷新账户
       </button>
@@ -24,50 +25,50 @@
 
     <DiagnosticBanner
       v-if="credits.outcome"
-      :code="credits.outcome.diagnostic.code"
-      :message="credits.outcome.diagnostic.message"
-      :retryable="credits.outcome.diagnostic.retryable"
+      :diagnostic="credits.outcome.diagnostic"
+      :retryable="credits.outcome.kind === 'error' && credits.outcome.diagnostic.retryable"
       :severity="credits.outcome.kind === 'error' ? 'error' : 'info'"
-      @retry="credits.load"
+      @retry="submitAdmin"
     />
 
     <AsyncStateView
       :state="credits.account"
-      empty-text="尚未创建账户；首次发放或预占时会自动建立，读取为零。"
-      @retry="credits.load"
+      empty-text="尚未创建账户。"
+      @retry="credits.load()"
     >
       <template #success="{ data }">
         <div
-          class="budget-summary"
+          class="credits-summary"
           data-testid="credits-account-summary"
         >
           <div><span>可用</span><strong>{{ data.available }} {{ data.currency }}</strong></div>
           <div><span>余额</span><strong>{{ data.balance }} {{ data.currency }}</strong></div>
-          <div><span>预占</span><strong>{{ data.reserved }} {{ data.currency }}</strong></div>
+          <div><span>已预占</span><strong>{{ data.reserved }} {{ data.currency }}</strong></div>
           <div><span>已支出</span><strong>{{ data.spent }} {{ data.currency }}</strong></div>
-          <div><span>待结算预占</span><strong>{{ data.pending }} {{ data.currency }}</strong></div>
-          <div>
-            <span>未知用量</span>
-            <strong>{{ data.unknown }} {{ data.currency }}</strong>
-            <small v-if="data.unknownCount > 0">待核实 {{ data.unknownCount }} 笔（释放后仍可能保留）</small>
+          <div><span>待结算</span><strong>{{ data.pending }} {{ data.currency }}</strong></div>
+          <div data-testid="credits-unknown">
+            <span>用量待核实</span>
+            <strong v-if="data.unknownCount === 0">无</strong>
+            <strong v-else-if="isZeroCredits(data.unknown)">{{ data.unknownCount }} 笔，预占已释放</strong>
+            <strong v-else>{{ data.unknownCount }} 笔，最多 {{ data.unknown }} {{ data.currency }}</strong>
           </div>
           <div><span>平台承担</span><strong>{{ data.platformAbsorbed }} {{ data.currency }}</strong></div>
         </div>
-        <small class="updated-note">账户修订 {{ data.revision }}</small>
-        <DiagnosticBanner
+        <p
           v-if="data.unknownCount > 0"
-          code="CREDITS_UNKNOWN_PENDING"
-          severity="warning"
-          :retryable="false"
-          :message="`仍有 ${data.unknownCount} 笔预占待核实未知用量。未知金额可能为 0，但计数表示对账尚未完成。`"
-        />
+          class="field-note"
+          role="note"
+          data-testid="credits-unknown-note"
+        >
+          有 {{ data.unknownCount }} 笔用量尚未核实。实际费用未知，不按零计算；核实期限到达后预占会释放，迟到的费用由平台承担，不会形成项目欠款。
+        </p>
       </template>
     </AsyncStateView>
 
     <div class="section-heading section-heading--compact">
       <div>
         <h4>账目</h4>
-        <p>按创建时间倒序；冲正追加新记录，不覆盖原文。</p>
+        <p>新记录在前。冲正会追加一条反向记录，原记录保留。</p>
       </div>
     </div>
     <AsyncStateView
@@ -76,16 +77,20 @@
       @retry="credits.loadLedger(credits.ledgerPage)"
     >
       <template #success="{ data }">
-        <ul class="charge-list">
+        <ul
+          class="credit-list"
+          aria-label="Credits 账目"
+        >
           <li
             v-for="entry in data.items"
             :key="entry.id"
-            class="charge-row"
+            class="credit-row"
           >
-            <div class="charge-main">
-              <strong>{{ entry.kind }} · 余额 {{ entry.balanceDelta }}</strong>
-              <small>预占 {{ entry.reservedDelta }} · 支出 {{ entry.spentDelta }} · 平台 {{ entry.platformAbsorbed }}</small>
+            <div class="credit-main">
+              <strong>{{ creditLedgerKindLabel(entry.kind) }} · 余额 {{ signedAmount(entry.balanceDelta) }}</strong>
+              <small>预占 {{ signedAmount(entry.reservedDelta) }} · 支出 {{ signedAmount(entry.spentDelta) }}<template v-if="!isZeroCredits(entry.platformAbsorbed)"> · 平台承担 {{ entry.platformAbsorbed }}</template></small>
               <small>{{ entry.reason }} · {{ formatTimestamp(entry.createdAt) }}</small>
+              <small v-if="entry.reversalOf">冲正记录</small>
               <details class="advanced-details">
                 <summary>查看账目内部标识</summary>
                 <small>条目 ID：{{ entry.id }}</small>
@@ -95,7 +100,10 @@
                 <small v-if="entry.actorId">操作者：{{ entry.actorId }}</small>
               </details>
             </div>
-            <div class="charge-actions">
+            <div
+              v-if="canManage && isReversible(entry.kind, entry.reversalOf)"
+              class="credit-actions"
+            >
               <button
                 type="button"
                 class="text-button"
@@ -107,7 +115,7 @@
             </div>
           </li>
         </ul>
-        <div class="usage-pagination">
+        <div class="credit-pagination">
           <button
             type="button"
             class="outlined-button small"
@@ -132,7 +140,7 @@
     <div class="section-heading section-heading--compact">
       <div>
         <h4>预占</h4>
-        <p>显示业务键、申请与剩余；未知用量在核实期限到期后显示“待核实，预占已释放”，unknownCount 仍可大于 0。</p>
+        <p>资源申请、构建和模型调用开始前会按允许的上限预占 Credits，结束后按实际用量扣收并释放剩余部分。</p>
       </div>
     </div>
     <AsyncStateView
@@ -141,41 +149,47 @@
       @retry="credits.loadHolds(credits.holdsPage)"
     >
       <template #success="{ data }">
-        <ul class="charge-list">
+        <ul
+          class="credit-list"
+          aria-label="Credits 预占"
+        >
           <li
             v-for="hold in data.items"
             :key="hold.id"
-            class="charge-row"
+            class="credit-row"
           >
-            <div class="charge-main">
-              <strong>{{ hold.state }} · 剩余 {{ hold.remaining }} / {{ hold.amount }}</strong>
-              <small>{{ hold.businessKey }} · {{ hold.requestId ? `申请 ${hold.requestId}` : hold.buildRequestId ? `构建 ${hold.buildRequestId}` : '无资源申请绑定' }}</small>
+            <div class="credit-main">
+              <strong>{{ creditHoldStateLabel(hold.state) }} · 剩余 {{ hold.remaining }} / {{ hold.amount }}</strong>
+              <small>{{ holdTargetLabel(hold) }}</small>
               <small>{{ formatTimestamp(hold.createdAt) }}</small>
-              <template v-if="holdUnknownKind(hold) !== 'none'">
+              <template v-if="creditHoldUnknownStatus(hold).kind !== 'none'">
                 <span
                   class="state-chip"
-                  :class="holdUnknownKind(hold) === 'released' ? 'state-chip--released' : 'state-chip--pending'"
+                  :class="creditHoldUnknownStatus(hold).kind === 'released' ? 'state-chip--released' : 'state-chip--pending'"
                 >{{ holdUnknownMessage(hold) }}</span>
-                <small v-if="holdUnknownKind(hold) === 'released'">
-                  资金已释放，未知事实仍保留；不代表实例、磁盘或外部调用已停止。
+                <small v-if="creditHoldUnknownStatus(hold).kind === 'released'">
+                  资金已释放，用量仍待核实；这不代表实例、磁盘或外部调用已经停止。
                 </small>
                 <small v-else-if="holdUnknownDueAt(hold)">
-                  核实截止 {{ formatTimestamp(holdUnknownDueAt(hold)!) }}
+                  核实截止 {{ formatTimestamp(holdUnknownDueAt(hold)!) }}，到期后释放预占。
                 </small>
               </template>
               <details class="advanced-details">
                 <summary>查看预占内部标识</summary>
                 <small>预占 ID：{{ hold.id }}</small>
+                <small>业务键：{{ hold.businessKey }}</small>
                 <small>调用方：{{ hold.ownerClientId }}</small>
+                <small v-if="hold.requestId">资源申请 ID：{{ hold.requestId }}</small>
+                <small v-if="hold.buildRequestId">构建 ID：{{ hold.buildRequestId }}<template v-if="hold.buildAttempt"> · 第 {{ hold.buildAttempt }} 次</template></small>
+                <small v-if="hold.modelCallId">模型调用 ID：{{ hold.modelCallId }}</small>
                 <small v-if="hold.reason">原因：{{ hold.reason }}</small>
                 <small v-if="hold.unknownSince">未知自：{{ formatTimestamp(hold.unknownSince) }}</small>
-                <small v-if="hold.reconciliationDueAt">核实截止：{{ formatTimestamp(hold.reconciliationDueAt) }}</small>
                 <small v-if="hold.expiredUnknownAt">预占释放于：{{ formatTimestamp(hold.expiredUnknownAt) }}</small>
               </details>
             </div>
           </li>
         </ul>
-        <div class="usage-pagination">
+        <div class="credit-pagination">
           <button
             type="button"
             class="outlined-button small"
@@ -197,127 +211,207 @@
       </template>
     </AsyncStateView>
 
+    <p
+      v-if="!canManage"
+      class="field-note"
+      role="note"
+      data-testid="credits-read-only-note"
+    >
+      你可以查看本项目的账户、账目和预占。发放、转移、调整和冲正由平台管理员执行。
+    </p>
+
     <form
-      class="adjustment-form"
+      v-else
+      class="credit-admin-form"
       data-testid="credits-admin-form"
-      @submit.prevent="submitAdmin"
+      @submit.prevent="requestAdmin"
     >
       <div class="section-heading section-heading--compact">
         <div>
           <h4>管理员账务操作</h4>
-          <p>仅平台管理员可写。须提供稳定幂等键（自动生成）与原因；转移与冲正在资金已预占时可能返回 409。</p>
+          <p>每笔操作都需要填写原因，并在账目中留下记录。已预占的资金不能转出或调减。</p>
         </div>
       </div>
       <div class="two-columns">
         <label>
           <span>操作</span>
-          <select
+          <AppSelect
             v-model="adminAction"
-            class="text-input"
+            aria-label="Credits 操作"
           >
-            <option value="grant">发放 grant</option>
-            <option value="transfer">转移 transfer</option>
-            <option value="adjust">调整 adjust</option>
-            <option value="reverse">冲正 reverse</option>
-          </select>
+            <option value="grant">发放</option>
+            <option value="transfer">转移到其他项目</option>
+            <option value="adjust">调整（正数增加，负数减少）</option>
+            <option value="reverse">冲正已有账目</option>
+          </AppSelect>
         </label>
         <label v-if="adminAction !== 'reverse'">
-          <span>金额（六位小数）</span>
+          <span>金额（CREDITS，最多六位小数）</span>
           <input
             v-model="adminAmount"
             class="text-input"
+            aria-label="Credits 金额"
             inputmode="decimal"
-            :pattern="adminAction === 'adjust' ? '-?(0|[1-9][0-9]*)\\.[0-9]{6}' : '(0|[1-9][0-9]*)\\.[0-9]{6}'"
+            placeholder="例如 20 或 -5.5"
             required
           >
         </label>
         <label v-if="adminAction === 'transfer'">
-          <span>目标项目 ID</span>
-          <input
+          <span>目标项目</span>
+          <AppSelect
             v-model="destinationProjectId"
-            class="text-input"
+            aria-label="目标项目"
             required
           >
+            <option value="">选择目标项目</option>
+            <option
+              v-for="project in destinationOptions"
+              :key="project.id"
+              :value="project.id"
+            >{{ project.name }}</option>
+          </AppSelect>
         </label>
         <label v-if="adminAction === 'reverse'">
           <span>原账目条目 ID</span>
           <input
             v-model="entryId"
             class="text-input"
+            aria-label="原账目条目 ID"
             required
           >
         </label>
       </div>
+      <small
+        v-if="adminAction !== 'reverse' && adminAmount.trim() && !canonicalAmount"
+        class="field-note warning-text"
+        role="alert"
+      >
+        {{ adminAction === 'adjust' ? '请输入非零金额，最多六位小数。' : '请输入大于零的金额，最多六位小数。' }}
+      </small>
       <label>
         <span>原因</span>
         <textarea
           v-model="adminReason"
           class="text-input"
+          aria-label="操作原因"
           rows="2"
           required
         />
       </label>
-      <button
-        type="submit"
-        class="filled-button"
-        :disabled="!canSubmitAdmin || credits.acting !== null || !projectId"
-      >
-        提交管理员操作
-      </button>
+      <div class="form-actions">
+        <button
+          type="submit"
+          class="filled-button"
+          :disabled="!canSubmitAdmin || credits.acting !== null || !projectId"
+        >
+          {{ adminAction === 'reverse' ? '继续冲正' : adminAction === 'transfer' ? '继续转移' : isDestructive ? '继续调减' : `提交${creditActionLabel(adminAction)}` }}
+        </button>
+      </div>
     </form>
+
+    <ConfirmDialog
+      :open="confirmation !== null"
+      :title="confirmation?.title ?? ''"
+      :description="confirmation?.description ?? ''"
+      :confirm-text="confirmation?.confirmText ?? '确认'"
+      severity="error"
+      @cancel="confirmation = null"
+      @confirm="confirmAdmin"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, toRef } from 'vue'
+import { computed, reactive, ref, toRef, watch } from 'vue'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import AppSelect from '@/components/form/AppSelect.vue'
 import {
+  canonicalCreditsAmount,
+  creditActionLabel,
+  creditHoldStateLabel,
   creditHoldUnknownStatus,
-  isCreditsFixedDecimal,
-  isPositiveCreditsAmount,
+  creditLedgerKindLabel,
+  isDestructiveCreditOperation,
   useProjectCredits,
   type CreditAdminAction,
+  type CreditAdminFormInput,
+  type CreditHold,
 } from '@/composables/useProjectCredits'
+import { useAuth } from '@/composables/useAuth'
+import { useProjects } from '@/composables/useProjects'
 import { formatTimestamp } from '@/utils/format'
+import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const props = defineProps<{
   projectId: string | null
 }>()
 
+const auth = useAuth()
+const projects = useProjects()
 const credits = reactive(useProjectCredits(toRef(props, 'projectId')))
+// The server enforces the platform-admin role on every write; the form is only
+// shown to the same role so members never see controls that would be refused.
+const canManage = computed(() => hasAnyRole(rolesFromProfile(auth.user.value?.profile), ['admin']))
 const adminAction = ref<CreditAdminAction>('grant')
-const adminAmount = ref('20.000000')
+const adminAmount = ref('')
 const adminReason = ref('')
 const destinationProjectId = ref('')
 const entryId = ref('')
+const confirmation = ref<{ title: string; description: string; confirmText: string; input: CreditAdminFormInput } | null>(null)
+/** The last submitted operation, kept so "重试" replays the same body and Idempotency-Key. */
+const lastSubmitted = ref<CreditAdminFormInput | null>(null)
+
+const destinationOptions = computed(() => projects.projects.kind === 'success'
+  ? projects.projects.data.filter((project) => project.id !== props.projectId)
+  : [])
+const canonicalAmount = computed(() => {
+  const amount = canonicalCreditsAmount(adminAmount.value, adminAction.value === 'adjust')
+  return amount && amount !== '0.000000' && amount !== '-0.000000' ? amount : null
+})
+const isDestructive = computed(() => isDestructiveCreditOperation({ action: adminAction.value, amount: canonicalAmount.value ?? '' }))
 
 const canSubmitAdmin = computed(() => {
-  if (!props.projectId || !adminReason.value.trim()) return false
+  if (!canManage.value || !props.projectId || !adminReason.value.trim()) return false
   if (adminAction.value === 'reverse') return Boolean(entryId.value.trim())
-  if (adminAction.value === 'transfer') {
-    return isPositiveCreditsAmount(adminAmount.value)
-      && Boolean(destinationProjectId.value.trim())
-      && destinationProjectId.value.trim() !== props.projectId
-  }
-  if (adminAction.value === 'adjust') {
-    return isCreditsFixedDecimal(adminAmount.value)
-      && adminAmount.value !== '0.000000'
-      && adminAmount.value !== '-0.000000'
-  }
-  return isPositiveCreditsAmount(adminAmount.value)
+  if (!canonicalAmount.value) return false
+  return adminAction.value !== 'transfer' || Boolean(destinationProjectId.value)
 })
 
-function holdUnknownKind(hold: Parameters<typeof creditHoldUnknownStatus>[0]) {
-  return creditHoldUnknownStatus(hold).kind
+watch(() => props.projectId, () => {
+  confirmation.value = null
+  lastSubmitted.value = null
+  destinationProjectId.value = ''
+  entryId.value = ''
+})
+
+function isZeroCredits(value: string) {
+  return /^-?0\.0{6}$/.test(value)
 }
 
-function holdUnknownMessage(hold: Parameters<typeof creditHoldUnknownStatus>[0]): string {
+function signedAmount(value: string) {
+  return value.startsWith('-') || isZeroCredits(value) ? value : `+${value}`
+}
+
+/** Holds, releases and unknown markers cannot be reversed (Resource rejects them); reversals are not reversed again. */
+function isReversible(kind: string, reversalOf: string | null | undefined) {
+  return !reversalOf && kind !== 'hold' && kind !== 'release' && kind !== 'unknown'
+}
+
+function holdTargetLabel(hold: CreditHold) {
+  if (hold.requestId) return '资源申请'
+  if (hold.buildRequestId) return hold.buildAttempt ? `镜像构建（第 ${hold.buildAttempt} 次）` : '镜像构建'
+  if (hold.modelCallId) return '模型调用'
+  return '其他业务'
+}
+
+function holdUnknownMessage(hold: CreditHold): string {
   const status = creditHoldUnknownStatus(hold)
   return status.kind === 'none' ? '' : status.message
 }
 
-function holdUnknownDueAt(hold: Parameters<typeof creditHoldUnknownStatus>[0]): string | null {
+function holdUnknownDueAt(hold: CreditHold): string | null {
   const status = creditHoldUnknownStatus(hold)
   return status.kind === 'pending' && status.reconciliationDueAt ? status.reconciliationDueAt : null
 }
@@ -325,65 +419,102 @@ function holdUnknownDueAt(hold: Parameters<typeof creditHoldUnknownStatus>[0]): 
 function prepareReverse(id: string) {
   adminAction.value = 'reverse'
   entryId.value = id
-  adminReason.value = adminReason.value.trim() || '冲正错误账目'
 }
 
-async function submitAdmin() {
+function requestAdmin() {
   if (!canSubmitAdmin.value) return
-  const ok = await credits.submitAdminOperation({
+  const input: CreditAdminFormInput = {
     action: adminAction.value,
-    amount: adminAmount.value,
+    amount: canonicalAmount.value ?? '',
     reason: adminReason.value,
     destinationProjectId: destinationProjectId.value,
     entryId: entryId.value,
-  })
-  if (ok) {
-    adminReason.value = ''
-    if (adminAction.value === 'reverse') entryId.value = ''
   }
+  if (!isDestructiveCreditOperation(input)) {
+    void execute(input)
+    return
+  }
+  if (input.action === 'transfer') {
+    const destination = destinationOptions.value.find((project) => project.id === input.destinationProjectId)?.name ?? input.destinationProjectId
+    confirmation.value = {
+      title: '确认转移 Credits',
+      description: `从当前项目转出 ${input.amount} CREDITS 到“${destination}”。当前项目可用余额会立即减少；要撤回只能再做一次冲正。`,
+      confirmText: '转移',
+      input,
+    }
+  } else if (input.action === 'reverse') {
+    confirmation.value = {
+      title: '确认冲正账目',
+      description: `为账目 ${input.entryId} 追加反向记录。原记录保留；如果这笔资金已被预占或消费，冲正会被拒绝。`,
+      confirmText: '冲正',
+      input,
+    }
+  } else {
+    confirmation.value = {
+      title: '确认调减 Credits',
+      description: `当前项目余额减少 ${input.amount.slice(1)} CREDITS。已预占的资金不能调减，余额不会低于已预占金额。`,
+      confirmText: '调减',
+      input,
+    }
+  }
+}
+
+async function confirmAdmin() {
+  const pending = confirmation.value
+  confirmation.value = null
+  if (pending) await execute(pending.input)
+}
+
+async function execute(input: CreditAdminFormInput) {
+  lastSubmitted.value = input
+  const ok = await credits.submitAdminOperation(input)
+  if (!ok) return
+  lastSubmitted.value = null
+  adminReason.value = ''
+  adminAmount.value = ''
+  if (input.action === 'reverse') entryId.value = ''
+}
+
+async function submitAdmin() {
+  if (lastSubmitted.value) await execute(lastSubmitted.value)
+  else await credits.load()
 }
 
 defineExpose({ reload: () => credits.load({ clearOutcome: true }) })
 </script>
 
 <style scoped>
-.credits-card { display: grid; gap: 18px; padding: 20px; }
-.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.credits-card { display: grid; gap: var(--space-4); padding: var(--space-5); }
+.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .section-heading--compact { align-items: center; }
 .section-heading h3 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-large); }
 .section-heading h4 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
-.section-heading p, .updated-note { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
-.budget-summary { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-.budget-summary div { display: grid; gap: 5px; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
-.budget-summary span { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
-.budget-summary strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); white-space: nowrap; }
-.budget-summary small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
-.charge-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.charge-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 14px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
-.charge-main { display: grid; gap: 4px; min-width: 0; }
-.charge-main strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
-.charge-main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
-.charge-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.advanced-details { display: grid; gap: 4px; margin-top: 2px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.section-heading p { margin: var(--space-1) 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
+.field-note { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.5; }
+.warning-text { color: var(--md-sys-color-error); }
+.credits-summary { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.credits-summary div { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.credits-summary span { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.credits-summary strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); overflow-wrap: anywhere; }
+.credit-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.credit-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.credit-main { display: grid; gap: var(--space-1); min-width: 0; }
+.credit-main strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
+.credit-main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
+.credit-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; justify-content: flex-end; }
+.advanced-details { display: grid; gap: var(--space-1); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .advanced-details summary { color: var(--md-sys-color-primary); cursor: pointer; }
-.usage-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 10px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
-.adjustment-form { display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid var(--md-sys-color-outline-variant); }
-.two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.adjustment-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
-textarea.text-input { resize: vertical; }
-.state-chip { display: inline-flex; white-space: nowrap; padding: 3px 8px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); width: fit-content; }
+.credit-pagination { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.credit-admin-form { display: grid; gap: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--md-sys-color-outline-variant); }
+.two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.credit-admin-form label { display: grid; gap: var(--space-1); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.form-actions { display: flex; justify-content: flex-end; }
+.state-chip { display: inline-flex; width: fit-content; white-space: nowrap; padding: var(--space-1) var(--space-2); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .state-chip--pending { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
 .state-chip--released { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
-.filled-button, .outlined-button, .text-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 17px; border-radius: var(--md-sys-shape-full); font: var(--md-sys-label-large); cursor: pointer; text-decoration: none; }
-.filled-button { border: 1px solid var(--md-sys-color-primary); background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); }
-.outlined-button { border: 1px solid var(--md-sys-color-outline); background: transparent; color: var(--md-sys-color-primary); }
-.outlined-button.small { min-height: 32px; padding: 0 11px; font: var(--md-sys-label-medium); }
-.text-button { min-height: 32px; padding: 0 8px; border: 0; background: transparent; color: var(--md-sys-color-primary); }
-.filled-button:disabled, .outlined-button:disabled, .text-button:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 620px) {
-  .budget-summary, .two-columns { grid-template-columns: 1fr; }
-  .charge-row { align-items: flex-start; flex-direction: column; }
-  .charge-actions { justify-content: flex-start; }
+  .credits-summary, .two-columns { grid-template-columns: 1fr; }
+  .credit-row { flex-direction: column; }
+  .credit-actions { justify-content: flex-start; }
 }
 </style>

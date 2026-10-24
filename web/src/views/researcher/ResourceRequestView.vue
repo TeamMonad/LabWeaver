@@ -151,9 +151,9 @@
                 :disabled="!canEstimate || costEstimate.acting || !selectedProjectId"
                 @click="requestServerEstimate"
               >
-                请求 CREDITS 估价
+                估算费用
               </button>
-              <small>使用服务端 estimateProjectResourceCost；金额不在浏览器重算。</small>
+              <small v-if="selectedGpuCatalogId && !selectedGpu" class="warning-text" role="status" data-testid="request-estimate-gpu-blocked">所选 GPU 当前不可用，无法估价。</small>
             </div>
             <AsyncStateView
               :state="costEstimate.estimate"
@@ -161,18 +161,10 @@
               @retry="requestServerEstimate"
             >
               <template #success="{ data }">
-                <strong data-testid="request-estimate-total">估价合计 {{ data.total.amount }} {{ data.total.currency }}</strong>
-                <small
-                  v-for="(line, index) in data.lines"
-                  :key="`${line.rateId}-${index}`"
-                >
-                  {{ billingUnitLabel(line.unit) }}：{{ line.amount.amount }} {{ line.amount.currency }}
-                  · {{ formatEstimateQuantity(line) }}
-                  · 费率 rev {{ line.rateRevision }}
-                </small>
+                <CostEstimateResult :total="data.total" :lines="data.lines" />
               </template>
             </AsyncStateView>
-            <small>缺费率、缺目录或过时报价会显示诊断，不会显示为零或免费。预占由后端内部入口完成。</small>
+            <small>审批通过、环境激活前，平台按批准的规格和时长预占项目 Credits；可用余额不足时不会创建环境。</small>
           </div>
           <div class="form-footer__actions">
             <button type="submit" class="filled-button" :disabled="!canSubmit || resources.acting !== null">提交资源申请</button>
@@ -228,6 +220,8 @@
       </section>
     </div>
 
+    <ProjectCreditsPanel v-if="projectIdRef" :project-id="projectIdRef" />
+
     <ConfirmDialog
       :open="resourceConfirmation !== null"
       :title="resourceConfirmationTitle"
@@ -248,13 +242,10 @@ import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import CostEstimateResult from '@/components/console/CostEstimateResult.vue'
+import ProjectCreditsPanel from '@/components/console/ProjectCreditsPanel.vue'
 import { useProjectResources, resourceSummary } from '@/composables/useProjectResources'
-import {
-  billingUnitLabel,
-  formatEstimateQuantity,
-  hoursFromNowInterval,
-  useProjectResourceCostEstimate,
-} from '@/composables/useProjectResourceCostEstimate'
+import { hoursFromNowInterval, useProjectResourceCostEstimate } from '@/composables/useProjectResourceCostEstimate'
 import { useProjectResourceOptions, type ResourceGpuCatalogOption } from '@/composables/useProjectResourceOptions'
 import { useProjects } from '@/composables/useProjects'
 import { useAuth } from '@/composables/useAuth'
@@ -559,6 +550,7 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .estimate-box { display: grid; gap: var(--space-1); padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .estimate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+.warning-text { color: var(--md-sys-color-error); }
 .estimate-box strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .gpu-detail { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font: var(--md-sys-body-small); }
 .status-card { display: grid; gap: var(--space-5); }

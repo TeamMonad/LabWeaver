@@ -133,6 +133,8 @@
                   <strong>{{ rateLabel(rate) }}</strong>
                   <small>{{ rate.unitQuantity }} 基础单位 · {{ rate.unitPrice.amount }} {{ rate.unitPrice.currency }} · {{ formatTimestamp(rate.effectiveFrom) }} 起</small>
                   <small>基础单位：{{ rateDisplayUnits[rate.unit]?.base ?? '未知计费单位' }}</small>
+                  <small v-if="rate.maxPreauthorization">单次调用最多预占 {{ rate.maxPreauthorization }} {{ rate.unitPrice.currency }}</small>
+                  <small v-if="rate.unitPrice.currency !== 'CREDITS'">非 CREDITS 费率，不用于项目 Credits 预占和扣收。</small>
                   <small>{{ equivalentRatePrice(rate.unit, rate.unitQuantity, rate.unitPrice.amount, rate.unitPrice.currency) ?? '金额或基础单位数量无效，无法换算。' }}</small>
                   <small v-if="rate.effectiveUntil">截止于 {{ formatTimestamp(rate.effectiveUntil) }}</small>
                 </div>
@@ -209,7 +211,11 @@
             <option value="cpu_millicore_second">CPU 核心小时</option>
             <option value="memory_byte_second">内存 GiB 小时</option>
             <option value="storage_byte_second">存储 GiB 小时</option>
-            <option value="build_second">构建秒</option>
+            <option value="build_second">镜像构建小时</option>
+            <option value="llm_input_token">模型输入 token（每百万）</option>
+            <option value="llm_output_token">模型输出 token（每百万）</option>
+            <option value="llm_cache_read_token">模型缓存读取 token（每百万）</option>
+            <option value="llm_cache_write_token">模型缓存写入 token（每百万）</option>
           </AppSelect>
         </label>
         <label v-if="rateUnit === 'gpu_unit_second'">
@@ -257,6 +263,44 @@
         >
           管理 GPU 目录
         </RouterLink>
+        <label v-if="rateUnit === 'build_second'">
+          <span>构建器标识</span>
+          <input
+            v-model.trim="rateBuilderBinding"
+            class="text-input"
+            aria-label="构建器标识"
+            maxlength="128"
+            placeholder="部署配置中的 builder binding，例如 buildkit-primary-v1"
+            required
+          >
+        </label>
+        <template v-if="isModelRate">
+          <label>
+            <span>模型标识</span>
+            <input
+              v-model.trim="rateModelBinding"
+              class="text-input"
+              aria-label="模型标识"
+              maxlength="256"
+              placeholder="网关实际调用的模型名称"
+              required
+            >
+          </label>
+          <label>
+            <span>单次调用最多预占（CREDITS）</span>
+            <input
+              v-model="rateMaxPreauthorization"
+              class="text-input"
+              aria-label="单次调用最多预占"
+              inputmode="decimal"
+              placeholder="例如 2 或 0.5"
+              required
+            >
+          </label>
+          <p class="rate-equivalent">
+            模型调用开始前按单次上限预占 Credits，结束后按实际 token 扣收。同一模型的输入、输出、缓存读取和缓存写入四类费率都配置后，模型调用才能开始；缺任何一类会拒绝调用，不按免费处理。
+          </p>
+        </template>
         <label>
           <span>单价（每 {{ rateDisplayUnits[rateUnit].label }}）</span>
           <input
@@ -290,6 +334,13 @@
           <AppDateTimePicker
             v-model="rateEffectiveUntil" />
         </label>
+        <p
+          v-if="rateCurrency.trim() !== 'CREDITS'"
+          class="rate-equivalent warning-text"
+          role="note"
+        >
+          项目 Credits 只按 CREDITS 费率预占和扣收。其他币种的费率仅用于预算核算，资源、构建和模型调用的 Credits 准入会因缺少 CREDITS 费率而失败。
+        </p>
         <p
           class="rate-equivalent"
           role="status"
@@ -443,6 +494,9 @@
         v-if="selectedProjectId"
         ref="estimatePanel"
         :project-id="selectedProjectId"
+        :gpu-classes="estimateGpuClasses"
+        :gpu-unavailable-reason="estimateGpuUnavailableReason"
+        :builder-bindings="estimateBuilderBindings"
       />
 
       <section
@@ -706,7 +760,9 @@ import ProjectResourceCostEstimatePanel from '@/components/console/ProjectResour
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResourceFinance, type ResourceCharge } from '@/composables/useProjectResourceFinance'
-import { canonicalRateAmount, equivalentRatePrice, rateDisplayUnits, rateVersionState } from '@/utils/resourceRates'
+import { canonicalRateAmount, equivalentRatePrice, modelTokenUnits, rateDisplayUnits, rateVersionState, validRateBinding } from '@/utils/resourceRates'
+import { billingUnitLabel } from '@/composables/useProjectResourceCostEstimate'
+import { canonicalCreditsAmount } from '@/composables/useProjectCredits'
 import { listResourceGpuCatalog } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import { useResourceRates } from '@/composables/useResourceRates'
@@ -769,7 +825,15 @@ const rateUnit = ref<ResourceBillingUnit>('gpu_unit_second')
 const rateGpuSelection = ref('')
 const rateUnitQuantity = computed(() => Number(rateDisplayUnits[rateUnit.value].quantity))
 const rateAmount = ref('')
-const rateCurrency = ref('USD')
+const rateCurrency = ref('CREDITS')
+const rateBuilderBinding = ref('')
+const rateModelBinding = ref('')
+const rateMaxPreauthorization = ref('')
+const isModelRate = computed(() => (modelTokenUnits as readonly string[]).includes(rateUnit.value))
+const canonicalMaxPreauthorization = computed(() => {
+  const amount = canonicalCreditsAmount(rateMaxPreauthorization.value, false)
+  return amount && amount !== '0.000000' ? amount : null
+})
 const rateEffectiveFrom = ref(localDateTimeValue(new Date(Date.now() + 5 * 60_000)))
 const rateEffectiveUntil = ref('')
 const now = ref(Date.now())
@@ -780,6 +844,19 @@ const endingEffectiveUntil = ref('')
 const endConfirmation = ref<{ rateId: string; effectiveUntil: string; label: string } | null>(null)
 const catalog = ref<AsyncState<GpuCatalogEntrySchema[]>>({ kind: 'idle' })
 const gpuOptions = computed(() => catalog.value.kind === 'success' ? catalog.value.data : [])
+// Estimate inputs come from the same catalog and rate list the administrator manages here.
+const estimateGpuClasses = computed(() => [...new Set(gpuOptions.value.map((entry) => entry.class))])
+const estimateGpuUnavailableReason = computed(() => {
+  if (catalog.value.kind === 'error') return 'GPU 目录暂时无法读取，当前不能估价 GPU。请先重试读取目录。'
+  if (catalog.value.kind === 'empty') return '尚无启用的 GPU 类型，GPU 当前不可用。'
+  if (catalog.value.kind !== 'success') return '正在读取 GPU 目录。'
+  return null
+})
+const estimateBuilderBindings = computed(() => rates.rates.kind === 'success'
+  ? [...new Set(rates.rates.data
+      .filter((rate) => rate.unit === 'build_second' && rate.builderBinding && rateVersionState(rate, now.value) !== '已结束')
+      .map((rate) => rate.builderBinding!))]
+  : [])
 function gpuOptionKey(entry: GpuCatalogEntrySchema) { return `${entry.class}:${entry.mode}` }
 const selectedGpu = computed(() => gpuOptions.value.find((entry) => gpuOptionKey(entry) === rateGpuSelection.value))
 const gpuModeDescription = computed(() => selectedGpu.value ? ({
@@ -856,6 +933,8 @@ const canSubmitRate = computed(() => Boolean(
   rateUnitQuantity.value && canonicalRateAmount(rateAmount.value)
   && /^[A-Za-z0-9_-]{1,32}$/.test(rateCurrency.value)
   && (rateUnit.value !== 'gpu_unit_second' || selectedGpu.value)
+  && (rateUnit.value !== 'build_second' || validRateBinding(rateBuilderBinding.value, 128))
+  && (!isModelRate.value || (validRateBinding(rateModelBinding.value, 256) && canonicalMaxPreauthorization.value))
   && !rateDateError.value,
 ))
 const endingRate = computed(() => {
@@ -1027,16 +1106,6 @@ function chargeTargetLabel(charge: ResourceCharge) {
   return usage ? usageTargetLabel(usage) : '项目用量关联待同步'
 }
 
-function billingUnitLabel(value: ResourceCharge['lines'][number]['unit']) {
-  return ({
-    cpu_millicore_second: 'CPU',
-    memory_byte_second: '内存',
-    storage_byte_second: '存储',
-    gpu_unit_second: 'GPU',
-    build_second: '构建',
-  } as Record<ResourceCharge['lines'][number]['unit'], string>)[value] ?? value
-}
-
 function localDateTimeValue(date = new Date()) {
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
@@ -1049,6 +1118,8 @@ function toUtcTimestamp(value: string): string | null {
 
 function rateLabel(rate: ResourceRateSchema) {
   if (rate.unit === 'gpu_unit_second') return `GPU ${rate.gpuClass} · ${rateModeLabel(rate.gpuMode)}`
+  if (rate.unit === 'build_second') return `镜像构建 · ${rate.builderBinding ?? '未指定构建器'}`
+  if (rate.modelBinding) return `${billingUnitLabel(rate.unit)} · ${rate.modelBinding}`
   return billingUnitLabel(rate.unit)
 }
 
@@ -1094,6 +1165,8 @@ async function submitRate() {
     unitQuantity: rateUnitQuantity.value!,
     gpuClass: rateUnit.value === 'gpu_unit_second' ? selectedGpu.value!.class : null,
     gpuMode: rateUnit.value === 'gpu_unit_second' ? selectedGpu.value!.mode : null,
+    ...(rateUnit.value === 'build_second' ? { builderBinding: rateBuilderBinding.value } : {}),
+    ...(isModelRate.value ? { modelBinding: rateModelBinding.value, maxPreauthorization: canonicalMaxPreauthorization.value } : {}),
     unitPrice: { currency: rateCurrency.value.trim(), amount: canonicalRateAmount(rateAmount.value)! },
     effectiveFrom,
     effectiveUntil,

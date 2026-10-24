@@ -7,21 +7,25 @@
     <div class="section-heading">
       <div>
         <h3 id="cost-estimate-heading">
-          资源 CREDITS 估价
+          费用估价
         </h3>
         <p>
-          调用服务端 <code>estimateProjectResourceCost</code>；计算与存储半开区间相互独立。金额取服务端六位 CREDITS 字符串，页面不重算合计；缺费率、缺目录或过时报价会显示明确诊断，不会显示为零或免费。
+          按当前费率估算资源申请和镜像构建的 CREDITS 上限。估价不预占资金也不占用容量；缺少费率或 GPU 类型不可用时估价会失败，不会显示为零或免费。
         </p>
       </div>
     </div>
 
     <form
       class="estimate-form"
+      aria-labelledby="resource-estimate-heading"
       @submit.prevent="submitEstimate"
     >
+      <h4 id="resource-estimate-heading">
+        资源申请
+      </h4>
       <div class="two-columns">
         <label>
-          <span>CPU（millicores）</span>
+          <span>CPU（m）</span>
           <input
             v-model.number="cpuMillicores"
             class="text-input"
@@ -51,15 +55,27 @@
           >
         </label>
         <label>
-          <span>GPU 类别（可选）</span>
-          <input
+          <span>GPU 类型（可选）</span>
+          <AppSelect
             v-model="gpuClass"
-            class="text-input"
-            type="text"
-            placeholder="留空表示不申请 GPU"
+            aria-label="估价 GPU 类型"
+            :disabled="gpuUnavailableReason !== null"
           >
+            <option value="">不申请 GPU</option>
+            <option
+              v-for="name in gpuClasses"
+              :key="name"
+              :value="name"
+            >{{ name }}</option>
+          </AppSelect>
+          <small
+            v-if="gpuUnavailableReason"
+            class="field-note warning-text"
+            role="status"
+            data-testid="estimate-gpu-unavailable"
+          >{{ gpuUnavailableReason }}</small>
         </label>
-        <label v-if="gpuClass.trim()">
+        <label v-if="gpuClass">
           <span>GPU 数量</span>
           <input
             v-model.number="gpuCount"
@@ -81,7 +97,7 @@
           >
         </label>
         <label>
-          <span>存储时长（小时）</span>
+          <span>存储保留时长（小时）</span>
           <input
             v-model.number="storageHours"
             class="text-input"
@@ -90,75 +106,96 @@
             max="8760"
             required
           >
+          <small class="field-note">停止计算后保留的磁盘按存储时长单独计价，可以长于计算时长。</small>
         </label>
       </div>
-      <small class="field-note">
-        默认从当前时刻起算半开区间；存储可长于计算。预占由 Environment/Task 配置 owner 在内部入口完成，浏览器不会调用 estimated-holds。
-      </small>
       <button
         type="submit"
-        class="filled-button"
-        :disabled="!canSubmit || cost.acting || !projectId"
+        class="outlined-button"
+        :disabled="!canSubmit || cost.acting"
       >
-        请求服务端估价
+        估价
       </button>
     </form>
 
     <AsyncStateView
       :state="cost.estimate"
-      empty-text="尚未请求估价。"
+      empty-text=""
       @retry="submitEstimate"
     >
       <template #success="{ data }">
-        <div
-          class="estimate-summary"
-          data-testid="cost-estimate-summary"
-        >
-          <div>
-            <span>服务端合计</span>
-            <strong>{{ data.total.amount }} {{ data.total.currency }}</strong>
-          </div>
-          <div>
-            <span>明细行数</span>
-            <strong>{{ data.lines.length }}</strong>
-          </div>
-        </div>
-        <small class="field-note">
-          合计直接显示服务端返回值；下面数量仅展示 quantity 与 quantityDivisor，不用于本地加总金额。
-        </small>
-        <ul
-          class="line-list"
-          aria-label="估价明细"
-        >
-          <li
-            v-for="(line, index) in data.lines"
-            :key="`${line.rateId}-${line.rateRevision}-${index}`"
-            class="line-row"
+        <CostEstimateResult
+          :total="data.total"
+          :lines="data.lines"
+        />
+      </template>
+    </AsyncStateView>
+
+    <form
+      class="estimate-form"
+      aria-labelledby="build-estimate-heading"
+      data-testid="build-cost-estimate-form"
+      @submit.prevent="submitBuildEstimate"
+    >
+      <h4 id="build-estimate-heading">
+        镜像构建
+      </h4>
+      <p class="field-note">
+        构建开始前按所选构建器的费率和最长构建时长预占 Credits；没有匹配费率时新构建会被拒绝。
+      </p>
+      <div class="two-columns">
+        <label>
+          <span>构建器</span>
+          <AppSelect
+            v-model="builderBinding"
+            aria-label="构建器"
+            :disabled="builderBindings.length === 0"
           >
-            <div class="line-main">
-              <strong>{{ billingUnitLabel(line.unit) }} · {{ line.amount.amount }} {{ line.amount.currency }}</strong>
-              <small>
-                单价 {{ line.unitPrice.amount }} {{ line.unitPrice.currency }}
-                / {{ line.unitQuantity }} · 数量 {{ formatEstimateQuantity(line) }}
-              </small>
-              <small>费率 {{ line.rateId }} · revision {{ line.rateRevision }}</small>
-            </div>
-          </li>
-        </ul>
-        <details class="advanced-details">
-          <summary>查看估价输入回显</summary>
-          <small>项目：{{ data.projectId }}</small>
-          <small>计算：{{ formatTimestamp(data.input.computeFrom) }} → {{ formatTimestamp(data.input.computeUntil) }}</small>
-          <small>存储：{{ formatTimestamp(data.input.storageFrom) }} → {{ formatTimestamp(data.input.storageUntil) }}</small>
-          <small>
-            规格：CPU {{ data.input.resources.cpuMillicores }}m ·
-            内存 {{ data.input.resources.memoryBytes }} B ·
-            存储 {{ data.input.resources.storageBytes }} B
-            <template v-if="data.input.resources.gpu">
-              · GPU {{ data.input.resources.gpu.class }} × {{ data.input.resources.gpu.count }}
-            </template>
-          </small>
-        </details>
+            <option value="">选择构建器</option>
+            <option
+              v-for="binding in builderBindings"
+              :key="binding"
+              :value="binding"
+            >{{ binding }}</option>
+          </AppSelect>
+          <small
+            v-if="builderBindings.length === 0"
+            class="field-note warning-text"
+            role="status"
+            data-testid="build-estimate-no-rate"
+          >还没有镜像构建费率，无法估价，新的构建也会被拒绝。请先在上方创建“镜像构建秒”费率。</small>
+        </label>
+        <label>
+          <span>最长构建时长（分钟）</span>
+          <input
+            v-model.number="buildMinutes"
+            class="text-input"
+            type="number"
+            min="1"
+            max="1440"
+            required
+          >
+        </label>
+      </div>
+      <button
+        type="submit"
+        class="outlined-button"
+        :disabled="!canSubmitBuild || build.acting"
+      >
+        估价
+      </button>
+    </form>
+
+    <AsyncStateView
+      :state="build.estimate"
+      empty-text=""
+      @retry="submitBuildEstimate"
+    >
+      <template #success="{ data }">
+        <CostEstimateResult
+          :total="data.total"
+          :lines="data.lines"
+        />
       </template>
     </AsyncStateView>
   </section>
@@ -167,19 +204,27 @@
 <script setup lang="ts">
 import { computed, reactive, ref, toRef, watch } from 'vue'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import CostEstimateResult from '@/components/console/CostEstimateResult.vue'
+import AppSelect from '@/components/form/AppSelect.vue'
 import {
-  billingUnitLabel,
-  formatEstimateQuantity,
   hoursFromNowInterval,
+  useProjectBuildCostEstimate,
   useProjectResourceCostEstimate,
 } from '@/composables/useProjectResourceCostEstimate'
-import { formatTimestamp } from '@/utils/format'
 
 const props = defineProps<{
   projectId: string | null
+  /** GPU classes from the active catalog. */
+  gpuClasses: readonly string[]
+  /** Why GPU cannot be estimated right now (catalog failed, loading or empty); null when selectable. */
+  gpuUnavailableReason: string | null
+  /** Builders that currently have a build_second rate. */
+  builderBindings: readonly string[]
 }>()
 
-const cost = reactive(useProjectResourceCostEstimate(toRef(props, 'projectId')))
+const projectIdRef = toRef(props, 'projectId')
+const cost = reactive(useProjectResourceCostEstimate(projectIdRef))
+const build = reactive(useProjectBuildCostEstimate(projectIdRef))
 const cpuMillicores = ref(2000)
 const memoryGiB = ref(4)
 const storageGiB = ref(20)
@@ -187,29 +232,34 @@ const computeHours = ref(8)
 const storageHours = ref(8)
 const gpuClass = ref('')
 const gpuCount = ref(1)
+const builderBinding = ref('')
+const buildMinutes = ref(30)
+
+const positiveInteger = (value: number) => Number.isInteger(value) && value > 0
 
 const canSubmit = computed(() => Boolean(
   props.projectId
-  && Number.isInteger(cpuMillicores.value) && cpuMillicores.value > 0
-  && Number.isInteger(memoryGiB.value) && memoryGiB.value > 0
-  && Number.isInteger(storageGiB.value) && storageGiB.value > 0
-  && Number.isInteger(computeHours.value) && computeHours.value > 0
-  && Number.isInteger(storageHours.value) && storageHours.value > 0
-  && (!gpuClass.value.trim() || (Number.isInteger(gpuCount.value) && gpuCount.value > 0)),
+  && [cpuMillicores.value, memoryGiB.value, storageGiB.value, computeHours.value, storageHours.value].every(positiveInteger)
+  && (!gpuClass.value || positiveInteger(gpuCount.value)),
+))
+const canSubmitBuild = computed(() => Boolean(
+  props.projectId && props.builderBindings.includes(builderBinding.value) && positiveInteger(buildMinutes.value),
 ))
 
-watch(
-  () => props.projectId,
-  () => {
-    // Form defaults stay; previous estimate cleared by composable.
-  },
-)
+watch(() => props.gpuClasses, (classes) => {
+  if (gpuClass.value && !classes.includes(gpuClass.value)) gpuClass.value = ''
+})
+watch(() => props.builderBindings, (bindings) => {
+  if (builderBinding.value && !bindings.includes(builderBinding.value)) builderBinding.value = ''
+  if (!builderBinding.value && bindings.length === 1) builderBinding.value = bindings[0]!
+}, { immediate: true })
+watch([cpuMillicores, memoryGiB, storageGiB, computeHours, storageHours, gpuClass, gpuCount], () => cost.reset())
+watch([builderBinding, buildMinutes], () => build.reset())
 
 async function submitEstimate() {
   if (!canSubmit.value) return
   const compute = hoursFromNowInterval(computeHours.value)
   const storage = hoursFromNowInterval(storageHours.value)
-  const className = gpuClass.value.trim()
   await cost.run({
     computeFrom: compute.from,
     computeUntil: compute.until,
@@ -219,38 +269,37 @@ async function submitEstimate() {
       cpuMillicores: cpuMillicores.value,
       memoryBytes: memoryGiB.value * 1024 ** 3,
       storageBytes: storageGiB.value * 1024 ** 3,
-      ...(className ? { gpu: { class: className, count: gpuCount.value } } : {}),
+      ...(gpuClass.value ? { gpu: { class: gpuClass.value, count: gpuCount.value } } : {}),
     },
   })
 }
 
-defineExpose({ reload: () => cost.reset() })
+async function submitBuildEstimate() {
+  if (!canSubmitBuild.value) return
+  const from = new Date()
+  from.setMilliseconds(0)
+  await build.run({
+    builderBinding: builderBinding.value,
+    from: from.toISOString(),
+    maxDurationMilliseconds: buildMinutes.value * 60_000,
+  })
+}
+
+defineExpose({ reload: () => { cost.reset(); build.reset() } })
 </script>
 
 <style scoped>
-.estimate-card { display: grid; gap: 18px; padding: 20px; }
-.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.estimate-card { display: grid; gap: var(--space-4); padding: var(--space-5); }
 .section-heading h3 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-large); }
-.section-heading p { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
-.estimate-form { display: grid; gap: 12px; }
-.two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.estimate-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
-.text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
-.field-note { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); line-height: 1.45; }
-.estimate-summary { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-.estimate-summary div { display: grid; gap: 5px; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
-.estimate-summary span { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
-.estimate-summary strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); white-space: nowrap; }
-.line-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.line-row { padding: 14px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
-.line-main { display: grid; gap: 4px; }
-.line-main strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
-.line-main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
-.advanced-details { display: grid; gap: 4px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
-.advanced-details summary { color: var(--md-sys-color-primary); cursor: pointer; }
-.filled-button { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 0 17px; border-radius: var(--md-sys-shape-full); border: 1px solid var(--md-sys-color-primary); background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); font: var(--md-sys-label-large); cursor: pointer; width: fit-content; }
-.filled-button:disabled { opacity: .5; cursor: not-allowed; }
+.section-heading p { margin: var(--space-1) 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
+.estimate-form { display: grid; gap: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--md-sys-color-outline-variant); }
+.estimate-form h4 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
+.estimate-form > .outlined-button { width: fit-content; }
+.two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.estimate-form label { display: grid; gap: var(--space-1); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.field-note { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); line-height: 1.45; }
+.warning-text { color: var(--md-sys-color-error); }
 @media (max-width: 620px) {
-  .two-columns, .estimate-summary { grid-template-columns: 1fr; }
+  .two-columns { grid-template-columns: 1fr; }
 }
 </style>

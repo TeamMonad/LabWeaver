@@ -803,7 +803,7 @@ export async function releaseProjectLeaseByUi(page, { projectName, projectId = n
  */
 export async function assertProjectChargesByUi(page, project) {
   await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
+  await expect(page.getByRole('heading', { name: '费率、Credits、预算与费用', exact: true })).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   const projectSelect = page.locator('.project-strip select')
   await expect(projectSelect.locator(`option[value="${project.id}"]`)).toHaveCount(1, { timeout: RESOURCE_PAGE_TIMEOUT_MS })
   await projectSelect.selectOption(project.id)
