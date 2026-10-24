@@ -5,6 +5,8 @@
 )]
 
 mod support;
+#[path = "cases/template_upgrade.rs"]
+mod template_upgrade_cases;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -1585,13 +1587,13 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
     assert_eq!(stopped_operation.snapshot.state, OperationState::Succeeded);
 
     store
-        .accept_command(
+        .accept_api_command(
             "restart-key-after-lease-refresh",
             &LifecycleCommand {
                 environment_id: work.id,
                 kind: EnvironmentOperationKind::Restart,
                 expected_revision: stopped_refreshed.revision,
-                actor_id: ActorId::new(),
+                actor_id: work.owner_id,
                 trace_id: "trace-restart-after-lease-refresh".to_owned(),
                 accepted_at: timestamp("2026-07-14T00:03:00.000Z"),
                 deadline_at: timestamp("2026-07-14T00:08:00.000Z"),
@@ -1600,6 +1602,10 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
                 max_attempts: 3,
                 reset_target: None,
             },
+            None,
+            stopped_refreshed.operation.lease_authorization.clone(),
+            work.project_id,
+            work.course_id,
         )
         .await?;
     let restarting = store.load(work.id).await?;
@@ -2299,9 +2305,8 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
                     root_disk_uid: uuid::Uuid::new_v4(),
                     guest_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
                     service_cluster_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 96, 0, 2)),
-                    ssh_host_key_sha256: Sha256Digest::of_bytes(b"host-key"),
+                    ssh_host_key_sha256: Some(Sha256Digest::of_bytes(b"host-key")),
                     guest_agent_connected: true,
-                    ssh_ready: true,
                     observed_at: self.observed_at,
                 },
             },
@@ -2506,10 +2511,11 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         .connect(&url)
         .await?;
     let migration = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
         include_str!("../../../migrations/environment/0002_project_ownership.sql"),
-        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql"),
+        include_str!("../../../migrations/environment/0008_guest_connection_readiness.sql")
     );
     sqlx::raw_sql(sqlx::AssertSqlSafe(&*migration))
         .execute(&pool)
@@ -2552,9 +2558,8 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         root_disk_uid,
         guest_ip: "10.42.0.10".parse()?,
         service_cluster_ip: "10.96.0.10".parse()?,
-        ssh_host_key_sha256: Sha256Digest::of_bytes(b"stable-host-key"),
+        ssh_host_key_sha256: Some(Sha256Digest::of_bytes(b"stable-host-key")),
         guest_agent_connected: true,
-        ssh_ready: true,
         observed_at: timestamp("2026-07-16T08:00:00.000Z"),
     };
     let provision = kubevirt_fence(environment_id, 1, ReconcileAction::Provision);
@@ -2591,7 +2596,10 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
     .bind(environment_id.as_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(persisted_host_key, running.ssh_host_key_sha256.to_string());
+    assert_eq!(
+        Some(persisted_host_key),
+        running.ssh_host_key_sha256.map(|digest| digest.to_string())
+    );
 
     let start = kubevirt_fence(environment_id, 3, ReconcileAction::Start);
     let mut restarted = running;
@@ -2666,6 +2674,36 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
     .fetch_one(&pool)
     .await?;
     assert_eq!(persisted_generation, 2);
+    let pending_id = EnvironmentId::new();
+    let mut pending_plan = plan.clone();
+    pending_plan.environment_id = pending_id;
+    pending_plan.namespace = format!("lw-env-{pending_id}");
+    let pending_fence = kubevirt_fence(pending_id, 1, ReconcileAction::Provision);
+    let mut pending = running;
+    pending.ssh_host_key_sha256 = None;
+    store
+        .record_running(&pending_fence, &pending_plan, &pending)
+        .await?;
+    let (runtime_state, host_key): (String, Option<String>) = sqlx::query_as(
+        "SELECT state,ssh_host_key_sha256 FROM environment.kubevirt_runtime_observations WHERE environment_id=$1",
+    ).bind(pending_id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(runtime_state, "running");
+    assert_eq!(
+        host_key, None,
+        "runtime readiness cannot fabricate SSH host-key evidence"
+    );
+    let mut ready_fence = kubevirt_fence(pending_id, 1, ReconcileAction::Observe);
+    ready_fence.provider_step = 2;
+    store
+        .record_running(&ready_fence, &pending_plan, &running)
+        .await?;
+    let host_key: Option<String> = sqlx::query_scalar(
+        "SELECT ssh_host_key_sha256 FROM environment.kubevirt_runtime_observations WHERE environment_id=$1",
+    ).bind(pending_id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        host_key,
+        running.ssh_host_key_sha256.map(|digest| digest.to_string())
+    );
     Ok(())
 }
 

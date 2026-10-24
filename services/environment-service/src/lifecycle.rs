@@ -87,15 +87,17 @@ pub fn plan_command_authorized(
     {
         return Err(LifecycleError::CommandInvalid);
     }
-    if matches!(
+    if (matches!(
         command.kind,
         EnvironmentOperationKind::Start
             | EnvironmentOperationKind::Retry
             | EnvironmentOperationKind::Recover
             | EnvironmentOperationKind::Reset
-    ) && current
-        .eligibility_expires_at
-        .is_some_and(|deadline| deadline <= authority_now)
+    ) || (current.class == contracts::authoring::EnvironmentClass::Work
+        && command.kind == EnvironmentOperationKind::Restart))
+        && current
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= authority_now)
     {
         return Err(LifecycleError::EligibilityExpired);
     }
@@ -149,6 +151,7 @@ pub fn plan_command_authorized(
         && matches!(
             command.kind,
             EnvironmentOperationKind::Start
+                | EnvironmentOperationKind::Restart
                 | EnvironmentOperationKind::Retry
                 | EnvironmentOperationKind::Recover
                 | EnvironmentOperationKind::Reset
@@ -168,10 +171,21 @@ pub fn plan_command_authorized(
             .then(|| current.operation.lease_authorization.clone())
             .flatten()
     });
+    let preserving_upgrade_cancel = command.kind == EnvironmentOperationKind::Cancel
+        && current.operation.template_upgrade.is_some()
+        && current.desired_state != DesiredEnvironmentState::Deleted;
     let mut planned = current.clone();
     planned.revision = next_revision(current.revision)?;
-    planned.desired_state = desired_state(current, command.kind);
-    planned.observed_state = accepted_observed_state(current, command.kind)?;
+    planned.desired_state = if preserving_upgrade_cancel {
+        DesiredEnvironmentState::Stopped
+    } else {
+        desired_state(current, command.kind)
+    };
+    planned.observed_state = if preserving_upgrade_cancel {
+        ObservedEnvironmentState::Stopping
+    } else {
+        accepted_observed_state(current, command.kind)?
+    };
     if increments_generation(command.kind) {
         planned.generation = current
             .generation
@@ -208,11 +222,20 @@ pub fn plan_command_authorized(
         deadline_at: command.deadline_at,
         cleanup_started_at: None,
         diagnostic_code: None,
-        preserve_mutable_disk: command.preserve_mutable_disk,
+        preserve_mutable_disk: command.preserve_mutable_disk || preserving_upgrade_cancel,
         access_revocation_revision: command.access_revocation_revision,
         retry_from_phase,
         reset_target: command.reset_target.clone(),
         lease_authorization: retained_lease_authorization,
+        template_upgrade: if preserving_upgrade_cancel
+            || matches!(
+                command.kind,
+                EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover
+            ) {
+            current.operation.template_upgrade
+        } else {
+            None
+        },
     };
     planned.validate()?;
     Ok(planned)
@@ -300,6 +323,15 @@ pub fn begin_timeout_cleanup(
     cleanup_deadline_at: UtcTimestamp,
 ) -> Result<EnvironmentInstance, LifecycleError> {
     ensure_current_operation(current, current.operation.id)?;
+    if current.operation.template_upgrade.is_some()
+        && current.desired_state != DesiredEnvironmentState::Deleted
+    {
+        return apply_provider_failure(
+            current,
+            current.operation.id,
+            "LW_WORK_TEMPLATE_UPGRADE_TIMEOUT",
+        );
+    }
     if cleanup_started_at < current.operation.accepted_at
         || cleanup_deadline_at <= cleanup_started_at
     {
@@ -461,7 +493,7 @@ fn validate_provider_observation(
             State::Stopped,
             State::Provisioning | State::Ready
         ) | (
-            Operation::Stop | Operation::Reset,
+            Operation::Stop | Operation::Reset | Operation::Cancel,
             State::Stopping,
             State::Stopped
         ) | (

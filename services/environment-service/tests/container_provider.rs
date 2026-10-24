@@ -619,7 +619,10 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
         Some(timestamp("2026-07-16T09:30:00.000Z")),
         PolicyId::new(),
         revision(2),
-        projection.release.approval.trust_revision,
+        projection
+            .release
+            .trust_revision()
+            .expect("approved release"),
     );
 
     instance.release_id = ReleaseId::new(); // Cleanup must not need a resolvable release.
@@ -683,7 +686,10 @@ fn provider(
     projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
-    let trust_revision = projection.release.approval.trust_revision;
+    let trust_revision = projection
+        .release
+        .trust_revision()
+        .expect("approved release");
     provider_with_state(
         projection,
         backend,
@@ -700,7 +706,10 @@ fn provider_with_access_mode(
     backend: Arc<FixtureBackend>,
     workspace_access_mode: &str,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
-    let trust_revision = projection.release.approval.trust_revision;
+    let trust_revision = projection
+        .release
+        .trust_revision()
+        .expect("approved release");
     provider_with_state_and_access_mode(
         projection,
         backend,
@@ -947,11 +956,11 @@ fn projection() -> ReleasePublished {
         project_id,
         course_id,
         version: 1,
-        candidate_id,
-        agent_run_id: contracts::AgentRunId::new(),
-        candidate_revision: revision(1),
+        candidate_id: Some(candidate_id),
+        agent_run_id: Some(contracts::AgentRunId::new()),
+        candidate_revision: Some(revision(1)),
         runtime_kind: RuntimeKind::Container,
-        approval: CandidateApproval {
+        approval: Some(CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: revision(1),
@@ -961,7 +970,8 @@ fn projection() -> ReleasePublished {
             decision: CandidateDecision::Approved,
             reason: "reviewed".to_owned(),
             decided_at: published_at,
-        },
+        }),
+        manual_approval: None,
         artifact: ImageArtifact::Container {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),

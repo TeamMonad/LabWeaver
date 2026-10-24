@@ -8,6 +8,7 @@
 pub mod api;
 mod candidate_builds;
 pub mod clients;
+mod manual_templates;
 mod material_uploads;
 mod membership_governance;
 pub mod messaging;
@@ -2541,7 +2542,7 @@ impl ControlService {
                    LEFT JOIN control.release_withdrawals withdrawals \
                           ON withdrawals.release_id=releases.release_id \
                   WHERE withdrawals.release_id IS NULL \
-                    AND releases.contract->'artifact'->>'kind'='container' \
+                    AND releases.contract->'artifact'->>'kind' IN ('container','catalog_container') \
                  UNION ALL \
                  SELECT split_part( \
                             releases.contract->'artifact'->'base_disk'->>'sourceRegistryDigest', \
@@ -2764,6 +2765,43 @@ impl ControlService {
         .map_err(|error| match error {
             ControlError::NotFound => ControlError::PolicyNotFound,
             other => other,
+        })
+    }
+
+    /// Reads Agent configuration without making model availability a Work prerequisite.
+    /// Only an absent policy means unconfigured; corrupt or inaccessible data fails closed.
+    pub async fn project_agent_capability(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<contracts::http::ProjectAgentCapability, ControlError> {
+        use contracts::http::ProjectAgentCapability;
+        let policy = match self.active_project_policy(project_id).await {
+            Ok(policy) => policy,
+            Err(ControlError::PolicyNotFound) => {
+                return Ok(ProjectAgentCapability::Unconfigured {
+                    reason_code: "LW_AGENT_MODEL_NOT_CONFIGURED".to_owned(),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        policy
+            .validate()
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if policy.project_id != project_id {
+            return Err(ControlError::PersistenceIdentityMismatch);
+        }
+        if self
+            .config
+            .llm_policy_options
+            .validate_policy_binding(&policy.binding)
+            .is_err()
+        {
+            return Ok(ProjectAgentCapability::Unavailable {
+                reason_code: "LW_AGENT_MODEL_BINDING_UNAVAILABLE".to_owned(),
+            });
+        }
+        Ok(ProjectAgentCapability::Configured {
+            model: policy.binding.model,
         })
     }
 
@@ -3506,7 +3544,7 @@ impl ControlService {
              FROM control.environment_template_releases releases \
              LEFT JOIN control.release_withdrawals withdrawals ON withdrawals.release_id=releases.release_id \
              JOIN control.projects projects ON projects.project_id=releases.project_id \
-             JOIN control.candidates candidates ON candidates.candidate_id=releases.environment_candidate_id \
+             LEFT JOIN control.candidates candidates ON candidates.candidate_id=releases.environment_candidate_id \
                AND candidates.project_id=releases.project_id \
                AND candidates.course_id IS NOT DISTINCT FROM releases.course_id \
                AND candidates.candidate_kind='environment' \
@@ -3518,7 +3556,10 @@ impl ControlService {
                AND publications.state='ready' \
              WHERE releases.release_id=$1 AND releases.project_id=$2 \
                AND ($3::uuid IS NULL OR releases.course_id IS NOT DISTINCT FROM $3) \
-               AND ((candidates.contract->'spec'->>'class'='work' AND projects.owner_actor_id=$4) \
+               AND ((COALESCE(releases.contract->'manualApproval'->'spec'->>'class',candidates.contract->'spec'->>'class')='work' \
+                     AND (projects.owner_actor_id=$4 OR EXISTS(SELECT 1 FROM control.project_memberships m \
+                          WHERE m.project_id=projects.project_id AND m.actor_id=$4 AND m.state='active' \
+                            AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp())))) \
                     OR (candidates.contract->'spec'->>'class'='experiment' \
                         AND publications.environment_release_id=releases.release_id))",
         )
@@ -3564,7 +3605,7 @@ impl ControlService {
              FROM control.environment_template_releases releases \
              LEFT JOIN control.release_withdrawals withdrawals ON withdrawals.release_id=releases.release_id \
              JOIN control.projects projects ON projects.project_id=releases.project_id \
-             JOIN control.candidates candidates ON candidates.candidate_id=releases.environment_candidate_id \
+             LEFT JOIN control.candidates candidates ON candidates.candidate_id=releases.environment_candidate_id \
                AND candidates.project_id=releases.project_id \
                AND candidates.course_id IS NOT DISTINCT FROM releases.course_id \
                AND candidates.candidate_kind='environment' \
@@ -3577,7 +3618,7 @@ impl ControlService {
              WHERE releases.project_id=$1 \
                AND ($2::uuid IS NULL OR releases.course_id IS NOT DISTINCT FROM $2) \
                AND releases.version>$3 \
-               AND ( (candidates.contract->'spec'->>'class'='work' \
+               AND ( (COALESCE(releases.contract->'manualApproval'->'spec'->>'class',candidates.contract->'spec'->>'class')='work' \
                      AND (projects.owner_actor_id=$5 OR EXISTS( \
                           SELECT 1 FROM control.project_memberships m \
                            WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
@@ -5294,7 +5335,8 @@ impl ControlService {
             release
                 .validate_against_candidate(&environment)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-            if release.approval != synthetic_approval || release.artifact != approval.image_artifact
+            if release.approval.as_ref() != Some(&synthetic_approval)
+                || release.artifact != approval.image_artifact
             {
                 return Err(ControlError::PersistenceIdentityMismatch);
             }
@@ -5316,11 +5358,12 @@ impl ControlService {
             course_id: approval.course_id,
             version: u64::try_from(next_version)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-            candidate_id: environment.id,
-            agent_run_id: environment.run_id,
-            candidate_revision: environment.revision,
+            candidate_id: Some(environment.id),
+            agent_run_id: Some(environment.run_id),
+            candidate_revision: Some(environment.revision),
             runtime_kind: environment.spec.runtime.kind(),
-            approval: synthetic_approval,
+            approval: Some(synthetic_approval),
+            manual_approval: None,
             artifact: approval.image_artifact.clone(),
             published_by: approval.actor_id,
             published_at: now,
@@ -5340,8 +5383,8 @@ impl ControlService {
         .bind(release.project_id.as_uuid())
         .bind(release.course_id.map(CourseId::as_uuid))
         .bind(next_version)
-        .bind(release.candidate_id.as_uuid())
-        .bind(i64_revision(release.candidate_revision)?)
+        .bind(release.candidate_id.map(CandidateId::as_uuid))
+        .bind(release.candidate_revision.map(i64_revision).transpose()?)
         .bind(spec_sha256.to_string())
         .bind(release.artifact.id().as_uuid())
         .bind(&contract)
@@ -5461,10 +5504,14 @@ impl ControlService {
         evaluation_release
             .validate_ownership(project_id, current.approval.course_id)
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        if environment_release.approval.id != approval_id
-            || environment_release.candidate_id != current.approval.environment_candidate_id
+        if environment_release
+            .approval
+            .as_ref()
+            .map(|approval| approval.id)
+            != Some(approval_id)
+            || environment_release.candidate_id != Some(current.approval.environment_candidate_id)
             || environment_release.candidate_revision
-                != current.approval.environment_candidate_revision
+                != Some(current.approval.environment_candidate_revision)
             || evaluation_release.approval_id != approval_id
             || evaluation_release.approval_revision != current.approval.revision
             || evaluation_release.candidate_id != current.approval.evaluation_candidate_id
@@ -5682,10 +5729,14 @@ impl ControlService {
         if environment_release.id != environment_release_id
             || environment_release.project_id != query.project_id
             || environment_release.course_id != query.course_id
-            || environment_release.approval.id != approval_id
-            || environment_release.candidate_id != status.approval.environment_candidate_id
+            || environment_release
+                .approval
+                .as_ref()
+                .map(|approval| approval.id)
+                != Some(approval_id)
+            || environment_release.candidate_id != Some(status.approval.environment_candidate_id)
             || environment_release.candidate_revision
-                != status.approval.environment_candidate_revision
+                != Some(status.approval.environment_candidate_revision)
         {
             return Err(ControlError::PersistenceIdentityMismatch);
         }
@@ -5720,7 +5771,7 @@ impl ControlService {
                     withdrawals.contract AS withdrawal_contract,
                     candidates.contract AS candidate_contract
              FROM control.environment_template_releases releases
-             JOIN control.candidates candidates
+             LEFT JOIN control.candidates candidates
                ON candidates.candidate_id=releases.environment_candidate_id
               AND candidates.project_id=releases.project_id
               AND candidates.course_id IS NOT DISTINCT FROM releases.course_id
@@ -5767,14 +5818,17 @@ impl ControlService {
         if release.id != release_id || release.version != query.environment_release_version {
             return Err(ControlError::PersistenceIdentityMismatch);
         }
+        if release.manual_approval.is_some() {
+            return Ok(None);
+        }
         let candidate: EnvironmentCandidate =
             serde_json::from_value(row.try_get("candidate_contract").map_err(db)?)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
         candidate
             .validate()
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        if candidate.id != release.candidate_id
-            || candidate.revision != release.candidate_revision
+        if Some(candidate.id) != release.candidate_id
+            || Some(candidate.revision) != release.candidate_revision
             || candidate.project_id != query.project_id
             || candidate.course_id != query.course_id
         {
@@ -5818,8 +5872,8 @@ impl ControlService {
     /// Publishes an immutable Work release from authoritative project projections only.
     ///
     /// Experiment releases are published by the authoring-approval consumer after the complete
-    /// approval has been durably recorded. This entry point therefore accepts only a validated
-    /// Work candidate and never treats a course association as the ownership boundary.
+    /// approval has been durably recorded. Work publication accepts either a reviewed platform
+    /// image/specification or an approved Agent candidate, without inventing model evidence.
     #[allow(
         clippy::too_many_arguments,
         reason = "release creation binds the project, actor, revision, event, and trace fences"
@@ -5883,83 +5937,124 @@ impl ControlService {
             IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
             IdempotencyDecision::Reserved => {}
         }
-        let candidate = sqlx::query(
+        let (
+            candidate_id,
+            agent_run_id,
+            candidate_revision,
+            approval,
+            manual_approval,
+            environment_spec,
+            artifact,
+            spec_sha256,
+        ) = if let Some(manual) = &request.manual {
+            if request.candidate_id.is_some()
+                || request.candidate_revision.is_some()
+                || request.approval_id.is_some()
+            {
+                return Err(ControlError::ContractInvalid);
+            }
+            let (approval, artifact) = self.review_manual_work_template(
+                manual,
+                request.runtime_kind,
+                actor_id,
+                now,
+                catalog,
+            )?;
+            let spec = approval.spec.clone();
+            let digest = canonical_hash(&spec)?.to_string();
+            (
+                None,
+                None,
+                None,
+                None,
+                Some(Box::new(approval)),
+                spec,
+                artifact,
+                digest,
+            )
+        } else {
+            let candidate_id = request.candidate_id.ok_or(ControlError::ContractInvalid)?;
+            let candidate_revision = request
+                .candidate_revision
+                .ok_or(ControlError::ContractInvalid)?;
+            let approval_id = request.approval_id.ok_or(ControlError::ContractInvalid)?;
+            let candidate = sqlx::query(
             "SELECT candidate_kind,project_id,course_id,revision,content_sha256,policy_revision,schema_sha256,contract FROM control.candidates \
              WHERE candidate_id=$1 AND project_id=$2 AND course_id IS NOT DISTINCT FROM $3 \
                AND candidate_kind='environment' AND state='validated' FOR SHARE",
         )
-        .bind(request.candidate_id.as_uuid())
+        .bind(candidate_id.as_uuid())
         .bind(project_id.as_uuid())
         .bind(course_id.map(CourseId::as_uuid))
         .fetch_optional(&mut *transaction)
         .await
         .map_err(db)?
         .ok_or(ControlError::CandidateNotFound)?;
-        if candidate
-            .try_get::<String, _>("candidate_kind")
-            .map_err(db)?
-            != "environment"
-            || revision_from_i64(candidate.try_get("revision").map_err(db)?)?
-                != request.candidate_revision
-        {
-            return Err(ControlError::ReleaseCandidateMismatch);
-        }
-        let environment_candidate: EnvironmentCandidate =
-            serde_json::from_value(candidate.try_get::<Value, _>("contract").map_err(db)?)
+            if candidate
+                .try_get::<String, _>("candidate_kind")
+                .map_err(db)?
+                != "environment"
+                || revision_from_i64(candidate.try_get("revision").map_err(db)?)?
+                    != candidate_revision
+            {
+                return Err(ControlError::ReleaseCandidateMismatch);
+            }
+            let environment_candidate: EnvironmentCandidate =
+                serde_json::from_value(candidate.try_get::<Value, _>("contract").map_err(db)?)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+            environment_candidate
+                .validate()
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        environment_candidate
-            .validate()
-            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        if environment_candidate.project_id != project_id
-            || environment_candidate.course_id != course_id
-            || environment_candidate.spec.class != EnvironmentClass::Work
-            || environment_candidate.spec.runtime.kind() != request.runtime_kind
-        {
-            return Err(ControlError::ReleaseCandidateMismatch);
-        }
-        ensure_retention_active(&environment_candidate.spec.retention, now)?;
-        let approval: CandidateApproval = load_contract_tx(
+            if environment_candidate.project_id != project_id
+                || environment_candidate.course_id != course_id
+                || environment_candidate.spec.class != EnvironmentClass::Work
+                || environment_candidate.spec.runtime.kind() != request.runtime_kind
+            {
+                return Err(ControlError::ReleaseCandidateMismatch);
+            }
+            ensure_retention_active(&environment_candidate.spec.retention, now)?;
+            let approval: CandidateApproval = load_contract_tx(
             &mut transaction,
             "SELECT contract FROM control.candidate_approvals WHERE approval_id=$1 AND candidate_id=$2",
-            request.approval_id.as_uuid(),
-            request.candidate_id.as_uuid(),
+            approval_id.as_uuid(),
+            candidate_id.as_uuid(),
         )
         .await?;
-        let candidate_policy =
-            revision_from_i64(candidate.try_get("policy_revision").map_err(db)?)?;
-        let candidate_schema: Sha256Digest = candidate
-            .try_get::<String, _>("schema_sha256")
-            .map_err(db)?
-            .parse()
-            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        let spec_sha256 = candidate
-            .try_get::<String, _>("content_sha256")
-            .map_err(db)?;
-        let active_policy = sqlx::query_scalar::<_, i64>(
-            "SELECT revision FROM control.project_llm_policies
+            let candidate_policy =
+                revision_from_i64(candidate.try_get("policy_revision").map_err(db)?)?;
+            let candidate_schema: Sha256Digest = candidate
+                .try_get::<String, _>("schema_sha256")
+                .map_err(db)?
+                .parse()
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+            let spec_sha256 = candidate
+                .try_get::<String, _>("content_sha256")
+                .map_err(db)?;
+            let active_policy = sqlx::query_scalar::<_, i64>(
+                "SELECT revision FROM control.project_llm_policies
              WHERE project_id=$1 AND course_id IS NOT DISTINCT FROM $2 AND superseded_at IS NULL",
-        )
-        .bind(project_id.as_uuid())
-        .bind(course_id.map(CourseId::as_uuid))
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::PolicyNotFound)?;
-        if !approval.is_release_eligible(
-            request.candidate_revision,
-            revision_from_i64(active_policy)?,
-            self.config.trust_revision,
-        ) || candidate_policy != approval.policy_revision
-        {
-            return Err(ControlError::ReleaseCandidateMismatch);
-        }
-        let _ = candidate_schema;
-        let artifact = match &environment_candidate.spec.runtime {
-            contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
-                // candidate_sha256 is internal persistence hash (not contract hash)
-                let candidate_sha256 = canonical_hash(&environment_candidate.spec)?;
-                let projection = sqlx::query(
-                    "SELECT artifacts.artifact \
+            )
+            .bind(project_id.as_uuid())
+            .bind(course_id.map(CourseId::as_uuid))
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(db)?
+            .ok_or(ControlError::PolicyNotFound)?;
+            if !approval.is_release_eligible(
+                candidate_revision,
+                revision_from_i64(active_policy)?,
+                self.config.trust_revision,
+            ) || candidate_policy != approval.policy_revision
+            {
+                return Err(ControlError::ReleaseCandidateMismatch);
+            }
+            let _ = candidate_schema;
+            let artifact = match &environment_candidate.spec.runtime {
+                contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
+                    // candidate_sha256 is internal persistence hash (not contract hash)
+                    let candidate_sha256 = canonical_hash(&environment_candidate.spec)?;
+                    let projection = sqlx::query(
+                        "SELECT artifacts.artifact \
                      FROM control.container_build_projections builds \
                      JOIN control.image_artifact_projections artifacts \
                        ON artifacts.image_artifact_id=builds.image_artifact_id \
@@ -5967,50 +6062,61 @@ impl ControlService {
                         AND builds.candidate_id=$3 AND builds.candidate_revision=$4 \
                         AND builds.candidate_sha256=$5 AND builds.target='environment' \
                         AND builds.state='succeeded' FOR SHARE",
-                )
-                .bind(project_id.as_uuid())
-                .bind(course_id.map(CourseId::as_uuid))
-                .bind(request.candidate_id.as_uuid())
-                .bind(
-                    i64::try_from(request.candidate_revision.get())
-                        .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
-                )
-                .bind(candidate_sha256.to_string())
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(db)?
-                .ok_or(ControlError::ArtifactNotAuthoritative)?;
-                let artifact: ImageArtifact =
-                    serde_json::from_value(projection.try_get("artifact").map_err(db)?)
-                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-                if !matches!(artifact, ImageArtifact::Container { .. }) {
-                    return Err(ControlError::ArtifactMismatch);
-                }
-                artifact
-            }
-            contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
-                provider_binding,
-                base_disk,
-                storage_class_binding,
-                ..
-            } => {
-                let (artifact_id, format) = self
-                    .config
-                    .virtual_machine_bases
-                    .resolve_with_catalog(
-                        provider_binding,
-                        storage_class_binding,
-                        base_disk,
-                        catalog,
-                        self.config.trust_revision,
                     )
-                    .ok_or(ControlError::ArtifactMismatch)?;
-                ImageArtifact::VirtualMachine {
-                    id: artifact_id,
-                    base_disk: base_disk.clone(),
-                    format,
+                    .bind(project_id.as_uuid())
+                    .bind(course_id.map(CourseId::as_uuid))
+                    .bind(candidate_id.as_uuid())
+                    .bind(
+                        i64::try_from(candidate_revision.get())
+                            .map_err(|_| ControlError::ReleaseCandidateMismatch)?,
+                    )
+                    .bind(candidate_sha256.to_string())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(db)?
+                    .ok_or(ControlError::ArtifactNotAuthoritative)?;
+                    let artifact: ImageArtifact =
+                        serde_json::from_value(projection.try_get("artifact").map_err(db)?)
+                            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                    if !matches!(artifact, ImageArtifact::Container { .. }) {
+                        return Err(ControlError::ArtifactMismatch);
+                    }
+                    artifact
                 }
-            }
+                contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
+                    provider_binding,
+                    base_disk,
+                    storage_class_binding,
+                    ..
+                } => {
+                    let (artifact_id, format) = self
+                        .config
+                        .virtual_machine_bases
+                        .resolve_with_catalog(
+                            provider_binding,
+                            storage_class_binding,
+                            base_disk,
+                            catalog,
+                            self.config.trust_revision,
+                        )
+                        .ok_or(ControlError::ArtifactMismatch)?;
+                    ImageArtifact::VirtualMachine {
+                        id: artifact_id,
+                        base_disk: base_disk.clone(),
+                        format,
+                    }
+                }
+            };
+            (
+                Some(candidate_id),
+                Some(environment_candidate.run_id),
+                Some(candidate_revision),
+                Some(approval),
+                None,
+                environment_candidate.spec,
+                artifact,
+                spec_sha256,
+            )
         };
         let artifact_id = artifact.id();
         let next_version = sqlx::query_scalar::<_, i64>(
@@ -6027,11 +6133,12 @@ impl ControlService {
             course_id,
             version: u64::try_from(next_version)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-            candidate_id: request.candidate_id,
-            agent_run_id: environment_candidate.run_id,
-            candidate_revision: request.candidate_revision,
+            candidate_id,
+            agent_run_id,
+            candidate_revision,
             runtime_kind: request.runtime_kind,
             approval,
+            manual_approval,
             artifact,
             published_by: actor_id,
             published_at: now,
@@ -6050,8 +6157,8 @@ impl ControlService {
         .bind(release.project_id.as_uuid())
         .bind(course_id.map(CourseId::as_uuid))
         .bind(next_version)
-        .bind(release.candidate_id.as_uuid())
-        .bind(i64_revision(release.candidate_revision)?)
+        .bind(release.candidate_id.map(CandidateId::as_uuid))
+        .bind(release.candidate_revision.map(i64_revision).transpose()?)
         .bind(&spec_sha256)
         .bind(artifact_id.as_uuid())
         .bind(&contract)
@@ -6060,10 +6167,6 @@ impl ControlService {
         .await
         .map_err(db)?;
         let event_id = EventId::new();
-        let _projection_sha256 = canonical_hash(&json!({
-            "release": release,
-            "environmentSpec": environment_candidate.spec,
-        }))?;
         let event = CloudEvent {
             specversion: SPEC_VERSION.to_owned(),
             id: event_id,
@@ -6081,7 +6184,7 @@ impl ControlService {
             trace_id: trace_id.to_owned(),
             data: ReleasePublished {
                 release: release.clone(),
-                environment_spec: environment_candidate.spec,
+                environment_spec,
             },
         };
         event
@@ -6245,36 +6348,38 @@ impl ControlService {
         if release.id != release_id || release.version != expected_version {
             return Err(ControlError::PersistenceIdentityMismatch);
         }
-        let candidate_id = release_row
-            .try_get::<Uuid, _>("environment_candidate_id")
-            .map_err(db)?;
-        let candidate_revision = revision_from_i64(
-            release_row
-                .try_get::<i64, _>("candidate_revision")
-                .map_err(db)?,
-        )?;
-        if release.candidate_id.as_uuid() != candidate_id
-            || release.candidate_revision != candidate_revision
-        {
-            return Err(ControlError::PersistenceIdentityMismatch);
-        }
-        let candidate_class = sqlx::query_scalar::<_, String>(
-            "SELECT contract->'spec'->>'class'
+        if release.manual_approval.is_none() {
+            let candidate_id = release_row
+                .try_get::<Uuid, _>("environment_candidate_id")
+                .map_err(db)?;
+            let candidate_revision = revision_from_i64(
+                release_row
+                    .try_get::<i64, _>("candidate_revision")
+                    .map_err(db)?,
+            )?;
+            if release.candidate_id.map(CandidateId::as_uuid) != Some(candidate_id)
+                || release.candidate_revision != Some(candidate_revision)
+            {
+                return Err(ControlError::PersistenceIdentityMismatch);
+            }
+            let candidate_class = sqlx::query_scalar::<_, String>(
+                "SELECT contract->'spec'->>'class'
              FROM control.candidates
              WHERE candidate_id=$1 AND project_id=$2
                AND course_id IS NOT DISTINCT FROM $3
                AND candidate_kind='environment' AND revision=$4 AND state='validated'",
-        )
-        .bind(candidate_id)
-        .bind(project_id.as_uuid())
-        .bind(release_course_id.map(CourseId::as_uuid))
-        .bind(i64_revision(candidate_revision)?)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::ReleaseCandidateMismatch)?;
-        if candidate_class != "work" && candidate_class != "experiment" {
-            return Err(ControlError::ReleaseCandidateMismatch);
+            )
+            .bind(candidate_id)
+            .bind(project_id.as_uuid())
+            .bind(release_course_id.map(CourseId::as_uuid))
+            .bind(i64_revision(candidate_revision)?)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(db)?
+            .ok_or(ControlError::ReleaseCandidateMismatch)?;
+            if candidate_class != "work" && candidate_class != "experiment" {
+                return Err(ControlError::ReleaseCandidateMismatch);
+            }
         }
         let withdrawal = ReleaseWithdrawal {
             release_id,
@@ -7434,6 +7539,9 @@ async fn enqueue_container_build(
         }
         return Ok(());
     };
+    let build_context = build_context
+        .as_ref()
+        .ok_or(ControlError::ContractInvalid)?;
     if let Some(image) = environment_image_export {
         image
             .validate()
@@ -8872,8 +8980,9 @@ fn sse_record(row: &sqlx::postgres::PgRow) -> Result<SseRecord, ControlError> {
 fn release_view(
     row: &sqlx::postgres::PgRow,
 ) -> Result<EnvironmentTemplateReleaseView, ControlError> {
-    let release = serde_json::from_value(row.try_get("release_contract").map_err(db)?)
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let release: EnvironmentTemplateRelease =
+        serde_json::from_value(row.try_get("release_contract").map_err(db)?)
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     let withdrawal = row
         .try_get::<Option<Value>, _>("withdrawal_contract")
         .map_err(db)?
@@ -8890,8 +8999,29 @@ fn release_view(
         })
         .transpose()?
         .flatten();
+    let (spec, description, template_family_id) = if let Some(manual) = &release.manual_approval {
+        (
+            manual.spec.clone(),
+            manual.description.clone(),
+            manual.template_family_id.clone(),
+        )
+    } else {
+        let candidate: EnvironmentCandidate =
+            serde_json::from_value(row.try_get("candidate_contract").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        (
+            candidate.spec,
+            String::new(),
+            format!("candidate-{}", candidate.id),
+        )
+    };
     Ok(EnvironmentTemplateReleaseView {
         release,
+        name: spec.name.clone(),
+        description,
+        template_family_id,
+        purpose: spec.class,
+        capabilities: contracts::supply_chain::TemplateCapability::for_spec(&spec),
         withdrawal,
         submission_manifest,
     })
@@ -8926,16 +9056,17 @@ fn project_release_view(
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     let persisted_version = u64::try_from(row.try_get::<i64, _>("release_version").map_err(db)?)
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let persisted_candidate_id = CandidateId::from_str(
-        &row.try_get::<Uuid, _>("release_candidate_id")
-            .map_err(db)?
-            .to_string(),
-    )
-    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let persisted_candidate_revision = revision_from_i64(
-        row.try_get::<i64, _>("release_candidate_revision")
-            .map_err(db)?,
-    )?;
+    let persisted_candidate_id = row
+        .try_get::<Option<Uuid>, _>("release_candidate_id")
+        .map_err(db)?
+        .map(|value| CandidateId::from_str(&value.to_string()))
+        .transpose()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let persisted_candidate_revision = row
+        .try_get::<Option<i64>, _>("release_candidate_revision")
+        .map_err(db)?
+        .map(revision_from_i64)
+        .transpose()?;
     if persisted_project_id != project_id
         || release.id != persisted_release_id
         || release.project_id != persisted_project_id
@@ -8947,6 +9078,12 @@ fn project_release_view(
         return Err(ControlError::PersistenceIdentityMismatch);
     }
     let actor_can_view_work: bool = row.try_get("actor_can_view_work").map_err(db)?;
+    if release.manual_approval.is_some() {
+        if !actor_can_view_work || view.purpose != EnvironmentClass::Work {
+            return Err(ControlError::NotFound);
+        }
+        return Ok(view);
+    }
     let candidate_project_id = ProjectId::from_str(
         &row.try_get::<Uuid, _>("candidate_project_id")
             .map_err(db)?
@@ -9005,7 +9142,8 @@ fn project_release_view(
                 .validate_ownership(project_id, release.course_id)
                 .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
             if publication.status != AuthoringPublicationState::Ready
-                || publication.approval.id != release.approval.id
+                || Some(publication.approval.id)
+                    != release.approval.as_ref().map(|approval| approval.id)
                 || publication.environment_release_id != Some(release.id)
             {
                 return Err(ControlError::NotFound);
@@ -9150,9 +9288,7 @@ fn event_matches_run(
 }
 
 fn image_artifact_id(artifact: &ImageArtifact) -> ImageArtifactId {
-    match artifact {
-        ImageArtifact::Container { id, .. } | ImageArtifact::VirtualMachine { id, .. } => *id,
-    }
+    artifact.id()
 }
 
 fn image_build_request_id(artifact: &ImageArtifact) -> Option<BuildRequestId> {
@@ -9160,7 +9296,7 @@ fn image_build_request_id(artifact: &ImageArtifact) -> Option<BuildRequestId> {
         ImageArtifact::Container {
             build_request_id, ..
         } => Some(*build_request_id),
-        ImageArtifact::VirtualMachine { .. } => None,
+        ImageArtifact::VirtualMachine { .. } | ImageArtifact::CatalogContainer { .. } => None,
     }
 }
 

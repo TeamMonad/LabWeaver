@@ -233,15 +233,10 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
             let request: EnvironmentLeaseVerificationRequest =
                 serde_json::from_slice(&message.payload)?;
             let reply = message.reply.ok_or("lease reply subject missing")?;
-            let expires_at = if response_index == 0 {
-                timestamp("2027-07-15T00:00:00.000Z")
-            } else {
-                timestamp("2020-07-15T00:00:00.000Z")
-            };
             let response = EnvironmentLeaseVerificationResponse {
                 version: 1,
                 state: EnvironmentLeaseState::Active,
-                authorization: Some(EnvironmentLeaseAuthorization {
+                authorization: (response_index == 0).then(|| EnvironmentLeaseAuthorization {
                     resource_request_id: contracts::ResourceRequestId::new(),
                     lease_id: request.lease_id,
                     lease_revision: revision(4),
@@ -258,7 +253,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
                     },
                     gpu_allocation: None,
                     active_from: timestamp("2026-01-01T00:00:00.000Z"),
-                    expires_at,
+                    expires_at: timestamp("2027-07-15T00:00:00.000Z"),
                 }),
             };
             lease_responder

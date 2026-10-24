@@ -1,5 +1,7 @@
 //! Runtime bindings read Control projections and remain part of the existing Resource approval.
-use contracts::authoring::{AuthoringApproval, EnvironmentCandidate, EnvironmentClass};
+use contracts::authoring::{
+    AuthoringApproval, EnvironmentCandidate, EnvironmentClass, EnvironmentSpec,
+};
 use contracts::platform_configuration::{
     PlatformConfigurationStatus, RuntimePreauthorizationScope,
 };
@@ -34,7 +36,7 @@ pub(crate) async fn current_inputs(
 ) -> Result<
     (
         RuntimeConfigurationIdentity,
-        EnvironmentCandidate,
+        EnvironmentSpec,
         PlatformConfigurationStatus,
     ),
     RuntimeBindingError,
@@ -50,26 +52,19 @@ pub(crate) async fn current_inputs(
     let row=sqlx::query("SELECT project_id,course_id,spec_sha256,release_contract,candidate_contract,authoring_approval_contract FROM control.runtime_authorization_configurations WHERE release_id=$1 AND release_version=$2")
         .bind(release_id.as_uuid()).bind(i64::try_from(*release_version).map_err(|_| RuntimeBindingError::ScopeDenied)?)
         .fetch_optional(&mut **tx).await.map_err(|_| RuntimeBindingError::Unavailable)?.ok_or(RuntimeBindingError::ScopeDenied)?;
-    let candidate: EnvironmentCandidate = serde_json::from_value(
-        row.try_get("candidate_contract")
-            .map_err(|_| RuntimeBindingError::Unavailable)?,
-    )
-    .map_err(|_| RuntimeBindingError::Unavailable)?;
     let release: EnvironmentTemplateRelease = serde_json::from_value(
         row.try_get("release_contract")
             .map_err(|_| RuntimeBindingError::Unavailable)?,
     )
     .map_err(|_| RuntimeBindingError::Unavailable)?;
-    release
-        .validate()
-        .map_err(|_| RuntimeBindingError::ScopeDenied)?;
-    candidate
-        .validate()
-        .map_err(|_| RuntimeBindingError::ScopeDenied)?;
-    release
-        .validate_against_candidate(&candidate)
-        .map_err(|_| RuntimeBindingError::ScopeDenied)?;
-    let configuration_sha256 = Sha256Digest::of_canonical(&candidate.spec)
+    let candidate: Option<EnvironmentCandidate> = row
+        .try_get::<Option<serde_json::Value>, _>("candidate_contract")
+        .map_err(|_| RuntimeBindingError::Unavailable)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| RuntimeBindingError::Unavailable)?;
+    let spec = release_spec(&release, candidate.as_ref())?;
+    let configuration_sha256 = Sha256Digest::of_canonical(spec)
         .map_err(|_| RuntimeBindingError::Unavailable)?
         .to_string();
     if release.id != *release_id
@@ -88,10 +83,11 @@ pub(crate) async fn current_inputs(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| RuntimeBindingError::Unavailable)?;
-    if candidate.spec.class == EnvironmentClass::Work && release.project_id != request.project_id {
+    if spec.class == EnvironmentClass::Work && release.project_id != request.project_id {
         return Err(RuntimeBindingError::ScopeDenied);
     }
-    if candidate.spec.class == EnvironmentClass::Experiment {
+    if spec.class == EnvironmentClass::Experiment {
+        let candidate = candidate.as_ref().ok_or(RuntimeBindingError::ScopeDenied)?;
         let approval = approval
             .as_ref()
             .ok_or(RuntimeAuthorizationError::TeacherApprovalRequired)?;
@@ -126,15 +122,43 @@ pub(crate) async fn current_inputs(
             .map_err(|_| RuntimeBindingError::Unavailable)?;
     let status = serde_json::from_value(value).map_err(|_| RuntimeBindingError::Unavailable)?;
     let identity = RuntimeConfigurationIdentity {
-        authoring_project_id: candidate.project_id,
-        course_id: candidate.course_id,
-        candidate_id: candidate.id,
-        candidate_revision: candidate.revision,
+        authoring_project_id: release.project_id,
+        course_id: release.course_id,
+        release_id: release.id,
+        release_version: release.version,
         configuration_sha256,
         authoring_approval_id: approval.as_ref().map(|approval| approval.id),
         teacher_scope: approval.and_then(|approval| approval.teacher_scope),
     };
-    Ok((identity, candidate, status))
+    let spec = match release.manual_approval {
+        Some(manual) => manual.spec,
+        None => candidate.ok_or(RuntimeBindingError::ScopeDenied)?.spec,
+    };
+    Ok((identity, spec, status))
+}
+
+fn release_spec<'a>(
+    release: &'a EnvironmentTemplateRelease,
+    candidate: Option<&'a EnvironmentCandidate>,
+) -> Result<&'a EnvironmentSpec, RuntimeBindingError> {
+    release
+        .validate()
+        .map_err(|_| RuntimeBindingError::ScopeDenied)?;
+    if let Some(manual) = &release.manual_approval {
+        if candidate.is_some() || manual.spec.class != EnvironmentClass::Work {
+            return Err(RuntimeBindingError::ScopeDenied);
+        }
+        Ok(&manual.spec)
+    } else {
+        let candidate = candidate.ok_or(RuntimeBindingError::ScopeDenied)?;
+        candidate
+            .validate()
+            .map_err(|_| RuntimeBindingError::ScopeDenied)?;
+        release
+            .validate_against_candidate(candidate)
+            .map_err(|_| RuntimeBindingError::ScopeDenied)?;
+        Ok(&candidate.spec)
+    }
 }
 
 async fn check_actor_scope(
@@ -171,7 +195,7 @@ fn select_permissions(
     policy: &contracts::platform_configuration::PlatformRuntimePolicy,
     request: &ResourceRequest,
     identity: &RuntimeConfigurationIdentity,
-    candidate: &EnvironmentCandidate,
+    spec: &EnvironmentSpec,
     declared: contracts::platform_configuration::RuntimePreauthorization,
 ) -> Result<
     (
@@ -180,13 +204,12 @@ fn select_permissions(
     ),
     RuntimeAuthorizationError,
 > {
-    let approved_course = if candidate.spec.class == EnvironmentClass::Experiment
-        && identity.teacher_scope.is_some()
-    {
-        request.course_id
-    } else {
-        None
-    };
+    let approved_course =
+        if spec.class == EnvironmentClass::Experiment && identity.teacher_scope.is_some() {
+            request.course_id
+        } else {
+            None
+        };
     let selected = select_preauthorization(policy, request.project_id, approved_course, &declared);
     let result = if let Some(selected) = selected {
         let basis = match selected.scope {
@@ -215,19 +238,19 @@ pub async fn resolve_binding(
         .begin()
         .await
         .map_err(|_| RuntimeBindingError::Unavailable)?;
-    let (identity, candidate, status) = current_inputs(&mut tx, request).await?;
+    let (identity, spec, status) = current_inputs(&mut tx, request).await?;
     check_policy_use(&status, RuntimePolicyUse::Admission)?;
     let applied = status
         .applied
         .as_ref()
         .ok_or(RuntimeAuthorizationError::PolicyNotVerified)?;
-    let declared = declared_baseline_permissions(&candidate.spec, request.project_id)?;
+    let declared = declared_baseline_permissions(&spec, request.project_id)?;
     check_platform_range(&applied.configuration.runtime_policy, &declared)?;
     let (permissions, basis) = select_permissions(
         &applied.configuration.runtime_policy,
         request,
         &identity,
-        &candidate,
+        &spec,
         declared,
     )?;
     let binding = RuntimeAuthorizationBinding {
@@ -262,9 +285,9 @@ async fn validated_policy(
     request: &ResourceRequest,
     binding: &RuntimeAuthorizationBinding,
 ) -> Result<contracts::platform_configuration::PlatformConfigurationVersion, RuntimeBindingError> {
-    let (identity, candidate, status) = current_inputs(tx, request).await?;
+    let (identity, spec, status) = current_inputs(tx, request).await?;
     binding.validate_current(request, &identity, &status)?;
-    let declared = declared_baseline_permissions(&candidate.spec, request.project_id)?;
+    let declared = declared_baseline_permissions(&spec, request.project_id)?;
     if declared.capabilities != binding.permissions.capabilities
         || declared.privileged != binding.permissions.privileged
     {
@@ -278,7 +301,7 @@ async fn validated_policy(
         &applied.configuration.runtime_policy,
         request,
         &identity,
-        &candidate,
+        &spec,
         declared,
     )?;
     if binding.permissions != permissions || binding.basis != basis {

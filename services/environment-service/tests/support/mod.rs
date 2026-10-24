@@ -1,5 +1,7 @@
 #![allow(dead_code, clippy::panic)]
 
+pub mod manual_release;
+
 use std::{error::Error, path::Path, str::FromStr};
 
 use async_trait::async_trait;
@@ -180,6 +182,7 @@ pub fn ready_instance() -> EnvironmentInstance {
             retry_from_phase: None,
             reset_target: None,
             lease_authorization: None,
+            template_upgrade: None,
         },
         eligibility_expires_at: Some(timestamp("2026-07-15T00:00:00.000Z")),
         endpoints: vec![EnvironmentEndpoint {
@@ -243,6 +246,7 @@ pub fn requested_instance() -> EnvironmentInstance {
             retry_from_phase: None,
             reset_target: None,
             lease_authorization: None,
+            template_upgrade: None,
         },
         eligibility_expires_at: Some(timestamp("2026-07-15T00:00:00.000Z")),
         endpoints: Vec::new(),

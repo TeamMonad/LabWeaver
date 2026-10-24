@@ -430,7 +430,7 @@ pub struct KubeVirtCleanupPlan {
     pub plan_sha256: Sha256Digest,
 }
 
-/// Complete readiness identity returned after VM and SSH converge; guest-agent state is observed separately.
+/// Runtime identity and independently probed SSH identity. A missing host key means unknown.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtRunningObservation {
@@ -442,9 +442,8 @@ pub struct KubeVirtRunningObservation {
     pub root_disk_uid: Uuid,
     pub guest_ip: IpAddr,
     pub service_cluster_ip: IpAddr,
-    pub ssh_host_key_sha256: Sha256Digest,
+    pub ssh_host_key_sha256: Option<Sha256Digest>,
     pub guest_agent_connected: bool,
-    pub ssh_ready: bool,
     pub observed_at: UtcTimestamp,
 }
 
@@ -2027,7 +2026,9 @@ impl KubeVirtObservationStore for PgKubeVirtObservationStore {
                 root_disk_uid: Some(observation.root_disk_uid),
                 guest_ip: Some(observation.guest_ip.to_string()),
                 service_cluster_ip: Some(observation.service_cluster_ip.to_string()),
-                ssh_host_key_sha256: Some(observation.ssh_host_key_sha256.to_string()),
+                ssh_host_key_sha256: observation
+                    .ssh_host_key_sha256
+                    .map(|digest| digest.to_string()),
                 observation_sha256,
                 cleanup_evidence: None,
                 observed_at: Some(observation.observed_at),
@@ -2200,7 +2201,10 @@ fn validate_record_transition(
                 if !replacing_disk
                     && (existing.vm_uid != record.vm_uid
                         || existing.root_disk_uid != record.root_disk_uid
-                        || existing.ssh_host_key_sha256 != record_host_key)
+                        || existing
+                            .ssh_host_key_sha256
+                            .zip(record_host_key)
+                            .is_some_and(|(known, observed)| known != observed))
                 {
                     return Err(KubeVirtObservationStoreError::IdentityMismatch);
                 }
@@ -2772,7 +2776,11 @@ where
         if resolved.withdrawn_at.is_some() {
             return Err(ReleaseProjectionError::Withdrawn);
         }
-        if release.approval.trust_revision != self.configuration.trust_revision {
+        if release
+            .trust_revision()
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?
+            != self.configuration.trust_revision
+        {
             return Err(ReleaseProjectionError::TrustRevisionMismatch);
         }
         Ok(())
@@ -3019,17 +3027,25 @@ fn ready_observation(
     }
     let revision = next_revision(instance.revision)?;
     Ok(ProviderObservation {
-        next_state: ObservedEnvironmentState::Ready,
+        next_state: if observed.ssh_host_key_sha256.is_some() {
+            ObservedEnvironmentState::Ready
+        } else {
+            ObservedEnvironmentState::Provisioning
+        },
         endpoints: vec![EnvironmentEndpoint {
             id: deterministic_endpoint_id(instance.id)?,
             protocol: contracts::environment::EndpointProtocol::Ssh,
             revision,
-            health: EndpointHealth::Healthy,
+            health: if observed.ssh_host_key_sha256.is_some() {
+                EndpointHealth::Healthy
+            } else {
+                EndpointHealth::Unknown
+            },
 
             observed_at: observed.observed_at,
         }],
         cleanup_evidence: None,
-        operation_complete: true,
+        operation_complete: observed.ssh_host_key_sha256.is_some(),
     })
 }
 
@@ -3052,8 +3068,9 @@ fn valid_running_observation(
         && !observed.root_disk_uid.is_nil()
         && private_route_ip(observed.guest_ip)
         && private_route_ip(observed.service_cluster_ip)
-        && observed.ssh_host_key_sha256 != Sha256Digest::of_bytes(&[])
-        && observed.ssh_ready
+        && observed
+            .ssh_host_key_sha256
+            .is_none_or(|digest| digest != Sha256Digest::of_bytes(&[]))
 }
 
 fn observation_store_failure(error: &KubeVirtObservationStoreError) -> ProviderFailure {

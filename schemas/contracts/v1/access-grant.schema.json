@@ -114,13 +114,22 @@
     },
     "EndpointHealth": {
       "description": "Endpoint health gates new AccessGrants.",
-      "enum": [
-        "pending",
-        "healthy",
-        "unhealthy",
-        "removed"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "pending",
+            "healthy",
+            "unhealthy",
+            "removed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The runtime exists, but no successful connection probe has been observed.",
+          "type": "string"
+        }
+      ]
     },
     "EndpointId": {
       "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",

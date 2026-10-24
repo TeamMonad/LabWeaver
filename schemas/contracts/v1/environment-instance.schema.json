@@ -59,13 +59,22 @@
     },
     "EndpointHealth": {
       "description": "Endpoint health gates new AccessGrants.",
-      "enum": [
-        "pending",
-        "healthy",
-        "unhealthy",
-        "removed"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "pending",
+            "healthy",
+            "unhealthy",
+            "removed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The runtime exists, but no successful connection probe has been observed.",
+          "type": "string"
+        }
+      ]
     },
     "EndpointId": {
       "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
@@ -295,6 +304,16 @@
         "state": {
           "$ref": "#/$defs/OperationState"
         },
+        "templateUpgrade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentTemplateUpgrade"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "traceId": {
           "type": "string"
         }
@@ -403,6 +422,39 @@
           "type": "object"
         }
       ]
+    },
+    "EnvironmentTemplateUpgrade": {
+      "additionalProperties": false,
+      "description": "Accepted container Work cutover. The release is desired until the operation succeeds.",
+      "properties": {
+        "dataPolicy": {
+          "$ref": "#/$defs/WorkTemplateUpgradeDataPolicy"
+        },
+        "sourceReleaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "sourceReleaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targetReleaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "targetReleaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sourceReleaseId",
+        "sourceReleaseVersion",
+        "targetReleaseId",
+        "targetReleaseVersion",
+        "dataPolicy"
+      ],
+      "type": "object"
     },
     "GpuAllocation": {
       "additionalProperties": false,
@@ -543,6 +595,15 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "WorkTemplateUpgradeDataPolicy": {
+      "oneOf": [
+        {
+          "const": "preserve_workspace",
+          "description": "Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.",
+          "type": "string"
+        }
+      ]
     },
     "WorkloadResources": {
       "additionalProperties": false,

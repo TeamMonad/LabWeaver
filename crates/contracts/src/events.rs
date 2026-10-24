@@ -662,7 +662,13 @@ impl ReleasePublished {
         self.environment_spec
             .validate()
             .map_err(|_| EventError::PayloadIdentityMismatch)?;
-        if self.environment_spec.runtime.kind() != self.release.runtime_kind {
+        if self.environment_spec.runtime.kind() != self.release.runtime_kind
+            || self
+                .release
+                .manual_approval
+                .as_ref()
+                .is_some_and(|manual| manual.spec != self.environment_spec)
+        {
             return Err(EventError::PayloadIdentityMismatch);
         }
         Ok(())

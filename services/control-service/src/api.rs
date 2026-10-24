@@ -144,6 +144,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(get_project_policy),
         )
         .route(
+            "/api/v1/projects/{project_id}/agent-capability",
+            get(get_project_agent_capability),
+        )
+        .route(
             "/api/v1/projects/{project_id}/llm-egress-policy-options",
             get(get_project_policy_options),
         )
@@ -210,6 +214,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/projects/{project_id}/authoring-approvals/{approval_id}",
             get(get_project_authoring_approval),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/template-images",
+            get(list_project_template_images),
         )
         .route(
             "/api/v1/projects/{project_id}/environment-template-releases",
@@ -770,6 +778,34 @@ async fn get_project_policy(
     .await?;
     let policy = state.control.active_project_policy(project_id).await?;
     Ok(with_etag(StatusCode::OK, &policy, policy.revision))
+}
+
+async fn get_project_agent_capability(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+) -> Result<Json<contracts::http::ProjectAgentCapability>, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectAgentCapability",
+        project_id,
+    )
+    .await?;
+    state
+        .control
+        .project_agent_capability(project_id)
+        .await
+        .map(Json)
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_AGENT_CONFIGURATION_UNREADABLE",
+                true,
+            )
+        })
 }
 
 async fn get_project_policy_options(
@@ -2070,6 +2106,28 @@ async fn withdraw_evaluation_release(
     Ok(with_etag(StatusCode::OK, &release, release.revision))
 }
 
+async fn list_project_template_images(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+) -> Result<Json<contracts::http::PlatformImageCatalog>, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "listProjectTemplateImages",
+        project_id,
+    )
+    .await?;
+    let mut catalog = state.agent.list_platform_images(&headers).await?;
+    catalog.entries.retain(|entry| {
+        entry.status == contracts::http::PlatformImageStatus::Active
+            && entry.trust_revision == state.control.config.trust_revision.get()
+    });
+    Ok(Json(catalog))
+}
+
 async fn create_project_work_release(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -2085,11 +2143,18 @@ async fn create_project_work_release(
         project_id,
     )
     .await?;
-    let candidate = state
-        .control
-        .project_environment_candidate(project_id, request.candidate_id)
-        .await?;
-    let catalog = candidate_platform_images(&state, &headers, &candidate).await?;
+    let catalog = if request.manual.is_some() {
+        state.agent.list_platform_images(&headers).await?.entries
+    } else {
+        let candidate = state
+            .control
+            .project_environment_candidate(
+                project_id,
+                request.candidate_id.ok_or(ControlError::ContractInvalid)?,
+            )
+            .await?;
+        candidate_platform_images(&state, &headers, &candidate).await?
+    };
     let key = idempotency(&headers)?;
     let published_at = now()?;
     let trace_id = trace_id(&headers);

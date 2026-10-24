@@ -54,11 +54,11 @@ fn projection() -> ReleasePublished {
         project_id,
         course_id,
         version: 1,
-        candidate_id,
-        agent_run_id: contracts::AgentRunId::new(),
-        candidate_revision: Revision::new(1).expect("revision"),
+        candidate_id: Some(candidate_id),
+        agent_run_id: Some(contracts::AgentRunId::new()),
+        candidate_revision: Some(Revision::new(1).expect("revision")),
         runtime_kind: RuntimeKind::Container,
-        approval: CandidateApproval {
+        approval: Some(CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: Revision::new(1).expect("revision"),
@@ -68,7 +68,8 @@ fn projection() -> ReleasePublished {
             decision: CandidateDecision::Approved,
             reason: "reviewed".to_owned(),
             decided_at: published_at,
-        },
+        }),
+        manual_approval: None,
         artifact: ImageArtifact::Container {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),

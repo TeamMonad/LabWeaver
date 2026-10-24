@@ -252,7 +252,7 @@
                   :retryable="true"
                   severity="error"
                   data-testid="release-verify-error"
-                  @retry="authoring.loadReleaseApproval(runRelease?.approval.id ?? null)"
+                  @retry="authoring.loadReleaseApproval(runRelease?.approval?.id ?? null)"
                 />
 
                 <div v-if="publishedRelease && authoring.approval.kind !== 'success'" class="approved" role="status" data-testid="review-published">
@@ -430,7 +430,7 @@ const runRelease = computed(() => (runId.value && projectReleases.value?.get(run
 
 /** Read the complete approval behind the run's release; it binds package and both candidates. */
 watch(
-  () => [runRelease.value?.approval.id ?? null, runId.value, projectId.value] as const,
+  () => [runRelease.value?.approval?.id ?? null, runId.value, projectId.value] as const,
   ([releaseApprovalId]) => void authoring.loadReleaseApproval(releaseApprovalId),
   { immediate: true },
 )
@@ -511,7 +511,7 @@ const boundArtifacts = computed(() => [
 ])
 
 function artifactEntries(prefix: string, artifact: CompleteAuthoringApprovalRequestSchemaImageArtifact) {
-  if (artifact.kind === 'container') {
+  if (artifact.kind === 'container' || artifact.kind === 'catalog_container') {
     return [{ label: prefix, value: `${artifact.repository}@${artifact.digest}` }]
   }
   return [{ label: prefix, value: `${artifact.format} · ${artifact.base_disk.binding} · ${artifact.base_disk.sourceRegistryDigest}` }]

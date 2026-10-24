@@ -95,9 +95,17 @@ pub(super) fn environment_route_action(
                 "reset" | "retry" | "recover",
             ],
         ) => (*id, "resetEnvironment"),
-        (&Method::POST, ["", "api", "v1", "environments", id, "start" | "restart"]) => {
-            (*id, "startEnvironment")
-        }
+        (
+            &Method::POST,
+            [
+                "",
+                "api",
+                "v1",
+                "environments",
+                id,
+                "start" | "restart" | "template-upgrade",
+            ],
+        ) => (*id, "startEnvironment"),
         (&Method::POST, ["", "api", "v1", "environments", id, "stop" | "cancel"]) => {
             (*id, "stopEnvironment")
         }

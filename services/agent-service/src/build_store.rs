@@ -1020,7 +1020,9 @@ fn container_identity(
             digest,
             ..
         } => Ok((*id, *build_request_id, digest)),
-        ImageArtifact::VirtualMachine { .. } => Err(BuildStoreError::IdentityMismatch),
+        ImageArtifact::VirtualMachine { .. } | ImageArtifact::CatalogContainer { .. } => {
+            Err(BuildStoreError::IdentityMismatch)
+        }
     }
 }
 

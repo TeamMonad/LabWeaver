@@ -941,15 +941,53 @@ pub struct InternalWithdrawEvaluationReleaseRequest {
     pub reason_code: DiagnosticCode,
 }
 
+/// Project Agent configuration admission, independent of manual Work operations.
+/// A failed configuration read is an HTTP failure, never `unconfigured`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ProjectAgentCapability {
+    /// A valid project policy matches the deployment-owned model binding.
+    /// Runtime requests still perform their own admission and provider checks.
+    Configured {
+        model: String,
+    },
+    Unconfigured {
+        reason_code: String,
+    },
+    Unavailable {
+        reason_code: String,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironmentTemplateReleaseRequest {
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
-    pub candidate_id: CandidateId,
-    pub candidate_revision: Revision,
+    pub candidate_id: Option<CandidateId>,
+    pub candidate_revision: Option<Revision>,
     pub runtime_kind: crate::authoring::RuntimeKind,
-    pub approval_id: ApprovalId,
+    pub approval_id: Option<ApprovalId>,
+    /// Reviewed manual configuration; mutually exclusive with all Agent candidate fields.
+    pub manual: Option<Box<ManualWorkTemplateRequest>>,
+}
+
+/// One explicit human approval publishes this exact platform image and Work specification.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManualWorkTemplateRequest {
+    pub platform_image_id: PlatformImageId,
+    pub platform_image_generation: u64,
+    pub template_family_id: String,
+    pub description: String,
+    pub spec: crate::authoring::EnvironmentSpec,
+    pub reason: String,
+    pub confirmed: bool,
 }
 
 /// Append-only reason supplied when withdrawing an immutable release.
@@ -1858,6 +1896,16 @@ pub struct CreateEnvironmentRequest {
     pub release_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_label: Option<String>,
+}
+
+/// Explicitly confirms restarting a Work onto a newer release while retaining /workspace.
+/// Ephemeral rootfs changes and active connections do not survive the restart.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpgradeEnvironmentTemplateRequest {
+    pub target_release_id: ReleaseId,
+    pub target_release_version: u64,
+    pub confirmed: bool,
 }
 
 /// Browser request for one explicitly selected, immutable Environment reset target.
@@ -2922,6 +2970,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/projects/{projectId}/agent-capability",
+        "getProjectAgentCapability",
+        "llm_policy:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects/{projectId}/llm-egress-policy-options",
         "getProjectLlmPolicyOptions",
         "llm_policy:read",
@@ -3958,6 +4020,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/projects/{projectId}/template-images",
+        "listProjectTemplateImages",
+        "release:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects/{projectId}/environment-template-releases",
         "listEnvironmentTemplateReleases",
         "release:read",
@@ -4114,6 +4190,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Post,
         "/api/v1/environments/{environmentId}/restart",
         "restartEnvironment",
+        "environment:write",
+        Oidc,
+        IdempotentRevisioned,
+        202,
+        true,
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/environments/{environmentId}/template-upgrade",
+        "upgradeEnvironmentTemplate",
         "environment:write",
         Oidc,
         IdempotentRevisioned,

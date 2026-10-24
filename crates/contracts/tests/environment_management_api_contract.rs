@@ -131,6 +131,7 @@ fn operation_snapshot_requires_consistent_terminal_facts() -> Result<(), Box<dyn
             "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
         )?),
         trace_id: "trace-81".to_owned(),
+        template_upgrade: None,
     };
     assert!(snapshot.validate().is_ok());
     snapshot.cancel_eligible = true;
@@ -222,6 +223,76 @@ fn generated_openapi_closes_inventory_operation_and_grant_discovery_gaps()
             })
             .ok_or("SSE cursor parameter missing")?;
         assert_eq!(parameter["schema"]["type"], "string");
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_capability_read_failures_are_distinct_from_unconfigured_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let generated = contracts::schema::generate_all()?;
+    let artifact = generated
+        .iter()
+        .find(|item| item.relative_path.ends_with("labweaver-public.v1.json"))
+        .ok_or("Public OpenAPI artifact missing")?;
+    let openapi: Value = serde_json::from_slice(&artifact.bytes)?;
+    let operation = &openapi["paths"]["/api/v1/projects/{projectId}/agent-capability"]["get"];
+    let errors = operation["x-labweaver-errors"]
+        .as_array()
+        .ok_or("capability errors missing")?;
+    assert!(
+        errors
+            .iter()
+            .any(|code| code == "LW_AGENT_CONFIGURATION_UNREADABLE")
+    );
+    assert!(operation["responses"].get("503").is_some());
+    assert!(
+        !errors
+            .iter()
+            .any(|code| code == "LW_AGENT_MODEL_NOT_CONFIGURED")
+    );
+    let unconfigured = contracts::http::ProjectAgentCapability::Unconfigured {
+        reason_code: "LW_AGENT_MODEL_NOT_CONFIGURED".to_owned(),
+    };
+    let view = serde_json::to_value(unconfigured)?;
+    assert_eq!(view["status"], "unconfigured");
+    assert_eq!(view["reasonCode"], "LW_AGENT_MODEL_NOT_CONFIGURED");
+    Ok(())
+}
+
+#[test]
+fn work_lease_operations_declare_conflict_for_inactive_leases_and_service_failure_for_protocol_damage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let generated = contracts::schema::generate_all()?;
+    let artifact = generated
+        .iter()
+        .find(|item| item.relative_path.ends_with("labweaver-public.v1.json"))
+        .ok_or("Public OpenAPI artifact missing")?;
+    let openapi: Value = serde_json::from_slice(&artifact.bytes)?;
+    for suffix in [
+        "start",
+        "restart",
+        "retry",
+        "recover",
+        "reset",
+        "template-upgrade",
+    ] {
+        let path = format!("/api/v1/environments/{{environmentId}}/{suffix}");
+        let operation = &openapi["paths"][&path]["post"];
+        assert!(operation["responses"].get("409").is_some(), "{path}");
+        assert!(operation["responses"].get("503").is_some(), "{path}");
+        let errors = operation["x-labweaver-errors"]
+            .as_array()
+            .ok_or("Work lease errors missing")?;
+        for diagnostic in [
+            "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+        ] {
+            assert!(
+                errors.iter().any(|code| code == diagnostic),
+                "{path}: {diagnostic}"
+            );
+        }
     }
     Ok(())
 }
