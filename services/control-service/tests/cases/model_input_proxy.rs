@@ -418,6 +418,43 @@ async fn sandbox_tools_and_each_model_request_recheck_original_authority()
             .await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+    for secret in [
+        "-----BEGIN PRIVATE KEY-----",
+        "AKIAIOSFODNN7EXAMPLE",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signaturemarker",
+    ] {
+        let input = json!({(secret): "harmless-value"});
+        let plain = serde_json::to_string(
+            &json!({"model":"fixture-provider-v1", "messages":[{"role":"assistant", "content":[{"type":"tool_use", "id":"read-fixture", "name":"Read", "input":input}]}]}),
+        )?;
+        let encoded = serde_json::to_string(secret)?;
+        let escaped = format!("\"\\u{:04x}{}", secret.as_bytes()[0], &encoded[2..]);
+        let unicode = plain.replacen(&encoded, &escaped, 1);
+        let nested = serde_json::to_string(
+            &json!({"model":"fixture-provider-v1", "messages":[{"role":"assistant", "content":[{"type":"tool_use", "id":"read-fixture", "name":"Read", "input":{"nested":[{"deeper":{(secret): "harmless-value"}}]}}]}]}),
+        )?;
+        for body in [plain, unicode, nested] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/internal/v1/model-input-attempts/{task}/v1/messages"
+                        ))
+                        .header("authorization", format!("Bearer {capability}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                captured.lock().await.len(),
+                2,
+                "secret keys must not reach the provider"
+            );
+        }
+    }
     assert_eq!(
         send_tool(&app, TaskRunId::new(), &capability)
             .await?

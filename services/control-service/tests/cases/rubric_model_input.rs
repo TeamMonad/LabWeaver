@@ -14,6 +14,8 @@ pub async fn assert_rubric_authority(
     pool: &sqlx::PgPool,
     package: &ProblemPackage,
     release: &EvaluationRelease,
+    environment_release: &contracts::supply_chain::EnvironmentTemplateRelease,
+    case: PublicationCase,
     now: UtcTimestamp,
 ) -> TestResult {
     let project = package.project_id;
@@ -268,6 +270,20 @@ pub async fn assert_rubric_authority(
         )
         .await?;
     assert_eq!(permission.policy_revision, approved.policy_revision);
+    if case == PublicationCase::FrozenSharedInputs {
+        assert_shared_frozen_inputs(
+            &service,
+            pool,
+            release,
+            environment_release,
+            &teacher,
+            &rubric,
+            now,
+        )
+        .await?;
+        assert_eq!(objects.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        return Ok(());
+    }
     let mut other_model = policy.clone();
     "other-model".clone_into(&mut other_model.binding.model);
     assert_eq!(
@@ -589,4 +605,134 @@ impl<T: std::fmt::Debug> DeniedResult<T> for Result<T, ControlError> {
             Ok(value) => Err(format!("unexpected permission: {reason}: {value:?}").into()),
         }
     }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "real original session, publication and rubric rules authorize each protected task step"
+)]
+async fn assert_shared_frozen_inputs(
+    service: &ControlService,
+    pool: &sqlx::PgPool,
+    release: &EvaluationRelease,
+    environment_release: &contracts::supply_chain::EnvironmentTemplateRelease,
+    teacher: &contracts::AuthenticatedActor,
+    rubric: &ModelInputRubricIdentity,
+    now: UtcTimestamp,
+) -> TestResult {
+    use base64::Engine as _;
+    use contracts::http::{
+        CreateFrozenModelInputAuthorizationRequest, ModelInputAuthorizationContext,
+        ModelInputAuthorizationSource,
+    };
+    sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
+        .execute(pool)
+        .await?;
+    apply_domain_migrations(pool, Domain::Access).await?;
+    sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256) VALUES($1,'https://fixture-issuer.invalid',$2)")
+        .bind(teacher.actor_id.as_uuid()).bind(Sha256Digest::of_bytes(teacher.actor_id.as_uuid().as_bytes()).to_string()).execute(pool).await?;
+    let keys = auth::KeyRing::parse(
+        "fixture".to_owned(),
+        &format!(
+            "fixture:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32])
+        ),
+    )?;
+    let session = auth::create_bff_session(
+        pool,
+        &keys,
+        auth::CreateBffSession {
+            actor_id: teacher.actor_id.as_uuid(),
+            roles: teacher.roles.clone(),
+            authorization_revision: 1,
+            expires_at: now.get() + time::Duration::hours(1),
+            idle_ttl: time::Duration::minutes(30),
+            oidc_sid: None,
+            logout_hint: "fixture-logout".to_owned(),
+        },
+        now.get(),
+    )
+    .await?;
+    let original = ModelInputAuthorizationContext {
+        session_sha256: Sha256Digest::of_bytes(session.session_id.to_string().as_bytes())
+            .to_string(),
+        actor_id: teacher.actor_id,
+        project_id: release.project_id,
+        course_id: release.course_id,
+        operation_id: "freezeSubmission".to_owned(),
+        valid_until: now,
+    };
+    let mut evaluation = release.clone();
+    let review_step = |id: &str| serde_json::json!({"role":"advisory","id":id,"runner":{"kind":"llm_review","include":["answer.txt"],"rubric":format!("evaluator://{}",rubric.path),"outputMode":"goal_assessment"},"failurePolicy":"continue_advisory"});
+    evaluation.evaluation_spec = serde_json::from_value(serde_json::json!({
+        "apiVersion":"evaluation.labweaver.io/v1","kind":"EvaluationSpec","metadata":{"name":"shared-advisory-input","version":"1.0.0"},
+        "spec":{"submission":{"collector":{"kind":"workspace_snapshot","include":["answer.txt"],"maxBytes":1024},"llmReadable":["answer.txt"]},
+        "steps":[review_step("review-a"),review_step("review-b"),{"role":"score","id":"deterministic","runner":{"kind":"file_assertion","requiredFiles":["answer.txt"]},"checker":{"kind":"exit_code","expected":0},"score":{"max":1},"failurePolicy":"stop"}],
+        "aggregation":{"kind":"deterministic_sum","maxScore":1,"gates":[]},"review":{"teacherApprovalRequiredForRelease":true,"forceManualWhen":[]}}
+    }))?;
+    evaluation.validate()?;
+    let manifest: contracts::submission::SubmissionManifest = serde_json::from_value(
+        serde_json::json!({
+            "apiVersion":"evaluation.labweaver.io/v1","kind":"SubmissionManifest","name":"shared-advisory-input","source":"workspace",
+            "include":[{"kind":"exactFile","path":"answer.txt"}],"exclude":[],"required":[],"llmReadable":[{"kind":"exactFile","path":"answer.txt"}],
+            "maxTotalBytes":1024,"maxFiles":4,"followSymlinks":false
+        }),
+    )?;
+    let frozen_id = contracts::FrozenSubmissionId::new();
+    let build_id = match &environment_release.artifact {
+        ImageArtifact::Container {
+            build_request_id, ..
+        } => Some(*build_request_id),
+        ImageArtifact::VirtualMachine { .. } => None,
+    };
+    let mut facts = serde_json::json!({
+        "frozenSubmissionId":frozen_id,"projectId":release.project_id,"courseId":release.course_id,"ownerActorId":teacher.actor_id,
+        "manifestRevision":1,"manifestSha256":Sha256Digest::of_canonical(&manifest)?.to_string(),"manifest":manifest,
+        "archive":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"archive-v1","sizeBytes":1,"mediaType":"application/gzip"},
+        "contentSha256":Sha256Digest::of_bytes(b"x").to_string(),"files":[{"path":"answer.txt","sha256":Sha256Digest::of_bytes(b"x").to_string()}],
+        "environment":{"environmentId":EnvironmentId::new(),"environmentRevision":1,"releaseId":environment_release.id,"releaseVersion":environment_release.version,"runtimeKind":environment_release.runtime_kind,"buildRequestId":build_id},
+        "evaluationRelease":{"id":release.id,"revision":release.revision,"state":"active"},"inputAuthorizationContext":original
+    });
+    for step_id in ["review-a", "review-b"] {
+        let task_id = contracts::TaskRunId::new();
+        facts["taskRunId"] = serde_json::json!(task_id);
+        facts["stepId"] = serde_json::json!(step_id);
+        let request = CreateFrozenModelInputAuthorizationRequest {
+            input_authorization_context: original.clone(),
+            task_run_id: task_id,
+            parent_lease_sha256: contracts::http::model_input_parent_lease_sha256(
+                uuid::Uuid::now_v7(),
+            ),
+            frozen_submission_id: frozen_id,
+            evaluation_release_id: release.id,
+            evaluation_release_revision: release.revision,
+            selected_paths: vec!["answer.txt".to_owned()],
+        };
+        let binding = service
+            .bind_frozen_model_input(&request, facts.clone(), &evaluation)
+            .await?;
+        let ModelInputAuthorizationSource::FrozenSubmission(source) = binding.source else {
+            return Err("wrong source".into());
+        };
+        assert_eq!(source.step_id, step_id);
+        assert_eq!(source.task_run_id, task_id);
+        assert_eq!(source.rubric, *rubric);
+        let mut other_task = request.clone();
+        other_task.task_run_id = contracts::TaskRunId::new();
+        assert!(
+            service
+                .bind_frozen_model_input(&other_task, facts.clone(), &evaluation)
+                .await
+                .is_err()
+        );
+        let mut unknown_step = facts.clone();
+        unknown_step["stepId"] = serde_json::json!("deterministic");
+        assert!(
+            service
+                .bind_frozen_model_input(&request, unknown_step, &evaluation)
+                .await
+                .is_err()
+        );
+    }
+    Ok(())
 }

@@ -136,6 +136,8 @@ async fn frozen_advisory_task_api_checks_scope_old_lease_and_fixed_deadline()
     let server = ParentServer::start(&fixture, &runner, &authority, &temp).await?;
     let request = input(&fixture)?;
     let facts = server.client.frozen_model_input_facts(&request).await?;
+    assert_eq!(facts["taskRunId"], serde_json::to_value(request.task_run_id)?);
+    assert_eq!(facts["stepId"], fixture.context.lease.step_id);
     assert_eq!(
         facts["inputAuthorizationContext"],
         serde_json::to_value(&request.input_authorization_context)?

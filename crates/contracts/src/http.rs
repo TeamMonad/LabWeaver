@@ -1140,6 +1140,8 @@ pub struct ProjectRubricModelInputRules {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrozenModelInputSource {
     pub task_run_id: TaskRunId,
+    /// Advisory step resolved from the protected task ledger, not inferred from selected files.
+    pub step_id: String,
     /// SHA of the original Evaluation worker lease; never refreshed on recovery.
     pub parent_lease_sha256: String,
     pub frozen_submission_id: FrozenSubmissionId,
@@ -1200,6 +1202,7 @@ impl ModelInputAuthorizationBinding {
                 || !is_sha256(&source.manifest_sha256)
                 || !is_sha256(&source.content_sha256)
                 || source.environment.release_version == 0
+                || source.step_id.is_empty()
             {
                 return Err(HttpContractError::InvalidInternalIdentity);
             }

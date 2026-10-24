@@ -8085,6 +8085,10 @@ export type ModelInputAuthorizationSource = {
      * Missing permission is representable for a refusal, never for model egress.
      */
     rubricPermission?: ModelInputRubricPermissionRef | null;
+    /**
+     * Advisory step resolved from the protected task ledger, not inferred from selected files.
+     */
+    stepId: string;
     taskRunId: InternalAgentLlmReviewRequestSchemaTaskRunId;
 };
 

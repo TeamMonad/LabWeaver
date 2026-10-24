@@ -2553,6 +2553,7 @@ fn review_request(
     let source = contracts::http::FrozenModelInputSource {
         parent_lease_sha256: "d".repeat(64),
         task_run_id,
+        step_id: "review".to_owned(),
         frozen_submission_id,
         manifest_revision: contracts::Revision::new(1).expect("revision"),
         manifest_sha256: "a".repeat(64),

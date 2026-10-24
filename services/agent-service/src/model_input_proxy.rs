@@ -251,31 +251,31 @@ impl ModelInputProxy {
         let mut pending = vec![value];
         while let Some(value) = pending.pop() {
             match value {
-                serde_json::Value::String(text) => {
-                    if !self
-                        .classifier
-                        .classify("model/tool-result", text.as_bytes())
-                        .await
-                        .map_err(|_| Denied)?
-                        .is_empty()
-                        || text.contains(&self.credential)
-                        || text.contains(capability)
-                    {
-                        return Err(Denied);
-                    }
-                }
+                serde_json::Value::String(text) => self.classify_text(text, capability).await?,
                 serde_json::Value::Array(values) => pending.extend(values),
                 serde_json::Value::Object(values) => {
-                    if values
-                        .keys()
-                        .any(|key| key.contains(capability) || key.contains(&self.credential))
-                    {
-                        return Err(Denied);
+                    for (key, value) in values {
+                        self.classify_text(key, capability).await?;
+                        pending.push(value);
                     }
-                    pending.extend(values.values());
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    async fn classify_text(&self, text: &str, capability: &str) -> Result<(), Denied> {
+        if !self
+            .classifier
+            .classify("model/tool-result", text.as_bytes())
+            .await
+            .map_err(|_| Denied)?
+            .is_empty()
+            || text.contains(&self.credential)
+            || text.contains(capability)
+        {
+            return Err(Denied);
         }
         Ok(())
     }

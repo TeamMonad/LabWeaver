@@ -116,6 +116,8 @@ impl ControlService {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FrozenFacts {
+    task_run_id: contracts::TaskRunId,
+    step_id: String,
     frozen_submission_id: contracts::FrozenSubmissionId,
     project_id: contracts::ProjectId,
     course_id: Option<contracts::CourseId>,
@@ -211,6 +213,7 @@ impl ControlService {
             .map_err(|_| ControlError::ContractInvalid)?
             .to_string();
         if facts.input_authorization_context.as_ref() != Some(context)
+            || facts.task_run_id != request.task_run_id
             || facts.project_id != context.project_id
             || facts.course_id != context.course_id
             || facts.owner_actor_id != context.actor_id
@@ -249,28 +252,23 @@ impl ControlService {
         if selected.is_empty() || selected.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(ControlError::ContractInvalid);
         }
-        let matching_steps = release
+        let step = release
             .evaluation_spec
             .body()
             .steps()
             .iter()
-            .filter_map(|step| step.advisory_runner())
-            .filter_map(|runner| match runner {
-                contracts::evaluation::AdvisoryRunnerSpec::LlmReview {
-                    include, rubric, ..
-                } => {
-                    let mut include = include.clone();
-                    include.sort();
-                    (include == selected).then_some(rubric.as_str())
-                }
-            })
-            .collect::<Vec<_>>();
-        if matching_steps.len() != 1 {
+            .find(|step| step.id() == facts.step_id)
+            .and_then(|step| step.advisory_runner())
+            .ok_or(ControlError::ContractInvalid)?;
+        let contracts::evaluation::AdvisoryRunnerSpec::LlmReview {
+            include, rubric, ..
+        } = step;
+        let mut include = include.iter().collect::<Vec<_>>();
+        include.sort_unstable();
+        if !include.into_iter().eq(selected.iter()) {
             return Err(ControlError::ContractInvalid);
         }
-        let rubric_path = matching_steps[0]
-            .strip_prefix("evaluator://")
-            .unwrap_or(matching_steps[0]);
+        let rubric_path = rubric.strip_prefix("evaluator://").unwrap_or(rubric);
         let publication: serde_json::Value = sqlx::query_scalar("SELECT contract FROM control.authoring_approval_publications WHERE project_id=$1 AND evaluation_release_id=$2 AND evaluation_release_revision=$3 AND state='ready'")
             .bind(release.project_id.as_uuid()).bind(release.id.as_uuid()).bind(super::i64_revision(release.revision)?).fetch_optional(&self.pool).await.map_err(db)?.ok_or(ControlError::ReleaseNotFound)?;
         let publication: contracts::authoring::AuthoringApprovalPublicationStatus =
@@ -353,6 +351,7 @@ impl ControlService {
         }
         let source = FrozenModelInputSource {
             task_run_id: request.task_run_id,
+            step_id: facts.step_id,
             parent_lease_sha256: request.parent_lease_sha256.clone(),
             frozen_submission_id: facts.frozen_submission_id,
             manifest_revision: facts.manifest_revision,

@@ -18,6 +18,8 @@ binding 的 `source.kind` 区分 `problem_package` 和 `frozen_submission`。冻
 
 冻结来源和创建 binding 请求必需 `parentLeaseSha256`，由 Evaluation 对真实父 `EvaluationStepLease.lease_token()` 的规范 UUID 字符串 UTF-8 计算 SHA-256。它固定进入原 binding/选择摘要；恢复不能刷新，旧缺失字段不补造。task ID 可在父 worker 恢复时保留而 lease token 轮换，因此 task ID 单独不能证明原执行代次仍有效。
 
+任务限定 metadata 还返回从当前 task/step/attempt 关联直接读取的 `taskRunId` 和 `stepId`。Control 只使用该 `stepId` 对应的 advisory step，核对它的 include 与 rubric，不通过 selectedPaths 反查步骤；多个步骤可以读取同一文件集合。`source.stepId` 必填并纳入不可变选择摘要，Evaluation 在读取内容前将它与原 lease 和 metadata 对照，跨步骤替换即使重算摘要也会拒绝。
+
 Control 每次创建/复核通过现有 `evaluation.control.invoke` 请求任务限定 metadata 路径 `/internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`，携带原 scope、release If-Match 及 `x-labweaver-evaluation-lease-sha256`。旧无任务路径不作 fallback，拒绝/404/错误均阻止绑定。Evaluation 在返回事实前核父 run/step/attempt 关联、当前 lease 摘要/到期、持久取消和原执行期限。摘要不是许可，不返回原 lease token。Agent 首次/repair 复核使用原摘要，自己的取消与 lease 检查仍独立执行。响应丢失时先读取原 Agent receipt，不能重新选择内容、刷新截止或重复发送。
 
 课程当前教师兼 instructor 且具有材料项目 Edit 权限时，可以通过 `POST /api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules` 单独设置 rubric 可见性、批准目标模型使用或撤回批准。GET 同路径返回教师可见的元数据规则。请求必须提供现行 policy 的 If-Match 和 Idempotency-Key。规则保存在现有 policy 的版本化 JSON 内，批准者和课程成员 revision 从当前真源获取；请求不能自报许可。每次改变可见性都会清除模型批准。只有 `course_public` 且存在当前 instructor 的有效批准时才允许外发；hidden、未知、离任、成员 revision 变化或撤回均拒绝。Browse 和模型许可分别检查。
@@ -61,6 +63,8 @@ Authoring sandbox 不持有上游模型凭据。Agent 在自己的进程中保�
 - sandbox 的网络只放行对象传输与 Agent 模型代理，不直接放行模型 endpoint。Helm 仅允许 `labweaver-authoring` 内 Agent 管理的 Pod 到 Agent 的 9445/TCP；普通内部 API 仍须服务 JWT。
 
 Claude 的 `PreToolUse`/`PostToolUse` hook 在每个工具动作前后调用 task 专属检查。每次 Anthropic-compatible `messages`/`count_tokens` HTTP 请求也由 Agent 代理重新核对原 session、当前成员/对象许可、原策略/文件版本、当前 track lease、取消与固定任务截止。代理对实际消息和工具结果复用秘密分类器，拒绝凭据与 capability 泄漏；扫描不授予对象许可。服务端不把 sandbox 提交的 actor、project、policy 或 provider URL 当权威。模型调用已开始后不能撤回已发送内容，撤权/取消会阻止后续请求和 repair。
+
+秘密分类在 JSON 解码后覆盖所有字符串值和对象键，包括明文键、Unicode 转义键和任意嵌套对象键。对象键中的私钥、AWS key、JWT、provider credential 或 task capability 与字符串值使用同一拒绝规则，不会因位于工具输入的键而绕过检查。
 
 教师创作和私人/共享 Work 配置均只把显式选择的材料包文件放进隔离 sandbox，校验实际字节的 SHA-256；未选文件不读取、不分类、不材料化。该路径不挂载、遍历或读取 Work 用户持久盘。学生 advisory 只消费冻结 manifest/step.include/llmReadable 交集和独立获准的 rubric。不能用同目录、文件名、课程相同或付款项目权限扩大输入范围。
 

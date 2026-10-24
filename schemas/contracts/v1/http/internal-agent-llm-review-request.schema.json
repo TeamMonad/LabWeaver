@@ -382,6 +382,10 @@
               ],
               "description": "Missing permission is representable for a refusal, never for model egress."
             },
+            "stepId": {
+              "description": "Advisory step resolved from the protected task ledger, not inferred from selected files.",
+              "type": "string"
+            },
             "taskRunId": {
               "$ref": "#/$defs/TaskRunId"
             }
@@ -389,6 +393,7 @@
           "required": [
             "kind",
             "taskRunId",
+            "stepId",
             "parentLeaseSha256",
             "frozenSubmissionId",
             "manifestRevision",
