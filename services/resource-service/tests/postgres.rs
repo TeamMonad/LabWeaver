@@ -4254,6 +4254,141 @@ async fn invalid_work_handoff_releases_the_pre_handoff_claim_without_retry()
     Ok(())
 }
 
+fn gated_return_pool(
+    pool: &sqlx::PgPool,
+) -> (
+    sqlx::PgPool,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let (gate_entered, gate_resume) = (entered.clone(), resume.clone());
+    let gated = PgPoolOptions::new()
+        .max_connections(2)
+        .after_release(move |_, _| {
+            let (entered, resume) = (gate_entered.clone(), gate_resume.clone());
+            Box::pin(async move {
+                entered.notify_one();
+                resume.notified().await;
+                Ok(true)
+            })
+        })
+        .connect_lazy_with((*pool.connect_options()).clone());
+    (gated, entered, resume)
+}
+
+#[tokio::test]
+async fn rejected_handoff_transactions_release_locks_before_returning()
+-> Result<(), Box<dyn std::error::Error>> {
+    for recovered_receipt in [false, true] {
+        let (_container, pool) = migrated_pool().await?;
+        let (store, _request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
+        let expiring = store
+            .begin_lease_expiry(lease.id, lease.revision, None, actor, "rejected-cleanup")
+            .await?;
+        let item = store
+            .next_lease_cleanup(actor)
+            .await?
+            .ok_or("cleanup fixture")?;
+        let releasing = if recovered_receipt {
+            Some(
+                store
+                    .mark_capacity_releasing_with_ack(&item, lease.revision)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        // SQLx flushes a dropped transaction on its background pool-return task, not
+        // before the store method returns. Pause that task before its ping: an explicit
+        // rollback must already have released every row lock when rejection is observed.
+        let (rejecting_pool, entered, resume) = gated_return_pool(&pool);
+        let rejecting = PgResourceStore::new(rejecting_pool.clone());
+        let rejected = if let Some(releasing) = releasing {
+            rejecting
+                .complete_pre_handoff_release(
+                    claim.id,
+                    releasing.revision,
+                    lease.id,
+                    expiring.revision,
+                    actor,
+                    "receipt-is-not-absence",
+                )
+                .await
+                .map(|_| ())
+        } else {
+            let mut stale = item;
+            stale.lease.revision = lease.revision;
+            rejecting
+                .mark_capacity_releasing_with_ack(&stale, lease.revision)
+                .await
+                .map(|_| ())
+        };
+        assert!(matches!(
+            rejected,
+            Err(ResourceStoreError::CapacityClaimStateConflict)
+        ));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+        let cleanup = store.next_lease_cleanup(actor).await;
+        resume.notify_one();
+        rejecting_pool.close().await;
+        let cleanup = cleanup?.ok_or("rejected transaction retained cleanup row locks")?;
+        assert_eq!(cleanup.claim.id, claim.id);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn scanner_snapshot_errors_release_locks_before_returning()
+-> Result<(), Box<dyn std::error::Error>> {
+    for cleanup_scanner in [false, true] {
+        let (_container, pool) = migrated_pool().await?;
+        let (store, _request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
+        if cleanup_scanner {
+            store
+                .begin_lease_expiry(lease.id, lease.revision, None, actor, "decode-cleanup")
+                .await?;
+        } else {
+            // The shell scanner only recovers provisioning work after its persisted timeout.
+            sqlx::query("UPDATE resource.capacity_claims SET state='provisioning',updated_at=clock_timestamp()-interval '2 minutes' WHERE claim_id=$1")
+                .bind(claim.id.as_uuid())
+                .execute(&pool)
+                .await?;
+        }
+        // A malformed stored snapshot is decoded with `?` after FOR UPDATE succeeds.
+        sqlx::query("UPDATE resource.capacity_claims SET contract='{}'::jsonb WHERE claim_id=$1")
+            .bind(claim.id.as_uuid())
+            .execute(&pool)
+            .await?;
+        let (rejecting_pool, entered, resume) = gated_return_pool(&pool);
+        let rejecting = PgResourceStore::new(rejecting_pool.clone());
+        let rejected = if cleanup_scanner {
+            rejecting.next_lease_cleanup(actor).await
+        } else {
+            rejecting.claim_next_capacity_shell().await
+        };
+        assert!(matches!(
+            rejected,
+            Err(ResourceStoreError::Serialization(_))
+        ));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+        let claimable: Option<Uuid> = sqlx::query_scalar(
+            "SELECT c.claim_id FROM resource.capacity_claims c
+             JOIN resource.resource_leases l ON l.claim_id=c.claim_id
+             WHERE c.claim_id=$1 FOR UPDATE OF c,l SKIP LOCKED",
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_optional(&pool)
+        .await?;
+        resume.notify_one();
+        rejecting_pool.close().await;
+        assert_eq!(claimable, Some(claim.id.as_uuid()));
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn recovered_handoff_receipt_cannot_use_the_unaccepted_release_path()
 -> Result<(), Box<dyn std::error::Error>> {
