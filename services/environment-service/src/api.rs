@@ -1083,6 +1083,12 @@ async fn upgrade_environment_template(
         .store
         .prepare_work_template_upgrade(&instance, &request)
         .await?;
+    if instance.lease_id.is_some() {
+        return Err(EnvironmentStoreError::TemplateUpgrade(
+            crate::TemplateUpgradeError::UpgradeUnavailable,
+        )
+        .into());
+    }
     let accepted_at = state.store.current_time().await?;
     let authorization = verify_work_lease(&state, &instance, accepted_at).await?;
     let revocation = state
@@ -1435,7 +1441,11 @@ fn template_upgrade_problem(error: &crate::TemplateUpgradeError) -> Response {
     let request_id = context.request_id().to_owned();
     let diagnostic_code = DiagnosticCode::parse(error.to_string())
         .unwrap_or_else(|_| DiagnosticCode::registered("LW_ENVIRONMENT_REQUEST_FAILED"));
-    let status = StatusCode::UNPROCESSABLE_ENTITY;
+    let status = if matches!(error, crate::TemplateUpgradeError::UpgradeUnavailable) {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::UNPROCESSABLE_ENTITY
+    };
     let problem = contracts::ProblemDetails {
         problem_type: format!(
             "urn:labweaver:problem:{}",

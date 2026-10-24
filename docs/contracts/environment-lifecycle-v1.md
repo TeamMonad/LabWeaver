@@ -33,15 +33,19 @@ Freeze binding 从该事实返回真实 namespace/PVC。终端、Work 配置脚�
 
 回退此增量前，先通过当前版本正常收尾既有 namespace Work。不要切回默认模式来迁移现有 Work，也不要删除其落点账本记录。真实定位和凭据保留在私有部署输入；Issue/PR 只记录合成验证结果。
 
-`POST /api/v1/environments` 只接受 Experiment release。Work 的首次创建必须通过 Resource 的
-`ResourceTarget.environment` 申请、审批及租约交接；不读取项目模型配置。
-已有 Work 的 `start`、`restart`、`retry`、`recover`、`reset` 重新校验原租约的当前 Resource
-授权和容量绑定。原租约有效时直接操作；失效、撤销或释放后明确拒绝，不能靠旧的 Environment
-快照恢复运行。首次申请之外不强制重新人工审批；是否需要新申请取决于 Resource 当前授权。
-HTTP 与 JetStream 生命周期入口对 Work Restart 使用同一当前租约验证；过期或撤销的授权不进入命令事务，重复事件沿原 Inbox/幂等账本处理，不产生第二个操作。
-租约尚未激活、非 Active、Active 但 Resource 返回 `authorization:null`，以及结构合法但未到激活时间/已经过期的授权快照，均是业务拒绝：HTTP `409/LW_RUNTIME_LEASE_NOT_ACTIVE`，不是上游协议损坏。Resource 会对已过期但数据库状态仍为 Active 的租约返回 Active + null，调用方不得将其误报为 503。JetStream 入口沿用同一业务诊断拒绝，不写命令事务。
+`POST /api/v1/environments` 必须携带真实 Resource 申请的 `resourceRequestId`；Work 与 Experiment
+都通过原申请、审批、资金租约及自动交接创建。公开创建只附着原创建操作，不打开独立 reservation。
+手工 Work 不读取项目模型配置。
 
-只有反序列化失败、错误版本、授权身份/范围不匹配或授权结构非法等协议错误才返回 `503/LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID`，NATS 隔离记录也保留此诊断。上述映射覆盖所有 Work verifier 调用方：启动、重启、重试、恢复、重置、模板升级、Resource handoff 和租约刷新。
+已有实例的 `start`、`restart`、`retry`、`recover`、`reset` 在 HTTP 受理前重新读取原运行授权及资金覆盖；
+owner 与执行器在新计算效果前再次核对。只持有旧 Environment 快照或容量租约不能授权新计算；
+缺少运行授权客户端时返回 `503/LW_RUNTIME_AUTHORITY_UNAVAILABLE`，不退回仅容量校验。
+重复命令沿原 Inbox/幂等账本重放，不产生第二个操作或 hold。
+
+内部 handoff、租约刷新及 JetStream 的容量 lease verifier 仍区分业务失效与协议损坏：
+未激活、非 Active、Active + `authorization:null` 或当前有效窗之外是 `409/LW_RUNTIME_LEASE_NOT_ACTIVE`；
+反序列化失败、错误版本、授权身份/范围或结构非法是 `503/LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID`。
+这些结果不替代完整运行授权，JetStream 受理的旧容量 intent 仍须通过执行前 fresh 检查。
 费用估算复用已生成的 `estimateProjectResourceCost`，输入 `resources`、`computeFrom/computeUntil` 与 `storageFrom/storageUntil`，返回 `ResourceCostEstimate` 的固定费率明细和 `total`；不由 Environment 或浏览器另建计价逻辑。该接口不依赖模型，也不授予容量或资金权限，见[计算与存储估价](project-credits.md#计算与存储估价)。
 
 
@@ -49,23 +53,22 @@ HTTP 与 JetStream 生命周期入口对 Work Restart 使用同一当前租约�
 
 `POST /api/v1/environments/{environmentId}/template-upgrade`（SDK `upgradeEnvironmentTemplate`）
 要求 `Idempotency-Key`、当前 `If-Match` 和 `{targetReleaseId,targetReleaseVersion,confirmed:true}`。
-仅容器 Work 可接受同项目、同课程、同模板族且版本更高的 release；资源、网络、安全策略、
-provider、端口和入口必须与原批准配置一致，否则以
-`LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL` 拒绝。VM 总是以 HTTP 422
-`LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM` 拒绝，并返回中文 `ProblemDetails.detail`；不隐式重建。
+服务端先进行原有兼容性预检。跨项目/课程/模板族、非新版本或模板撤回仍由对应错误拒绝；
+资源、网络、安全、provider、端口和入口变化仍以 `LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL` 拒绝。
+VM 总是返回 HTTP 422 `LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM` 和中文原因，不隐式重建。
 
-服务端先验证兼容性，再校验当前 Resource 租约和撤销旧连接。接受事务只改变期望 release，
-复用原 Restart、Reconciler、代次、Outbox 与操作查询，不新建资源申请或第二套升级状态机。
-升级沿用 `environment_restarted` 撤销原因，不引入对端不支持的新 reason。必须收到 Access 对同一实例/版本的确认后才进入升级事务；撤销未确认时返回明确失败，原 release、操作和 PVC 绑定不变。
-`getEnvironmentOperation` 和历史列表中的 `templateUpgrade` 保存源/目标 release 及
-`dataPolicy: preserve_workspace`；状态与错误直接来自同一 operation。`releaseId/releaseVersion`
-此时是已确认的期望目标，不能独立于 `state` 当作升级完成。Deployment 的新副本、就绪副本和
-总副本都收敛后才完成；旧 Pod 仍可用不能令升级成功。
+当前采用 C 阶段规则：绑定了原 lease 的 Work（目前所有合法 Work）即使完全兼容，也返回 HTTP 409
+`LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE`。拒绝发生在原 lease 验证、Access 撤权和 store 接受事务之前；
+不改 `releaseId/releaseVersion`、运行实例或工作目录，不新增 operation/Outbox，不调用 Provider。
+同 key 或新 key 重试仍拒绝，不以受理一个后台必然失败的 Restart 代替同步拒绝。
 
-Namespace、`workspace` PVC、Resource 申请、租约、批准资源及原数据保留期限不变；仅
-`/workspace` 持久数据保留。容器临时 rootfs 与进程会随重启丢失。失败/超时进入 Failed 并
-保留数据，不进入删除 namespace 的超时清理；取消升级走停止实例而不是删除 PVC。
-用户重试或恢复继续同一个目标 release；不做未经确认的镜像回滚。
+替代做法是按新模板新建 Work，自行备份和迁移所需数据；检查完成后再释放旧 Work。
+这不是自动转移原 lease 或磁盘，新 Work 仍走自己的正式准入与计费。
+
+兼容升级复用原 lease 的恢复工作见 [#288](https://github.com/TeamMonad/LabWeaver/issues/288)（A'）。
+现有 store 接受实现、历史 `templateUpgrade` 操作 DTO 和 timeout/cancel 的保盘语义保留，
+但不作为当前公开入口支持升级的承诺。绕过入口写入升级 intent 仍会被 fresh 的精确配置 binding 拒绝，
+旧 release 的运行授权不能驱动新 release。
 
 ## 状态、访问和回收
 

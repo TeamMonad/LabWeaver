@@ -30,6 +30,8 @@ use testcontainers::{GenericImage, runners::AsyncRunner};
 use tower::ServiceExt;
 #[path = "environment_funded_auth.rs"]
 mod service_auth;
+#[path = "environment_funded_upgrade.rs"]
+mod upgrade_guards;
 #[path = "environment_funded_vm.rs"]
 mod vm_boundary;
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
@@ -190,6 +192,14 @@ pub(super) async fn exercise(
     ))
     .await?;
     let mut subscription = nats.subscribe("funded-lease-verify").await?;
+    let mut access_requests = nats.subscribe("unused-access-revoke").await?;
+    let revocations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_revocations = Arc::clone(&revocations);
+    let access_probe = tokio::spawn(async move {
+        while access_requests.next().await.is_some() {
+            observed_revocations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
     nats.flush().await?;
     let responder = nats.clone();
     let authority = resource.clone();
@@ -473,12 +483,14 @@ pub(super) async fn exercise(
         router: api,
         access_token: authority.access_token.clone(),
         usage_identity: authority.usage_identity.clone(),
+        revocations,
     };
     Box::pin(exercise_execution(
         pool, resource, &store, &admission, &instance, &grant, &http,
     ))
     .await?;
     replies.abort();
+    access_probe.abort();
     Ok(())
 }
 
@@ -735,6 +747,7 @@ struct LifecycleHttp {
     router: Router,
     access_token: String,
     usage_identity: auth::ServiceIdentity,
+    revocations: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl LifecycleHttp {
@@ -1096,6 +1109,14 @@ async fn exercise_execution(
         initial.hold.id
     );
     if container {
+        let restarted = if instance.class == contracts::authoring::EnvironmentClass::Work {
+            Box::pin(upgrade_guards::exercise(
+                pool, store, admission, &worker, &restarted, http, &calls,
+            ))
+            .await?
+        } else {
+            restarted
+        };
         lifecycle_command(store, &restarted, Kind::Delete, None).await?;
         assert!(matches!(
             run_due(&worker, store, "native-known-funded-delete").await?,
