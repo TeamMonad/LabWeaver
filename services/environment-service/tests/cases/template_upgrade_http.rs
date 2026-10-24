@@ -691,6 +691,82 @@ async fn authenticated_http_upgrade_requires_restart_revocation_ack_and_preserve
     Ok(())
 }
 
+#[tokio::test]
+async fn authenticated_http_restart_rejects_expired_and_revoked_leases_after_revocation_ack()
+-> TestResult {
+    const COUNTS: &str = "SELECT (SELECT count(*) FROM environment.environment_instances), \
+        (SELECT count(*) FROM environment.environment_operations), \
+        (SELECT count(*) FROM environment.outbox_events)";
+    let harness = Harness::start().await?;
+    harness.peers.acknowledge.store(true, Ordering::SeqCst);
+    let before: (i64, i64, i64) = sqlx::query_as(COUNTS).fetch_one(&harness.pool).await?;
+    let installed = harness.backend.installed.lock().await.clone();
+    let client = reqwest::Client::builder().no_proxy().build()?;
+
+    for (index, (label, mode)) in [("expired-active", 1), ("revoked", 2)]
+        .into_iter()
+        .enumerate()
+    {
+        harness.peers.lease_mode.store(mode, Ordering::SeqCst);
+        let response = client
+            .post(format!(
+                "{}/api/v1/environments/{}/restart",
+                harness.base, harness.ready.id
+            ))
+            .bearer_auth(&harness.token)
+            .header("x-labweaver-actor-id", harness.ready.owner_id.to_string())
+            .header("x-labweaver-session-id", uuid::Uuid::now_v7().to_string())
+            .header(
+                "If-Match",
+                StrongEtag::from_revision(harness.ready.revision).header_value(),
+            )
+            .header("Idempotency-Key", format!("http-restart-lease-{label}"))
+            .send()
+            .await?;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "{label}"
+        );
+        let problem: serde_json::Value = response.json().await?;
+        assert_eq!(
+            problem["diagnosticCode"], "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+            "{label}: {problem}"
+        );
+        assert_eq!(
+            harness.peers.revocations.load(Ordering::SeqCst),
+            index + 1,
+            "{label}: production revocation must receive its valid ack before the lease denial"
+        );
+        assert_eq!(
+            harness.peers.lease_queries.load(Ordering::SeqCst),
+            index + 1,
+            "{label}: the signed HTTP request must reach lease verification"
+        );
+        assert_eq!(
+            harness.store.load(harness.ready.id).await?,
+            harness.ready,
+            "{label}"
+        );
+        let after: (i64, i64, i64) = sqlx::query_as(COUNTS).fetch_one(&harness.pool).await?;
+        assert_eq!(
+            after, before,
+            "{label}: instance, operation and Outbox counts must not change"
+        );
+        assert_eq!(
+            harness.backend.restart_count.load(Ordering::SeqCst),
+            0,
+            "{label}"
+        );
+        assert_eq!(
+            *harness.backend.installed.lock().await,
+            installed,
+            "{label}"
+        );
+    }
+    Ok(())
+}
+
 fn restart_message(
     instance: &EnvironmentInstance,
     now: UtcTimestamp,
