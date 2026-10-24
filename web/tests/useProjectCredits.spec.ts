@@ -339,6 +339,36 @@ describe('useProjectCredits', () => {
     }
   })
 
+  it('keeps a newer memory-only operation and its key next to an older stored one, also when the older one answers late', async () => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementation(lostResponse)
+    const { credits } = setup()
+    await flushPromises()
+    expect(await credits.submitAdminOperation(grant)).toBe('failed')
+    const quota = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })
+    try {
+      const changed = { ...grant, amount: '3.000000' }
+      expect(await credits.submitAdminOperation(changed)).toBe('failed')
+      expect(await credits.submitAdminOperation(changed)).toBe('failed')
+      expect(keyOf(2)).toBe(keyOf(1))
+      expect(credits.pendingOperations.value.map(({ input, persisted }) => [input.amount, persisted])).toEqual(
+        expect.arrayContaining([['10.000000', true], ['3.000000', false]]),
+      )
+
+      // The older operation answers late (accepted on replay): only its own record goes.
+      vi.mocked(createCreditAdminOperation).mockImplementationOnce(accepted)
+      expect(await credits.submitAdminOperation(grant)).toBe('accepted')
+      expect(keyOf(3)).toBe(keyOf(0))
+      expect(credits.pendingOperations.value).toEqual([
+        expect.objectContaining({ persisted: false, input: expect.objectContaining({ amount: '3.000000' }) }),
+      ])
+      expect(await credits.submitAdminOperation(changed)).toBe('failed')
+      expect(keyOf(4)).toBe(keyOf(1))
+    } finally {
+      quota.mockRestore()
+    }
+  })
+
   it('keeps the submit lock until the refreshed account is shown', async () => {
     mockReads()
     vi.mocked(createCreditAdminOperation).mockImplementation(accepted)

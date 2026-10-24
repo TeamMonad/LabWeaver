@@ -79,9 +79,13 @@ function removeStored(keys: string[]) {
   }
 }
 
+/**
+ * A memory copy only exists after a later write was refused, so it is always
+ * newer than a stored entry under the same key and wins.
+ */
 export function readPendingCommand<T>(actorId: string, scope: string): PendingCommand<T> | null {
   const key = entryKey(actorId, scope)
-  return readStored<T>(key) ?? (unpersisted.get(key) as PendingCommand<T> | undefined) ?? null
+  return (unpersisted.get(key) as PendingCommand<T> | undefined) ?? readStored<T>(key)
 }
 
 /** Returns false when the command could not be persisted and is held in page memory only. */
@@ -97,6 +101,15 @@ export function writePendingCommand<T>(actorId: string, scope: string, command: 
   } catch {
     // Storage unavailable or full: keep the key in memory below.
   }
+  const stored = readStored(key)
+  // The same command is already stored from an earlier attempt: a refresh still replays its key.
+  if (stored?.idempotencyKey === command.idempotencyKey) {
+    unpersisted.delete(key)
+    return true
+  }
+  // An older command stored under this key was replaced by this one: drop it so
+  // a refresh does not offer it again. Best effort; the memory copy wins on read.
+  if (stored) removeStored([key])
   unpersisted.set(key, command)
   return false
 }
@@ -121,16 +134,16 @@ export function listPendingCommands<T>(actorId: string, scopePrefix: string): Ar
   const actorPrefix = entryKey(actorId, '')
   const prefix = entryKey(actorId, scopePrefix)
   const entries: Array<ListedPendingCommand<T>> = []
-  const seen = new Set<string>()
-  for (const key of storedKeys(prefix)) {
-    const command = readStored<T>(key)
-    if (!command) continue
-    seen.add(key)
-    entries.push({ scope: key.slice(actorPrefix.length), command, persisted: true })
-  }
+  const memoryKeys = new Set<string>()
   for (const [key, command] of unpersisted) {
-    if (!key.startsWith(prefix) || seen.has(key)) continue
+    if (!key.startsWith(prefix)) continue
+    memoryKeys.add(key)
     entries.push({ scope: key.slice(actorPrefix.length), command: command as PendingCommand<T>, persisted: false })
+  }
+  for (const key of storedKeys(prefix)) {
+    if (memoryKeys.has(key)) continue
+    const command = readStored<T>(key)
+    if (command) entries.push({ scope: key.slice(actorPrefix.length), command, persisted: true })
   }
   return entries.sort((left, right) => left.scope.localeCompare(right.scope))
 }
