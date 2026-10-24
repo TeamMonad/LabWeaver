@@ -600,9 +600,9 @@ class DeploymentBundleTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertNotEqual(result.returncode, 0, sample["name"])
-                self.assertTrue(
-                    "values don't meet the specifications of the schema" in result.stderr
-                    or "platformConfigurationPolicy" in result.stderr,
+                self.assertIn(
+                    "values don't meet the specifications of the schema",
+                    result.stderr,
                     sample["name"] + ": " + result.stderr,
                 )
         self.clean_runtime()
