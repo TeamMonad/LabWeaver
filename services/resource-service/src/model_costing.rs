@@ -256,6 +256,7 @@ impl PgResourceStore {
             &hold,
         )
         .await?;
+        tx.commit().await?;
         Ok(hold)
     }
 }

@@ -3308,6 +3308,7 @@ impl PgResourceStore {
             return Err(ResourceStoreError::InvalidNamespace);
         }
         validate_trace(trace_id)?;
+        self.expire_task_resource(task_run_id).await?;
         let mut transaction = self.pool.begin().await?;
         crate::costing::rate_lock(&mut transaction).await?;
         let row = sqlx::query(
@@ -3401,7 +3402,18 @@ impl PgResourceStore {
             return Err(ResourceStoreError::ApprovalInvalid);
         }
         if approval_valid_until <= now.get() {
-            return Err(ResourceStoreError::ApprovalInvalid);
+            release_task_locked(
+                &mut transaction,
+                &request,
+                &claim,
+                &lease,
+                current_namespace,
+                trace_id,
+                Some("LW_RESOURCE_APPROVAL_EXPIRED"),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
         }
         let duration = approved_duration_seconds;
         let expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(duration))

@@ -1231,19 +1231,19 @@ async fn live_claude_code_returns_bounded_advisory_goal_review() -> Result<(), B
 }
 
 fn live_provider_environment() -> Result<(String, BTreeMap<String, String>), Box<dyn Error>> {
-    const KEYS: [&str; 3] = [
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_MODEL",
-    ];
-    let environment = KEYS
-        .into_iter()
-        .map(|key| Ok((key.to_owned(), std::env::var(key)?)))
-        .collect::<Result<BTreeMap<_, _>, Box<dyn Error>>>()?;
-    let model = environment
-        .get("ANTHROPIC_MODEL")
-        .cloned()
-        .ok_or("ANTHROPIC_MODEL was not provided")?;
+    // These explicit probe inputs must come from an active Agent run capability, never a provider key.
+    let model = std::env::var("ANTHROPIC_MODEL")?;
+    let environment = BTreeMap::from([
+        ("ANTHROPIC_MODEL".to_owned(), model.clone()),
+        (
+            "ANTHROPIC_BASE_URL".to_owned(),
+            std::env::var("LABWEAVER_MODEL_GATEWAY_URL")?,
+        ),
+        (
+            "ANTHROPIC_API_KEY".to_owned(),
+            std::env::var("LABWEAVER_MODEL_GATEWAY_TOKEN")?,
+        ),
+    ]);
     Ok((model, environment))
 }
 

@@ -671,6 +671,14 @@ class DeploymentBundleTests(unittest.TestCase):
             self.assertEqual(
                 builder["securityContext"]["capabilities"], {"drop": ["ALL"]}
             )
+            agent = deployments["agent-service"]["spec"]["template"]["spec"]["containers"][0]
+            self.assertIn({"name": "model-gateway", "containerPort": 9460, "protocol": "TCP"}, agent["ports"])
+            objects = list(yaml.safe_load_all(result.stdout))
+            service = next(item for item in objects if item and item.get("kind") == "Service" and item["metadata"]["name"] == "agent-service")
+            self.assertTrue(any(port["port"] == 9460 for port in service["spec"]["ports"]))
+            policy = next(item for item in objects if item and item.get("kind") == "NetworkPolicy" and item["metadata"]["name"] == "agent-service")
+            sandbox_rule = next(rule for rule in policy["spec"]["ingress"] if any(source.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name") == "labweaver-authoring" for source in rule["from"]))
+            self.assertEqual(sandbox_rule["ports"], [{"protocol": "TCP", "port": 9460}])
         self.clean_runtime()
 
     def key(self, path: Path | None = None) -> str:

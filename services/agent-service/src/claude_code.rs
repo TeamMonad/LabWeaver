@@ -1374,12 +1374,7 @@ pub struct ClaudeCodeRuntime {
     in_flight: Arc<Semaphore>,
     /// Container provider bindings the deployment actually registers.
     provider_bindings: Vec<String>,
-    model_gateway: Option<(
-        crate::model_gateway::ModelGatewayRuntime,
-        ProjectId,
-        uuid::Uuid,
-        u32,
-    )>,
+    process_environment: BTreeMap<String, String>,
 }
 
 /// Validated advisory review returned by one Claude Code invocation.
@@ -1453,20 +1448,14 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
-            model_gateway: None,
+            process_environment: BTreeMap::new(),
         })
     }
 
-    /// Installs the shared gateway and the advisory run identity used for signed capabilities.
+    /// Supplies deployment-owned process protocol environment; callers own capability issuance.
     #[must_use]
-    pub fn with_model_gateway(
-        mut self,
-        gateway: crate::model_gateway::ModelGatewayRuntime,
-        project_id: ProjectId,
-        run_id: uuid::Uuid,
-        attempt: u32,
-    ) -> Self {
-        self.model_gateway = Some((gateway, project_id, run_id, attempt));
+    pub fn with_process_environment(mut self, environment: BTreeMap<String, String>) -> Self {
+        self.process_environment = environment;
         self
     }
 
@@ -1503,7 +1492,7 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
-            model_gateway: None,
+            process_environment: BTreeMap::new(),
         })
     }
 
@@ -1776,20 +1765,7 @@ impl ClaudeCodeRuntime {
                     &current_prompt,
                     authoring,
                 );
-                if let Some((gateway, advisory_project, advisory_run, advisory_attempt)) =
-                    &self.model_gateway
-                {
-                    let (project_id, run_id, attempt) = match &invocation_scope {
-                        ExecutionScope::Authoring(scope) => {
-                            (scope.project_id, scope.run_id.as_uuid(), scope.attempt)
-                        }
-                        ExecutionScope::Advisory => {
-                            (*advisory_project, *advisory_run, *advisory_attempt)
-                        }
-                    };
-                    command =
-                        command.with_environment(gateway.environment(project_id, run_id, attempt));
-                }
+                command = command.with_environment(self.process_environment.clone());
                 command.deadline = tokio::time::Instant::now() + remaining_time();
                 self.process
                     .execute(&invocation_scope, command, cancellation.clone())
@@ -2051,7 +2027,8 @@ impl ClaudeCodeRuntime {
                 input_sha256,
                 &prompt,
                 false,
-            );
+            )
+            .with_environment(self.process_environment.clone());
             let process_output = self
                 .process
                 .execute(&ExecutionScope::Advisory, command, cancellation.clone())

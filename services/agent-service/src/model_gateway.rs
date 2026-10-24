@@ -1,6 +1,7 @@
+//! Agent-owned Anthropic transport: scoped capability, durable call fence, Resource accounting.
 use axum::{
     Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::State,
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -29,30 +30,30 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use task_execution::resource::ResourceClient;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::mpsc};
 use uuid::Uuid;
 
-const TOKEN_VERSION: &str = "lw1";
-
-/// A signed, short-lived capability for one model run attempt.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ScopedTokenIssuer {
     key: Arc<[u8]>,
     ttl: Duration,
 }
-
-#[derive(Debug, Deserialize, Serialize)]
+impl std::fmt::Debug for ScopedTokenIssuer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopedTokenIssuer")
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Deserialize, Serialize)]
 struct TokenClaims {
-    v: String,
-    project_id: String,
+    project_id: ProjectId,
     agent_run_id: Uuid,
     attempt: u32,
     expires_at: u64,
 }
-
 impl ScopedTokenIssuer {
-    /// Creates a signer. HMAC is used rather than local registration so every Agent replica can
-    /// validate a capability without shared process state or a new database table.
+    /// HMAC permits verification by every replica; live run/attempt authority is checked in PG.
     pub fn new(key: impl Into<Vec<u8>>, ttl: Duration) -> Option<Self> {
         let key = key.into();
         if key.len() < 32 || ttl.is_zero() {
@@ -63,8 +64,6 @@ impl ScopedTokenIssuer {
             ttl,
         })
     }
-
-    /// Issues a capability scoped to exactly one project, run and attempt.
     #[must_use]
     pub fn issue(&self, project_id: ProjectId, agent_run_id: Uuid, attempt: u32) -> String {
         let expires_at = SystemTime::now()
@@ -73,66 +72,53 @@ impl ScopedTokenIssuer {
             .as_secs()
             .saturating_add(self.ttl.as_secs());
         let claims = TokenClaims {
-            v: TOKEN_VERSION.to_owned(),
-            project_id: project_id.to_string(),
+            project_id,
             agent_run_id,
             attempt,
             expires_at,
         };
-        let payload = serde_json::to_vec(&claims).unwrap_or_default();
-        let encoded = URL_SAFE_NO_PAD.encode(payload);
-        let signature = hmac_sha256(&self.key, encoded.as_bytes());
-        format!("{encoded}.{}", URL_SAFE_NO_PAD.encode(signature))
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap_or_default());
+        let signature = hmac_sha256(&self.key, payload.as_bytes());
+        format!("{payload}.{}", URL_SAFE_NO_PAD.encode(signature))
     }
-
-    fn validate(&self, token: &str) -> Result<TokenClaims, TokenValidationError> {
-        let (encoded, signature) = token
+    fn validate(&self, token: &str) -> Result<TokenClaims, &'static str> {
+        let (payload, signature) = token
             .split_once('.')
-            .ok_or(TokenValidationError::Malformed)?;
+            .ok_or("LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
         let supplied = URL_SAFE_NO_PAD
             .decode(signature)
-            .map_err(|_| TokenValidationError::Malformed)?;
-        let expected = hmac_sha256(&self.key, encoded.as_bytes());
-        if !constant_time_eq(&supplied, &expected) {
-            return Err(TokenValidationError::Signature);
+            .map_err(|_| "LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
+        let expected = hmac_sha256(&self.key, payload.as_bytes());
+        if supplied.len() != expected.len()
+            || supplied
+                .iter()
+                .zip(expected)
+                .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+                != 0
+        {
+            return Err("LW_MODEL_GATEWAY_TOKEN_SCOPE");
         }
-        let claims: TokenClaims = serde_json::from_slice(
-            &URL_SAFE_NO_PAD
-                .decode(encoded)
-                .map_err(|_| TokenValidationError::Malformed)?,
-        )
-        .map_err(|_| TokenValidationError::Malformed)?;
-        if claims.v != TOKEN_VERSION {
-            return Err(TokenValidationError::Malformed);
-        }
-        let now = SystemTime::now()
+        let bytes = URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| "LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
+        let claims: TokenClaims =
+            serde_json::from_slice(&bytes).map_err(|_| "LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
+        if SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
-        if now >= claims.expires_at {
-            return Err(TokenValidationError::Expired);
-        }
-        if claims.project_id.parse::<ProjectId>().is_err() {
-            return Err(TokenValidationError::Malformed);
+            .as_secs()
+            >= claims.expires_at
+        {
+            return Err("LW_MODEL_GATEWAY_TOKEN_EXPIRED");
         }
         Ok(claims)
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TokenValidationError {
-    Malformed,
-    Signature,
-    Expired,
-}
-
-/// Runtime values shared by both Agent model execution paths.
 #[derive(Clone, Debug)]
 pub struct ModelGatewayRuntime {
     pub base_url: Url,
     pub issuer: ScopedTokenIssuer,
 }
-
 impl ModelGatewayRuntime {
     #[must_use]
     pub fn environment(
@@ -141,136 +127,94 @@ impl ModelGatewayRuntime {
         agent_run_id: Uuid,
         attempt: u32,
     ) -> BTreeMap<String, String> {
-        let mut environment = BTreeMap::new();
-        environment.insert("ANTHROPIC_BASE_URL".to_owned(), self.base_url.to_string());
-        environment.insert(
-            "ANTHROPIC_API_KEY".to_owned(),
-            self.issuer.issue(project_id, agent_run_id, attempt),
-        );
-        environment
+        BTreeMap::from([
+            ("ANTHROPIC_BASE_URL".into(), self.base_url.to_string()),
+            (
+                "ANTHROPIC_API_KEY".into(),
+                self.issuer.issue(project_id, agent_run_id, attempt),
+            ),
+        ])
     }
 }
-
 #[derive(Clone)]
 pub struct GatewayState {
     pub upstream: Url,
     pub upstream_key: String,
-    /// Legacy single-capability fields remain private compatibility for unit callers. Production
-    /// always supplies `issuer` and never accepts a provider token from a worker.
-    pub token: String,
-    pub expires_at: SystemTime,
-    pub project_id: ProjectId,
-    pub agent_run_id: Uuid,
-    pub attempt: u32,
+    pub issuer: ScopedTokenIssuer,
+    pub pool: sqlx::PgPool,
     pub resource: ResourceClient,
     pub sequence: Arc<AtomicU64>,
     pub http: reqwest::Client,
-    pub issuer: Option<ScopedTokenIssuer>,
 }
-
 impl GatewayState {
     pub fn router(self) -> Router {
         Router::new()
             .route("/v1/messages", post(messages))
             .with_state(Arc::new(self))
     }
+    async fn active(&self, claims: &TokenClaims) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent.llm_review_runs WHERE task_run_id=$1 AND project_id=$2 AND attempt=$3 AND state='running' AND lease_expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM agent.agent_runs r JOIN agent.agent_track_work_items t USING(run_id) WHERE r.run_id=$1 AND r.project_id=$2 AND r.state='running' AND r.cancellation_requested_at IS NULL AND t.attempt_number=$3 AND t.state='running' AND t.lease_expires_at>clock_timestamp())")
+            .bind(claims.agent_run_id).bind(claims.project_id.as_uuid()).bind(i64::from(claims.attempt)).fetch_one(&self.pool).await
+    }
 }
-
 pub async fn serve(state: GatewayState, listener: TcpListener) -> Result<(), std::io::Error> {
     axum::serve(listener, state.router()).await
 }
-
 fn error_response(status: StatusCode, code: &'static str, message: &str) -> Response {
-    let body = json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code});
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        axum::Json(body),
-    )
-        .into_response()
+    (status,axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code}))).into_response()
 }
-
-fn deterministic_uuid(parts: &[&[u8]]) -> Uuid {
+fn identity(parts: &[&[u8]]) -> Uuid {
     let mut hash = Sha256::new();
     for part in parts {
         hash.update(part);
         hash.update([0]);
     }
-    let bytes: [u8; 16] = hash.finalize()[..16].try_into().unwrap_or([0; 16]);
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hash.finalize()[..16]);
+    // EventId wire decoding requires UUIDv7. The payload is deterministic, never a random fallback.
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
 }
-fn deterministic_event_id(parts: &[&[u8]]) -> contracts::EventId {
-    let uuid = deterministic_uuid(parts);
-    contracts::EventId::from_str(&uuid.to_string()).unwrap_or_else(|_| contracts::EventId::new())
-}
-
 #[allow(
+    clippy::too_many_lines,
     clippy::manual_let_else,
-    clippy::single_match_else,
-    clippy::too_many_lines
+    reason = "admission failures return one sanitized provider error"
 )]
 async fn messages(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(auth) = headers
+    let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-    else {
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+        });
+    let Some(token) = token else {
         return error_response(
             StatusCode::UNAUTHORIZED,
             "LW_MODEL_GATEWAY_TOKEN_MISSING",
             "gateway token required",
         );
     };
-    let token = auth.strip_prefix("Bearer ").unwrap_or_default();
-    let (project_id, agent_run_id, attempt) = if let Some(issuer) = &state.issuer {
-        let claims = match issuer.validate(token) {
-            Ok(claims) => claims,
-            Err(TokenValidationError::Expired) => {
-                return error_response(
-                    StatusCode::UNAUTHORIZED,
-                    "LW_MODEL_GATEWAY_TOKEN_EXPIRED",
-                    "gateway token expired",
-                );
-            }
-            Err(_) => {
-                return error_response(
-                    StatusCode::FORBIDDEN,
-                    "LW_MODEL_GATEWAY_TOKEN_SCOPE",
-                    "gateway token scope denied",
-                );
-            }
-        };
-        let project_id = match claims.project_id.parse::<ProjectId>() {
-            Ok(value) => value,
-            Err(_) => {
-                return error_response(
-                    StatusCode::FORBIDDEN,
-                    "LW_MODEL_GATEWAY_TOKEN_SCOPE",
-                    "gateway token scope denied",
-                );
-            }
-        };
-        (project_id, claims.agent_run_id, claims.attempt)
-    } else {
-        if token != state.token {
-            return error_response(
-                StatusCode::FORBIDDEN,
-                "LW_MODEL_GATEWAY_TOKEN_SCOPE",
-                "gateway token scope denied",
-            );
+    let claims = match state.issuer.validate(token) {
+        Ok(value) => value,
+        Err(code) => {
+            return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
         }
-        if SystemTime::now() > state.expires_at {
-            return error_response(
-                StatusCode::UNAUTHORIZED,
-                "LW_MODEL_GATEWAY_TOKEN_EXPIRED",
-                "gateway token expired",
-            );
-        }
-        (state.project_id, state.agent_run_id, state.attempt)
     };
+    if !matches!(state.active(&claims).await, Ok(true)) {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "LW_MODEL_GATEWAY_TOKEN_SCOPE",
+            "run attempt is no longer active",
+        );
+    }
     let input: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(_) => {
@@ -281,226 +225,206 @@ async fn messages(
             );
         }
     };
-    let model = input
+    let Some(model) = input
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    if model.is_empty() {
+        .filter(|value| !value.is_empty())
+    else {
         return error_response(
             StatusCode::BAD_REQUEST,
             "LW_MODEL_GATEWAY_MODEL_MISSING",
-            "model is required",
+            "model required",
         );
-    }
-    let call_id = headers
+    };
+    let model = model.to_owned();
+    let supplied = headers
         .get("x-labweaver-call-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .unwrap_or_else(|| {
-            let sequence = state
-                .sequence
-                .fetch_add(1, Ordering::AcqRel)
-                .saturating_add(1);
-            deterministic_uuid(&[
-                agent_run_id.as_bytes(),
-                &attempt.to_be_bytes(),
-                &sequence.to_be_bytes(),
-            ])
-        });
+        .or_else(|| headers.get("idempotency-key"))
+        .and_then(|value| value.to_str().ok());
+    let sequence = state.sequence.fetch_add(1, Ordering::AcqRel).to_be_bytes();
+    let invocation = Uuid::now_v7();
+    let call_id = identity(&[
+        claims.project_id.as_uuid().as_bytes(),
+        claims.agent_run_id.as_bytes(),
+        &claims.attempt.to_be_bytes(),
+        supplied.map_or(sequence.as_slice(), str::as_bytes),
+        if supplied.is_some() {
+            b"retry"
+        } else {
+            invocation.as_bytes()
+        },
+    ]);
     let admission = match state
         .resource
         .admit_model_cost(
             &call_id.to_string(),
             &ModelCostAdmissionRequest {
                 call_id,
-                project_id,
+                project_id: claims.project_id,
                 model_binding: model.clone(),
             },
         )
         .await
     {
         Ok(value) => value,
-        Err(
-            task_execution::resource::ResourceClientError::Denied
-            | task_execution::resource::ResourceClientError::Rejected,
-        ) => {
+        Err(_) => {
             return error_response(
                 StatusCode::PAYMENT_REQUIRED,
-                "LW_CREDITS_INSUFFICIENT",
-                "model Credits admission rejected",
-            );
-        }
-        Err(_) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LW_MODEL_ADMISSION_UNAVAILABLE",
-                "model Credits admission unavailable",
+                "LW_MODEL_ADMISSION_REJECTED",
+                "model Credits admission rejected; no upstream request sent",
             );
         }
     };
-    let upstream_url = state
-        .upstream
-        .join("v1/messages")
-        .unwrap_or_else(|_| state.upstream.clone());
-    let mut request = state
-        .http
-        .post(upstream_url)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(
-            header::AUTHORIZATION,
-            format!("Bearer {}", state.upstream_key),
-        )
-        .body(body);
-    if let Some(value) = headers.get("anthropic-version") {
-        request = request.header("anthropic-version", value);
-    }
-    let upstream = match request.send().await {
-        Ok(value) => value,
-        Err(_) => {
-            let _ = settle_unknown(
-                &state,
-                admission.hold.id,
-                call_id,
-                &model,
-                "upstream request failed",
-            )
-            .await;
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "LW_MODEL_UPSTREAM_FAILED",
-                "model upstream failed",
-            );
-        }
-    };
-    let status = upstream.status();
-    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
-    if content_type
-        .as_ref()
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("text/event-stream"))
-    {
-        let stream = gateway_stream(
-            upstream.bytes_stream(),
-            state.clone(),
-            admission.hold.id,
-            call_id,
-            model.clone(),
-        );
-        let mut builder = Response::builder().status(status);
-        if let Some(value) = content_type {
-            builder = builder.header(header::CONTENT_TYPE, value);
-        }
-        return builder
-            .body(axum::body::Body::from_stream(stream))
-            .unwrap_or_else(|_| {
-                error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "LW_MODEL_GATEWAY_RESPONSE_INVALID",
-                    "invalid model response",
-                )
-            });
-    }
-    let bytes = match upstream.bytes().await {
-        Ok(value) => value,
-        Err(_) => {
-            let _ = settle_unknown(
-                &state,
-                admission.hold.id,
-                call_id,
-                &model,
-                "upstream response incomplete",
-            )
-            .await;
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "LW_MODEL_USAGE_UNKNOWN",
-                "model usage could not be reconciled",
-            );
-        }
-    };
-    let measurement = extract_usage(
-        &bytes,
-        content_type
-            .as_ref()
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default(),
-    )
-    .map_or_else(
-        || ModelUsageMeasurement::Unknown {
-            reason: "upstream response did not contain usage".into(),
+    // Unknown is persisted before the external side effect. A killed replica or dropped handler
+    // cannot leave an unbounded Pending hold: the existing one-hour reconciliation deadline applies.
+    if settle(
+        &state,
+        admission.hold.id,
+        call_id,
+        &model,
+        ModelUsageMeasurement::Unknown {
+            reason: "model invocation in progress or outcome uncertain".into(),
         },
-        |quantities| ModelUsageMeasurement::Known { quantities },
-    );
-    let _ = settle(&state, admission.hold.id, call_id, &model, measurement).await;
-    let mut builder = Response::builder().status(status);
-    if let Some(value) = content_type {
-        builder = builder.header(header::CONTENT_TYPE, value);
+        b"unknown",
+    )
+    .await
+    .is_err()
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LW_MODEL_SETTLEMENT_UNAVAILABLE",
+            "model hold could not be recorded",
+        );
     }
-    builder
-        .body(axum::body::Body::from(bytes))
-        .unwrap_or_else(|_| {
-            error_response(
-                StatusCode::BAD_GATEWAY,
-                "LW_MODEL_GATEWAY_RESPONSE_INVALID",
-                "invalid model response",
-            )
-        })
+    let request_hash = format!("{:x}", Sha256::digest(&body));
+    let fenced=sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state) VALUES('model_gateway_call',$1,$2,'in_progress') ON CONFLICT DO NOTHING")
+        .bind(call_id.to_string()).bind(&request_hash).execute(&state.pool).await;
+    match fenced {
+        Ok(result) if result.rows_affected() == 1 => {}
+        _ => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "LW_MODEL_CALL_OUTCOME_UNKNOWN",
+                "same call already accepted; query original hold instead of replaying upstream",
+            );
+        }
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    // The task owns the irreversible request and settlement, independently of the HTTP handler.
+    tokio::spawn(async move {
+        let response = forward(state, headers, body, model, admission.hold.id, call_id).await;
+        let _ = sender.send(response);
+    });
+    receiver.await.unwrap_or_else(|_| {
+        error_response(
+            StatusCode::BAD_GATEWAY,
+            "LW_MODEL_USAGE_UNKNOWN",
+            "model outcome unknown",
+        )
+    })
 }
-
-fn gateway_stream<S>(
-    stream: S,
+async fn forward(
     state: Arc<GatewayState>,
+    headers: HeaderMap,
+    body: Bytes,
+    model: String,
     hold_id: Uuid,
     call_id: Uuid,
-    model: String,
-) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>>
-where
-    S: futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
-{
-    futures_util::stream::unfold(
-        (stream, Vec::new(), state, hold_id, call_id, model),
-        |(mut stream, mut body, state, hold_id, call_id, model)| async move {
-            match stream.next().await {
-                Some(Ok(chunk)) => {
-                    body.extend_from_slice(&chunk);
-                    Some((Ok(chunk), (stream, body, state, hold_id, call_id, model)))
-                }
-                Some(Err(_)) => {
-                    let _ = settle_unknown(&state, hold_id, call_id, &model, "stream interrupted")
-                        .await;
-                    None
-                }
-                None => {
-                    let measurement = extract_usage(&body, "text/event-stream").map_or_else(
-                        || ModelUsageMeasurement::Unknown {
-                            reason: "stream ended without usage".into(),
-                        },
-                        |quantities| ModelUsageMeasurement::Known { quantities },
-                    );
-                    let _ = settle(&state, hold_id, call_id, &model, measurement).await;
-                    None
+) -> Response {
+    let Ok(url) = state.upstream.join("v1/messages") else {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "LW_MODEL_UPSTREAM_FAILED",
+            "invalid upstream route",
+        );
+    };
+    let mut request = state
+        .http
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .bearer_auth(&state.upstream_key)
+        .header("x-api-key", &state.upstream_key)
+        .body(body);
+    for name in ["anthropic-version", "anthropic-beta"] {
+        if let Some(value) = headers.get(name) {
+            request = request.header(name, value);
+        }
+    }
+    let Ok(upstream) = request.send().await else {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "LW_MODEL_UPSTREAM_FAILED",
+            "model upstream failed; hold pending reconciliation",
+        );
+    };
+    let status = upstream.status();
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_owned();
+    let (sender, receiver) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    let sse = content_type.contains("text/event-stream");
+    tokio::spawn(async move {
+        let mut stream = upstream.bytes_stream();
+        let mut observation = UsageObservation::new(sse);
+        loop {
+            tokio::select! {
+                biased;
+                ()=sender.closed()=>break,
+                chunk=stream.next()=>match chunk {
+                    Some(Ok(bytes))=>{observation.observe(&bytes);if sender.send(Ok(bytes)).await.is_err(){break;}}
+                    Some(Err(_))=>{let _=sender.send(Err(std::io::Error::other("upstream stream interrupted"))).await;break;}
+                    None=>break,
                 }
             }
-        },
+        }
+        if status.is_success()
+            && let Some(quantities) = observation.quantities()
+            && let Err(error) = settle(
+                &state,
+                hold_id,
+                call_id,
+                &model,
+                ModelUsageMeasurement::Known { quantities },
+                b"known",
+            )
+            .await
+        {
+            tracing::error!(event="agent.model.settlement_pending",error=%error,hold_id=%hold_id,"model usage settlement failed; original Unknown deadline remains authoritative");
+        }
+        // No terminal usage or error => leave the durably recorded Unknown, never zero.
+    });
+    let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|value| (value, receiver))
+    });
+    (
+        status,
+        [(header::CONTENT_TYPE, content_type)],
+        Body::from_stream(stream),
     )
+        .into_response()
 }
-
 async fn settle(
     state: &GatewayState,
     hold_id: Uuid,
     call_id: Uuid,
     model: &str,
     measurement: ModelUsageMeasurement,
+    phase: &[u8],
 ) -> Result<(), task_execution::resource::ResourceClientError> {
+    let event_id =
+        contracts::EventId::from_str(&identity(&[call_id.as_bytes(), phase]).to_string())
+            .map_err(|_| task_execution::resource::ResourceClientError::RequestInvalid)?;
     state
         .resource
         .settle_model_cost(
             hold_id,
             &ModelCostSettlementRequest {
                 hold_id,
-                event_id: deterministic_event_id(&[call_id.as_bytes(), b"settle"]),
                 call_id,
+                event_id,
                 model_binding: model.to_owned(),
                 measurement,
             },
@@ -508,165 +432,97 @@ async fn settle(
         .await
         .map(|_| ())
 }
-async fn settle_unknown(
-    state: &GatewayState,
-    hold_id: Uuid,
-    call_id: Uuid,
-    model: &str,
-    reason: &str,
-) -> Result<(), task_execution::resource::ResourceClientError> {
-    settle(
-        state,
-        hold_id,
-        call_id,
-        model,
-        ModelUsageMeasurement::Unknown {
-            reason: reason.to_owned(),
-        },
-    )
-    .await
+#[derive(Default)]
+struct UsageObservation {
+    sse: bool,
+    bytes: Vec<u8>,
+    usage: ModelTokenQuantities,
+    seen: bool,
+    invalid: bool,
 }
-
-fn extract_usage(body: &[u8], content_type: &str) -> Option<ModelTokenQuantities> {
-    if content_type.contains("text/event-stream") {
-        return extract_sse_usage(body);
-    }
-    let value: Value = serde_json::from_slice(body).ok()?;
-    Some(usage_value(value.get("usage")?))
-}
-fn extract_sse_usage(body: &[u8]) -> Option<ModelTokenQuantities> {
-    let mut result = ModelTokenQuantities::default();
-    let mut seen = false;
-    for line in String::from_utf8_lossy(body)
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-    {
-        let value: Value = serde_json::from_str(line).ok()?;
-        if let Some(usage) = value
-            .get("message")
-            .and_then(|message| message.get("usage"))
-            .or_else(|| value.get("usage"))
-        {
-            result = merge_usage(result, usage);
-            seen = true;
+impl UsageObservation {
+    fn new(sse: bool) -> Self {
+        Self {
+            sse,
+            ..Self::default()
         }
     }
-    seen.then_some(result)
+    fn observe(&mut self, bytes: &[u8]) {
+        if self.invalid {
+            return;
+        }
+        self.bytes.extend_from_slice(bytes);
+        if self.bytes.len() > 1024 * 1024 {
+            self.invalid = true;
+            self.bytes.clear();
+            return;
+        }
+        if self.sse {
+            while let Some(end) = self.bytes.iter().position(|byte| *byte == b'\n') {
+                let line = &self.bytes[..end];
+                if let Some(data) = line.strip_prefix(b"data:")
+                    && let Ok(value) = serde_json::from_slice::<Value>(data)
+                {
+                    self.merge(&value);
+                }
+                self.bytes.drain(..=end);
+            }
+        }
+    }
+    fn merge(&mut self, value: &Value) {
+        let usage = value.get("usage").or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        });
+        if let Some(usage) = usage {
+            for (field, quantity) in [
+                ("input_tokens", &mut self.usage.input_tokens),
+                ("output_tokens", &mut self.usage.output_tokens),
+                ("cache_read_input_tokens", &mut self.usage.cache_read_tokens),
+                (
+                    "cache_creation_input_tokens",
+                    &mut self.usage.cache_write_tokens,
+                ),
+            ] {
+                if let Some(value) = usage.get(field).and_then(Value::as_u64) {
+                    *quantity = value;
+                    self.seen = true;
+                }
+            }
+        }
+    }
+    fn quantities(mut self) -> Option<ModelTokenQuantities> {
+        if self.invalid {
+            return None;
+        }
+        if !self.sse
+            && let Ok(value) = serde_json::from_slice::<Value>(&self.bytes)
+        {
+            self.merge(&value);
+        }
+        self.seen.then_some(self.usage)
+    }
 }
-fn usage_value(value: &Value) -> ModelTokenQuantities {
-    merge_usage(ModelTokenQuantities::default(), value)
-}
-fn merge_usage(mut output: ModelTokenQuantities, value: &Value) -> ModelTokenQuantities {
-    output.input_tokens = value
-        .get("input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(output.input_tokens);
-    output.output_tokens = value
-        .get("output_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(output.output_tokens);
-    output.cache_read_tokens = value
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(output.cache_read_tokens);
-    output.cache_write_tokens = value
-        .get("cache_creation_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(output.cache_write_tokens);
-    output
-}
-
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     let mut block = [0_u8; 64];
-    if key.len() > block.len() {
+    if key.len() > 64 {
         block[..32].copy_from_slice(&Sha256::digest(key));
     } else {
         block[..key.len()].copy_from_slice(key);
     }
-    let mut ipad = [0x36_u8; 64];
-    let mut opad = [0x5c_u8; 64];
+    let mut inner = [0x36; 64];
+    let mut outer = [0x5c; 64];
     for index in 0..64 {
-        ipad[index] ^= block[index];
-        opad[index] ^= block[index];
+        inner[index] ^= block[index];
+        outer[index] ^= block[index];
     }
-    let mut inner = Sha256::new();
-    inner.update(ipad);
-    inner.update(message);
-    let mut outer = Sha256::new();
-    outer.update(opad);
-    outer.update(inner.finalize());
-    outer.finalize().into()
-}
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
-        == 0
-}
-
-#[must_use]
-pub fn token_expiry(ttl: Duration) -> SystemTime {
-    SystemTime::now().checked_add(ttl).unwrap_or(UNIX_EPOCH)
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::duration_suboptimal_units
-)]
-mod tests {
-    use super::*;
-    #[test]
-    fn scoped_tokens_are_bound_and_signed() {
-        let project = ProjectId::new();
-        let issuer = ScopedTokenIssuer::new(vec![7; 32], Duration::from_secs(300)).unwrap();
-        let token = issuer.issue(project, Uuid::new_v4(), 3);
-        let claims = issuer.validate(&token).unwrap();
-        assert_eq!(claims.project_id, project.to_string());
-        assert_eq!(claims.attempt, 3);
-        let mut tampered = token.into_bytes();
-        tampered[3] = b'X';
-        assert!(
-            issuer
-                .validate(std::str::from_utf8(&tampered).unwrap())
-                .is_err()
-        );
-    }
-    #[test]
-    fn usage_aggregates_all_four_dimensions() {
-        let usage = extract_usage(br#"{"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}"#, "application/json").unwrap();
-        assert_eq!(usage.input_tokens, 1);
-        assert_eq!(usage.output_tokens, 2);
-        assert_eq!(usage.cache_read_tokens, 3);
-        assert_eq!(usage.cache_write_tokens, 4);
-    }
-    #[test]
-    fn scoped_environment_contains_gateway_only_credentials() {
-        let runtime = ModelGatewayRuntime {
-            base_url: Url::parse("http://agent-service:9460/").expect("gateway URL"),
-            issuer: ScopedTokenIssuer::new(vec![9; 32], Duration::from_secs(300)).expect("signer"),
-        };
-        let environment = runtime.environment(ProjectId::new(), Uuid::new_v4(), 2);
-        assert!(environment.contains_key("ANTHROPIC_BASE_URL"));
-        assert!(environment.contains_key("ANTHROPIC_API_KEY"));
-        assert!(!environment.contains_key("ANTHROPIC_AUTH_TOKEN"));
-        assert!(!environment.contains_key("MODEL_GATEWAY_UPSTREAM_KEY"));
-    }
-
-    #[test]
-    fn sse_usage_aggregates_message_and_terminal_usage() {
-        let usage = extract_usage(
-            b"data: {\"message\":{\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":7}}}\n\ndata: {\"usage\":{\"output_tokens\":11,\"cache_creation_input_tokens\":13}}\n",
-            "text/event-stream",
-        )
-        .expect("SSE usage");
-        assert_eq!(usage.input_tokens, 5);
-        assert_eq!(usage.output_tokens, 11);
-        assert_eq!(usage.cache_read_tokens, 7);
-        assert_eq!(usage.cache_write_tokens, 13);
-    }
+    let mut hash = Sha256::new();
+    hash.update(inner);
+    hash.update(message);
+    let digest = hash.finalize();
+    let mut hash = Sha256::new();
+    hash.update(outer);
+    hash.update(digest);
+    hash.finalize().into()
 }

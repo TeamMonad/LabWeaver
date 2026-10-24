@@ -69,10 +69,10 @@ sandbox:
   memory_bytes: 2147483648
   workspace_bytes: 2147483648
   wall_time_seconds: 3600
-  # Reviewed attempt egress destinations as "<cidr>:<port>": the object store and
-  # the model endpoint. The attempt reaches nothing else; startup rejects a
-  # deployment that omits the configured object-store port.
-  allowed_egress: ["10.0.0.0/8:443"]
+  # Replace these example /32s with the object-store Service IP and Agent gateway Service IP.
+  # Never add the external provider URL/CIDR here; only the gateway owns that egress.
+  # The namespace policy also pins the gateway workload and port.
+  allowed_egress: ["10.96.0.10/32:443", "10.96.0.20/32:9460"]
   # Optional rootless BuildKit sidecar; deployment binds both keys together with
   # the reviewed buildkitd.toml ConfigMap so the attempt can build only against
   # Harbor. Leave unset to run attempts without an image-build capability.

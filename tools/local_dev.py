@@ -3322,7 +3322,7 @@ def make_app_input(
             elif key=="session-keyring.json": values[key]=keyring
             elif key=="model-gateway-upstream-url": values[key]=provider_environment["ANTHROPIC_BASE_URL"]
             elif key=="model-gateway-upstream-key": values[key]=provider_environment["ANTHROPIC_AUTH_TOKEN"]
-            elif key=="model-gateway-signing-key": values[key]=secrets.token_bytes(32)
+            elif key=="model-gateway-signing-key": values[key]=secrets.token_hex(32)
             elif key=="minio-access-key": values[key]="labweaver-root"
             elif key=="minio-secret-key": values[key]=(foundation/"render-input/secrets/minio-secrets/root-password").read_bytes()
             elif key=="registry-pull-config.json":

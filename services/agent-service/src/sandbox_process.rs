@@ -88,12 +88,8 @@ pub struct SandboxProcessConfiguration {
     /// Absent means the object store is trusted by the image trust store. The file is read once at
     /// startup so an attempt never depends on a path inside its own pod.
     pub object_store_ca_file: Option<PathBuf>,
-    /// Reviewed provider environment every attempt process runs with.
-    ///
-    /// The sandboxed Claude Code CLI is a separate process in a separate pod, so the provider
-    /// endpoint, model and credential have to travel with the attempt instead of being inherited
-    /// from the service environment. Entries are rendered into the per-attempt Secret, which the
-    /// attempt owns and deletes with its bundle.
+    /// Static non-secret CLI settings. Provider URL/key entries are rejected at execution.
+    /// The gateway capability is issued separately and rendered into the owned attempt Secret.
     pub worker_environment: BTreeMap<String, String>,
     /// Shared gateway endpoint and signer used to mint one capability per attempt.
     pub model_gateway: Option<crate::model_gateway::ModelGatewayRuntime>,
@@ -516,18 +512,12 @@ impl SandboxAuthoringProcess {
             ownership,
             trace_id: scope.trace_id.clone(),
             command: command_argv(&command),
-            command_environment: {
-                let mut environment =
-                    attempt_environment(&self.configuration.worker_environment, command.env());
-                if let Some(gateway) = &self.configuration.model_gateway {
-                    environment.extend(gateway.environment(
-                        scope.project_id,
-                        scope.run_id.as_uuid(),
-                        scope.attempt,
-                    ));
-                }
-                environment
-            },
+            command_environment: scoped_attempt_environment(
+                &self.configuration.worker_environment,
+                command.env(),
+                self.configuration.model_gateway.as_ref(),
+                scope,
+            )?,
             expected_claude_version: scope.claude_code_version.clone(),
             material_download_url: material_download.url,
             material_sha256: command.stdin_sha256().to_string(),
@@ -2071,21 +2061,31 @@ fn object_key(prefix: &str, task_run_id: TaskRunId, name: &str) -> String {
     format!("{prefix}/{}/{name}", task_run_id.as_uuid().simple())
 }
 
-/// Merges the reviewed provider environment with the per-command CLI overrides.
-///
-/// Command entries win, because the runtime owns the CLI switches it sets; every other reviewed
-/// entry (provider endpoint, model, credential) is required for the CLI to reach the model at all.
-fn attempt_environment(
+/// Combines protocol overrides with static settings, then mints the scoped gateway credential.
+/// Neither the deployment map nor an individual CLI command may supply a provider URL or key.
+fn scoped_attempt_environment(
     worker_environment: &BTreeMap<String, String>,
     command_environment: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+    gateway: Option<&crate::model_gateway::ModelGatewayRuntime>,
+    scope: &AuthoringAttemptScope,
+) -> Result<BTreeMap<String, String>, ClaudeCodeProcessError> {
+    let gateway = gateway.ok_or(ClaudeCodeProcessError::Unavailable)?;
+    for environment in [worker_environment, command_environment] {
+        if environment
+            .keys()
+            .any(|key| key.starts_with("ANTHROPIC_") && key != "ANTHROPIC_MODEL")
+        {
+            return Err(ClaudeCodeProcessError::Unavailable);
+        }
+    }
     let mut environment = worker_environment.clone();
-    environment.extend(
-        command_environment
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone())),
-    );
-    environment
+    environment.extend(command_environment.clone());
+    environment.extend(gateway.environment(
+        scope.project_id,
+        scope.run_id.as_uuid(),
+        scope.attempt,
+    ));
+    Ok(environment)
 }
 
 /// Timing of one observed attempt, taken from the shared observation.
@@ -2180,12 +2180,14 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
 #[cfg(test)]
 mod tests {
     use super::{
-        SandboxReceipt, SandboxReceiptError, attempt_environment, map_task_resource, parse_receipt,
-        sandbox_failure,
+        SandboxReceipt, SandboxReceiptError, map_task_resource, parse_receipt, sandbox_failure,
+        scoped_attempt_environment,
     };
     use crate::claude_code::ClaudeCodeProcessError;
+    use base64::Engine as _;
     use persistence_sqlx::Sha256Digest;
     use std::collections::BTreeMap;
+    use std::time::Duration;
     use task_execution::resource::TaskResourceError;
 
     use crate::claude_code::AuthoringAttemptScope;
@@ -2212,37 +2214,42 @@ mod tests {
         );
     }
 
-    #[test]
-    fn attempt_environment_always_carries_the_reviewed_provider_environment() {
-        // The sandboxed CLI runs in its own pod, so the reviewed provider endpoint, model and
-        // credential must travel with the attempt; the per-command CLI switches still win.
-        let worker = BTreeMap::from([
-            (
-                "ANTHROPIC_BASE_URL".to_owned(),
-                "https://model.example".to_owned(),
-            ),
-            ("ANTHROPIC_MODEL".to_owned(), "model-1".to_owned()),
-            ("ANTHROPIC_AUTH_TOKEN".to_owned(), "token-1".to_owned()),
-            ("API_TIMEOUT_MS".to_owned(), "1".to_owned()),
-        ]);
-        let command = BTreeMap::from([("API_TIMEOUT_MS".to_owned(), "120000".to_owned())]);
-        let environment = attempt_environment(&worker, &command);
-        assert_eq!(
-            environment.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some("https://model.example")
+    #[tokio::test]
+    async fn sandbox_process_receives_only_scoped_gateway_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let scope = scope();
+        let gateway = crate::model_gateway::ModelGatewayRuntime {
+            base_url: "http://agent-service:9460/".parse()?,
+            issuer: crate::model_gateway::ScopedTokenIssuer::new(
+                vec![3; 32],
+                Duration::from_mins(5),
+            )
+            .ok_or("signer")?,
+        };
+        let worker = BTreeMap::from([("ANTHROPIC_MODEL".to_owned(), "fixture-model".to_owned())]);
+        let environment =
+            scoped_attempt_environment(&worker, &BTreeMap::new(), Some(&gateway), &scope)?;
+        let output = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "test \"$ANTHROPIC_BASE_URL\" = 'http://agent-service:9460/' && test -n \"$ANTHROPIC_API_KEY\" && test -z \"$ANTHROPIC_AUTH_TOKEN\" && printf '%s' \"$ANTHROPIC_API_KEY\""])
+            .env_clear().envs(environment).output().await?;
+        assert!(output.status.success());
+        let token = std::str::from_utf8(&output.stdout)?;
+        let claims: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD.decode(token.split_once('.').ok_or("token")?.0)?,
+        )?;
+        assert_eq!(claims["project_id"], scope.project_id.to_string());
+        assert_eq!(claims["agent_run_id"], scope.run_id.to_string());
+        assert_eq!(claims["attempt"], scope.attempt);
+        let direct = BTreeMap::from([(
+            "ANTHROPIC_BASE_URL".to_owned(),
+            "https://provider.invalid/".to_owned(),
+        )]);
+        assert!(
+            scoped_attempt_environment(&direct, &BTreeMap::new(), Some(&gateway), &scope).is_err()
         );
-        assert_eq!(
-            environment.get("ANTHROPIC_MODEL").map(String::as_str),
-            Some("model-1")
-        );
-        assert_eq!(
-            environment.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
-            Some("token-1")
-        );
-        assert_eq!(
-            environment.get("API_TIMEOUT_MS").map(String::as_str),
-            Some("120000")
-        );
+        assert!(scoped_attempt_environment(&worker, &BTreeMap::new(), None, &scope).is_err());
+        Ok(())
     }
 
     const RESULT_MAX_BYTES: u64 = 4 * 1024 * 1024;

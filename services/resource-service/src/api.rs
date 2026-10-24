@@ -1406,6 +1406,12 @@ async fn internal_service_auth(
 }
 
 fn internal_route_permission(path: &str) -> Option<&'static str> {
+    if path == "/internal/v1/credits/model/admit" {
+        return Some("resource.credits.hold");
+    }
+    if path.starts_with("/internal/v1/credits/model/") && path.ends_with("/settle") {
+        return Some("resource.usage.record");
+    }
     if path.starts_with("/internal/v1/environment-credit-grants/") {
         return Some("resource.environment.resolve");
     }

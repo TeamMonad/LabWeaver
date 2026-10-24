@@ -70,6 +70,15 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: environment-service}
       ports: [{protocol: TCP, port: 9451}]
+    {{- else if eq $name "agent-service" }}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/part-of: labweaver}
+      ports: [{protocol: TCP, port: 9445}, {protocol: TCP, port: 9460}]
+    - from:
+        - namespaceSelector:
+            {{- toYaml $root.Values.network.authoringNamespaceSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 9460}]
     {{- else }}
     - from:
         - podSelector:

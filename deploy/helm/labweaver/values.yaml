@@ -150,10 +150,11 @@ workloads:
       LABWEAVER_SERVICE_CLIENT_ID: labweaver-agent
       LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
       LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE: /etc/labweaver/secrets/cursor-signing-key-current
-      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,control.agent_run.read,environment.work.configure,environment:resolve_work_execution_binding,resource.task.create,resource.task.read,resource.task.claim,resource.task.ack,resource.task.release,resource.task.cancel,resource.usage.record
+      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,control.agent_run.read,environment.work.configure,environment:resolve_work_execution_binding,resource.task.create,resource.task.read,resource.task.claim,resource.task.ack,resource.task.release,resource.task.cancel,resource.usage.record,resource.credits.hold
       LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: mtls, containerPort: 9445, servicePort: 9445}
+      - {name: model-gateway, containerPort: 9460, servicePort: 9460}
     readiness: {type: tcp, port: mtls}
   build-executor:
     enabled: true
@@ -423,6 +424,8 @@ network:
     matchLabels: {kubernetes.io/metadata.name: labweaver-demo}
   environmentNamespaceSelector:
     matchLabels: {labweaver.io/environment: "true"}
+  authoringNamespaceSelector:
+    matchLabels: {kubernetes.io/metadata.name: labweaver-authoring}
   identityNamespaceSelector:
     matchLabels: {kubernetes.io/metadata.name: keycloak-system}
   kubernetesApiCidrs: []

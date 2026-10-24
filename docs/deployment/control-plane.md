@@ -27,6 +27,10 @@ Agent 启动时必须从 Secret 文件读取 `model-gateway-upstream-url`、
 导致 fail-closed。网关监听 Agent Service 的内部 `9460` 端口，Worker 只获得静态模型名和
 每次 run/attempt 签发的短期 `ANTHROPIC_API_KEY`，不能配置提供商 URL 或长期 key。
 
+签名 key 使用至少 32 字节的 UTF-8 Secret 文本（例如本地生成的 64 位十六进制文本），所有 Agent
+副本挂载同一签名 key。HMAC 验签不依赖单副本内存；每个请求仍检查 Agent 数据库中的运行租约和
+终态。上游 API key 只由网关读取，既不注入 Claude 子进程，也不写入 attempt Secret。
+
 沙箱命名空间的 Cilium NetworkPolicy 只允许到 `agent-service:9460`（以及其已批准的对象存储），
 不允许 host、FQDN 或提供商 CIDR。更新 upstream 时只替换 Secret 并重启 Agent；不把 key 写入
 YAML、命令参数、日志或 bundle 报告。

@@ -28,6 +28,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use auth::{ServiceAuthConfig, ServiceIdentity, ServiceTokenVerifier, TransportSecurityMode};
+use contracts::authoring::{
+    CandidateApproval, CandidateDecision, EnvironmentCandidate, EnvironmentSpec, RuntimeKind,
+};
 use contracts::environment::{
     ActivateEnvironmentResourceReservationRequest, EnvironmentResourceReservationState,
     ReleaseEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationRequest,
@@ -37,16 +40,23 @@ use contracts::http::{
     CreateResourceRateRequest, EndResourceRateRequest, InternalCreateTaskResourceRequest,
     RecordResourceUsageRequest, ResourceRequestListQuery, UpsertResourceBudgetRequest,
 };
+use contracts::platform_configuration::{
+    PlatformConfigurationAppliedState, PlatformConfigurationDesired, PlatformConfigurationStatus,
+    PlatformConfigurationVersion,
+};
 use contracts::resource::{
     CapacityClaim, FixedDecimal, GpuAllocationMode, GpuCatalogEntry, GpuRequest, Money,
     ResourceApproval, ResourceBillingUnit, ResourceRequest, ResourceRequestState, ResourceTarget,
     ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement, WorkloadResources,
 };
+use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
 use contracts::{
-    ActorId, CapacityClaimId, CourseId, EnvironmentId, EventId, GpuCatalogEntryId, LeaseId,
-    OperationId, PlatformRole, ProjectId, ReleaseId, ResourceApprovalId, ResourceRequestId,
-    Revision, TaskRunId, UtcTimestamp,
+    ActorId, AgentRunId, ApprovalId, ArtifactId, BuildRequestId, CandidateId, CapacityClaimId,
+    CourseId, EnvironmentId, EventId, GpuCatalogEntryId, ImageArtifactId, LeaseId, OperationId,
+    PlatformRole, ProjectId, ReleaseId, ResourceApprovalId, ResourceRequestId, Revision, TaskRunId,
+    UtcTimestamp,
 };
+use persistence_sqlx::Sha256Digest;
 use resource_service::ApprovalPolicy;
 use resource_service::LifecycleError;
 use resource_service::capacity::{
@@ -829,39 +839,6 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
         stale_ack,
         Err(resource_service::store::ResourceStoreError::CapacityClaimStateConflict)
     ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET created_at=clock_timestamp() - interval '1 hour',
-             valid_until=clock_timestamp() - interval '1 minute'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
-    let expired_ack = store
-        .acknowledge_funded_task_resource(
-            task_run_id,
-            &contracts::http::AcknowledgeTaskResourceRequest {
-                expected_claim_revision: claimed.claim_revision,
-                expected_lease_revision: claimed.lease_revision,
-                execution_namespace: "labweaver-evaluation-runs".into(),
-            },
-            "synthetic-task-owner",
-            "trace-task-expired-ack",
-        )
-        .await;
-    assert!(matches!(
-        expired_ack,
-        Err(resource_service::store::ResourceStoreError::ApprovalInvalid)
-    ));
-    sqlx::query(
-        "UPDATE resource.resource_approvals
-         SET valid_until=clock_timestamp() + interval '1 hour'
-         WHERE approval_id=$1",
-    )
-    .bind(approval.id.as_uuid())
-    .execute(&pool)
-    .await?;
     let acknowledged = store
         .acknowledge_funded_task_resource(
             task_run_id,
@@ -6003,7 +5980,166 @@ impl MutationHttpFixture {
             .await?)
     }
 }
+async fn seed_runtime_projection(
+    pool: &sqlx::PgPool,
+    request: &ResourceRequest,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ResourceTarget::Environment {
+        release_id,
+        release_version,
+        ..
+    } = request.target
+    else {
+        return Err("runtime projection requires Environment target".into());
+    };
+    let candidate_id = CandidateId::new();
+    let run_id = AgentRunId::new();
+    let candidate_revision = Revision::new(1)?;
+    let spec: EnvironmentSpec = serde_json::from_value(json!({
+        "apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"code-server","class":"work",
+        "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824,"storageBytes":1_073_741_824},"network":{"mode":"deny_all"},
+        "entries":[{"name":"code-server","protocol":"https","servicePort":8080}],
+        "security":{"userPolicy":"non_root_required","rootFilesystemPolicy":"read_only_required","privilegeEscalationPolicy":"deny","publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
+        "runtime":{"kind":"container","provider_binding":"container-primary-v1","build_context":{"artifactId":ArtifactId::new(),"storeBinding":"approved-context-v1","objectVersion":"version-1","sizeBytes":7,"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip"},"service_port":8080},
+        "retention":{"policyId":ApprovalId::new(),"policyRevision":1,"class":"run_evidence","retainUntil":"2030-08-16T08:00:00.000Z","disposition":"delete"}
+    }))?;
+    let candidate = EnvironmentCandidate {
+        id: candidate_id,
+        run_id,
+        project_id: request.project_id,
+        course_id: request.course_id,
+        revision: candidate_revision,
+        spec,
+        policy_revision: Revision::new(1)?,
+        model: "fixture-provider-v1".into(),
+        created_at: now,
+    };
+    candidate.validate()?;
+    let release = EnvironmentTemplateRelease {
+        id: release_id,
+        project_id: request.project_id,
+        course_id: request.course_id,
+        version: release_version,
+        candidate_id,
+        agent_run_id: run_id,
+        candidate_revision,
+        runtime_kind: RuntimeKind::Container,
+        approval: CandidateApproval {
+            id: ApprovalId::new(),
+            candidate_id,
+            candidate_revision,
+            policy_revision: Revision::new(1)?,
+            trust_revision: Revision::new(1)?,
+            actor_id: request.requester_id,
+            decision: CandidateDecision::Approved,
+            reason: "fixture".into(),
+            decided_at: now,
+        },
+        artifact: ImageArtifact::Container {
+            id: ImageArtifactId::new(),
+            build_request_id: BuildRequestId::new(),
+            repository: "registry.invalid/fixture".into(),
+            digest: format!("sha256:{}", Sha256Digest::of_bytes(b"fixture-image")),
+        },
+        published_by: request.requester_id,
+        published_at: now,
+    };
+    release.validate()?;
+    let desired = PlatformConfigurationDesired::default();
+    let configuration_sha256 = Sha256Digest::of_canonical(&desired)?.to_string();
+    let applied = PlatformConfigurationVersion {
+        revision: Revision::new(1)?,
+        configuration: desired,
+        configuration_sha256,
+        created_by: request.requester_id,
+        created_at: now,
+    };
+    let status = PlatformConfigurationStatus {
+        revision: 1,
+        applied: Some(applied),
+        applied_state: PlatformConfigurationAppliedState::Verified,
+        ..Default::default()
+    };
+    // Exercise the actual view definitions and their source tables, not substitute projections.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let catalog = persistence_sqlx::MigrationCatalog::load(&root.join("catalog.yaml"))?;
+    sqlx::raw_sql("CREATE ROLE lw_control_runtime; CREATE SCHEMA access; CREATE SCHEMA control")
+        .execute(pool)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    for name in [
+        persistence_sqlx::Domain::Access,
+        persistence_sqlx::Domain::Control,
+    ] {
+        let search_path = match name {
+            persistence_sqlx::Domain::Access => "SET search_path TO access, pg_catalog",
+            _ => "SET search_path TO control, pg_catalog",
+        };
+        sqlx::query(search_path).execute(&mut *connection).await?;
+        let domain = catalog
+            .domains
+            .iter()
+            .find(|domain| domain.name == name)
+            .ok_or("domain missing")?;
+        for migration in &domain.migrations {
+            let sql = persistence_sqlx::MigrationCatalog::read_verified_sql(&root, migration)?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&mut *connection)
+                .await?;
+        }
+    }
+    sqlx::query("RESET search_path")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+    sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256) VALUES($1,'https://fixture.invalid',$2)")
+        .bind(request.requester_id.as_uuid()).bind(Sha256Digest::of_bytes(b"fixture-actor").to_string()).execute(pool).await?;
+    sqlx::query("INSERT INTO control.project_memberships(project_id,actor_id,role,state,object_role,revision) VALUES($1,$2,'teacher','active','owner',1)")
+        .bind(request.project_id.as_uuid()).bind(request.requester_id.as_uuid()).execute(pool).await?;
+    if let Some(course_id) = request.course_id {
+        sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,state,revision,object_role) VALUES($1,$2,'teacher','active',1,'instructor')")
+            .bind(course_id.as_uuid()).bind(request.requester_id.as_uuid()).execute(pool).await?;
+    }
+    let spec_sha256 = Sha256Digest::of_canonical(&candidate.spec)?.to_string();
+    sqlx::query("INSERT INTO control.candidates(candidate_id,candidate_kind,course_id,project_id,revision,state,content_sha256,contract) VALUES($1,'environment',$2,$3,$4,'validated',$5,$6)")
+        .bind(candidate.id.as_uuid()).bind(request.course_id.map(CourseId::as_uuid)).bind(request.project_id.as_uuid()).bind(i64::try_from(candidate.revision.get())?).bind(&spec_sha256).bind(serde_json::to_value(&candidate)?).execute(pool).await?;
+    sqlx::query("INSERT INTO control.environment_template_releases(release_id,version,project_id,course_id,environment_candidate_id,candidate_revision,spec_sha256,contract,published_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+        .bind(release_id.as_uuid()).bind(i64::try_from(release_version)?).bind(request.project_id.as_uuid()).bind(request.course_id.map(CourseId::as_uuid)).bind(candidate.id.as_uuid()).bind(i64::try_from(candidate.revision.get())?).bind(spec_sha256).bind(serde_json::to_value(&release)?).bind(now.get()).execute(pool).await?;
+    sqlx::query("INSERT INTO control.platform_configuration_state(singleton,revision,contract) VALUES(true,1,$1) ON CONFLICT(singleton) DO UPDATE SET revision=1,contract=excluded.contract")
+        .bind(serde_json::to_value(status)?).execute(pool).await?;
+    Ok(())
+}
 async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::error::Error>> {
+    mutation_http_fixture_with_projection(true).await
+}
+
+#[tokio::test]
+async fn environment_approval_without_runtime_projection_has_no_financial_side_effects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = mutation_http_fixture_with_projection(false).await?;
+    let path = format!("/api/v1/resource-requests/{}/approve", fixture.request.id);
+    let response = fixture
+        .post(&path, "missing-runtime-projection", &fixture.approval())
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let problem: contracts::ProblemDetails = response.json().await?;
+    assert_eq!(
+        problem.diagnostic_code.as_str(),
+        "LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE"
+    );
+    assert_eq!(mutation_counts(&fixture.pool).await?, (0, 0, 0, 0, 0, 0));
+    let account = resource_service::credits::PgCreditStore::new(fixture.pool.clone())
+        .account(fixture.request.project_id)
+        .await?;
+    assert_eq!(account.spent, FixedDecimal::parse("0.000000")?);
+    Ok(())
+}
+
+async fn mutation_http_fixture_with_projection(
+    seed_projection: bool,
+) -> Result<MutationHttpFixture, Box<dyn std::error::Error>> {
     let (database, pool) = migrated_pool().await?;
     let authority =
         spawn_resource_auth_authority(resource_signing_material("mutation-http")?).await?;
@@ -6025,6 +6161,9 @@ async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::err
     store
         .create(&Uuid::now_v7().to_string(), &request, "http-fixture-create")
         .await?;
+    if seed_projection {
+        seed_runtime_projection(&pool, &request, now).await?;
+    }
     for (unit, unit_quantity, amount) in [
         (ResourceBillingUnit::CpuMillicoreSecond, 1000, "1.000000"),
         (ResourceBillingUnit::MemoryByteSecond, 1, "0.000000"),
@@ -6051,18 +6190,20 @@ async fn mutation_http_fixture() -> Result<MutationHttpFixture, Box<dyn std::err
             )
             .await?;
     }
-    resource_service::credits::PgCreditStore::new(pool.clone())
-        .admin(
-            "http-fixture-grant",
-            request.requester_id,
-            &[PlatformRole::PlatformAdmin],
-            &contracts::resource::credits::CreditAdminOperation::Grant {
-                project_id: request.project_id,
-                amount: FixedDecimal::parse("1000.000000")?,
-                reason: "isolated synthetic allowance".into(),
-            },
-        )
-        .await?;
+    if seed_projection {
+        resource_service::credits::PgCreditStore::new(pool.clone())
+            .admin(
+                "http-fixture-grant",
+                request.requester_id,
+                &[PlatformRole::PlatformAdmin],
+                &contracts::resource::credits::CreditAdminOperation::Grant {
+                    project_id: request.project_id,
+                    amount: FixedDecimal::parse("1000.000000")?,
+                    reason: "isolated synthetic allowance".into(),
+                },
+            )
+            .await?;
+    }
     let key = [9_u8; 32];
     let session = auth::BffSession {
         session_id: Uuid::now_v7(),

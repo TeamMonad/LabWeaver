@@ -1913,10 +1913,8 @@ class LocalDevBundleTests(unittest.TestCase):
                 base64.b64decode(agent_secret["data"]["model-gateway-upstream-key"]),
                 b"test-provider-token",
             )
-            self.assertEqual(
-                len(base64.b64decode(agent_secret["data"]["model-gateway-signing-key"])),
-                32,
-            )
+            signing_key = base64.b64decode(agent_secret["data"]["model-gateway-signing-key"]).decode("utf-8")
+            self.assertRegex(signing_key, r"^[0-9a-f]{64}$")
             self.assertNotIn("test-provider-token", bundle.read_text(encoding="utf-8"))
             control_values = yaml.safe_load(control_config["data"]["config.yaml"])
             self.assertEqual(

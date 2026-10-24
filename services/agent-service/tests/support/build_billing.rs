@@ -171,6 +171,7 @@ impl BuildBillingFixture {
         let credits = resource_service::credits::PgCreditStore::new(pool.clone());
         let state = resource_service::api::ResourceApiState::new(store.clone())
             .with_service_verifier(Arc::new(verifier))
+            .with_task_service_client_ids(BTreeSet::from([CLIENT.into()]))
             .with_build_service_client_id(Some(CLIENT.into()));
         let app = resource_service::api::resource_api_router(state);
         let server = tokio::spawn(async move {

@@ -19,7 +19,7 @@ async fn admit(
     Ok(Json(
         state
             .store
-            .admit_model_cost("model-admission", &identity.client_id, &input)
+            .admit_model_cost(&input.call_id.to_string(), &identity.client_id, &input)
             .await?,
     ))
 }

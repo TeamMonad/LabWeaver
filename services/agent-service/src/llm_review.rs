@@ -777,7 +777,7 @@ impl LlmReviewWorker {
             timer_cancel.cancel();
         });
         let result = self
-            .execute_inner(&lease.request, cancellation.clone(), &deadline_reached)
+            .execute_inner(lease, cancellation.clone(), &deadline_reached)
             .await;
         deadline_timer.abort();
         let deadline_expired =
@@ -802,10 +802,11 @@ impl LlmReviewWorker {
 
     async fn execute_inner(
         &self,
-        request: &InternalAgentLlmReviewRequest,
+        lease: &LlmReviewLease,
         cancellation: RunCancellation,
         deadline_reached: &AtomicBool,
     ) -> Result<crate::claude_code::ClaudeCodeReviewExecution, ReviewExecutionFailure> {
+        let request = &lease.request;
         if let Some(failure) = cancellation_failure(&cancellation, deadline_reached, None) {
             return Err(failure);
         }
@@ -859,16 +860,15 @@ impl LlmReviewWorker {
         }
         let runtime = ClaudeCodeRuntime::new(request.policy.clone(), Arc::clone(&self.process))
             .map_err(|error| review_execution_failure(error.diagnostic_code(), None))?;
-        let runtime = if let Some(gateway) = self.model_gateway.clone() {
-            runtime.with_model_gateway(
-                gateway,
-                request.project_id,
-                request.task_run_id.as_uuid(),
-                0,
-            )
-        } else {
-            runtime
-        };
+        let gateway = self
+            .model_gateway
+            .as_ref()
+            .ok_or_else(|| review_execution_failure("LW_MODEL_GATEWAY_UNCONFIGURED", None))?;
+        let runtime = runtime.with_process_environment(gateway.environment(
+            request.project_id,
+            request.task_run_id.as_uuid(),
+            lease.attempt,
+        ));
         // Keep the runtime future alive after cancellation is requested. It owns the provider
         // invocation and must let the process boundary perform its cancellation cleanup before
         // returning the cumulative usage observed by earlier repair envelopes.
@@ -1135,6 +1135,7 @@ impl LlmReviewStoreError {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
 
     use async_trait::async_trait;
@@ -1399,7 +1400,7 @@ mod tests {
             worker_id: "test-worker".to_owned(),
             lease_duration: Duration::from_secs(1),
             poll_interval: Duration::from_millis(10),
-            model_gateway: None,
+            model_gateway: Some(test_gateway()),
         };
 
         let failure = worker
@@ -1409,5 +1410,65 @@ mod tests {
         assert_eq!(failure.diagnostic_code, "LW_PROVIDER_UNAVAILABLE");
         assert_eq!(version_calls.load(Ordering::Acquire), 1);
         assert_eq!(execute_calls.load(Ordering::Acquire), 1);
+    }
+
+    fn test_gateway() -> crate::model_gateway::ModelGatewayRuntime {
+        crate::model_gateway::ModelGatewayRuntime {
+            base_url: "http://agent-service:9460/".parse().expect("gateway URL"),
+            issuer: crate::model_gateway::ScopedTokenIssuer::new(
+                vec![7; 32],
+                Duration::from_mins(5),
+            )
+            .expect("signer"),
+        }
+    }
+
+    #[tokio::test]
+    async fn review_worker_subprocess_receives_gateway_and_scoped_key_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let evidence = directory.path().join("capability");
+        let executable = directory.path().join("claude");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *--version*) echo '2.1.207'; exit 0;; esac\n[ \"$ANTHROPIC_BASE_URL\" = 'http://agent-service:9460/' ] || exit 19\n[ -n \"$ANTHROPIC_API_KEY\" ] || exit 20\n[ -z \"$ANTHROPIC_AUTH_TOKEN\" ] || exit 21\nprintf '%s' \"$ANTHROPIC_API_KEY\" > '{}'\nexit 1\n",
+                evidence.display()
+            ),
+        )?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let process = crate::claude_code::TokioClaudeCodeProcess::new(BTreeMap::from([
+            (
+                "PATH".into(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            ("ANTHROPIC_MODEL".into(), "fixture-model".into()),
+        ]));
+        let worker = LlmReviewWorker {
+            store: LlmReviewStore::new(
+                sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://invalid")?,
+            ),
+            classifier: Arc::new(DeterministicEgressClassifier::new(
+                "dlp-v1".into(),
+                Revision::new(1)?,
+            )?),
+            process: Arc::new(process),
+            worker_id: "review-process-test".into(),
+            lease_duration: Duration::from_secs(10),
+            poll_interval: Duration::from_millis(10),
+            model_gateway: Some(test_gateway()),
+        };
+        let lease = lease(request(deadline_after(5_000)));
+        let _ = worker.execute(&lease, RunCancellation::new()).await;
+        let token = std::fs::read_to_string(evidence)?;
+        let claims: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD.decode(token.split_once('.').ok_or("token")?.0)?,
+        )?;
+        assert_eq!(claims["project_id"], lease.request.project_id.to_string());
+        assert_eq!(claims["agent_run_id"], lease.task_run_id.to_string());
+        assert_eq!(claims["attempt"], lease.attempt);
+        Ok(())
     }
 }

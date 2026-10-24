@@ -559,6 +559,44 @@ async fn cancellation_during_claim_settles_and_releases_the_committed_claim() ->
 }
 
 #[tokio::test]
+async fn expired_task_approval_releases_claim_without_funding_or_revival() -> TestResult {
+    let fixture = Fixture::start().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    approve(&fixture.faults.store, &request).await?;
+    let claimed = fixture.wait_for_claim().await?;
+    sqlx::query("UPDATE resource.resource_approvals SET created_at=clock_timestamp()-interval '1 hour',valid_until=clock_timestamp()-interval '1 minute' WHERE approval_id=$1")
+        .bind(claimed.claim.approval_id.as_uuid()).execute(&fixture.pool).await?;
+    let outcome = fixture
+        .lifecycle
+        .acknowledge(&claimed, "labweaver-evaluation")
+        .await;
+    assert!(matches!(
+        outcome,
+        Err(TaskResourceError::ResourceApprovalExpired)
+    ));
+    let stopped = fixture.lifecycle.load_status().await?;
+    assert_eq!(stopped.claim.state, CapacityClaimState::Released);
+    assert_eq!(stopped.lease.state, ResourceLeaseState::Revoked);
+    assert_eq!(
+        stopped.request.diagnostic_code.as_deref(),
+        Some("LW_RESOURCE_APPROVAL_EXPIRED")
+    );
+    assert!(
+        fixture
+            .lifecycle
+            .acknowledge(&claimed, "labweaver-evaluation")
+            .await
+            .is_err()
+    );
+    let account = PgCreditStore::new(fixture.pool.clone())
+        .account(request.project_id)
+        .await?;
+    assert_eq!(account.reserved, FixedDecimal::parse("0.000000")?);
+    assert_eq!(account.spent, FixedDecimal::parse("0.000000")?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResult {
     let fixture = Fixture::start().await?;
     let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
@@ -593,7 +631,7 @@ async fn active_snapshot_cannot_bypass_authoritative_lease_expiry() -> TestResul
             .is_err(),
         "an earlier Active snapshot cannot admit an expired lease"
     );
-    assert_eq!(fixture.event_count().await?, events);
+    assert_eq!(fixture.event_count().await?, events + 2);
     let pending_cleanup = fixture.lifecycle.load_status().await?;
     assert!(!pending_cleanup.cleanup_confirmed);
     assert_eq!(

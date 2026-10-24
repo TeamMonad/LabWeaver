@@ -157,6 +157,7 @@ async fn model_pg_normal_settlement_charges_all_four_dimensions()
         contracts::resource::credits::CreditHoldState::Settled
     );
     assert_eq!(settled.remaining, amount("0.000000"));
+    assert_eq!(credits.account(project).await?.spent, amount("10.000000"));
     Ok(())
 }
 
@@ -221,6 +222,21 @@ async fn model_pg_duplicate_settlement_event_is_idempotent()
         )
         .await?;
     assert_eq!(first, replay);
+    let late = store
+        .settle_model_cost(
+            "late-unknown",
+            "agent",
+            accepted.hold.id,
+            call,
+            EventId::new(),
+            "claude-test",
+            &ModelUsageMeasurement::Unknown {
+                reason: "out-of-order observation".into(),
+            },
+        )
+        .await?;
+    assert_eq!(late.remaining, amount("0.000000"));
+    assert_eq!(credits.account(project).await?.spent, amount("2.000000"));
     Ok(())
 }
 
@@ -269,6 +285,7 @@ async fn model_pg_cache_read_and_write_are_separate_lines() -> Result<(), Box<dy
         settled.state,
         contracts::resource::credits::CreditHoldState::Settled
     );
+    assert_eq!(credits.account(project).await?.spent, amount("18.000000"));
     Ok(())
 }
 
@@ -320,6 +337,10 @@ async fn model_pg_unknown_settlement_keeps_hold_reconcilable()
         contracts::resource::credits::CreditHoldState::Unknown
     );
     assert!(unknown.measurement_unknown);
+    let due = unknown.reconciliation_due_at.ok_or("unknown deadline")?;
+    assert_eq!(credits.expire_unknown_at(due).await?, 1);
+    assert_eq!(credits.account(project).await?.reserved, amount("0.000000"));
+    assert_eq!(credits.account(project).await?.spent, amount("0.000000"));
     Ok(())
 }
 
@@ -336,5 +357,57 @@ async fn model_pg_all_null_hold_target_is_rejected() -> Result<(), Box<dyn std::
             .and_then(|error| error.constraint()),
         Some("credit_holds_target_check")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_pg_rate_changes_do_not_replace_admitted_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, _pool, store, credits) = fixture().await?;
+    configure_rates(&store, Some("claude-test")).await?;
+    let project = ProjectId::new();
+    grant(&credits, project, "100.000000").await?;
+    let call = Uuid::now_v7();
+    let original = store
+        .admit_model_cost("price-snapshot", "agent", &admission(project, call))
+        .await?;
+    let now = store.current_time().await?;
+    store
+        .create_rate(
+            "new-input-price",
+            &CreateResourceRateRequest {
+                builder_binding: None,
+                model_binding: Some("claude-test".into()),
+                max_preauthorization: Some(amount("100.000000")),
+                unit: ResourceBillingUnit::LlmInputToken,
+                unit_quantity: 1,
+                gpu_class: None,
+                gpu_mode: None,
+                unit_price: Money {
+                    currency: "CREDITS".into(),
+                    amount: amount("50.000000"),
+                },
+                effective_from: now,
+                effective_until: None,
+            },
+        )
+        .await?;
+    store
+        .settle_model_cost(
+            "price-snapshot-settle",
+            "agent",
+            original.hold.id,
+            call,
+            EventId::new(),
+            "claude-test",
+            &ModelUsageMeasurement::Known {
+                quantities: ModelTokenQuantities {
+                    input_tokens: 1,
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+    assert_eq!(credits.account(project).await?.spent, amount("1.000000"));
     Ok(())
 }

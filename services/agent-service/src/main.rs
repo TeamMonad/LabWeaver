@@ -42,7 +42,7 @@ use auth::{
     ServerTlsFileConfig, ServiceAuthConfig, ServiceAuthError, ServiceTokenClient,
     ServiceTokenClientConfig, ServiceTokenVerifier, TransportSecurityMode,
 };
-use contracts::{ArtifactId, ArtifactRef, ProjectId, Revision, UtcTimestamp};
+use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
 use reqwest::Url;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -493,15 +493,15 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let gateway_state = GatewayState {
         upstream: gateway_upstream,
         upstream_key: gateway_key,
-        token: String::new(),
-        expires_at: std::time::SystemTime::UNIX_EPOCH,
-        project_id: ProjectId::new(),
-        agent_run_id: uuid::Uuid::nil(),
-        attempt: 0,
+        pool: store.pool().clone(),
         resource: resource_client,
         sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        http: reqwest::Client::new(),
-        issuer: Some(gateway_issuer),
+        http: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_mins(5))
+            .build()
+            .map_err(|_| StartupError::Configuration)?,
+        issuer: gateway_issuer,
     };
     let work_execution_store = store.clone();
     let work_execution_objects = Arc::clone(&objects);

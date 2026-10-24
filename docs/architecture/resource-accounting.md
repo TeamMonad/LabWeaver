@@ -85,14 +85,17 @@ Outbox 与账务维护使用独立循环，仍在同一个 Resource 进程。真
 
 Agent 的所有 Claude/Anthropic Messages 请求必须先经过 Agent model gateway。Worker 不接收提供商
 URL 或长期 API key；每个 run/attempt 取得限定 project、run、attempt 且短期过期的 HMAC capability。
-Gateway 在转发前调用 Resource model admission，余额不足或缺少完整费率配置时返回
-`LW_CREDITS_INSUFFICIENT`/`LW_MODEL_ADMISSION_UNAVAILABLE`，不会接触上游。
+任意副本除验证签名和过期时间外，还从 Agent PostgreSQL 检查同一 run/attempt 的运行状态和租约；
+取消、完成或租约失效后不能继续调用。Gateway 转发前调用 Resource model admission，余额不足或
+缺少四类完整费率配置时返回 Anthropic error 和 `LW_MODEL_ADMISSION_REJECTED`，不接触上游。
 
 模型费率是四个独立的 CREDITS 单价：input、output、cache-read、cache-write，并各自使用配置的
-token 基数；cache read 和 cache write 不折算成 input，也不从 USD 推导。准入按单次最大预占额
-冻结，结算使用上游 usage 快照和相同 callId。上游无 usage、请求失败、客户端取消或 SSE 中断均
-记为 Unknown，保留预占并进入既有未知用量核实流程，绝不按零 token 结算。重复 callId 由
-Resource 幂等处理，不能重复预占或产生第二条账目。
+token 基数；cache read 和 cache write 不折算成 input，也不从 USD 推导。准入绑定单次最大预占和
+四类费率快照，新费率不会改写已接受调用。Gateway 在外部副作用前持久化 Unknown 观察与调用 fence：
+进程崩溃或请求取消也不会留下无期限 Pending。非流式、SSE 正常结束或两端中断时，有已观察的 usage
+就按该用量结算；没有 usage 则保持 Unknown，不按零结算。首次未知一小时后释放剩余预占，迟到费用
+由平台承担。`x-labweaver-call-id`（或 provider `idempotency-key`）绑定签名能力范围；相同调用只预占一次，
+返回 `LW_MODEL_CALL_OUTCOME_UNKNOWN` 的重试只能查询原 hold，不能重放上游副作用。
 
 ## BuildKit 构建
 
