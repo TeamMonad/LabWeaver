@@ -27,7 +27,11 @@ import {
   uploadPackageDirectoryByUi,
   waitForEnvironment,
 } from '../support/real-experiment.mjs'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { parse as parseYaml } from 'yaml'
 import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
+import { experimentResourceRequest, requestAndEnterExperimentEnvironmentByUi } from '../support/real-resource.mjs'
 import { revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
 import {
   approveAndPublishByUi,
@@ -128,19 +132,20 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
   return { approval, publication }
 }
 
-async function createEnvironmentByStudentUi(page, projectId, releaseId) {
-  await page.goto(`/student/labs?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
-  await selectProjectByUi(page, projectId)
-  await page.getByRole('button', { name: /创建项目环境/ }).first().click()
-  const dialog = page.getByRole('dialog', { name: '创建项目环境', exact: true })
-  await expect(dialog).toBeVisible()
-  const releaseCard = dialog.locator('.release-card').filter({ hasText: releaseId }).first()
-  await expect(releaseCard).toBeVisible({ timeout: 120_000 })
-  const responsePromise = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/environments')
-  await releaseCard.getByRole('button', { name: '选择并创建', exact: true }).click()
-  const accepted = await expectJson(await responsePromise, 'REAL_EXPERIMENT_ENVIRONMENT_CREATE_FAILED')
-  expect(accepted).toMatchObject({ environmentId: expect.any(String), operationId: expect.any(String) })
-  return accepted.environmentId
+/**
+ * The student requests the resources the security-controlled package's
+ * environment.yaml asks for, an admin approves, and the student enters the
+ * environment from "已批准的申请".
+ */
+async function createEnvironmentByStudentUi(page, adminPage, projectId, releaseId, requesterId) {
+  const spec = parseYaml(await readFile(fileURLToPath(new URL('../../../examples/security-controlled/environment.yaml', import.meta.url)), 'utf8'))
+  const { environmentId } = await requestAndEnterExperimentEnvironmentByUi(page, adminPage, {
+    projectId,
+    releaseId,
+    requesterId,
+    ...experimentResourceRequest(spec.resources),
+  })
+  return environmentId
 }
 
 async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
@@ -335,8 +340,10 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
 
     environmentId = await createEnvironmentByStudentUi(
       studentPage,
+      adminPage,
       projectId,
       publication.environmentReleaseId,
+      studentActorId,
     )
     await waitForEnvironment(studentContext.request, environmentId)
     await issueTerminalAccessAndConnect(studentPage, projectId, environmentId)
