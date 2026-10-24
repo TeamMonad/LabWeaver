@@ -342,12 +342,20 @@
       </h3>
 
       <p class="section-subtitle">
-        材料包就绪后启动生成，页面刷新后会从项目服务恢复最近一次任务。
+        材料包就绪后，先勾选要交给模型的文件，再启动生成；页面刷新后会从项目服务恢复最近一次任务。
       </p>
+
+      <ModelInputPathPicker
+        v-if="uploadedPackage"
+        v-model="modelInputChecked"
+        :files="uploadedPackage.files"
+        :disabled="agent.acting !== null"
+      />
 
       <button
         type="button"
         class="filled-button"
+        data-testid="material-start-run"
         :disabled="!canStartRun"
         @click="startRun"
       >
@@ -393,12 +401,19 @@
                   <span class="run-track__kind">{{ agentTrackKindLabel(track.kind) }}</span>
                   <span class="run-track__candidate">{{ track.candidateId ? '已生成候选' : '等待生成' }}</span>
                 </div>
-                <p
-                  v-if="attemptDiagnostic(track)"
-                  class="run-track__diagnostic"
-                >
-                  诊断：{{ attemptDiagnostic(track) }}
-                </p>
+                <template v-if="attemptDiagnostic(track)">
+                  <p
+                    v-if="readableTrackDiagnostic(attemptDiagnostic(track)!).message"
+                    class="run-track__diagnostic"
+                    role="status"
+                  >
+                    原因：{{ readableTrackDiagnostic(attemptDiagnostic(track)!).message }}
+                    {{ readableTrackDiagnostic(attemptDiagnostic(track)!).nextStep }}
+                  </p>
+                  <p class="run-track__diagnostic">
+                    诊断：{{ attemptDiagnostic(track) }}
+                  </p>
+                </template>
                 <p
                   v-if="attemptDiagnostic(track) && diagnosticAction(attemptDiagnostic(track)!)"
                   class="diagnostic-action"
@@ -513,7 +528,7 @@
         :next-step="agent.outcome.nextStep"
         :message="agent.outcome.message"
         :retryable="agent.outcome.retryable"
-        severity="info"
+        :severity="agent.outcome.code.endsWith('_ACCEPTED') ? 'info' : 'error'"
       />
       <p
         v-if="agent.outcome && diagnosticAction(agent.outcome.code)"
@@ -545,8 +560,10 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import UploadRecoveryStatus from '@/components/common/UploadRecoveryStatus.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
+import { useModelInputSelection } from '@/composables/useModelInputSelection'
 import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
@@ -592,6 +609,7 @@ const restoreDiagnostic = ref<DiagnosticViewModel | null>(null)
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed(() => (upload.state.kind === 'done' ? upload.state.package : null))
+const { checked: modelInputChecked, selectedPaths: modelInputPaths } = useModelInputSelection(uploadedPackage)
 const retentionChoiceEditable = computed(() => (
   upload.session === null
   && !packageDone.value
@@ -607,6 +625,7 @@ const displayRun = computed(() => {
 
 const canStartRun = computed(() => {
   if (!packageDone.value || !uploadedPackage.value || policy.state.kind !== 'success' || agent.acting) return false
+  if (modelInputPaths.value.length === 0) return false
   if (agent.run.kind !== 'success' || agent.run.data.packageId !== uploadedPackage.value.id) return true
   return !runIsInFlight(agent.run.data.state)
 })
@@ -685,6 +704,11 @@ function packageRetentionChoice(packageData: NonNullable<typeof uploadedPackage.
 
 function attemptDiagnostic(track: AgentRunSchema['tracks'][number]): string | null {
   return [...track.attempts].reverse().find((attempt) => attempt.diagnosticCode)?.diagnosticCode ?? null
+}
+
+/** Chinese reason and next step for a known attempt code; both stay empty for unknown codes. */
+function readableTrackDiagnostic(code: string): DiagnosticViewModel {
+  return makeDiagnostic(code, '')
 }
 
 async function restoreAuthoringContext(generation = ++restoreGeneration) {
@@ -837,13 +861,15 @@ function onDrop(event: DragEvent) {
 async function startRun() {
   const pkg = uploadedPackage.value
   const policyData = policy.state.kind === 'success' ? policy.state.data : undefined
-  if (!pkg || !policyData || !canStartRun.value) return
+  const selectedPaths = modelInputPaths.value
+  if (!pkg || !policyData || !canStartRun.value || selectedPaths.length === 0) return
   const started = await agent.start({
     packageId: pkg.id,
     packageRevision: pkg.revision,
     policyId: policyData.id,
     policyRevision: policyData.revision,
     environmentClass: 'experiment',
+    selectedPaths,
   })
   if (started && agent.run.kind === 'success') {
     restoredContextKey = `${projectId.value}:${pkg.id}:${agent.run.data.id}`

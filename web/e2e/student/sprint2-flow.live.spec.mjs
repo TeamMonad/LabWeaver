@@ -400,8 +400,10 @@ async function publishWorkTemplate(page, project, packageCopy = null, { adminPag
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/projects/${project.id}/agent-runs`
     })
+    await page.getByTestId('model-input-path-option').and(page.locator('[value="README.md"]')).check()
     await page.getByRole('button', { name: '启动 Work 模板生成', exact: true }).click()
     const runResponse = await runResponsePromise
+    expect(runResponse.request().postDataJSON().selectedPaths).toEqual(['README.md'])
     const acceptedRun = await expectJson(runResponse, 'WORK_TEMPLATE_RUN_CREATE_FAILED')
     expect(acceptedRun).toMatchObject({
       id: expect.any(String),
@@ -1145,6 +1147,8 @@ test('student provisions a Work environment, configures it, and releases its cap
     await expect(workEnvironment.locator(`option[value="${environmentId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await workEnvironment.selectOption(environmentId)
     await expect(page.locator('.package-upload-success')).toContainText(`材料包版本：${packageData.revision}`, { timeout: 120_000 })
+    await expect(page.getByRole('button', { name: '生成 Work 配置', exact: true })).toBeDisabled()
+    await page.getByTestId('model-input-path-option').and(page.locator('[value="README.md"]')).check()
     await page.getByLabel(/我确认 Agent 可能修改该 Work/).check()
     const planResponsePromise = page.waitForResponse(
       (response) => {
@@ -1176,6 +1180,7 @@ test('student provisions a Work environment, configures it, and releases its cap
       environmentRevision: expect.any(Number),
       policyId: expect.any(String),
       policyRevision: expect.any(Number),
+      selectedPaths: ['README.md'],
     })
     if (
       !Number.isInteger(configurationRequestBody.environmentRevision)

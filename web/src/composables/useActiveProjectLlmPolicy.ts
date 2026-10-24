@@ -5,9 +5,11 @@ import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/
 
 export function useActiveProjectLlmPolicy(projectId: Ref<string | null>) {
   const state = ref<AsyncState<ProjectLlmEgressPolicySchema>>({ kind: 'idle' })
+  let generation = 0
 
   async function load() {
     const id = projectId.value
+    const current = ++generation
     if (!id) {
       state.value = {
         kind: 'blocked',
@@ -18,6 +20,8 @@ export function useActiveProjectLlmPolicy(projectId: Ref<string | null>) {
 
     state.value = { kind: 'loading', message: '加载项目 LLM 策略…' }
     const result = await getActiveProjectLlmPolicy({ path: { projectId: id } })
+    // A slower earlier read must not replace the answer of a later one.
+    if (current !== generation) return
     if (result.error) {
       const problem = extractProblemDetails(result.error)
       if (problem?.status === 404 || problem?.diagnosticCode === 'LW_POLICY_NOT_FOUND') {

@@ -221,7 +221,7 @@ async function authorAndPublish(page, adminPage, project, environmentSpec, evalu
   await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
   await selectProjectByUi(page, project.id)
   const packageData = await uploadPackageDirectoryByUi(page, PACKAGE_ROOT, 'materials/application.conf')
-  const accepted = await startExperimentRunByUi(page, project.id)
+  const accepted = await startExperimentRunByUi(page, project.id, packageData)
   onRun(accepted)
   const run = await waitForAuthoringRunWithResourceApproval({
     request: page.request,

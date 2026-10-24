@@ -218,14 +218,30 @@ export async function uploadPackageDirectoryByUi(page, directory, expectedPath =
   return packageData
 }
 
-export async function startExperimentRunByUi(page, projectId) {
+/**
+ * Start experiment generation for the package just uploaded. Nothing is sent to the model until files are
+ * explicitly ticked (#216); this generator needs the whole package, so every uploaded path is selected and
+ * the request must carry exactly the server's package paths in package order.
+ */
+export async function startExperimentRunByUi(page, projectId, packageData) {
+  const packagePaths = (packageData?.files ?? []).map((file) => file.path)
+  expect(packagePaths.length, 'uploaded package has no files to select').toBeGreaterThan(0)
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
       && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
   })
-  await page.getByRole('button', { name: '启动实验生成', exact: true }).click()
-  const run = await expectJson(await responsePromise, 'REAL_EXPERIMENT_AGENT_RUN_CREATE_FAILED')
+  const start = page.getByRole('button', { name: '启动实验生成', exact: true })
+  const options = page.getByTestId('model-input-path-option')
+  await expect(options).toHaveCount(packagePaths.length)
+  await expect.poll(() => options.evaluateAll((inputs) => inputs.map((input) => input.value))).toEqual(packagePaths)
+  await expect(start).toBeDisabled()
+  await page.getByTestId('model-input-select-all').click()
+  await expect(page.getByTestId('model-input-summary')).toContainText(`已勾选 ${packagePaths.length} / ${packagePaths.length} 个文件`)
+  await start.click()
+  const response = await responsePromise
+  expect(response.request().postDataJSON().selectedPaths).toEqual(packagePaths)
+  const run = await expectJson(response, 'REAL_EXPERIMENT_AGENT_RUN_CREATE_FAILED')
   expect(run).toMatchObject({
     id: expect.any(String),
     projectId,

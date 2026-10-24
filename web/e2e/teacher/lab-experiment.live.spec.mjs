@@ -655,7 +655,7 @@ test('student completes a published lab experiment through its browser entry', a
           disposition: 'retain_until_revoked',
         })
       }
-      run = await startExperimentRunByUi(page, project.id)
+      run = await startExperimentRunByUi(page, project.id, packageData)
       completed = await waitForExperimentRun(
         request,
         project.id,

@@ -305,6 +305,14 @@
                       :retryable="false"
                       severity="error"
                     />
+                    <RubricModelInputRulesPanel
+                      v-if="data.status === 'ready' && projectId && data.evaluationReleaseId && data.evaluationReleaseRevision && pkgData && pkgData.id === data.approval.packageId && pkgData.revision === data.approval.packageRevision && advisoryRubricSteps.length > 0"
+                      :project-id="projectId"
+                      :evaluation-release-id="data.evaluationReleaseId"
+                      :evaluation-release-revision="data.evaluationReleaseRevision"
+                      :problem-package="pkgData"
+                      :advisory-steps="advisoryRubricSteps"
+                    />
                   </template>
                 </AsyncStateView>
               </section>
@@ -328,6 +336,7 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import ReviewQueue from '@/components/review/ReviewQueue.vue'
+import RubricModelInputRulesPanel from '@/components/review/RubricModelInputRulesPanel.vue'
 import { useProjects } from '@/composables/useProjects'
 import { useProjectAuthoringApproval } from '@/composables/useProjectAuthoringApproval'
 import type { AuthoringPublicationState, CompleteAuthoringApprovalRequestSchemaImageArtifact } from '@/generated/contracts'
@@ -415,6 +424,9 @@ const environment = computed(() => authoring.environmentCandidate.kind === 'succ
 const evaluation = computed(() => authoring.evaluationCandidate.kind === 'success' ? authoring.evaluationCandidate.data : null)
 const pkgData = computed(() => authoring.problemPackage.kind === 'success' ? authoring.problemPackage.data : null)
 const publicationData = computed(() => authoring.publication.kind === 'success' ? authoring.publication.data : null)
+/** Rubric files the published Evaluation release hands to its AI review steps. */
+const advisoryRubricSteps = computed(() => (evaluation.value?.candidate.spec.spec.steps ?? [])
+  .flatMap((step) => (step.role === 'advisory' ? [{ id: step.id, rubric: step.runner.rubric }] : [])))
 
 const experimentTitle = computed(() => environment.value?.candidate.spec.name ?? '实验候选')
 const evaluationName = computed(() => evaluation.value ? `${evaluation.value.candidate.spec.metadata.name} ${evaluation.value.candidate.spec.metadata.version}` : '')

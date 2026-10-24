@@ -495,7 +495,7 @@ test('teacher publishes a real security experiment and student repairs it throug
     await expect(page.getByRole('heading', { name: '材料上传与实验生成', exact: true })).toBeVisible()
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy.directory)
 
-    const run = await startExperimentRunByUi(page, project.id)
+    const run = await startExperimentRunByUi(page, project.id, packageData)
     await expect(page).toHaveURL(new RegExp(`[?&]runId=${encodeURIComponent(run.id)}(?:&|$)`), { timeout: 30_000 })
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: '生成实验候选', exact: true })).toBeVisible()

@@ -99,8 +99,11 @@ async function publishWorkTemplateByUi(teacherPage, adminPage, projectId, teache
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
     })
+    await teacherPage.getByTestId('model-input-path-option').and(teacherPage.locator('[value="README.md"]')).check()
     await teacherPage.getByRole('button', { name: '启动 Work 模板生成', exact: true }).click()
-    const acceptedRun = await expectJson(await runResponsePromise, 'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_CREATE_FAILED')
+    const runResponse = await runResponsePromise
+    expect(runResponse.request().postDataJSON().selectedPaths).toEqual(['README.md'])
+    const acceptedRun = await expectJson(runResponse, 'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_CREATE_FAILED')
     expect(acceptedRun).toMatchObject({
       id: expect.any(String),
       projectId,

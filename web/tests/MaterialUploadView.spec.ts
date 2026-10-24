@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import MaterialUploadView from '@/views/teacher/MaterialUploadView.vue'
 import {
+  createProjectAgentRun,
   getActiveProjectLlmPolicy,
   getProjectAgentRun,
   getProjectProblemPackage,
@@ -15,6 +16,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
+    createProjectAgentRun: vi.fn(),
     getActiveProjectLlmPolicy: vi.fn(),
     getProjectAgentRun: vi.fn(),
     getProjectProblemPackage: vi.fn(),
@@ -67,7 +69,11 @@ const mockPackage = {
   projectId: 'project-1',
   courseId: 'course-1',
   revision: 2,
-  files: [],
+  files: [
+    { path: 'lab.md', sha256: 'a'.repeat(64), object: { artifactId: 'artifact-lab', mediaType: 'text/markdown', objectVersion: 'v1', sizeBytes: 64, storeBinding: 'materials' } },
+    { path: ' notes .md', sha256: 'b'.repeat(64), object: { artifactId: 'artifact-notes', mediaType: 'text/markdown', objectVersion: 'v1', sizeBytes: 32, storeBinding: 'materials' } },
+    { path: 'tests/check.py', sha256: 'c'.repeat(64), object: { artifactId: 'artifact-check', mediaType: 'text/x-python', objectVersion: 'v1', sizeBytes: 128, storeBinding: 'materials' } },
+  ],
   retention: {},
   completedAt: '2026-07-11T00:00:00.000Z',
 }
@@ -263,6 +269,108 @@ describe('MaterialUploadView', () => {
     await wrapper.get('[data-testid="project-agent-run-history"] button.outlined-button').trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('该运行记录不是实验包生成任务'))
     expect(getProjectProblemPackage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  async function mountRestoredPackage(): Promise<VueWrapper> {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
+    vi.mocked(getProjectProblemPackage).mockResolvedValue({ data: mockPackage as never, error: undefined as never })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/teacher/materials', component: MaterialUploadView }],
+    })
+    await router.push('/teacher/materials?projectId=project-1&packageId=package-1')
+    await router.isReady()
+    const wrapper = mount(MaterialUploadView, { global: { plugins: [router] } })
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="model-input-picker"]').exists()).toBe(true))
+    return wrapper
+  }
+
+  function pathOption(wrapper: VueWrapper, path: string) {
+    const option = wrapper.findAll('[data-testid="model-input-path-option"]').find((input) => (input.element as HTMLInputElement).value === path)
+    if (!option) throw new Error(`missing option ${JSON.stringify(path)}`)
+    return option
+  }
+
+  it('keeps generation disabled until files are explicitly selected', async () => {
+    const wrapper = await mountRestoredPackage()
+    const start = wrapper.get('[data-testid="material-start-run"]')
+
+    const options = wrapper.findAll('[data-testid="model-input-path-option"]')
+    expect(options.map((option) => (option.element as HTMLInputElement).checked)).toEqual([false, false, false])
+    expect((start.element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.get('[data-testid="model-input-summary"]').text()).toContain('尚未勾选文件，启动按钮不可用')
+
+    await start.trigger('click')
+    expect(createProjectAgentRun).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('submits exactly the selected package paths in package order', async () => {
+    vi.mocked(createProjectAgentRun).mockResolvedValue({
+      data: { ...experimentRun, state: 'requested', tracks: [] } as never,
+      error: undefined as never,
+    })
+    const wrapper = await mountRestoredPackage()
+
+    await pathOption(wrapper, 'tests/check.py').setValue(true)
+    await pathOption(wrapper, ' notes .md').setValue(true)
+    expect(wrapper.get('[data-testid="model-input-summary"]').text()).toContain('已勾选 2 / 3 个文件')
+    await wrapper.get('[data-testid="material-start-run"]').trigger('click')
+
+    await vi.waitFor(() => expect(createProjectAgentRun).toHaveBeenCalledTimes(1))
+    const body = vi.mocked(createProjectAgentRun).mock.calls[0][0].body
+    expect(body).toMatchObject({ projectId: 'project-1', packageId: 'package-1', packageRevision: 2, environmentClass: 'experiment' })
+    expect(body.selectedPaths).toEqual([' notes .md', 'tests/check.py'])
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['LW_MODEL_INPUT_SELECTION_REQUIRED', 400, '没有收到有效的文件选择'],
+    ['LW_MODEL_INPUT_AUTHORIZATION_DENIED', 403, '当前会话或账号权限不允许把所选内容交给模型'],
+  ])('shows the Chinese reason before %s and its request id', async (code, status, reason) => {
+    vi.mocked(createProjectAgentRun).mockResolvedValue({
+      data: undefined as never,
+      error: { type: 'about:blank', title: 'Rejected', status, detail: 'rejected by Control', diagnosticCode: code, retryable: false, requestId: `req-${status}` } as never,
+    })
+    const wrapper = await mountRestoredPackage()
+
+    await pathOption(wrapper, 'lab.md').setValue(true)
+    await wrapper.get('[data-testid="material-start-run"]').trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.find('.diagnostic-banner .diagnostic-code').exists()).toBe(true))
+    const banner = wrapper.get('.diagnostic-banner')
+    expect(banner.classes()).toContain('diagnostic-banner--error')
+    expect(banner.get('.diagnostic-message').text()).toContain(reason)
+    expect(banner.get('.diagnostic-next-step').text()).not.toBe('')
+    expect(banner.get('.diagnostic-code').text()).toBe(code)
+    expect(banner.get('.diagnostic-request-id').text()).toBe(`req-${status}`)
+    expect(banner.html().indexOf(reason)).toBeLessThan(banner.html().indexOf(code))
+    wrapper.unmount()
+  })
+
+  it('explains a run attempt denied by the model input recheck', async () => {
+    vi.mocked(getProjectAgentRun).mockResolvedValue({
+      data: {
+        ...experimentRun,
+        tracks: [{ kind: 'environment', candidateId: null, attempts: [{ number: 1, state: 'failed', diagnosticCode: 'LW_MODEL_INPUT_AUTHORIZATION_DENIED' }] }],
+      } as never,
+      error: undefined as never,
+    })
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
+    vi.mocked(getProjectProblemPackage).mockResolvedValue({ data: mockPackage as never, error: undefined as never })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/teacher/materials', component: MaterialUploadView }],
+    })
+    await router.push('/teacher/materials?projectId=project-1&packageId=package-1&runId=experiment-run-1')
+    await router.isReady()
+    const wrapper = mount(MaterialUploadView, { global: { plugins: [router] } })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('原因：当前会话或账号权限不允许把所选内容交给模型'))
+    expect(wrapper.text()).toContain('诊断：LW_MODEL_INPUT_AUTHORIZATION_DENIED')
     wrapper.unmount()
   })
 })

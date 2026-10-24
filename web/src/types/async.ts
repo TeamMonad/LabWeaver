@@ -71,6 +71,17 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '本版本暂不支持在原资金租约上升级模板。可以用新版本新建 Work，再自行迁移 /workspace 数据。'
     case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
       return '目标版本的资源、网络、安全或入口配置与当前 Work 不同，需要重新申请资源，不能在原 Work 内升级。'
+    // Model input selection and authorization codes (#216).
+    case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
+      return '没有收到有效的文件选择：必须勾选至少一个材料包内的文件，且不能重复或包含该材料包版本中不存在的路径。本次没有创建生成任务。'
+    case 'LW_MODEL_INPUT_AUTHORIZATION_INVALID':
+      return '评分规则的文件身份无效，平台没有保存这次修改。'
+    case 'LW_MODEL_INPUT_AUTHORIZATION_DENIED':
+      return '当前会话或账号权限不允许把所选内容交给模型，平台没有发起新的模型调用。'
+    case 'LW_MODEL_INPUT_AUTHORIZATION_REQUIRED':
+      return '任务缺少原始的模型输入授权，未开始新的模型调用。'
+    case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
+      return '平台暂时无法核验模型输入授权，未开始模型调用。'
     default:
       return message
   }
@@ -90,6 +101,15 @@ function codeNextStep(code: string): string | undefined {
     case 'LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE':
     case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
       return '请用新版本模板新建 Work，迁移并检查数据后再释放原 Work。'
+    case 'LW_MODEL_INPUT_SELECTION_REQUIRED':
+      return '请刷新材料包后重新勾选要交给模型的文件，再启动生成。'
+    case 'LW_MODEL_INPUT_AUTHORIZATION_INVALID':
+      return '请刷新评分规则列表，按当前发布版本重新操作。'
+    case 'LW_MODEL_INPUT_AUTHORIZATION_DENIED':
+    case 'LW_MODEL_INPUT_AUTHORIZATION_REQUIRED':
+      return '请确认仍有该项目的相应权限且登录未过期；需要时重新登录后再操作。'
+    case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
+      return '请稍后新建任务；多次失败请把下方诊断信息发给管理员。'
     default:
       return undefined
   }
