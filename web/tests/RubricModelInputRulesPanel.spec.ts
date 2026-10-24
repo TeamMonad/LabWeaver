@@ -283,7 +283,7 @@ describe('RubricModelInputRulesPanel', () => {
     expect(wrapper.get('[data-testid="rubric-approve-model"]').attributes('disabled')).toBeUndefined()
   })
 
-  it('re-reads the AI settings once and then keeps approval closed when the versions still disagree', async () => {
+  it('re-reads once, then explains a lasting version mismatch and offers a manual recheck', async () => {
     vi.mocked(getProjectRubricModelInputRules).mockResolvedValue({ data: rulesView([rule()], 4) as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue(policyWith(3, 'model-a'))
     const wrapper = await mountPanel()
@@ -291,7 +291,59 @@ describe('RubricModelInputRulesPanel', () => {
 
     expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(2)
     expect(wrapper.get('[data-testid="rubric-approve-model"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.get('[data-testid="rubric-rule-status"]').text()).toBe('课程内公开，尚未批准交给模型：不会交给模型。')
+    expect(wrapper.find('[data-testid="rubric-policy-unsynced"]').exists()).toBe(false)
+    const problem = wrapper.get('[data-testid="rubric-policy-problem"]')
+    expect(problem.get('.diagnostic-message').text()).toContain('项目 AI 设置（策略版本 3）与评分规则（策略版本 4）不属于同一策略版本')
+    expect(problem.get('.diagnostic-code').text()).toBe('RUBRIC_POLICY_VERSION_MISMATCH')
+    expect(problem.html().indexOf('不属于同一策略版本')).toBeLessThan(problem.html().indexOf('RUBRIC_POLICY_VERSION_MISMATCH'))
+
+    await wrapper.get('[data-testid="rubric-policy-recheck"]').trigger('click')
+    await flushPromises()
+    // One manual recheck reads both sides again; it does not turn into an automatic loop.
+    expect(getProjectRubricModelInputRules).toHaveBeenCalledTimes(2)
+    expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(4)
+    await flushPromises()
+    expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(4)
+    expect(wrapper.find('[data-testid="rubric-policy-recheck"]').exists()).toBe(true)
+  })
+
+  it('recovers after a failed automatic re-read: manual recheck aligns the versions and approves the right model', async () => {
+    vi.mocked(getProjectRubricModelInputRules).mockResolvedValue({ data: rulesView([rule()], 4) as never, error: undefined as never })
+    vi.mocked(getActiveProjectLlmPolicy)
+      .mockResolvedValueOnce(policyWith(3, 'model-a'))
+      .mockResolvedValueOnce({
+        data: undefined,
+        error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: 'control unavailable', diagnosticCode: 'LW_SERVICE_UNAVAILABLE', retryable: true, requestId: 'req-503' },
+      } as never)
+      .mockResolvedValueOnce(policyWith(4, 'model-b'))
+    vi.mocked(maintainProjectRubricModelInputRule).mockResolvedValue({
+      data: rulesView([rule({ approval: { approvedBy: 'teacher-1', approverCourseMembershipRevision: 1, model: 'model-b', runtimeBinding: 'runtime-a' } })], 5) as never,
+      error: undefined as never,
+    })
+    const wrapper = await mountPanel()
+    await flushPromises()
+
+    expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(2)
+    const problem = wrapper.get('[data-testid="rubric-policy-problem"]')
+    expect(problem.get('.diagnostic-message').text()).toBe('control unavailable')
+    expect(problem.get('.diagnostic-code').text()).toBe('LW_SERVICE_UNAVAILABLE')
+    expect(problem.get('.diagnostic-request-id').text()).toBe('req-503')
+    expect(wrapper.get('[data-testid="rubric-approve-model"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-testid="rubric-policy-recheck"]').trigger('click')
+    await flushPromises()
+    expect(getProjectRubricModelInputRules).toHaveBeenCalledTimes(2)
+    expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(3)
+    expect(wrapper.find('[data-testid="rubric-policy-problem"]').exists()).toBe(false)
+    const approve = wrapper.get('[data-testid="rubric-approve-model"]')
+    expect(approve.text()).toBe('批准交给模型 model-b')
+    expect(approve.attributes('disabled')).toBeUndefined()
+
+    await approve.trigger('click')
+    await flushPromises()
+    const request = vi.mocked(maintainProjectRubricModelInputRule).mock.calls[0][0]
+    expect(request.headers['If-Match']).toBe('"rev-4"')
+    expect(request.body.action).toEqual({ kind: 'approve_model_use', model: 'model-b', runtimeBinding: 'runtime-a' })
   })
 
   it('ignores a rule for another release revision or rubric version', async () => {

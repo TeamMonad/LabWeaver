@@ -68,9 +68,24 @@
             </template>
           </li>
         </ul>
-        <p v-if="canEdit && rowsNeedPolicy && !syncedBinding" class="rubric-note" role="status" data-testid="rubric-policy-unsynced">
-          正在核对项目 AI 设置与评分规则是否属于同一策略版本，核对完成前不能批准交给模型。
-        </p>
+        <template v-if="canEdit && rowsNeedPolicy && policySync.kind !== 'synced'">
+          <p v-if="policySync.kind === 'checking'" class="rubric-note" role="status" data-testid="rubric-policy-unsynced">
+            正在核对项目 AI 设置与评分规则是否属于同一策略版本，核对完成前不能批准交给模型。
+          </p>
+          <div v-else class="rubric-policy-problem" data-testid="rubric-policy-problem">
+            <DiagnosticBanner
+              :code="policySync.diagnostic.code"
+              :message="policySync.diagnostic.message"
+              :next-step="policySync.diagnostic.nextStep"
+              :request-id="policySync.diagnostic.requestId"
+              :retryable="false"
+              severity="warning"
+            />
+            <button type="button" class="outlined-button" data-testid="rubric-policy-recheck" @click="recheckPolicy">
+              重新核对
+            </button>
+          </div>
+        </template>
       </template>
     </AsyncStateView>
 
@@ -108,6 +123,7 @@ import type {
   RubricModelInputRuleAction,
   RubricModelInputVisibility,
 } from '@/generated/contracts'
+import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 
 type RubricIdentity = MaintainRubricModelInputRuleRequestSchema['rubric']
 
@@ -124,6 +140,12 @@ interface PendingChange {
   row: RubricRow
   action: RubricModelInputRuleAction
 }
+
+/** Whether the approval target (the AI binding) is trusted for the rules on screen. */
+type PolicySync =
+  | { kind: 'synced' }
+  | { kind: 'checking' }
+  | { kind: 'failed' | 'mismatch'; diagnostic: DiagnosticViewModel }
 
 const props = defineProps<{
   projectId: string
@@ -155,23 +177,49 @@ const syncedBinding = computed(() => {
 })
 
 // The two reads can land on different policy versions (a save creates a new one; another tab may change the
-// model). Re-read whichever side is strictly older, once per distinct mismatch: if the re-read still disagrees,
-// approval stays closed instead of reading again in a loop. An equal revision with another id is never trusted.
-let reconciledMismatch: string | null = null
-watch(
-  () => (policy.state.kind === 'success' && rules.state.kind === 'success'
-    ? `${rules.state.data.policyRevision}:${policy.state.data.revision}`
-    : null),
-  (versions) => {
-    if (!versions || rules.acting || policy.state.kind !== 'success' || rules.state.kind !== 'success') return
-    const rulesRevision = rules.state.data.policyRevision
-    const policyRevision = policy.state.data.revision
-    if (rulesRevision === policyRevision || versions === reconciledMismatch) return
-    reconciledMismatch = versions
-    if (rulesRevision > policyRevision) void policy.load()
-    else void rules.load()
-  },
-)
+// model). Re-read whichever side is strictly older, once per distinct mismatch. If that read fails or still
+// disagrees, the page states why and offers a manual recheck instead of reading again in a loop. An equal
+// revision with another id is never trusted.
+const reconciledMismatch = ref<string | null>(null)
+const versionKey = computed(() => (policy.state.kind === 'success' && rules.state.kind === 'success'
+  ? `${rules.state.data.policyRevision}:${policy.state.data.revision}`
+  : null))
+watch(versionKey, (versions) => {
+  if (!versions || rules.acting || policy.state.kind !== 'success' || rules.state.kind !== 'success') return
+  const rulesRevision = rules.state.data.policyRevision
+  const policyRevision = policy.state.data.revision
+  if (rulesRevision === policyRevision || versions === reconciledMismatch.value) return
+  reconciledMismatch.value = versions
+  if (rulesRevision > policyRevision) void policy.load()
+  else void rules.load()
+})
+
+const policySync = computed<PolicySync>(() => {
+  if (syncedBinding.value) return { kind: 'synced' }
+  const state = policy.state
+  // Every failed read carries a diagnostic (reason first, then code and requestId).
+  if ('diagnostic' in state) return { kind: 'failed', diagnostic: state.diagnostic }
+  if (state.kind === 'empty') {
+    return {
+      kind: 'failed',
+      diagnostic: makeDiagnostic('LW_POLICY_NOT_FOUND', '项目当前没有已激活的 AI 设置，不能批准交给模型。', false),
+    }
+  }
+  if (state.kind !== 'success' || rules.state.kind !== 'success' || versionKey.value !== reconciledMismatch.value) return { kind: 'checking' }
+  const diagnostic = makeDiagnostic(
+    'RUBRIC_POLICY_VERSION_MISMATCH',
+    `项目 AI 设置（策略版本 ${state.data.revision}）与评分规则（策略版本 ${rules.state.data.policyRevision}）不属于同一策略版本，可能有人正在修改，暂不能确定批准的目标模型。`,
+    false,
+  )
+  diagnostic.nextStep = '点击“重新核对”同时重新读取评分规则和项目 AI 设置；仍不一致时稍后再试。'
+  return { kind: 'mismatch', diagnostic }
+})
+
+/** Manual recovery: read both sides again; approval stays closed until they agree. */
+async function recheckPolicy() {
+  reconciledMismatch.value = null
+  await Promise.all([rules.load(), policy.load()])
+}
 
 function sameIdentity(left: RubricIdentity, right: RubricIdentity): boolean {
   return left.packageId === right.packageId
@@ -341,6 +389,13 @@ function approve(row: RubricRow) {
 
 .rubric-status--blocked {
   color: var(--md-sys-color-error);
+}
+
+.rubric-policy-problem {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  margin-top: var(--space-3);
 }
 
 .rubric-actions {
