@@ -239,6 +239,54 @@ impl GatewayState {
             .await
     }
 
+    /// Replays only durable, confirmed no-send observations; never infers zero from an unknown call.
+    pub async fn reconcile_pending_zero_settlements(
+        &self,
+    ) -> Result<u64, GatewayReconciliationError> {
+        let keys: Vec<String> = sqlx::query_scalar("SELECT idempotency_key FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND state='in_progress' AND result ? 'knownZero' ORDER BY created_at,idempotency_key LIMIT 100")
+            .fetch_all(&self.pool).await?;
+        let mut completed = 0;
+        for key in keys {
+            let call_id = Uuid::parse_str(&key)
+                .map_err(|_| GatewayReconciliationError::InvalidObservation)?;
+            if self.reconcile_zero_call(call_id).await? {
+                completed += 1;
+            }
+        }
+        Ok(completed)
+    }
+
+    async fn reconcile_zero_call(&self, call_id: Uuid) -> Result<bool, GatewayReconciliationError> {
+        use sqlx::Row as _;
+        let row = sqlx::query("SELECT state,result FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND idempotency_key=$1")
+            .bind(call_id.to_string()).fetch_optional(&self.pool).await?;
+        let Some(row) = row else { return Ok(false) };
+        let Some(result) = row.try_get::<Option<Value>, _>("result")? else {
+            return Ok(false);
+        };
+        let Some(observation) = result.get("knownZero") else {
+            return Ok(false);
+        };
+        let request: ModelCostSettlementRequest = serde_json::from_value(observation.clone())
+            .map_err(|_| GatewayReconciliationError::InvalidObservation)?;
+        if request.call_id != call_id
+            || !matches!(&request.measurement, ModelUsageMeasurement::Known {quantities} if quantities == &ModelTokenQuantities::default())
+            || request.event_id != zero_settlement_event(call_id)?
+        {
+            return Err(GatewayReconciliationError::InvalidObservation);
+        }
+        if row.try_get::<String, _>("state")? == "completed" {
+            return Ok(true);
+        }
+        self.resource
+            .settle_model_cost(request.hold_id, &request)
+            .await?;
+        // A lost Resource response or a failed Agent update replays the same stable eventId.
+        sqlx::query("UPDATE agent.idempotency_ledger SET state='completed',completed_at=clock_timestamp() WHERE operation='model_gateway_call' AND idempotency_key=$1 AND state='in_progress' AND result=$2")
+            .bind(call_id.to_string()).bind(result).execute(&self.pool).await?;
+        Ok(true)
+    }
+
     async fn refuse_before_send(
         &self,
         hold_id: Uuid,
@@ -246,23 +294,31 @@ impl GatewayState {
         model: &str,
         code: &'static str,
     ) -> Response {
-        if settle(
-            self,
-            hold_id,
-            call_id,
-            model,
-            ModelUsageMeasurement::Known {
-                quantities: ModelTokenQuantities::default(),
-            },
-            b"denied-before-send",
-        )
-        .await
-        .is_err()
-        {
+        let Ok(event_id) = zero_settlement_event(call_id) else {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "LW_MODEL_SETTLEMENT_PENDING",
-                "no model request sent; zero-usage hold release pending reconciliation",
+                "no model request sent; zero observation could not be prepared",
+            );
+        };
+        let observation = json!({"knownZero":ModelCostSettlementRequest {
+            hold_id, call_id, event_id, model_binding:model.to_owned(),
+            measurement:ModelUsageMeasurement::Known {quantities:ModelTokenQuantities::default()},
+        }});
+        let recorded = sqlx::query("UPDATE agent.idempotency_ledger SET result=$2 WHERE operation='model_gateway_call' AND idempotency_key=$1 AND state='in_progress' AND (result IS NULL OR result=$2)")
+            .bind(call_id.to_string()).bind(observation).execute(&self.pool).await;
+        if !matches!(recorded, Ok(result) if result.rows_affected()==1) {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_MODEL_SETTLEMENT_PENDING",
+                "no model request sent; zero observation persistence failed",
+            );
+        }
+        if self.reconcile_zero_call(call_id).await.is_err() {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_MODEL_SETTLEMENT_PENDING",
+                "no model request sent; durable zero observation awaits reconciliation",
             );
         }
         error_response(
@@ -334,7 +390,20 @@ impl GatewayState {
     }
 }
 pub async fn serve(state: GatewayState, listener: TcpListener) -> Result<(), std::io::Error> {
-    axum::serve(listener, state.router()).await
+    let server = async { axum::serve(listener, state.clone().router()).await };
+    let reconciliation = async {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            if let Err(error) = state.reconcile_pending_zero_settlements().await {
+                tracing::warn!(event="agent.model.zero_settlement_pending",diagnostic_code=%error,"durable zero observation retained for reconciliation");
+            }
+        }
+    };
+    tokio::select! {
+        result = server => result,
+        () = reconciliation => Err(std::io::Error::other("model settlement reconciliation ended")),
+    }
 }
 fn error_response(status: StatusCode, code: &'static str, message: &str) -> Response {
     (status,axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code}))).into_response()
@@ -423,17 +492,6 @@ async fn messages(
             "model differs from the original authorized policy",
         );
     }
-    if let Err(code) = state
-        .authorization
-        .classify(&input, token, &state.upstream_key)
-        .await
-    {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            code,
-            "model input contains denied content",
-        );
-    }
     let request_hash = format!("{:x}", Sha256::digest(&body));
     let call_id = match state.call_identity(&claims, &headers, &request_hash).await {
         Ok(id) => id,
@@ -450,11 +508,23 @@ async fn messages(
     match accepted {
         Ok(false) => {}
         Ok(true) => {
-            return error_response(
-                StatusCode::CONFLICT,
-                "LW_MODEL_CALL_OUTCOME_UNKNOWN",
-                "original call is already fenced; inspect its persisted observation",
-            );
+            return match state.reconcile_zero_call(call_id).await {
+                Ok(true) => error_response(
+                    StatusCode::FORBIDDEN,
+                    "LW_MODEL_INPUT_AUTHORIZATION_DENIED",
+                    "original call was denied before upstream; its zero observation is settled",
+                ),
+                Ok(false) => error_response(
+                    StatusCode::CONFLICT,
+                    "LW_MODEL_CALL_OUTCOME_UNKNOWN",
+                    "original call is already fenced; inspect its persisted observation",
+                ),
+                Err(_) => error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "LW_MODEL_SETTLEMENT_PENDING",
+                    "original zero observation awaits reconciliation; no new upstream request sent",
+                ),
+            };
         }
         Err(_) => {
             return error_response(
@@ -463,6 +533,17 @@ async fn messages(
                 "call execution fence unavailable",
             );
         }
+    }
+    if let Err(code) = state
+        .authorization
+        .classify(&input, token, &state.upstream_key)
+        .await
+    {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            code,
+            "model input contains denied content",
+        );
     }
     let admission = match state
         .resource
@@ -912,15 +993,28 @@ async fn authorize_tool(
 
 #[cfg(test)]
 #[tokio::test]
+async fn dlp_refusal_after_admission_releases_real_hold_without_charge()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_zero_settlement(false).await
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn failed_zero_settlement_is_durable_and_reconciles_idempotently()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_zero_settlement(true).await
+}
+
+#[cfg(test)]
 #[allow(
     clippy::too_many_lines,
     reason = "native session, admission, refusal and zero settlement are one financial scenario"
 )]
-async fn dlp_refusal_after_admission_releases_real_hold_without_charge()
--> Result<(), Box<dyn std::error::Error>> {
+async fn exercise_zero_settlement(fail_first: bool) -> Result<(), Box<dyn std::error::Error>> {
     use contracts::resource::{FixedDecimal, credits::CreditHoldState};
     use testcontainers::{ImageExt, runners::AsyncRunner};
     use testcontainers_modules::postgres::Postgres;
+    use tower::ServiceExt as _;
     let pg = Postgres::default().with_tag("17.5-alpine").start().await?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(12)
@@ -971,7 +1065,13 @@ async fn dlp_refusal_after_admission_releases_real_hold_without_charge()
         http: reqwest::Client::new(),
         authorization: authority.authorization.clone(),
     });
-    let call_id = Uuid::now_v7();
+    let call_key = "confirmed-zero-reconcile";
+    let call_id = identity(&[
+        authority.project.as_uuid().as_bytes(),
+        authority.run_id.as_uuid().as_bytes(),
+        &authority.attempt.to_be_bytes(),
+        call_key.as_bytes(),
+    ]);
     let admission = billing
         .client
         .admit_model_cost(
@@ -986,21 +1086,68 @@ async fn dlp_refusal_after_admission_releases_real_hold_without_charge()
     assert!(billing.credits.account(authority.project).await?.reserved > FixedDecimal::zero());
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", token.parse()?);
-    let body = serde_json::to_vec(
+    let body = Bytes::from(serde_json::to_vec(
         &json!({"model":"fixture-model","messages":[{"role":"user","content":{"-----BEGIN PRIVATE KEY-----":"not-a-secret-value"}}]}),
-    )?;
+    )?);
+    let request_hash = format!("{:x}", Sha256::digest(&body));
+    sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state) VALUES('model_gateway_call',$1,$2,'in_progress')")
+        .bind(call_id.to_string()).bind(request_hash).execute(&pool).await?;
+    if fail_first {
+        // Fail the actual Resource transaction, not a mock or a replacement backend.
+        sqlx::raw_sql("CREATE FUNCTION resource.test_zero_settlement_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'isolated Resource zero-settlement failure'; END $$; CREATE TRIGGER test_zero_settlement_failure BEFORE INSERT ON resource.model_cost_observations FOR EACH ROW WHEN (NEW.contract->'measurement'->>'state'='known') EXECUTE FUNCTION resource.test_zero_settlement_failure();").execute(&pool).await?;
+    }
     // Exercise the actual final gateway preflight after a real admission, not a mock classifier.
+    let replay_body = body.clone();
     let response = forward(
-        state,
+        state.clone(),
         headers,
-        Bytes::from(body),
+        body,
         "fixture-model".to_owned(),
         admission.hold.id,
         call_id,
         claims,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.status(),
+        if fail_first {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::FORBIDDEN
+        }
+    );
+    let durable: Value = sqlx::query_scalar("SELECT result FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND idempotency_key=$1").bind(call_id.to_string()).fetch_one(&pool).await?;
+    let stable_event = serde_json::to_value(zero_settlement_event(call_id)?)?;
+    assert_eq!(durable["knownZero"]["eventId"], stable_event);
+    assert_eq!(durable["knownZero"]["measurement"]["state"], "known");
+    assert_eq!(
+        durable["knownZero"]["measurement"]["quantities"],
+        serde_json::to_value(ModelTokenQuantities::default())?
+    );
+    if fail_first {
+        assert!(billing.credits.account(authority.project).await?.reserved > FixedDecimal::zero());
+        assert_eq!(
+            billing.credits.account(authority.project).await?.spent,
+            FixedDecimal::zero()
+        );
+        let pending: String = sqlx::query_scalar("SELECT state FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND idempotency_key=$1").bind(call_id.to_string()).fetch_one(&pool).await?;
+        assert_eq!(pending, "in_progress");
+        sqlx::raw_sql("DROP TRIGGER test_zero_settlement_failure ON resource.model_cost_observations; DROP FUNCTION resource.test_zero_settlement_failure();").execute(&pool).await?;
+        sqlx::query(
+            "UPDATE access.bff_sessions SET revoked_at=clock_timestamp() WHERE session_id=$1",
+        )
+        .bind(authority.session)
+        .execute(&pool)
+        .await?;
+        // A new gateway instance replays the persisted observation without a live user session.
+        let restarted = state.as_ref().clone();
+        assert_eq!(restarted.reconcile_pending_zero_settlements().await?, 1);
+        assert_eq!(restarted.reconcile_pending_zero_settlements().await?, 0);
+        sqlx::query("UPDATE access.bff_sessions SET revoked_at=NULL WHERE session_id=$1")
+            .bind(authority.session)
+            .execute(&pool)
+            .await?;
+    }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     let account = billing.credits.account(authority.project).await?;
     assert_eq!(account.reserved, FixedDecimal::zero());
@@ -1013,6 +1160,57 @@ async fn dlp_refusal_after_admission_releases_real_hold_without_charge()
     assert_eq!(holds.len(), 1);
     assert_eq!(holds[0].state, CreditHoldState::Settled);
     assert_eq!(holds[0].remaining, FixedDecimal::zero());
+    let completed: String = sqlx::query_scalar("SELECT state FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND idempotency_key=$1").bind(call_id.to_string()).fetch_one(&pool).await?;
+    assert_eq!(completed, "completed");
+    if fail_first {
+        // Simulate losing the Agent completion update after Resource committed the zero event.
+        sqlx::query("UPDATE agent.idempotency_ledger SET state='in_progress',completed_at=NULL WHERE operation='model_gateway_call' AND idempotency_key=$1")
+            .bind(call_id.to_string()).execute(&pool).await?;
+    }
+    let duplicate = state
+        .as_ref()
+        .clone()
+        .router()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", &token)
+                .header("x-labweaver-call-id", call_key)
+                .body(Body::from(replay_body))?,
+        )
+        .await?;
+    assert_eq!(duplicate.status(), StatusCode::FORBIDDEN);
+    let complete_after_retry: String = sqlx::query_scalar("SELECT state FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND idempotency_key=$1").bind(call_id.to_string()).fetch_one(&pool).await?;
+    assert_eq!(complete_after_retry, "completed");
+    let observations: i64 = sqlx::query_scalar("SELECT count(*) FROM resource.model_cost_observations WHERE hold_id=$1 AND contract->'measurement'->>'state'='known'").bind(admission.hold.id).fetch_one(&pool).await?;
+    assert_eq!(observations, 1);
+    assert_eq!(
+        billing.credits.account(authority.project).await?.reserved,
+        FixedDecimal::zero()
+    );
+    assert_eq!(
+        billing.credits.account(authority.project).await?.spent,
+        FixedDecimal::zero()
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     server.abort();
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GatewayReconciliationError {
+    #[error("LW_MODEL_ZERO_OBSERVATION_PERSISTENCE_FAILED")]
+    Persistence(#[from] sqlx::Error),
+    #[error("LW_MODEL_ZERO_OBSERVATION_INVALID")]
+    InvalidObservation,
+    #[error("LW_MODEL_ZERO_SETTLEMENT_UNAVAILABLE")]
+    Resource(#[from] task_execution::resource::ResourceClientError),
+}
+
+fn zero_settlement_event(call_id: Uuid) -> Result<contracts::EventId, GatewayReconciliationError> {
+    contracts::EventId::from_str(
+        &identity(&[call_id.as_bytes(), b"denied-before-send"]).to_string(),
+    )
+    .map_err(|_| GatewayReconciliationError::InvalidObservation)
 }

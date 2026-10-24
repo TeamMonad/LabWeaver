@@ -71,6 +71,8 @@ pub struct ModelAuthorizationFixture {
     pub scope: ModelGatewayScope,
     pub now: UtcTimestamp,
     pub lease: uuid::Uuid,
+    pub control_base_uri: reqwest::Url,
+    pub control_ca_file: std::path::PathBuf,
     _directory: tempfile::TempDir,
     control: tokio::task::JoinHandle<()>,
 }
@@ -340,6 +342,8 @@ impl ModelAuthorizationFixture {
             scope,
             now,
             lease,
+            control_base_uri: base,
+            control_ca_file: ca,
             _directory: directory,
             control,
         })

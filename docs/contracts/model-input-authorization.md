@@ -62,6 +62,8 @@ Authoring sandbox 不持有上游模型凭据。唯一模型出口是 #252 的 `
 
 Claude 的 `PreToolUse`/`PostToolUse` hook 调用同一网关的 `/authorize` 检查。每个新模型请求重新检查原 session、当前成员/对象权限、策略与内容版本、原 execution lease、取消及固定任务截止。服务端不信任 sandbox 自报 actor/project/provider URL；已开始的发送不能撤回，撤权与取消阻止后续动作与 repair。
 
+发送前拒绝的已确认零观察及稳定 `eventId` 先写入现有 `model_gateway_call` 持久 fence，再提交 Resource 结算。RPC 失败时记录保持 pending；gateway 启动和每 10 秒的有界对账会幂等补交，同一 callId 的重复请求也先补交这条记录，再返回原拒绝，不重新发送模型。Resource 确认后 fence 才完成，零观察保留；原会话撤销也不阻止已知事实的结算。没有证据的未知调用不会进入该零用量恢复路径，不以一小时兜底代替已确认零观察。
+
 秘密分类在 JSON 解码后覆盖所有字符串值和对象键，包括明文键、Unicode 转义键和任意嵌套对象键。对象键中的私钥、AWS key、JWT、provider credential 或 task capability 与字符串值使用同一拒绝规则，不会因位于工具输入的键而绕过检查。
 
 教师创作和私人/共享 Work 配置均只把显式选择的材料包文件放进隔离 sandbox，校验实际字节的 SHA-256；未选文件不读取、不分类、不材料化。该路径不挂载、遍历或读取 Work 用户持久盘。学生 advisory 只消费冻结 manifest/step.include/llmReadable 交集和独立获准的 rubric。不能用同目录、文件名、课程相同或付款项目权限扩大输入范围。
@@ -77,3 +79,7 @@ Claude 的 `PreToolUse`/`PostToolUse` hook 调用同一网关的 `/authorize` �
 ## 前端消费
 
 创建入口必须显式选择非空精确 `selectedPaths`，不能自动全选或省略；202 仅表示任务已接受。展示失败时先显示中文原因/下一步，再提供诊断码与 requestId。浏览器不构造 binding、capability 或内部 resolve 请求。教师可见 rubric 不等于获准发给外部模型，界面需分别消费可见性、批准目标模型与撤回动作。
+
+## 同步 HTTP 错误声明
+
+公开创建操作声明 `LW_MODEL_INPUT_SELECTION_REQUIRED` 和 `LW_MODEL_INPUT_AUTHORIZATION_DENIED`；rubric 维护操作声明 `LW_MODEL_INPUT_AUTHORIZATION_INVALID` 和 `LW_MODEL_INPUT_AUTHORIZATION_DENIED`；内部创建/复核操作声明实际同步返回的 `LW_MODEL_INPUT_AUTHORIZATION_DENIED`。这些代码进入对应 operation 的 `x-labweaver-errors`，由 Rust 真源统一生成 OpenAPI/SDK。只在异步任务中出现的 `LW_MODEL_INPUT_AUTHORIZATION_REQUIRED`、`LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE` 不列入这些同步 Control HTTP 操作的错误列表。

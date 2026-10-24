@@ -7875,7 +7875,9 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_MODEL_INPUT_SELECTION_REQUIRED",
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
         "x-labweaver-object-action": "configure_agent",
@@ -11813,7 +11815,9 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_MODEL_INPUT_AUTHORIZATION_INVALID",
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-object-action": "edit",
@@ -14629,7 +14633,9 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_MODEL_INPUT_SELECTION_REQUIRED",
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
         "x-labweaver-object-action": "configure_agent",
