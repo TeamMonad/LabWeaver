@@ -5575,7 +5575,11 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_RUNTIME_LEASE_NOT_ACTIVE",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "environment:write",
@@ -5696,7 +5700,11 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_RUNTIME_LEASE_NOT_ACTIVE",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "environment:write",
@@ -5807,7 +5815,11 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_RUNTIME_LEASE_NOT_ACTIVE",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "environment:write",
@@ -5918,7 +5930,11 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_RUNTIME_LEASE_NOT_ACTIVE",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "environment:write",
@@ -6029,7 +6045,11 @@
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
           "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_REVISION_CONFLICT",
+          "LW_RUNTIME_LEASE_NOT_ACTIVE",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "environment:write",
@@ -6268,7 +6288,11 @@
           "LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE",
           "LW_WORK_TEMPLATE_UPGRADE_TIMEOUT",
           "LW_ENVIRONMENT_REVISION_CONFLICT",
-          "LW_IDEMPOTENCY_CONFLICT"
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_RUNTIME_LEASE_NOT_ACTIVE",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+          "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "environment:write",

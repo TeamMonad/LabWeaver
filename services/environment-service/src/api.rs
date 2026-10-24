@@ -1681,7 +1681,8 @@ impl IntoResponse for EnvironmentApiError {
                 EnvironmentStoreError::IdempotencyConflict
                 | EnvironmentStoreError::IdempotencyInProgress
                 | EnvironmentStoreError::Lifecycle(crate::LifecycleError::OperationActive),
-            ) => StatusCode::CONFLICT,
+            )
+            | Self::Messaging(NatsMessagingError::LeaseNotActive) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
         let rendered = self.to_string();

@@ -2165,6 +2165,17 @@ fn environment_management_errors(operation_id: &str) -> Option<Value> {
             "LW_HTTP_SERVICE_UNAVAILABLE",
             "LW_HTTP_INTERNAL",
         ],
+        "startEnvironment" | "restartEnvironment" | "retryEnvironment" | "recoverEnvironment"
+        | "resetEnvironment" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_ACCESS_DENIED",
+            "LW_IDEMPOTENCY_CONFLICT",
+            "LW_REVISION_CONFLICT",
+            "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE",
+        ],
         "upgradeEnvironmentTemplate" => vec![
             "LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM",
             "LW_WORK_TEMPLATE_UPGRADE_CONFIRMATION_REQUIRED",
@@ -2177,6 +2188,10 @@ fn environment_management_errors(operation_id: &str) -> Option<Value> {
             "LW_WORK_TEMPLATE_UPGRADE_TIMEOUT",
             "LW_ENVIRONMENT_REVISION_CONFLICT",
             "LW_IDEMPOTENCY_CONFLICT",
+            "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_TIMEOUT",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_UNAVAILABLE",
         ],
         _ => return None,
     };

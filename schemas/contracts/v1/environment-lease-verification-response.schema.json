@@ -87,6 +87,7 @@
     "EnvironmentLeaseState": {
       "description": "Closed Resource Lease states understood by the Environment verifier.",
       "enum": [
+        "pending",
         "active",
         "expiring",
         "expired",

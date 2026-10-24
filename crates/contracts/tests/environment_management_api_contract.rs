@@ -259,3 +259,40 @@ fn agent_capability_read_failures_are_distinct_from_unconfigured_state()
     assert_eq!(view["reasonCode"], "LW_AGENT_MODEL_NOT_CONFIGURED");
     Ok(())
 }
+
+#[test]
+fn work_lease_operations_declare_conflict_for_inactive_leases_and_service_failure_for_protocol_damage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let generated = contracts::schema::generate_all()?;
+    let artifact = generated
+        .iter()
+        .find(|item| item.relative_path.ends_with("labweaver-public.v1.json"))
+        .ok_or("Public OpenAPI artifact missing")?;
+    let openapi: Value = serde_json::from_slice(&artifact.bytes)?;
+    for suffix in [
+        "start",
+        "restart",
+        "retry",
+        "recover",
+        "reset",
+        "template-upgrade",
+    ] {
+        let path = format!("/api/v1/environments/{{environmentId}}/{suffix}");
+        let operation = &openapi["paths"][&path]["post"];
+        assert!(operation["responses"].get("409").is_some(), "{path}");
+        assert!(operation["responses"].get("503").is_some(), "{path}");
+        let errors = operation["x-labweaver-errors"]
+            .as_array()
+            .ok_or("Work lease errors missing")?;
+        for diagnostic in [
+            "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+        ] {
+            assert!(
+                errors.iter().any(|code| code == diagnostic),
+                "{path}: {diagnostic}"
+            );
+        }
+    }
+    Ok(())
+}

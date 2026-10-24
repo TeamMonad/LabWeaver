@@ -58,6 +58,24 @@ use tokio::sync::Mutex;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 const FORWARD_PERMISSION: &str = "access.environment.forward";
+const RESOURCE_CLIENT_ID: &str = "resource-service";
+const RESOURCE_PERMISSION: &str = "resource.environment.manage";
+const INACTIVE_CODE: &str = "LW_RUNTIME_LEASE_NOT_ACTIVE";
+const INVALID_CODE: &str = "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID";
+type LeaseCase = (u8, reqwest::StatusCode, &'static str);
+const LEASE_REJECTIONS: &[LeaseCase] = &[
+    (1, reqwest::StatusCode::CONFLICT, INACTIVE_CODE),
+    (2, reqwest::StatusCode::CONFLICT, INACTIVE_CODE),
+    (3, reqwest::StatusCode::CONFLICT, INACTIVE_CODE),
+    (5, reqwest::StatusCode::CONFLICT, INACTIVE_CODE),
+    (6, reqwest::StatusCode::CONFLICT, INACTIVE_CODE),
+    (7, reqwest::StatusCode::CONFLICT, INACTIVE_CODE),
+    (11, reqwest::StatusCode::CONFLICT, INACTIVE_CODE),
+    (4, reqwest::StatusCode::SERVICE_UNAVAILABLE, INVALID_CODE),
+    (8, reqwest::StatusCode::SERVICE_UNAVAILABLE, INVALID_CODE),
+    (9, reqwest::StatusCode::SERVICE_UNAVAILABLE, INVALID_CODE),
+    (10, reqwest::StatusCode::SERVICE_UNAVAILABLE, INVALID_CODE),
+];
 const REVOKE_SUBJECT: &str = "labweaver.access.environment.revoke.v1";
 const LEASE_SUBJECT: &str = "labweaver.resource.lease.verify.v1";
 const QUARANTINE_SUBJECT: &str = "private.environment.command.quarantine.v1";
@@ -106,6 +124,7 @@ struct Peers {
     lease_mode: AtomicU8,
     revocations: AtomicUsize,
     lease_queries: AtomicUsize,
+    reasons: Mutex<Vec<AccessReason>>,
 }
 
 struct Tasks(Vec<tokio::task::AbortHandle>);
@@ -134,6 +153,8 @@ struct InstalledDeployment {
 struct KubernetesBoundary {
     installed: Mutex<Option<InstalledDeployment>>,
     restart_count: AtomicUsize,
+    replicas: AtomicUsize,
+    fail_restart: AtomicBool,
 }
 
 impl KubernetesBoundary {
@@ -170,6 +191,15 @@ impl KubernetesBoundary {
             namespace: plan.namespace.clone(),
             workspace_claim,
         });
+        let replicas = deployment
+            .document
+            .pointer("/spec/replicas")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(rejected)?;
+        self.replicas.store(
+            usize::try_from(replicas).map_err(|_| rejected())?,
+            Ordering::SeqCst,
+        );
         observation(ready)
     }
 }
@@ -220,15 +250,34 @@ impl ContainerProviderBackend for KubernetesBoundary {
         _revision: Revision,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         self.restart_count.fetch_add(1, Ordering::SeqCst);
+        if self.fail_restart.swap(false, Ordering::SeqCst) {
+            return Err(rejected());
+        }
         self.install(plan).await
     }
     async fn scale(
         &self,
         _fence: &ContainerBackendFence,
-        _plan: &ContainerResourcePlan,
-        _replicas: u32,
+        plan: &ContainerResourcePlan,
+        replicas: u32,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
-        Err(rejected())
+        match replicas {
+            0 => {
+                if self
+                    .installed
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_none_or(|installed| installed.namespace != plan.namespace)
+                {
+                    return Err(rejected());
+                }
+                self.replicas.store(0, Ordering::SeqCst);
+                observation(true)
+            }
+            1 => self.install(plan).await,
+            _ => Err(rejected()),
+        }
     }
     async fn delete_namespace(
         &self,
@@ -270,7 +319,7 @@ async fn spawn_peers(
             let request: RevokeRequest = contracts::parse_strict_json(&message.payload)?;
             assert_eq!(request.version, 1);
             assert_eq!(request.environment_id, revoke_id);
-            assert_eq!(request.reason, AccessReason::Restarted);
+            revoke_peers.reasons.lock().await.push(request.reason);
             revoke_peers.revocations.fetch_add(1, Ordering::SeqCst);
             if !revoke_peers.acknowledge.load(Ordering::SeqCst) {
                 continue;
@@ -301,29 +350,11 @@ async fn spawn_peers(
             assert_eq!(request.course_id, authorization.course_id);
             assert_eq!(request.capacity_binding, authorization.capacity_binding);
             peers.lease_queries.fetch_add(1, Ordering::SeqCst);
-            let mut current = authorization.clone();
             let mode = peers.lease_mode.load(Ordering::SeqCst);
-            if mode == 1 {
-                current.active_from = UtcTimestamp::from_utc(
-                    authorization.active_from.get() - time::Duration::hours(2),
-                )?;
-                current.expires_at = UtcTimestamp::from_utc(
-                    authorization.active_from.get() - time::Duration::hours(1),
-                )?;
-            }
-            let response = EnvironmentLeaseVerificationResponse {
-                version: 1,
-                state: if mode == 2 {
-                    EnvironmentLeaseState::Revoked
-                } else {
-                    EnvironmentLeaseState::Active
-                },
-                authorization: (mode != 2).then_some(current),
-            };
             responder
                 .publish(
                     message.reply.ok_or("lease reply missing")?,
-                    serde_json::to_vec(&response)?.into(),
+                    lease_reply(&authorization, mode)?.into(),
                 )
                 .await?;
         }
@@ -332,12 +363,53 @@ async fn spawn_peers(
     Ok(())
 }
 
+// 1 is the production Resource expiry shape: Active plus authorization:null.
+// 3 retains an expired but structurally valid snapshot as a separate defensive case.
+fn lease_reply(
+    authorization: &EnvironmentLeaseAuthorization,
+    mode: u8,
+) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+    if mode == 4 {
+        return Ok(b"{".to_vec());
+    }
+    let mut current = authorization.clone();
+    match mode {
+        3 => {
+            current.active_from =
+                UtcTimestamp::from_utc(authorization.active_from.get() - time::Duration::hours(2))?;
+            current.expires_at =
+                UtcTimestamp::from_utc(authorization.active_from.get() - time::Duration::hours(1))?;
+        }
+        9 => current.environment_id = EnvironmentId::new(),
+        10 => current.expires_at = current.active_from,
+        11 => {
+            current.active_from = authorization.expires_at;
+            current.expires_at =
+                UtcTimestamp::from_utc(authorization.expires_at.get() + time::Duration::hours(1))?;
+        }
+        _ => {}
+    }
+    let (state, authorization) = match mode {
+        1 | 8 => (EnvironmentLeaseState::Active, None),
+        2 => (EnvironmentLeaseState::Revoked, None),
+        5 => (EnvironmentLeaseState::Expired, None),
+        6 => (EnvironmentLeaseState::Expiring, None),
+        7 => (EnvironmentLeaseState::Pending, None),
+        _ => (EnvironmentLeaseState::Active, Some(current)),
+    };
+    Ok(serde_json::to_vec(&EnvironmentLeaseVerificationResponse {
+        version: if mode == 8 { 2 } else { 1 },
+        state,
+        authorization,
+    })?)
+}
+
 async fn requested_work(store: &PgEnvironmentStore) -> TestResult<EnvironmentInstance> {
     let now = store.current_time().await?;
     let mut instance = requested_instance();
     instance.class = EnvironmentClass::Work;
     instance.lease_id = Some(LeaseId::new());
-    instance.capacity_binding = Some("http-upgrade-workspace".to_owned());
+    instance.capacity_binding = Some(contracts::CapacityClaimId::new().to_string());
     instance.eligibility_expires_at = Some(UtcTimestamp::from_utc(
         now.get() + time::Duration::hours(1),
     )?);
@@ -394,7 +466,7 @@ fn provider_worker(
 
 struct Harness {
     _tasks: Tasks,
-    _authority: AuthorityHandle,
+    authority: AuthorityHandle,
     _postgres: ContainerAsync<Postgres>,
     _nats: ContainerAsync<GenericImage>,
     pool: PgPool,
@@ -407,6 +479,7 @@ struct Harness {
     target: contracts::events::ReleasePublished,
     base: String,
     token: String,
+    http: reqwest::Client,
 }
 
 impl Harness {
@@ -480,7 +553,7 @@ impl Harness {
             serve_authenticated_api(&pool, &store, &releases, &client, &mut tasks).await?;
         Ok(Self {
             _tasks: tasks,
-            _authority: authority,
+            authority,
             _postgres: postgres,
             _nats: nats,
             pool,
@@ -493,33 +566,68 @@ impl Harness {
             target,
             base,
             token,
+            http: reqwest::Client::builder().no_proxy().build()?,
         })
     }
 
-    async fn upgrade(&self, key: &str, authenticated: bool) -> TestResult<reqwest::Response> {
-        let mut request = reqwest::Client::builder()
-            .no_proxy()
-            .build()?
-            .post(format!(
-                "{}/api/v1/environments/{}/template-upgrade",
-                self.base, self.ready.id
-            ))
+    fn request(&self, route: &str, key: &str, token: Option<&str>) -> reqwest::RequestBuilder {
+        let mut request = self
+            .http
+            .post(format!("{}{route}", self.base))
             .header("x-labweaver-actor-id", self.ready.owner_id.to_string())
             .header("x-labweaver-session-id", uuid::Uuid::now_v7().to_string())
             .header(
                 "If-Match",
                 StrongEtag::from_revision(self.ready.revision).header_value(),
             )
-            .header("Idempotency-Key", key)
+            .header("Idempotency-Key", key);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request
+    }
+
+    async fn upgrade(&self, key: &str, authenticated: bool) -> TestResult<reqwest::Response> {
+        Ok(self
+            .request(
+                &format!("/api/v1/environments/{}/template-upgrade", self.ready.id),
+                key,
+                authenticated.then_some(self.token.as_str()),
+            )
             .json(&UpgradeEnvironmentTemplateRequest {
                 target_release_id: self.target.release.id,
                 target_release_version: self.target.release.version,
                 confirmed: true,
-            });
-        if authenticated {
-            request = request.bearer_auth(&self.token);
+            })
+            .send()
+            .await?)
+    }
+
+    async fn prepare_state(&mut self, operation: &str) -> TestResult {
+        let seed = match operation {
+            "start" => Some(("stop", ObservedEnvironmentState::Stopped)),
+            "retry" | "recover" => Some(("restart", ObservedEnvironmentState::Failed)),
+            _ => None,
+        };
+        let Some((action, expected)) = seed else {
+            return Ok(());
+        };
+        self.peers.acknowledge.store(true, Ordering::SeqCst);
+        if expected == ObservedEnvironmentState::Failed {
+            self.backend.fail_restart.store(true, Ordering::SeqCst);
         }
-        Ok(request.send().await?)
+        let response = self
+            .request(
+                &format!("/api/v1/environments/{}/{action}", self.ready.id),
+                "seed-operation-state",
+                Some(&self.token),
+            )
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        drive_state(&self.store, &self.worker, self.ready.id, expected).await?;
+        self.ready = self.store.load(self.ready.id).await?;
+        Ok(())
     }
 }
 
@@ -535,8 +643,8 @@ async fn serve_authenticated_api(
         ServiceAuthConfig::new(
             &authority.issuer,
             AUDIENCE.to_owned(),
-            BTreeSet::from([CLIENT_ID.to_owned()]),
-            BTreeSet::from([FORWARD_PERMISSION.to_owned()]),
+            BTreeSet::from([CLIENT_ID.to_owned(), RESOURCE_CLIENT_ID.to_owned()]),
+            BTreeSet::new(),
             BTreeSet::from(["ES256".to_owned()]),
             3600,
             1,
@@ -588,12 +696,27 @@ async fn drive_ready(
     worker: &ReconcileWorker,
     environment_id: EnvironmentId,
 ) -> TestResult {
+    drive_state(
+        store,
+        worker,
+        environment_id,
+        ObservedEnvironmentState::Ready,
+    )
+    .await
+}
+
+async fn drive_state(
+    store: &PgEnvironmentStore,
+    worker: &ReconcileWorker,
+    environment_id: EnvironmentId,
+    expected: ObservedEnvironmentState,
+) -> TestResult {
     for _ in 0..10 {
         worker
             .run_once("http-upgrade-runtime", store.current_time().await?)
             .await?;
         let current = store.load(environment_id).await?;
-        if current.observed_state == ObservedEnvironmentState::Ready {
+        if current.observed_state == expected {
             return Ok(());
         }
         if current.operation.state == OperationState::Failed {
@@ -687,6 +810,10 @@ async fn authenticated_http_upgrade_requires_restart_revocation_ack_and_preserve
         accepted
     );
     assert_eq!(harness.peers.revocations.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *harness.peers.reasons.lock().await,
+        [AccessReason::Restarted, AccessReason::Restarted]
+    );
     assert_eq!(harness.backend.restart_count.load(Ordering::SeqCst), 1);
     Ok(())
 }
@@ -703,9 +830,17 @@ async fn authenticated_http_restart_rejects_expired_and_revoked_leases_after_rev
     let installed = harness.backend.installed.lock().await.clone();
     let client = reqwest::Client::builder().no_proxy().build()?;
 
-    for (index, (label, mode)) in [("expired-active", 1), ("revoked", 2)]
-        .into_iter()
-        .enumerate()
+    for (index, (label, mode)) in [
+        ("active-without-authorization", 1),
+        ("revoked", 2),
+        ("expired-snapshot-defense", 3),
+        ("expired", 5),
+        ("expiring", 6),
+        ("pending", 7),
+        ("not-yet-active", 11),
+    ]
+    .into_iter()
+    .enumerate()
     {
         harness.peers.lease_mode.store(mode, Ordering::SeqCst);
         let response = client
@@ -723,14 +858,10 @@ async fn authenticated_http_restart_rejects_expired_and_revoked_leases_after_rev
             .header("Idempotency-Key", format!("http-restart-lease-{label}"))
             .send()
             .await?;
-        assert_eq!(
-            response.status(),
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            "{label}"
-        );
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{label}");
         let problem: serde_json::Value = response.json().await?;
         assert_eq!(
-            problem["diagnosticCode"], "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+            problem["diagnosticCode"], "LW_RUNTIME_LEASE_NOT_ACTIVE",
             "{label}: {problem}"
         );
         assert_eq!(
@@ -763,6 +894,173 @@ async fn authenticated_http_restart_rejects_expired_and_revoked_leases_after_rev
             installed,
             "{label}"
         );
+    }
+    Ok(())
+}
+
+async fn database_counts(pool: &PgPool) -> TestResult<(i64, i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT (SELECT count(*) FROM environment.environment_instances), \
+        (SELECT count(*) FROM environment.environment_operations), \
+        (SELECT count(*) FROM environment.outbox_events)",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn assert_lease_rejection(
+    harness: &Harness,
+    route: &str,
+    body: Option<&serde_json::Value>,
+    token: &str,
+    (mode, status, diagnostic): LeaseCase,
+) -> TestResult {
+    harness.peers.acknowledge.store(true, Ordering::SeqCst);
+    harness.peers.lease_mode.store(mode, Ordering::SeqCst);
+    let counts = database_counts(&harness.pool).await?;
+    let queries = harness.peers.lease_queries.load(Ordering::SeqCst);
+    let revocations = harness.peers.revocations.load(Ordering::SeqCst);
+    let restarts = harness.backend.restart_count.load(Ordering::SeqCst);
+    let installed = harness.backend.installed.lock().await.clone();
+    let replicas = harness.backend.replicas.load(Ordering::SeqCst);
+    let mut request = harness.request(route, &format!("lease-{mode}-review"), Some(token));
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = request.send().await?;
+    let actual_status = response.status();
+    let problem: serde_json::Value = response.json().await?;
+    assert_eq!(actual_status, status, "{route}, mode {mode}: {problem}");
+    assert_eq!(
+        problem["diagnosticCode"], diagnostic,
+        "{route}, mode {mode}: {problem}"
+    );
+    assert_eq!(
+        harness.peers.lease_queries.load(Ordering::SeqCst),
+        queries + 1,
+        "{route}, mode {mode}"
+    );
+    // Upgrade verifies the lease before revoking; Restart/Reset revoke before verification.
+    let revokes = ["/restart", "/reset"]
+        .iter()
+        .any(|suffix| route.ends_with(suffix));
+    assert_eq!(
+        harness.peers.revocations.load(Ordering::SeqCst),
+        revocations + usize::from(revokes),
+        "{route}, mode {mode}: revocation ordering"
+    );
+    assert_eq!(harness.store.load(harness.ready.id).await?, harness.ready);
+    assert_eq!(database_counts(&harness.pool).await?, counts);
+    assert_eq!(
+        harness.backend.restart_count.load(Ordering::SeqCst),
+        restarts
+    );
+    assert_eq!(*harness.backend.installed.lock().await, installed);
+    assert_eq!(harness.backend.replicas.load(Ordering::SeqCst), replicas);
+    Ok(())
+}
+
+#[tokio::test]
+async fn authenticated_http_work_operations_distinguish_inactive_leases_from_protocol_damage()
+-> TestResult {
+    for operation in [
+        "start",
+        "restart",
+        "retry",
+        "recover",
+        "reset",
+        "template-upgrade",
+    ] {
+        let mut harness = Harness::start().await?;
+        harness.prepare_state(operation).await?;
+        let route = format!("/api/v1/environments/{}/{operation}", harness.ready.id);
+        let body = match operation {
+            "reset" => Some(serde_json::to_value(
+                contracts::http::ResetEnvironmentRequest {
+                    reset_target:
+                        contracts::environment::EnvironmentResetTarget::WorkConfiguration {
+                            configuration_revision: revision(1),
+                            authorization_revision: revision(1),
+                        },
+                },
+            )?),
+            "template-upgrade" => Some(serde_json::to_value(UpgradeEnvironmentTemplateRequest {
+                target_release_id: harness.target.release.id,
+                target_release_version: harness.target.release.version,
+                confirmed: true,
+            })?),
+            _ => None,
+        };
+        for &case in LEASE_REJECTIONS {
+            assert_lease_rejection(&harness, &route, body.as_ref(), &harness.token, case).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_leases_from_protocol_damage()
+-> TestResult {
+    let harness = Harness::start().await?;
+    let authorization = harness
+        .ready
+        .operation
+        .lease_authorization
+        .as_ref()
+        .ok_or("authorization missing")?;
+    let token = signed_token(
+        &harness.authority.key,
+        &harness.authority.issuer,
+        RESOURCE_CLIENT_ID,
+        AUDIENCE,
+        [RESOURCE_PERMISSION],
+    )?;
+    let handoff = contracts::environment::ResourceWorkHandoff {
+        version: 1,
+        request_id: authorization.resource_request_id,
+        request_revision: revision(1),
+        lease_id: authorization.lease_id,
+        lease_revision: authorization.lease_revision,
+        claim_id: authorization.capacity_binding.parse()?,
+        claim_revision: revision(1),
+        environment_id: harness.ready.id,
+        project_id: harness.ready.project_id,
+        course_id: harness.ready.course_id,
+        owner_actor_id: harness.ready.owner_id,
+        display_label: harness.ready.display_label.clone(),
+        release_id: harness.ready.release_id,
+        release_version: harness.ready.release_version,
+        provider_binding: harness.ready.provider_binding.clone(),
+        capacity_binding: authorization.capacity_binding.clone(),
+        approved_resources: authorization.approved_resources.clone(),
+        gpu_allocation: authorization.gpu_allocation.clone(),
+        trace_id: "resource-handoff-review".to_owned(),
+    };
+    let update = contracts::environment::ResourceWorkLeaseUpdate {
+        version: 1,
+        lease_id: authorization.lease_id,
+        lease_revision: authorization.lease_revision,
+        environment_id: harness.ready.id,
+        project_id: harness.ready.project_id,
+        course_id: harness.ready.course_id,
+        owner_actor_id: harness.ready.owner_id,
+        capacity_binding: authorization.capacity_binding.clone(),
+        expires_at: authorization.expires_at,
+        trace_id: "resource-lease-update-review".to_owned(),
+    };
+    for (route, body) in [
+        (
+            "/internal/v1/resource/work-handoffs",
+            serde_json::to_value(handoff)?,
+        ),
+        (
+            "/internal/v1/resource/work-lease-updates",
+            serde_json::to_value(update)?,
+        ),
+    ] {
+        for &case in LEASE_REJECTIONS {
+            assert_lease_rejection(&harness, route, Some(&body), &token, case).await?;
+        }
     }
     Ok(())
 }
@@ -805,10 +1103,10 @@ fn restart_message(
     })
 }
 
-#[tokio::test]
-async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -> TestResult {
-    let harness = Harness::start().await?;
-    let context = async_nats::jetstream::new(harness.client.clone());
+async fn restart_consumer(
+    client: &async_nats::Client,
+) -> TestResult<(async_nats::jetstream::Context, JetStreamCommandConsumer)> {
+    let context = async_nats::jetstream::new(client.clone());
     context
         .create_stream(async_nats::jetstream::stream::Config {
             name: "REVIEW_COMMANDS".to_owned(),
@@ -830,13 +1128,22 @@ async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -
             ..Default::default()
         })
         .await?;
-    let mut consumer = JetStreamCommandConsumer::bind(
-        harness.client.clone(),
+    let consumer = JetStreamCommandConsumer::bind(
+        client.clone(),
         "REVIEW_COMMANDS",
         "review-restart",
         QUARANTINE_SUBJECT,
     )
     .await?;
+    Ok((context, consumer))
+}
+
+#[tokio::test]
+async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -> TestResult {
+    let harness = Harness::start().await?;
+    let (context, mut consumer) = restart_consumer(&harness.client).await?;
+    let mut quarantined = harness.client.subscribe(QUARANTINE_SUBJECT).await?;
+    harness.client.flush().await?;
     let verifier = NatsResourceLeaseVerifier::new(
         LEASE_SUBJECT.to_owned(),
         harness.client.clone(),
@@ -848,7 +1155,7 @@ async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -
     .bind(harness.ready.id.as_uuid())
     .fetch_one(&harness.pool)
     .await?;
-    for mode in [1, 2] {
+    for &(mode, _, diagnostic) in LEASE_REJECTIONS {
         harness.peers.lease_mode.store(mode, Ordering::SeqCst);
         let message = restart_message(&harness.ready, harness.store.current_time().await?)?;
         context
@@ -867,6 +1174,11 @@ async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -
             outcome,
             environment_service::CommandConsumeOutcome::Rejected
         );
+        let notification = tokio::time::timeout(Duration::from_secs(5), quarantined.next())
+            .await?
+            .ok_or("quarantine notification missing")?;
+        let record: serde_json::Value = contracts::parse_strict_json(&notification.payload)?;
+        assert_eq!(record["diagnosticCode"], diagnostic, "lease mode {mode}");
         assert_eq!(harness.store.load(harness.ready.id).await?, harness.ready);
     }
     harness.peers.lease_mode.store(0, Ordering::SeqCst);
@@ -901,6 +1213,9 @@ async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -
     assert_eq!(after, before + 1);
     drive_ready(&harness.store, &harness.worker, harness.ready.id).await?;
     assert_eq!(harness.backend.restart_count.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.peers.lease_queries.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        harness.peers.lease_queries.load(Ordering::SeqCst),
+        LEASE_REJECTIONS.len() + 2
+    );
     Ok(())
 }

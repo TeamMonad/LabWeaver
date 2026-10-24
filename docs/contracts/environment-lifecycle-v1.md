@@ -16,6 +16,9 @@ Environment 唯一写入环境 Namespace、Quota、PVC、容器和 VM。Resource
 授权和容量绑定。原租约有效时直接操作；失效、撤销或释放后明确拒绝，不能靠旧的 Environment
 快照恢复运行。首次申请之外不强制重新人工审批；是否需要新申请取决于 Resource 当前授权。
 HTTP 与 JetStream 生命周期入口对 Work Restart 使用同一当前租约验证；过期或撤销的授权不进入命令事务，重复事件沿原 Inbox/幂等账本处理，不产生第二个操作。
+租约尚未激活、非 Active、Active 但 Resource 返回 `authorization:null`，以及结构合法但未到激活时间/已经过期的授权快照，均是业务拒绝：HTTP `409/LW_RUNTIME_LEASE_NOT_ACTIVE`，不是上游协议损坏。Resource 会对已过期但数据库状态仍为 Active 的租约返回 Active + null，调用方不得将其误报为 503。JetStream 入口沿用同一业务诊断拒绝，不写命令事务。
+
+只有反序列化失败、错误版本、授权身份/范围不匹配或授权结构非法等协议错误才返回 `503/LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID`，NATS 隔离记录也保留此诊断。上述映射覆盖所有 Work verifier 调用方：启动、重启、重试、恢复、重置、模板升级、Resource handoff 和租约刷新。
 费用估算复用已生成的 `estimateProjectResourceCost`，输入 `resources`、`computeFrom/computeUntil` 与 `storageFrom/storageUntil`，返回 `ResourceCostEstimate` 的固定费率明细和 `total`；不由 Environment 或浏览器另建计价逻辑。该接口不依赖模型，也不授予容量或资金权限，见[计算与存储估价](project-credits.md#计算与存储估价)。
 
 
