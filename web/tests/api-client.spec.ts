@@ -1,6 +1,7 @@
 import axios, { AxiosError, AxiosHeaders } from 'axios'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createLabWeaverApiClient } from '@/api/client'
+import { createClient } from '@/generated/contracts/client'
 import { diagnosticFromError, extractProblemDetails, makeDiagnostic } from '@/types/async'
 
 vi.mock('@/config', () => ({
@@ -640,6 +641,60 @@ describe('generated SSE authentication (#198)', () => {
 
       expect(epochListeners.size).toBe(0)
       expect(callerListeners.size).toBe(0)
+    })
+
+    it('forwards throw() to the generated loop exactly like an unguarded stream', async () => {
+      const failure = new Error('consumer could not handle the event')
+      /** Throws into a stream suspended after its first event, with no retry left. */
+      const throwAfterFirstEvent = async (open: (options: { url: string; onSseError: (error: unknown) => void; sseMaxRetryAttempts: number }) => Promise<Stream>) => {
+        const fetch = vi.fn(async (_request: Request) => eventStream())
+        vi.stubGlobal('fetch', fetch)
+        const onSseError = vi.fn()
+        const events = await open({ url: eventsUrl, onSseError, sseMaxRetryAttempts: 1 })
+        expect((await events.stream.next()).value).toEqual({ streamSequence: '1' })
+        const result = await events.stream.throw(failure)
+        return { result, errors: onSseError.mock.calls.map(([error]) => error), fetches: fetch.mock.calls.length }
+      }
+      const expected = { result: { done: true, value: undefined }, errors: [failure], fetches: 1 }
+
+      const unguarded = createClient({ baseURL: 'https://api.example.test' })
+      expect(await throwAfterFirstEvent((options) => unguarded.sse.get(options))).toEqual(expected)
+
+      const { session, client } = await freshTransport()
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: { mode: 'bearer', accessToken: async () => 'bearer-of-actor-a' },
+      })
+      const epochListeners = abortListenersOf(session.sessionEpochSignal())
+      expect(await throwAfterFirstEvent((options) => api.sse.get({ ...options, security: [...security] }))).toEqual(expected)
+      expect(epochListeners.size).toBe(0)
+    })
+
+    it('releases its listeners and passes the original error through when the stream cannot be opened', async () => {
+      const { session, client } = await freshTransport()
+      const fetch = vi.fn()
+      vi.stubGlobal('fetch', fetch)
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: { mode: 'bearer', accessToken: async () => 'bearer-of-actor-a' },
+      })
+      const epochListeners = abortListenersOf(session.sessionEpochSignal())
+      const caller = new AbortController()
+      const callerListeners = abortListenersOf(caller.signal)
+      const rejection = new Error('request validation failed')
+
+      await expect(api.sse.get({
+        url: eventsUrl,
+        security: [...security],
+        signal: caller.signal,
+        requestValidator: async () => {
+          throw rejection
+        },
+      })).rejects.toBe(rejection)
+
+      expect(epochListeners.size).toBe(0)
+      expect(callerListeners.size).toBe(0)
+      expect(fetch).not.toHaveBeenCalled()
     })
   })
 })

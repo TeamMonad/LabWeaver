@@ -318,6 +318,8 @@ function guardStreams(client: Client, accessToken?: AccessTokenProvider): void {
         }
       })
 
+      // A stream that cannot be opened (a request validator or preflight
+      // rejecting) releases its listeners and fails with the original error.
       const { stream } = await open({
         ...options,
         signal: stopped.signal,
@@ -342,6 +344,9 @@ function guardStreams(client: Client, accessToken?: AccessTokenProvider): void {
             throw error
           }
         },
+      }).catch((error: unknown) => {
+        stop()
+        throw error
       })
 
       const close = async (): Promise<IteratorResult<unknown, void>> => {
@@ -352,21 +357,26 @@ function guardStreams(client: Client, accessToken?: AccessTokenProvider): void {
       // One network chunk can hold several events, which the generated loop
       // hands out without reading again; the epoch is therefore also checked
       // at every delivery, not only before each fetch.
+      const advance = async (step: () => Promise<IteratorResult<unknown, void>>) => {
+        try {
+          const result = await step()
+          return result.done || stopped.signal.aborted ? close() : result
+        } catch (error) {
+          await close()
+          throw error
+        }
+      }
       const delivered: AsyncGenerator<unknown, void, unknown> = {
-        async next() {
-          if (stopped.signal.aborted) return close()
-          try {
-            const result = await stream.next()
-            return result.done || stopped.signal.aborted ? close() : result
-          } catch (error) {
+        next: async () => (stopped.signal.aborted ? close() : advance(() => stream.next())),
+        return: close,
+        // Forwarded so the generated loop reports the error and applies its own
+        // retry rules; a stream of an ended epoch is closed and rethrows.
+        async throw(error: unknown) {
+          if (stopped.signal.aborted) {
             await close()
             throw error
           }
-        },
-        return: close,
-        async throw(error: unknown) {
-          await close()
-          throw error
+          return advance(() => stream.throw(error))
         },
         [Symbol.asyncIterator]() {
           return this
