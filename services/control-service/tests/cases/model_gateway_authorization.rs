@@ -1,8 +1,5 @@
 //! Real Control/Agent/Resource `PostgreSQL` and JWT/TLS APIs; only the model upstream is captured.
-#[path = "../../../agent-service/tests/support/build_billing.rs"]
-mod build_billing;
-#[path = "../../../agent-service/tests/support/model_authorization.rs"]
-mod model_authorization;
+use super::{build_billing, model_authorization};
 
 use agent_service::model_gateway::{GatewayState, ModelGatewayRuntime, ScopedTokenIssuer};
 use axum::{

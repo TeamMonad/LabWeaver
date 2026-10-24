@@ -1066,6 +1066,9 @@
               "control.authoring.read"
             ]
           }
+        ],
+        "x-labweaver-errors": [
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
         ]
       }
     },
@@ -1103,6 +1106,9 @@
               "control.authoring.read"
             ]
           }
+        ],
+        "x-labweaver-errors": [
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
         ]
       }
     },
@@ -3951,7 +3957,10 @@
             ]
           }
         ],
-        "summary": "Recheck current session, object action and explicitly selected material versions"
+        "summary": "Recheck current session, object action and explicitly selected material versions",
+        "x-labweaver-errors": [
+          "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        ]
       }
     },
     "/internal/v1/platform-configuration/applies/{applyId}": {

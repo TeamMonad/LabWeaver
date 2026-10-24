@@ -913,6 +913,14 @@ async fn get_rubric_model_input_rules(
     Ok(with_etag(StatusCode::OK, &rules, rules.policy_revision))
 }
 
+fn validate_model_input_rubric(
+    rubric: &contracts::http::ModelInputRubricIdentity,
+) -> Result<(), ApiError> {
+    rubric
+        .validate()
+        .map_err(|_| ApiError::bad_request("LW_MODEL_INPUT_AUTHORIZATION_INVALID"))
+}
+
 async fn maintain_rubric_model_input_rule(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -928,10 +936,7 @@ async fn maintain_rubric_model_input_rule(
         project_id,
     )
     .await?;
-    request
-        .rubric
-        .validate()
-        .map_err(|_| ApiError::bad_request("LW_MODEL_INPUT_AUTHORIZATION_INVALID"))?;
+    validate_model_input_rubric(&request.rubric)?;
     state
         .control
         .project_rubric_model_input_rules(project_id, &decision.actor, now()?)
@@ -3243,3 +3248,7 @@ impl IntoResponse for ApiError {
             .into_response()
     }
 }
+
+#[cfg(test)]
+#[path = "api/model_input_contract_tests.rs"]
+mod model_input_contract_tests;

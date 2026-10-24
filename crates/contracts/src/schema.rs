@@ -1866,6 +1866,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         entry[method] = operation_json;
     }
     add_auth_paths(surface, &mut paths);
+    declare_model_input_errors(&mut paths)?;
     let security_schemes = if surface == ApiSurface::Public {
         json!({
             "oidc": {"type":"oauth2","flows":{"authorizationCode":{"authorizationUrl":"/auth/login","tokenUrl":"/auth/callback","scopes":{}}}},
@@ -1962,6 +1963,48 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
     }
     let document: utoipa::openapi::OpenApi = serde_json::from_value(value)?;
     Ok(serde_json::to_value(document)?)
+}
+
+fn declare_model_input_errors(paths: &mut BTreeMap<String, Value>) -> Result<(), GenerationError> {
+    for path in paths.values_mut() {
+        let Some(methods) = path.as_object_mut() else {
+            continue;
+        };
+        for operation in methods.values_mut() {
+            let codes: &[&str] = match operation.get("operationId").and_then(Value::as_str) {
+                Some("createProjectAgentRun" | "createProjectWorkConfigurationRun") => &[
+                    "LW_MODEL_INPUT_SELECTION_REQUIRED",
+                    "LW_MODEL_INPUT_AUTHORIZATION_DENIED",
+                ],
+                Some("maintainProjectRubricModelInputRule") => &[
+                    "LW_MODEL_INPUT_AUTHORIZATION_INVALID",
+                    "LW_MODEL_INPUT_AUTHORIZATION_DENIED",
+                ],
+                Some(
+                    "createFrozenModelInputAuthorization"
+                    | "resolveFrozenModelInputAuthorization"
+                    | "resolveModelInputAuthorization",
+                ) => &["LW_MODEL_INPUT_AUTHORIZATION_DENIED"],
+                _ => continue,
+            };
+            let fields = operation.as_object_mut().ok_or_else(|| {
+                GenerationError::Contract("model input operation must be an object".to_owned())
+            })?;
+            let errors = fields
+                .entry("x-labweaver-errors")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or_else(|| {
+                    GenerationError::Contract("model input HTTP errors must be an array".to_owned())
+                })?;
+            for code in codes {
+                if !errors.iter().any(|value| value.as_str() == Some(code)) {
+                    errors.push(json!(code));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
