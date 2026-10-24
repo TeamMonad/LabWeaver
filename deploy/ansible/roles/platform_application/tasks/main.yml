@@ -371,6 +371,10 @@
       - platform_application_access_configuration.browser.allowed_origins[0] | urlsplit('scheme') == 'https'
       - platform_application_access_configuration.browser.allowed_origins[0] | urlsplit('hostname') == platform_application_portal_hostname
       - platform_application_access_configuration.browser.allowed_origins[0] | urlsplit('port') in [none, 443]
+      - platform_application_runtime_hostname | length > 0
+      - platform_application_runtime_hostname != platform_application_portal_hostname
+      - platform_application_runtime_tls_secret_name | length > 0
+      - platform_application_access_configuration.browser.runtime_origin == 'https://' + platform_application_runtime_hostname
       - platform_application_web_configuration.accessBaseUrl | urlsplit('scheme') == 'https'
       - platform_application_web_configuration.accessBaseUrl | urlsplit('hostname') == platform_application_portal_hostname
       - platform_application_web_configuration.accessBaseUrl | urlsplit('port') in [none, 443]
@@ -3443,7 +3447,11 @@
         '--set-string', 'portalRoute.name=' + platform_application_portal_route_name,
         '--set-string', 'portalRoute.hostname=' + platform_application_portal_hostname,
         '--set-string', 'portalRoute.gatewayName=' + platform_application_portal_gateway_name,
-        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name
+        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name,
+        '--set-string', 'runtimeRoute.hostname=' + platform_application_runtime_hostname,
+        '--set-string', 'runtimeRoute.gatewayName=' + platform_application_runtime_gateway_name,
+        '--set-string', 'runtimeRoute.gatewayClassName=' + platform_application_runtime_gateway_class_name,
+        '--set-string', 'runtimeRoute.tlsSecretName=' + platform_application_runtime_tls_secret_name
       ]) -%}
       {%- endif -%}
       {%- if platform_application_object_store_route_enabled -%}

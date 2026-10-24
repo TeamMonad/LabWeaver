@@ -43,3 +43,47 @@ cargo test -p access-service --test postgres oidc_binding_is_checked_before_atom
 ```
 
 真实浏览器边界入口和依赖要求见 [`docs/usage.md`](../usage.md)。测试夹具不能替代生产 SSH/sshd 传输验收。
+
+## 运行时 origin 隔离与浏览器交接
+
+`EndpointGrant.connectUrl` 仍为门户相对路径 `/connect/{endpointGrantId}/`，前端继续使用
+`window.open(connectUrl)`。该入口只接受已登录浏览器的 GET，不再在门户 origin 返回任何运行时内容。
+Access 必须配置 `browser.runtime_origin`（独立 HTTPS 主机，不能只换门户端口）；缺失或与任一门户
+主机相同会拒绝启动，不回退同源。BFF 的 `__Host-labweaver_session` 不设置 Domain，只发给门户。
+
+交接先导航到运行时主机的 `/runtime-bootstrap/{grant}`，设置随机的 host-only、Secure、HttpOnly、
+SameSite=Lax 绑定 Cookie，再返回门户签发 30 秒一次性交接 URL。该 URL 的散列、浏览器绑定散列、
+endpoint grant、actor、BFF session 和期限保存在 PostgreSQL；跨浏览器、跨 grant、重放和过期都拒绝。
+URL 不包含 BFF session 或其 Cookie。交接响应不缓存，使用 `Referrer-Policy: no-referrer`，并隔离 opener。
+
+运行时 `/runtime-handoff/{grant}/{token}` 原子消费交接，设置独立的
+`__Secure-labweaver_runtime` capability Cookie：HttpOnly、Secure、SameSite=Lax，不设置 Domain，
+Path 限定为 `/connect/{grant}/`，最长 5 分钟且不超过 BFF session 绝对有效期。每个运行时请求重新
+验证 capability 的 grant/actor/session 绑定、有效 BFF session、当前 AccessGrant/EndpointGrant、
+成员动作和 Environment 权威状态。退出、授权撤销或到期后下一次请求立即拒绝，不访问运行时上游。
+capability 过期后从门户重新点击入口，不复制交接 URL 续期。
+
+运行时 host 不提供 `/api/v1`、`/auth` 或 Console；即使绕过 ingress 也由 Access host 边界拒绝。
+门户拒绝运行时 Origin，且不向它开放 API CORS。运行时写方法要求运行时自己的精确 Origin 和当前
+grant 的 Edit 动作，不使用门户 CSRF token。上游请求不携带 BFF/capability Cookie 或 Authorization，
+上游 Set-Cookie 不转发；根相对重定向重写到同一运行时 host 的 grant 路径，外部重定向拒绝。
+
+| 条件 | HTTP | diagnosticCode |
+| --- | ---: | --- |
+| 错误 host/Origin 或在门户尝试代理运行时写请求 | 403 | `LW_ACCESS_RUNTIME_ORIGIN_REJECTED` |
+| 交接/绑定/capability 缺失、错误、重放、过期或跨 grant | 403 | `LW_ACCESS_RUNTIME_CAPABILITY_REJECTED` |
+| 已消费 capability 对应的 BFF 会话退出/到期 | 401 | `LW_AUTH_SESSION_REJECTED` |
+| grant 已撤销/到期、成员或端点不可用 | 403 | `LW_ACCESS_RUNTIME_DENIED` |
+
+回归入口（HTTP 测试运行真实 Access、Environment resolver 与 PostgreSQL；只有 IdP 和运行时应用是边界夹具）：
+
+```sh
+cargo test -p access-service runtime_handoff_isolated_bound_one_time_and_live_revocation --locked
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web exec playwright install chromium
+cargo test -p access-service chromium_runtime_script_cannot_use_portal_session --locked -- --ignored --nocapture
+python -m unittest discover -s tests/ansible -p test_runtime_origin.py
+```
+
+Chromium 用真实浏览器 Cookie 和脚本执行检查跨主机隔离，CI 的 `playwright-ci` 同样执行此显式
+浏览器门禁；普通 Rust 测试不要求安装 Node/Chromium。上述临时 TLS 夹具不代表真实 DNS/集群证书验收。

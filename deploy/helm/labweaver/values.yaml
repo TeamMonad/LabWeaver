@@ -36,6 +36,14 @@ portalRoute:
   gatewayName: ""
   gatewaySectionName: http
 
+# Required whenever the public portal route is enabled. The runtime Gateway
+# terminates TLS using a pre-provisioned Secret in portalRoute.namespace.
+runtimeRoute:
+  hostname: ""
+  gatewayName: labweaver-runtime
+  gatewayClassName: cilium
+  tlsSecretName: ""
+
 objectStoreRoute:
   enabled: false
   namespace: ""

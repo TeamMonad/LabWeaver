@@ -185,8 +185,9 @@ export type EndpointGrant = {
     action: EndpointAction;
     alias?: string | null;
     /**
-     * Same-origin, Access Service-authorized browser entry point. Present only
-     * for HTTP(S) grants and derived from this immutable endpoint grant ID.
+     * Portal handoff entry point, not a same-origin runtime proxy. Opening this
+     * path navigates to the configured isolated runtime origin using a one-time,
+     * browser-bound handoff. Present only for HTTP(S), derived from this grant ID.
      */
     connectUrl?: string | null;
     endpointId: EndpointId;

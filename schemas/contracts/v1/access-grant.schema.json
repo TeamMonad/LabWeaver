@@ -47,7 +47,7 @@
           ]
         },
         "connectUrl": {
-          "description": "Same-origin, Access Service-authorized browser entry point. Present only\nfor HTTP(S) grants and derived from this immutable endpoint grant ID.",
+          "description": "Portal handoff entry point, not a same-origin runtime proxy. Opening this\npath navigates to the configured isolated runtime origin using a one-time,\nbrowser-bound handoff. Present only for HTTP(S), derived from this grant ID.",
           "type": [
             "string",
             "null"

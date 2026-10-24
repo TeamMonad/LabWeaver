@@ -143,6 +143,7 @@ pub struct OidcFileConfig {
 pub struct BrowserFileConfig {
     pub bind_addr: String,
     pub allowed_origins: BTreeSet<String>,
+    pub runtime_origin: String,
     pub session_ttl_seconds: u64,
     pub session_idle_ttl_seconds: u64,
     pub oidc_transaction_ttl_seconds: u64,
@@ -305,6 +306,13 @@ impl AccessAuthFile {
             || !(3_600..=2_592_000).contains(&parsed.browser.session_retention_seconds)
             || parsed.browser.session_cookie_name != "__Host-labweaver_session"
             || parsed.browser.csrf_header_name != "X-CSRF-Token"
+            || !is_exact_allowed_origin(&parsed.browser.runtime_origin, parsed.transport_security)
+            || parsed.browser.allowed_origins.iter().any(|origin| {
+                let portal = url::Url::parse(origin).ok();
+                let runtime = url::Url::parse(&parsed.browser.runtime_origin).ok();
+                portal.as_ref().and_then(url::Url::host_str)
+                    == runtime.as_ref().and_then(url::Url::host_str)
+            })
             || parsed
                 .browser
                 .bind_addr
@@ -845,6 +853,7 @@ oidc:
 browser:
   bind_addr: 127.0.0.1:8080
   allowed_origins: [https://portal.example.test]
+  runtime_origin: https://runtime.example.test
   session_ttl_seconds: 900
   session_idle_ttl_seconds: 300
   oidc_transaction_ttl_seconds: 300
@@ -936,6 +945,33 @@ nats:
             AccessAuthFile::parse_yaml(&valid.replace(
                 "https://portal.example.test]",
                 "https://portal.example.test/]"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_origin_is_required_https_and_has_a_separate_cookie_host() {
+        let example = include_str!("../../../deploy/config/access-auth.yaml.example");
+        for origin in [
+            "",
+            "http://runtime.example.invalid",
+            "https://portal.example.invalid",
+            "https://portal.example.invalid:8443",
+            "https://runtime.example.invalid/path",
+        ] {
+            assert!(
+                AccessAuthFile::parse_yaml(
+                    &example.replace("https://runtime.example.invalid", origin)
+                )
+                .is_err(),
+                "accepted unsafe runtime origin {origin}"
+            );
+        }
+        assert!(
+            AccessAuthFile::parse_yaml(&example.replace(
+                "  runtime_origin: \"https://runtime.example.invalid\"\n",
+                ""
             ))
             .is_err()
         );

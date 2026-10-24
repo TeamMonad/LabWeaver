@@ -43,6 +43,8 @@ mod oidc_login_tests;
 mod freeze_context_tests;
 #[path = "rubric_rules_proxy_tests.rs"]
 mod rubric_rules_proxy_tests;
+#[path = "runtime_origin_tests.rs"]
+mod runtime_origin_tests;
 #[path = "../tests/support/mod.rs"]
 mod support;
 
@@ -319,7 +321,7 @@ async fn token(
     let claims = json!({
         "iss": state.issuer, "aud": audience, "azp": "access-test", "sub": "service-account-access",
         "iat": now, "nbf": now - 1, "exp": now + 300,
-        "resource_access": {audience: {"roles": [PERMISSION]}}
+        "resource_access": {audience: {"roles": [PERMISSION, "environment.endpoint.resolve"]}}
     });
     match jsonwebtoken::encode(&header, &claims, &state.signing_key) {
         Ok(token) => {
@@ -407,7 +409,8 @@ async fn control(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if claims.claims["azp"] != "access-test"
-        || claims.claims["resource_access"][AUDIENCE]["roles"] != json!([PERMISSION])
+        || claims.claims["resource_access"][AUDIENCE]["roles"]
+            != json!([PERMISSION, "environment.endpoint.resolve"])
     {
         return StatusCode::FORBIDDEN.into_response();
     }

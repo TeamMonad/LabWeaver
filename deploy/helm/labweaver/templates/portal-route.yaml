@@ -1,6 +1,11 @@
 {{- if .Values.portalRoute.enabled }}
 {{- $routeNamespace := required "portalRoute.namespace is required" .Values.portalRoute.namespace }}
 {{- $routeName := required "portalRoute.name is required" .Values.portalRoute.name }}
+{{- $runtimeHost := required "runtimeRoute.hostname is required" .Values.runtimeRoute.hostname }}
+{{- if eq $runtimeHost .Values.portalRoute.hostname }}
+{{- fail "runtimeRoute.hostname must differ from portalRoute.hostname" }}
+{{- end }}
+{{- $_ := required "runtimeRoute.tlsSecretName is required" .Values.runtimeRoute.tlsSecretName }}
 ---
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant

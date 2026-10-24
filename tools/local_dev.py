@@ -1633,17 +1633,18 @@ def free_port() -> str:
 
 
 def verify_loopback_nip_io() -> None:
-    """Require nip.io's convenience name to remain a loopback-only alias."""
+    """Require portal and runtime convenience names to remain loopback-only."""
 
-    try:
-        addresses = {
-            item[4][0]
-            for item in socket.getaddrinfo("127.0.0.1.nip.io", None, type=socket.SOCK_STREAM)
-        }
-    except OSError as error:
-        fail(f"cannot resolve the local portal hostname 127.0.0.1.nip.io: {error}")
-    if addresses != {"127.0.0.1"}:
-        fail("127.0.0.1.nip.io did not resolve exclusively to 127.0.0.1")
+    for hostname in ("127.0.0.1.nip.io", "runtime.127.0.0.1.nip.io"):
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+            }
+        except OSError as error:
+            fail(f"cannot resolve the local hostname {hostname}: {error}")
+        if addresses != {"127.0.0.1"}:
+            fail(f"{hostname} did not resolve exclusively to 127.0.0.1")
 
 
 def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
@@ -3179,6 +3180,7 @@ def make_app_input(
         data=data.replace("https://keycloak.example.invalid/realms/labweaver", public_issuer)
         data=data.replace("https://keycloak.example.invalid/realms/workloads", public_issuer)
         data=data.replace("https://portal.example.invalid", portal_origin)
+        data=data.replace("https://runtime.example.invalid", f"https://runtime.127.0.0.1.nip.io:{PORTAL_PORT}")
         data=data.replace("https://demo.lab.example/", portal_origin + "/")
         registry_host = (
             real_build_provider.registry_host
@@ -3681,6 +3683,21 @@ http {
       proxy_set_header Connection $connection_upgrade;
     }
   }
+  server {
+    listen 8443 ssl;
+    server_name runtime.127.0.0.1.nip.io;
+    ssl_certificate /etc/labweaver/tls/tls.crt;
+    ssl_certificate_key /etc/labweaver/tls/tls.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    set $labweaver_access access-service.labweaver-system.svc.cluster.local:8080;
+    location ~ ^/(connect|runtime-bootstrap|runtime-handoff)(/|$) {
+      access_log off;
+      proxy_pass http://$labweaver_access;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-Proto https;
+    }
+    location / { return 404; }
+  }
 }
 """
     objects = [
@@ -3880,7 +3897,7 @@ def up(
         portal_key, portal_crt = cert(
             work / "portal", foundation / "authority" / "ca.key",
             foundation / "authority" / "ca.crt", "portal",
-            ["DNS:127.0.0.1.nip.io", "DNS:localhost", "IP:127.0.0.1"],
+            ["DNS:127.0.0.1.nip.io", "DNS:runtime.127.0.0.1.nip.io", "DNS:localhost", "IP:127.0.0.1"],
             usage="serverAuth",
         )
         deploy_local_portal(kubeconfig, work, images, portal_key, portal_crt,
