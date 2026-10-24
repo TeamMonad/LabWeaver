@@ -87,14 +87,9 @@ pub fn plan_command_authorized(
     {
         return Err(LifecycleError::CommandInvalid);
     }
-    if (matches!(
-        command.kind,
-        EnvironmentOperationKind::Start
-            | EnvironmentOperationKind::Retry
-            | EnvironmentOperationKind::Recover
-            | EnvironmentOperationKind::Reset
-    ) || (current.class == contracts::authoring::EnvironmentClass::Work
-        && command.kind == EnvironmentOperationKind::Restart))
+    if current.requires_compute_authorization(command.kind)
+        && (!matches!(command.kind, EnvironmentOperationKind::Restart)
+            || current.class == contracts::authoring::EnvironmentClass::Work)
         && current
             .eligibility_expires_at
             .is_some_and(|deadline| deadline <= authority_now)
@@ -147,16 +142,7 @@ pub fn plan_command_authorized(
     } else {
         None
     };
-    if current.class == contracts::authoring::EnvironmentClass::Work
-        && matches!(
-            command.kind,
-            EnvironmentOperationKind::Start
-                | EnvironmentOperationKind::Restart
-                | EnvironmentOperationKind::Retry
-                | EnvironmentOperationKind::Recover
-                | EnvironmentOperationKind::Reset
-        )
-    {
+    if current.has_resource_lease() && current.requires_compute_authorization(command.kind) {
         validate_lease_authorization(current, lease_authorization.as_ref(), authority_now)?;
     } else if lease_authorization.is_some() {
         return Err(LifecycleError::CommandInvalid);
@@ -167,7 +153,7 @@ pub fn plan_command_authorized(
     // that persisted fence to ensure cleanup readback cannot release a newer
     // claim after an older operation completes.
     let retained_lease_authorization = lease_authorization.or_else(|| {
-        (current.class == contracts::authoring::EnvironmentClass::Work)
+        (current.has_resource_lease())
             .then(|| current.operation.lease_authorization.clone())
             .flatten()
     });

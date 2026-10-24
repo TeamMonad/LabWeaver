@@ -42,9 +42,9 @@ pub(super) fn status(error: &crate::runtime_authorization::RuntimeBindingError) 
             RuntimeAuthorizationError::TeacherApprovalRequired
             | RuntimeAuthorizationError::OutsidePlatformRange,
         ) => StatusCode::FORBIDDEN,
-        RuntimeBindingError::LeaseNotActive | RuntimeBindingError::Authorization(_) => {
-            StatusCode::CONFLICT
-        }
+        RuntimeBindingError::AllocationPending
+        | RuntimeBindingError::LeaseNotActive
+        | RuntimeBindingError::Authorization(_) => StatusCode::CONFLICT,
     }
 }
 
@@ -53,6 +53,9 @@ pub(super) fn detail(error: &crate::runtime_authorization::RuntimeBindingError) 
     use contracts::runtime_authorization::RuntimeAuthorizationError;
     match error {
         RuntimeBindingError::Unavailable => "当前授权信息不可用，请稍后重试或联系管理员。",
+        RuntimeBindingError::AllocationPending => {
+            "资源申请已批准，正在分配环境，请等待完成，无需重新提交申请。"
+        }
         RuntimeBindingError::LeaseNotActive => {
             "资源租约尚未激活或已经失效，请等待资源分配或重新申请。"
         }

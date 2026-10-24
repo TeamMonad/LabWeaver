@@ -98,6 +98,7 @@ fn inventory_and_operation_queries_enforce_bounded_opaque_pagination()
     assert!(invalid_cursor.validate().is_err());
 
     let create = CreateEnvironmentRequest {
+        resource_request_id: contracts::ResourceRequestId::new(),
         project_id,
         course_id: Some(course_id),
         release_id: ReleaseId::from_str("01900000-0000-7000-8000-000000000002")?,

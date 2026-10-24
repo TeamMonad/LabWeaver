@@ -169,7 +169,7 @@ describe('useProjectResourceOptions environments', () => {
     scope.stop()
   })
 
-  it('offers only Work releases that are not withdrawn, titled by the template name', async () => {
+  it('offers only Work releases that are not withdrawn in a project without a course, titled by the template name', async () => {
     mocks.listEnvironments.mockResolvedValue(environmentPage([]))
     const base = { runtimeKind: 'container', publishedAt: '2026-09-12T10:30:00.000Z', name: 'Python 分析' }
     mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({
@@ -189,6 +189,30 @@ describe('useProjectResourceOptions environments', () => {
     const releases = state.releases.kind === 'success' ? state.releases.data : []
     expect(releases.map((release) => release.id)).toEqual(['release-work'])
     expect(releases[0].label).toContain('Python 分析 v2')
+    scope.stop()
+  })
+
+  it('also offers the non-withdrawn experiment releases of a course project, marked as course experiments', async () => {
+    mocks.listEnvironments.mockResolvedValue(environmentPage([]))
+    const base = { runtimeKind: 'container', publishedAt: '2026-09-12T10:30:00.000Z', name: '缓冲区实验' }
+    mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({
+      items: [
+        { ...base, id: 'release-work', version: 2, purpose: 'work', name: 'Python 分析' },
+        { ...base, id: 'release-experiment', version: 3, purpose: 'experiment' },
+        { ...base, id: 'release-experiment-withdrawn', version: 1, purpose: 'experiment', withdrawal: { reasonCode: 'TEACHER_WITHDRAWN' } },
+      ],
+    })
+    mocks.apiGet.mockResolvedValue({ data: [], error: undefined })
+
+    const scope = effectScope()
+    let state!: ReturnType<typeof useProjectResourceOptions>
+    scope.run(() => { state = useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>('course-1')) })
+
+    await vi.waitFor(() => expect(state.releases.kind).toBe('success'))
+    const releases = state.releases.kind === 'success' ? state.releases.data : []
+    expect(releases.map((release) => [release.id, release.purpose])).toEqual([['release-work', 'work'], ['release-experiment', 'experiment']])
+    expect(releases[1].label).toContain('课程实验 · 缓冲区实验 v3')
+    expect(mocks.fetchEnvironmentTemplateReleases).toHaveBeenCalledWith('project-1', 'course-1')
     scope.stop()
   })
 })

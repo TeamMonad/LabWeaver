@@ -36,6 +36,15 @@ spec:
       ports:
         - {protocol: TCP, port: 8087}
         - {protocol: TCP, port: 9448}
+    # Runtime executors read original authorization and credit grants using the
+    # Environment service JWT; they do not need Resource's health listener.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [container-executor, kubevirt-executor]
+      ports: [{protocol: TCP, port: 9448}]
     {{- else if eq $name "control-service" }}
     - from:
         - podSelector:

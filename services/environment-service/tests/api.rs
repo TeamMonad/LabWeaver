@@ -21,28 +21,20 @@ use axum::{
     http::{HeaderValue, Method, Request, StatusCode, header},
 };
 use contracts::environment::{
-    ActivateEnvironmentResourceReservationRequest, ActivateEnvironmentResourceReservationResponse,
     EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentInstance,
-    EnvironmentOperationKind, EnvironmentResourceReservationState,
-    ReleaseEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationRequest,
-    SuspendEnvironmentResourceReservationRequest, SuspendEnvironmentResourceReservationResponse,
+    EnvironmentOperationKind,
 };
-use contracts::events::ReleasePublished;
 use contracts::http::{SnapshotPage, StrongEtag};
-use contracts::resource::{GpuAllocation, GpuAllocationMode};
 use contracts::{
-    ActorId, AgentRunId, ApprovalId, BuildRequestId, CandidateId, EndpointId, EnvironmentId,
-    ImageArtifactId, OperationId, PolicyId, ProjectId, ReleaseId, Revision, UtcTimestamp,
+    ActorId, AgentRunId, EndpointId, EnvironmentId, OperationId, ProjectId, Revision, UtcTimestamp,
 };
 use environment_service::{
-    EnvironmentApiState, ExperimentResourceAllocator, FreezeBindingConfiguration,
-    FreezeBindingService, NatsAccessRevoker, NatsResourceLeaseVerifier, PgEnvironmentStore,
-    PgReleaseProjectionStore, ProviderObservation, ResourceUsageClientError,
+    EnvironmentApiState, FreezeBindingConfiguration, FreezeBindingService, NatsAccessRevoker,
+    NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore, ProviderObservation,
     WorkAdmissionClientError, WorkAdmissionResolver, apply_provider_failure,
     apply_provider_observation, environment_api_router,
 };
 use futures_util::StreamExt;
-use persistence_sqlx::Sha256Digest;
 use serde_json::{Value, json};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
@@ -71,236 +63,6 @@ impl WorkAdmissionResolver for UnusedAdmission {
     }
 }
 
-#[derive(Clone)]
-struct CountingGpuAllocator {
-    resolve_count: Arc<AtomicUsize>,
-    release_count: Arc<AtomicUsize>,
-    allocation: GpuAllocation,
-}
-
-#[async_trait]
-impl ExperimentResourceAllocator for CountingGpuAllocator {
-    async fn resolve_resource_reservation(
-        &self,
-        request: &ResolveEnvironmentResourceReservationRequest,
-    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
-        let count = self.resolve_count.fetch_add(1, Ordering::SeqCst) + 1;
-        if count > 1 {
-            return Err(ResourceUsageClientError::Rejected { retryable: false });
-        }
-        let gpu = request
-            .gpu
-            .as_ref()
-            .ok_or(ResourceUsageClientError::InvalidResponse)?;
-        if gpu.class != self.allocation.class
-            || gpu.count != self.allocation.count
-            || request.provider_binding != self.allocation.provider_binding
-        {
-            return Err(ResourceUsageClientError::InvalidResponse);
-        }
-        Ok(Some(self.allocation.clone()))
-    }
-
-    async fn release_resource_reservation(
-        &self,
-        request: &ReleaseEnvironmentResourceReservationRequest,
-    ) -> Result<bool, ResourceUsageClientError> {
-        self.release_count.fetch_add(1, Ordering::SeqCst);
-        let _ = request;
-        Ok(true)
-    }
-
-    async fn activate_resource_reservation(
-        &self,
-        request: &ActivateEnvironmentResourceReservationRequest,
-    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError> {
-        Ok(ActivateEnvironmentResourceReservationResponse {
-            version: 1,
-            environment_id: request.environment_id,
-            state: EnvironmentResourceReservationState::Reserved,
-            reservation_generation: 1,
-            environment_generation: request.environment_generation,
-            allocation: request.expected_allocation.clone(),
-            applied: true,
-        })
-    }
-
-    async fn suspend_resource_reservation(
-        &self,
-        request: &SuspendEnvironmentResourceReservationRequest,
-    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError> {
-        Ok(SuspendEnvironmentResourceReservationResponse {
-            version: 1,
-            environment_id: request.environment_id,
-            state: EnvironmentResourceReservationState::Suspended,
-            reservation_generation: 1,
-            environment_generation: request.environment_generation,
-            allocation: Some(self.allocation.clone()),
-            applied: true,
-        })
-    }
-}
-
-#[tokio::test]
-async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
--> Result<(), Box<dyn Error>> {
-    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
-    let database_url = format!(
-        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
-        postgres.get_host_port_ipv4(5432).await?
-    );
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(6)
-        .connect(&database_url)
-        .await?;
-    support::apply_environment_migrations(&pool).await?;
-
-    let nats = GenericImage::new("nats", "2.11.8-alpine")
-        .with_exposed_port(4222.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
-        .start()
-        .await?;
-    let nats_url = format!("nats://127.0.0.1:{}", nats.get_host_port_ipv4(4222).await?);
-    let nats_client = async_nats::connect(nats_url).await?;
-
-    let project_id = ProjectId::new();
-    let course_id = Some(contracts::CourseId::new());
-    let projection = gpu_release_projection(project_id, course_id)?;
-    sqlx::query(
-        "INSERT INTO environment.release_projections
-         (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1)",
-    )
-    .bind(projection.release.id.as_uuid())
-    .bind(project_id.as_uuid())
-    .bind(course_id.map(contracts::CourseId::as_uuid))
-    .bind(i64::try_from(projection.release.version)?)
-    .bind("container-primary-v1")
-    .bind(Sha256Digest::of_bytes(b"gpu-release-test").to_string())
-    .bind(serde_json::to_value(&projection)?)
-    .bind(uuid::Uuid::now_v7())
-    .execute(&pool)
-    .await?;
-
-    let store = PgEnvironmentStore::new(pool.clone());
-    let releases = PgReleaseProjectionStore::new(pool.clone());
-    let resolve_count = Arc::new(AtomicUsize::new(0));
-    let release_count = Arc::new(AtomicUsize::new(0));
-    let allocator = CountingGpuAllocator {
-        resolve_count: Arc::clone(&resolve_count),
-        release_count: Arc::clone(&release_count),
-        allocation: GpuAllocation {
-            entry_id: contracts::GpuCatalogEntryId::new(),
-            class: "a100".to_owned(),
-            count: 1,
-            mode: GpuAllocationMode::Exclusive,
-            provider_binding: "container-primary-v1".to_owned(),
-            allocation_binding: "capacity-a100-0".to_owned(),
-            catalog_revision: revision(1),
-        },
-    };
-    let api = environment_api_router(
-        EnvironmentApiState::new(
-            store,
-            releases.clone(),
-            NatsAccessRevoker::new(
-                ACCESS_REVOKE_SUBJECT.to_owned(),
-                nats_client.clone(),
-                Duration::from_secs(2),
-            )?,
-            NatsResourceLeaseVerifier::new(
-                LEASE_VERIFY_SUBJECT.to_owned(),
-                nats_client,
-                Duration::from_secs(2),
-            )?,
-            FreezeBindingService::new_with_admission_resolver(
-                pool.clone(),
-                releases.clone(),
-                FreezeBindingConfiguration {
-                    container_workspace_storage_class: "test-storage".to_owned(),
-                    vm: None,
-                },
-                UnusedAdmission,
-            )?,
-        )
-        .with_resource_reservations(allocator),
-    );
-    let identity = access_identity();
-    let actor_id = ActorId::new();
-    let session_id = uuid::Uuid::now_v7();
-    let body = json!({
-        "projectId": project_id,
-        "courseId": course_id,
-        "releaseId": projection.release.id,
-        "releaseVersion": projection.release.version,
-        "displayLabel": "GPU replay"
-    });
-
-    let first = send(
-        &api,
-        Method::POST,
-        "/api/v1/environments".to_owned(),
-        &identity,
-        actor_id,
-        session_id,
-        None,
-        Some(body.clone()),
-        Some("api-create-gpu-replay"),
-    )
-    .await?;
-    assert_eq!(first.0, StatusCode::ACCEPTED);
-    let replay = send(
-        &api,
-        Method::POST,
-        "/api/v1/environments".to_owned(),
-        &identity,
-        actor_id,
-        uuid::Uuid::now_v7(),
-        None,
-        Some(body.clone()),
-        Some("api-create-gpu-replay"),
-    )
-    .await?;
-    assert_eq!(replay.0, StatusCode::ACCEPTED);
-    assert_eq!(replay.1["operationId"], first.1["operationId"]);
-    assert_eq!(replay.1["environmentId"], first.1["environmentId"]);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
-    assert_eq!(release_count.load(Ordering::SeqCst), 0);
-
-    let mut changed_label = body.clone();
-    changed_label["displayLabel"] = json!("different label");
-    let conflict = send(
-        &api,
-        Method::POST,
-        "/api/v1/environments".to_owned(),
-        &identity,
-        actor_id,
-        uuid::Uuid::now_v7(),
-        None,
-        Some(changed_label),
-        Some("api-create-gpu-replay"),
-    )
-    .await?;
-    assert_eq!(conflict.0, StatusCode::CONFLICT);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
-
-    let other_actor = send(
-        &api,
-        Method::POST,
-        "/api/v1/environments".to_owned(),
-        &identity,
-        ActorId::new(),
-        uuid::Uuid::now_v7(),
-        None,
-        Some(body),
-        Some("api-create-gpu-replay"),
-    )
-    .await?;
-    assert_eq!(other_actor.0, StatusCode::CONFLICT);
-    assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
-    Ok(())
-}
-
 #[tokio::test]
 async fn public_operation_and_lifecycle_routes_preserve_scope_cursor_and_status_contracts()
 -> Result<(), Box<dyn Error>> {
@@ -326,29 +88,32 @@ async fn public_operation_and_lifecycle_routes_preserve_scope_cursor_and_status_
         spawn_revocation_responder(nats_client.clone()).await?;
 
     let releases = PgReleaseProjectionStore::new(pool.clone());
-    let api = environment_api_router(EnvironmentApiState::new(
-        PgEnvironmentStore::new(pool.clone()),
-        releases.clone(),
-        NatsAccessRevoker::new(
-            ACCESS_REVOKE_SUBJECT.to_owned(),
-            nats_client.clone(),
-            Duration::from_secs(2),
-        )?,
-        NatsResourceLeaseVerifier::new(
-            LEASE_VERIFY_SUBJECT.to_owned(),
-            nats_client,
-            Duration::from_secs(2),
-        )?,
-        FreezeBindingService::new_with_admission_resolver(
-            pool.clone(),
-            releases,
-            FreezeBindingConfiguration {
-                container_workspace_storage_class: "test-storage".to_owned(),
-                vm: None,
-            },
-            UnusedAdmission,
-        )?,
-    ));
+    let api = environment_api_router(
+        EnvironmentApiState::new(
+            PgEnvironmentStore::new(pool.clone()),
+            releases.clone(),
+            NatsAccessRevoker::new(
+                ACCESS_REVOKE_SUBJECT.to_owned(),
+                nats_client.clone(),
+                Duration::from_secs(2),
+            )?,
+            NatsResourceLeaseVerifier::new(
+                LEASE_VERIFY_SUBJECT.to_owned(),
+                nats_client,
+                Duration::from_secs(2),
+            )?,
+            FreezeBindingService::new_with_admission_resolver(
+                pool.clone(),
+                releases,
+                FreezeBindingConfiguration {
+                    container_workspace_storage_class: "test-storage".to_owned(),
+                    vm: None,
+                },
+                UnusedAdmission,
+            )?,
+        )
+        .with_runtime_admission(support::stored_runtime_admission(pool.clone())),
+    );
 
     let identity = access_identity();
     let session_id = uuid::Uuid::now_v7();
@@ -746,6 +511,7 @@ async fn failed_instance(
     instance.owner_id = owner_id;
     instance.eligibility_expires_at = Some(timestamp("2099-01-01T00:00:00.000Z"));
     instance.operation.actor_id = owner_id;
+    let instance = support::funded_instance(instance);
     store.create(key, &instance).await?;
 
     let mut held = Vec::new();
@@ -800,91 +566,6 @@ async fn failed_instance(
         }
     }
     Ok(store.load(instance.id).await?)
-}
-
-fn gpu_release_projection(
-    project_id: ProjectId,
-    course_id: Option<contracts::CourseId>,
-) -> Result<ReleasePublished, Box<dyn Error>> {
-    let candidate_id = CandidateId::new();
-    let candidate_revision = revision(1);
-    let release_id = ReleaseId::new();
-    let published_at = timestamp("2026-07-14T00:00:00.000Z");
-    let digest = format!("sha256:{}", "0".repeat(64));
-    let projection: ReleasePublished = serde_json::from_value(json!({
-        "release": {
-            "id": release_id,
-            "projectId": project_id,
-            "courseId": course_id,
-            "version": 1,
-            "candidateId": candidate_id,
-            "agentRunId": AgentRunId::new(),
-            "candidateRevision": candidate_revision,
-            "runtimeKind": "container",
-            "approval": {
-                "id": ApprovalId::new(),
-                "candidateId": candidate_id,
-                "candidateRevision": candidate_revision,
-                "policyRevision": 1,
-                "trustRevision": 1,
-                "actorId": ActorId::new(),
-                "decision": "approved",
-                "reason": "reviewed",
-                "decidedAt": published_at
-            },
-            "artifact": {
-                "kind": "container",
-                "id": ImageArtifactId::new(),
-                "build_request_id": BuildRequestId::new(),
-                "repository": "harbor.internal/labweaver-test",
-                "digest": digest
-            },
-            "publishedBy": ActorId::new(),
-            "publishedAt": published_at
-        },
-        "environmentSpec": {
-            "apiVersion": "environment.labweaver.io/v1",
-            "kind": "EnvironmentSpec",
-            "name": "gpu-replay",
-            "class": "experiment",
-            "resources": {
-                "cpuMillicores": 1000,
-                "memoryBytes": 1_073_741_824_u64,
-                "storageBytes": 1_073_741_824_u64,
-                "gpu": {"class": "a100", "count": 1}
-            },
-            "network": {"mode": "deny_all"},
-            "entries": [{"name": "web", "protocol": "http", "servicePort": 8080}],
-            "security": {
-                "userPolicy": "non_root_required",
-                "rootFilesystemPolicy": "read_only_required",
-                "privilegeEscalationPolicy": "deny",
-                "publicExposurePolicy": "deny",
-                "securityProfileBinding": "restricted-v1"
-            },
-            "runtime": {
-                "kind": "container",
-                "provider_binding": "container-primary-v1",
-                "build_context": {
-                    "artifactId": contracts::ArtifactId::new(),
-                    "storeBinding": "artifact-store-v1",
-                    "objectVersion": "version-1",
-                    "sizeBytes": 128,
-                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"
-                },
-                "service_port": 8080
-            },
-            "retention": {
-                "policyId": PolicyId::new(),
-                "policyRevision": 1,
-                "class": "run_evidence",
-                "retainUntil": "2099-01-01T00:00:00.000Z",
-                "disposition": "delete"
-            }
-        }
-    }))?;
-    projection.validate()?;
-    Ok(projection)
 }
 
 async fn converge_to_ready(

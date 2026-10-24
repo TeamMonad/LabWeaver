@@ -3,20 +3,17 @@
     <header class="page-header">
       <h2>项目环境控制台</h2>
       <p class="page-subtitle">
-        选择已发布模板创建项目环境，管理生命周期并获取 SSH/HTTP 访问授权。
+        管理已有项目环境的生命周期并获取 SSH/HTTP 访问授权。新环境需要先提交资源申请，审批通过后从环境列表进入。
       </p>
     </header>
 
     <DiagnosticBanner
       v-if="isContextMissing"
       code="PROJECT_CONTEXT_MISSING"
-      message="项目上下文未绑定，无法加载环境模板版本。请先通过顶栏项目选择器选择有权访问的项目。"
+      message="项目上下文未绑定，无法加载项目环境。请先通过顶栏项目选择器选择有权访问的项目。"
       :retryable="false"
       severity="error"
     />
-
-
-    <EnvironmentReleasePicker />
 
     <section
       class="console-section"
@@ -236,7 +233,6 @@ import EnvironmentConsoleTab from '@/components/environment/EnvironmentConsoleTa
 import EnvironmentLifecycleBar from '@/components/environment/EnvironmentLifecycleBar.vue'
 import EnvironmentOperationsTab from '@/components/environment/EnvironmentOperationsTab.vue'
 import EnvironmentOverviewTab from '@/components/environment/EnvironmentOverviewTab.vue'
-import EnvironmentReleasePicker from '@/components/environment/EnvironmentReleasePicker.vue'
 import EnvironmentSubmissionTab from '@/components/environment/EnvironmentSubmissionTab.vue'
 import { provideEnvironmentEntry, useEnvironmentEntry } from '@/composables/useEnvironmentEntry'
 

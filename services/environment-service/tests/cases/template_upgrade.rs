@@ -1,4 +1,5 @@
-//! Real `PostgreSQL` upgrade lifecycle; only the runtime provider is an external-boundary fixture.
+//! Repository-only upgrade metadata tests retained for #288 (A'). The public C-stage
+//! entry point rejects original-lease upgrades; these tests do not claim runtime authorization.
 use super::*;
 use contracts::authoring::{EnvironmentClass, RuntimeKind};
 use contracts::events::ReleasePublished;
@@ -8,56 +9,9 @@ use support::manual_release::{insert_projection, projection};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-struct CurrentClockRuntimeProvider;
-
-#[async_trait]
-impl EnvironmentProvider for CurrentClockRuntimeProvider {
-    fn binding(&self) -> &'static str {
-        "container-primary-v1"
-    }
-
-    async fn execute(
-        &self,
-        action: ReconcileAction,
-        instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
-        let outcome = LifecycleSuccessProvider {
-            restart_ready_observed_at: None,
-        }
-        .execute(action, instance)
-        .await?;
-        match outcome {
-            environment_service::ProviderOutcome::Completed(mut observation) => {
-                let observed = time::OffsetDateTime::now_utc();
-                let observed = observed
-                    .replace_nanosecond(u32::from(observed.millisecond()) * 1_000_000)
-                    .map_err(|_| ProviderFailure {
-                        code: ProviderFailureCode::Rejected,
-                        retryable: false,
-                    })?;
-                let now = UtcTimestamp::from_utc(observed).map_err(|_| ProviderFailure {
-                    code: ProviderFailureCode::Rejected,
-                    retryable: false,
-                })?;
-                for endpoint in &mut observation.endpoints {
-                    endpoint.observed_at = now;
-                }
-                Ok(environment_service::ProviderOutcome::Completed(observation))
-            }
-            environment_service::ProviderOutcome::Pending => {
-                Ok(environment_service::ProviderOutcome::Pending)
-            }
-        }
-    }
-}
-
-fn worker(store: PgEnvironmentStore, fail: bool) -> TestResult<ReconcileWorker> {
+fn worker(store: PgEnvironmentStore) -> TestResult<ReconcileWorker> {
     let mut registry = ProviderRegistry::default();
-    if fail {
-        registry.register(Arc::new(CleanupFailureProvider))?;
-    } else {
-        registry.register(Arc::new(CurrentClockRuntimeProvider))?;
-    }
+    registry.register(Arc::new(CleanupFailureProvider))?;
     Ok(ReconcileWorker::new(
         store,
         Reconciler::new(registry, Duration::from_millis(100))?,
@@ -97,15 +51,23 @@ async fn ready_work(
         expires_at: instance.eligibility_expires_at.ok_or("expiry")?,
     });
     store.create("upgrade-create-work", &instance).await?;
-    let runtime = worker(store.clone(), false)?;
-    for _ in 0..4 {
-        runtime
-            .run_once("upgrade-create-worker", store.current_time().await?)
-            .await?;
-        tokio::time::sleep(Duration::from_millis(110)).await;
+    // Seed an already-running aggregate; no new compute or synthetic grant is claimed.
+    let lease = store
+        .claim_due("upgrade-existing-work", Duration::from_secs(10))
+        .await?
+        .ok_or("fixture operation missing")?;
+    let mut ready = lease.instance.clone();
+    ready.revision = revision(ready.revision.get() + 1);
+    ready.observed_generation = ready.generation;
+    ready.observed_state = ObservedEnvironmentState::Ready;
+    ready.operation.state = OperationState::Succeeded;
+    ready.endpoints = support::ready_instance().endpoints;
+    let observed_at = store.current_time().await?;
+    for endpoint in &mut ready.endpoints {
+        endpoint.revision = ready.revision;
+        endpoint.observed_at = observed_at;
     }
-    let ready = store.load(instance.id).await?;
-    assert_eq!(ready.observed_state, ObservedEnvironmentState::Ready);
+    store.save_reconciled(&lease, &ready).await?;
     Ok(ready)
 }
 
@@ -245,7 +207,7 @@ async fn template_upgrade_preserves_workspace_and_exposes_failure_without_comple
             .target_release_id,
         target.release.id
     );
-    worker(store.clone(), true)?
+    worker(store.clone())?
         .run_once("upgrade-failing-worker", store.current_time().await?)
         .await?;
     let failed = store.load(original.id).await?;
@@ -261,6 +223,13 @@ async fn template_upgrade_preserves_workspace_and_exposes_failure_without_comple
         .snapshot;
     assert_eq!(status.state, OperationState::Failed);
     assert!(status.diagnostic_code.is_some());
+    assert_eq!(
+        status
+            .diagnostic_code
+            .as_ref()
+            .map(contracts::DiagnosticCode::as_str),
+        Some("LW_RUNTIME_AUTHORITY_UNAVAILABLE")
+    );
     assert!(
         store
             .get_operation(original.id, ActorId::new(), accepted.operation_id)

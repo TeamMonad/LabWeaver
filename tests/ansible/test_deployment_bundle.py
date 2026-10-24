@@ -724,6 +724,79 @@ class DeploymentBundleTests(unittest.TestCase):
                 self.assertIn(dependency, executor_secret)
         self.clean_runtime()
 
+    def test_encrypted_bundle_owns_optional_container_placement_for_owner_and_executor(self) -> None:
+        profile_ref = "config/runtime/container-placement/profile.json"
+        profile = (REPOSITORY / "deploy/config/container-placement.json.example").read_bytes()
+        self.model["application"]["configMaps"]["container-placement-config"] = {
+            "profile.json": profile_ref
+        }
+        write(self.root / profile_ref, profile)
+        self.save_model()
+        recipient = self.key()
+        bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+            objects = list(yaml.safe_load_all((loaded / "application.yaml").read_bytes()))
+            placement = [item for item in objects if item["metadata"]["name"] == "container-placement-config"]
+            self.assertEqual(len(placement), 1)
+            self.assertEqual(placement[0]["data"]["profile.json"].encode(), profile)
+            values = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
+            self.assertEqual(values["containerPlacementProfileConfigMap"], "container-placement-config")
+            command = [
+                shutil.which("helm"), "template", "labweaver", str(bundle.WORKLOADS_FILE.parent),
+                "--namespace", "labweaver-system", "--values", str(loaded / "helm-values.yaml"),
+            ]
+            self.assertIsNotNone(command[0], "The pinned Helm renderer is required.")
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            mounts = set()
+            for item in yaml.safe_load_all(result.stdout):
+                if not item or item.get("kind") != "Deployment":
+                    continue
+                pod = item["spec"]["template"]["spec"]
+                container = pod["containers"][0]
+                env = {entry["name"]: entry for entry in container.get("env", [])}
+                if "LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE" not in env:
+                    continue
+                mounts.add(item["metadata"]["name"])
+                self.assertEqual(env["LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE"]["value"], "/etc/labweaver/container-placement/profile.json")
+                self.assertIn({"name": "container-placement", "mountPath": "/etc/labweaver/container-placement", "readOnly": True}, container["volumeMounts"])
+                volume = next(volume for volume in pod["volumes"] if volume["name"] == "container-placement")
+                self.assertEqual(volume["configMap"]["name"], "container-placement-config")
+            self.assertEqual(mounts, {"environment-service", "container-executor"})
+            for field in ("env", "secretEnv"):
+                with self.subTest(field=field):
+                    overridden = copy.deepcopy(values)
+                    value = "/tmp/other.json" if field == "env" else {"name": "other", "key": "profile"}
+                    overridden["workloadInputs"]["environment-service"][field]["LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE"] = value
+                    override = self.private / f"override-{field}.yaml"
+                    override.write_text(yaml.safe_dump(overridden))
+                    rejected = subprocess.run(command[:-1] + [str(override)], capture_output=True, text=True)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("containerPlacementProfileConfigMap owns", rejected.stderr)
+        self.clean_runtime()
+
+    def test_bundle_rejects_another_profile_reference_or_workload_path(self) -> None:
+        original = copy.deepcopy(self.model)
+        for field in ("containerPlacementProfileConfigMap", "env", "secretEnv"):
+            with self.subTest(field=field):
+                self.model = copy.deepcopy(original)
+                if field == "containerPlacementProfileConfigMap":
+                    self.model["application"]["helmValues"][field] = "foreign-config"
+                    diagnostic = "LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN"
+                else:
+                    self.model["application"]["workloadInputs"]["environment-service"][field]["LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE"] = "/tmp/foreign.json"
+                    diagnostic = "LW_BUNDLE_WORKLOAD_INVALID"
+                self.save_model()
+                with self.assertRaisesRegex(bundle.BundleError, diagnostic):
+                    bundle.load_bundle(self.root)
+
+    def test_bundle_requires_exact_optional_profile_keys(self) -> None:
+        self.model["application"]["configMaps"]["container-placement-config"] = {"wrong.json": "config/wrong.json"}
+        write(self.root / "config/wrong.json", b"{}")
+        self.save_model()
+        with self.assertRaisesRegex(bundle.BundleError, "LW_BUNDLE_MODEL_INVALID"):
+            bundle.load_bundle(self.root)
+
     def key(self, path: Path | None = None) -> str:
         if shutil.which("age") is None or shutil.which("age-keygen") is None:
             self.fail(

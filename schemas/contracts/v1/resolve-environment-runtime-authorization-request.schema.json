@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment requests the existing request/claim/approval/lease chain, never a new grant.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environmentId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expectedLeaseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LeaseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "resourceRequestId": {
+      "$ref": "#/$defs/ResourceRequestId"
+    }
+  },
+  "required": [
+    "resourceRequestId",
+    "projectId",
+    "ownerActorId",
+    "releaseId",
+    "releaseVersion"
+  ],
+  "title": "ResolveEnvironmentRuntimeAuthorizationRequest",
+  "type": "object"
+}

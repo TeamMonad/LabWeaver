@@ -1795,6 +1795,89 @@ class LocalDevBundleTests(unittest.TestCase):
         ):
             self.assertIn(required, fixture)
 
+    def _assert_local_executor_authority(self, work: Path, bundle: Path) -> None:
+        values_file = work / "environment-executor-values.yaml"
+        values = yaml.safe_load(values_file.read_text())
+        env = values["workloads"]["container-executor"]["env"]
+        defaults = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.yaml").read_text())
+        owner = defaults["workloads"]["environment-service"]["env"]
+        from deployment_bundle import ENVIRONMENT_EXECUTOR_SHARED
+        for variable in ENVIRONMENT_EXECUTOR_SHARED:
+            expected = owner[variable]
+            if variable == "LABWEAVER_SERVICE_OIDC_ISSUER":
+                expected = f"https://127.0.0.1.nip.io:{local_dev.PORTAL_PORT}/identity/realms/workloads"
+            elif variable in {"LABWEAVER_SERVICE_OIDC_CA", "LABWEAVER_SERVICE_CLIENT_SECRET_FILE", "LABWEAVER_RESOURCE_USAGE_CA_PATH"}:
+                expected = expected.replace("/etc/labweaver/secrets/", "/etc/labweaver/environment-authority/")
+            self.assertEqual(env[variable], expected, variable)
+        self.assertEqual(values["environmentExecutorAuthority"]["secretSources"][0]["name"], "environment-service-secrets")
+        documents = list(yaml.safe_load_all(bundle.read_text()))
+        config = next(item for item in documents if item["kind"] == "ConfigMap" and item["metadata"]["name"] == "container-executor-config")
+        startup = yaml.safe_load(config["data"]["config.yaml"])
+        self.assertEqual(startup["databaseUrlFile"], "/etc/labweaver/environment-authority/database-url")
+        self.assertEqual(startup["nats"]["serverFile"], "/etc/labweaver/environment-authority/nats-server")
+        # Feed the full real projector output to the production Rust startup parser.
+        # Rebase only the mounted file locator into this fixture's real Secret tree;
+        # do not replace serverFile with a synthetic inline endpoint.
+        mounted = json.loads(json.dumps(startup))
+        endpoint_file = work / "app-input/secrets/environment-service-secrets/nats-server"
+        mounted["nats"]["serverFile"] = str(endpoint_file)
+        parser_input = work / "runtime-executor-parser.yaml"
+        parser_input.write_text(yaml.safe_dump(mounted))
+        command = ["cargo", "run", "--quiet", "--locked", "-p", "environment-service", "--bin", "environment-service",
+                   "--", "--check-runtime-executor-config", str(parser_input)]
+        parsed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        both = json.loads(json.dumps(mounted))
+        both["nats"]["server"] = endpoint_file.read_text().strip()
+        missing = json.loads(json.dumps(mounted))
+        del missing["nats"]["serverFile"]
+        for invalid in (both, missing):
+            parser_input.write_text(yaml.safe_dump(invalid))
+            rejected = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("LW_ENVIRONMENT_CONFIG_INVALID", rejected.stderr)
+            self.assertNotIn(endpoint_file.read_text().strip(), rejected.stderr)
+        empty_endpoint = work / "empty-nats-server"
+        empty_endpoint.write_text(" \n\t")
+        mounted["nats"]["serverFile"] = str(empty_endpoint)
+        parser_input.write_text(yaml.safe_dump(mounted))
+        rejected = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("LW_ENVIRONMENT_CONFIG_INVALID", rejected.stderr)
+        render_args = [
+            "helm", "template", "labweaver-local", str(ROOT / "deploy/helm/labweaver"),
+            "--values", str(ROOT / "deploy/helm/labweaver/values.local-kind.yaml"),
+            "--values", str(values_file),
+            "--set-string", "deploymentIdentity.configurationBundleSha256=sha256:" + hashlib.sha256(bundle.read_bytes()).hexdigest(),
+        ]
+        for image in defaults["images"]:
+            render_args.extend(["--set-string", f"images.{image}=example.test/labweaver/{image}@sha256:" + "a" * 64])
+        rendered = subprocess.run(render_args, capture_output=True, text=True, check=False)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        objects = [item for item in yaml.safe_load_all(rendered.stdout) if item]
+        resource_policy = next(item for item in objects if item.get("kind") == "NetworkPolicy" and item["metadata"]["name"] == "resource-service")
+        for executor in ("container-executor", "kubevirt-executor"):
+            rules = [rule for rule in resource_policy["spec"]["ingress"]
+                     if any(executor in expression.get("values", [])
+                            for source in rule.get("from", [])
+                            for expression in source.get("podSelector", {}).get("matchExpressions", []))]
+            self.assertEqual(len(rules), 1, executor)
+            self.assertEqual(rules[0]["ports"], [{"protocol": "TCP", "port": 9448}])
+            self.assertEqual(rules[0]["from"], [{"podSelector": {"matchExpressions": [{
+                "key": "app.kubernetes.io/name", "operator": "In",
+                "values": ["container-executor", "kubevirt-executor"],
+            }]}}])
+        deployment = next(item for item in yaml.safe_load_all(rendered.stdout) if item and item["kind"] == "Deployment" and item["metadata"]["name"] == "container-executor")
+        pod = deployment["spec"]["template"]["spec"]
+        authority = next(volume for volume in pod["volumes"] if volume["name"] == "environment-authority")
+        self.assertEqual(authority["projected"]["sources"][0]["secret"]["name"], "environment-service-secrets")
+        mounts = pod["containers"][0]["volumeMounts"]
+        self.assertIn({"name": "environment-authority", "mountPath": "/etc/labweaver/environment-authority", "readOnly": True}, mounts)
+        with (patch.object(local_dev, "kubectl"), patch.object(local_dev, "run") as run,
+              patch.object(local_dev, "wait_rollout"), patch.object(local_dev, "local_kubernetes_api_endpoint", return_value="10.96.0.1/32")):
+            local_dev.deploy(work / "kubeconfig", {}, bundle, bundle, "bundle-hash", env["LABWEAVER_SERVICE_OIDC_ISSUER"])
+        self.assertIn(str(values_file), run.call_args.args[0])
+
     def test_local_kind_bundle_covers_enabled_workloads_and_identity_bindings(self) -> None:
         # The Agent platform registry is part of the reviewed bundle contract, so
         # only the profile that provisions the run-owned Harbor and BuildKit
@@ -1992,6 +2075,7 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertFalse((app_input / "configmaps" / "kubevirt-console-executor-config").exists())
             self.assertFalse((app_input / "secrets" / "kubevirt-executor-secrets").exists())
             self.assertFalse((app_input / "secrets" / "kubevirt-console-executor-secrets").exists())
+            self._assert_local_executor_authority(work, bundle)
 
     def test_local_fixture_profile_binds_fixture_platform_registry_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2086,6 +2170,7 @@ class LocalDevBundleTests(unittest.TestCase):
                 None,
             )
             self.assertIsNone(build_executor_secret)
+            self._assert_local_executor_authority(work, bundle)
 
     @staticmethod
     def _write_real_build_provider(root: Path) -> local_dev.local_dev_build.RealBuildProvider:

@@ -137,7 +137,7 @@ impl FreezeBindingService {
             || instance
                 .eligibility_expires_at
                 .is_some_and(|deadline| deadline <= now)
-            || (instance.class == contracts::authoring::EnvironmentClass::Work
+            || (instance.has_resource_lease()
                 && instance
                     .operation
                     .lease_authorization
@@ -155,9 +155,10 @@ impl FreezeBindingService {
             .resolve(instance.release_id, instance.release_version)
             .await?;
         if release.withdrawn_at.is_some()
-            || release.projection.release.project_id != instance.project_id
+            || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
+            || release.projection.environment_spec.class != instance.class
         {
             return Err(FreezeBindingError::ReleaseIdentityMismatch);
         }
@@ -178,11 +179,20 @@ impl FreezeBindingService {
             },
         };
         let source = match instance.runtime_kind {
-            RuntimeKind::Container => EnvironmentFreezeSourceBinding::Container {
-                namespace: format!("lw-env-{}", instance.id),
-                persistent_volume_claim: "workspace".to_owned(),
-                storage_class_name: self.configuration.container_workspace_storage_class.clone(),
-            },
+            RuntimeKind::Container => {
+                let placement =
+                    crate::ContainerPlacement::load(&self.pool, instance.id, instance.project_id)
+                        .await
+                        .map_err(|_| FreezeBindingError::EnvironmentNotEligible)?;
+                EnvironmentFreezeSourceBinding::Container {
+                    namespace: placement.namespace.clone(),
+                    persistent_volume_claim: placement.resource_name("workspace"),
+                    storage_class_name: self
+                        .configuration
+                        .container_workspace_storage_class
+                        .clone(),
+                }
+            }
             RuntimeKind::VirtualMachine => {
                 self.vm_configuration()?;
                 let public_key = request
@@ -352,9 +362,10 @@ impl FreezeBindingService {
             .resolve(instance.release_id, instance.release_version)
             .await?;
         if release.withdrawn_at.is_some()
-            || release.projection.release.project_id != instance.project_id
+            || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
+            || release.projection.environment_spec.class != instance.class
         {
             return Err(FreezeBindingError::ReleaseIdentityMismatch);
         }

@@ -459,6 +459,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
@@ -505,7 +506,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         ObservedEnvironmentState::Failed
     );
 
-    let mut crash_target = requested_instance();
+    let mut crash_target = support::funded_instance(requested_instance());
     crash_target.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
     store
         .create("create-key-crash-recovery", &crash_target)
@@ -525,6 +526,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let restarted_worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(crash_registry, Duration::from_millis(100))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
@@ -593,7 +595,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         release_version: completed_create.release_version,
     };
     store
-        .accept_command(
+        .accept_api_command(
             "reset-key-persisted-target",
             &LifecycleCommand {
                 environment_id: completed_create.id,
@@ -608,6 +610,10 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
                 max_attempts: 3,
                 reset_target: Some(reset_target.clone()),
             },
+            None,
+            completed_create.operation.lease_authorization.clone(),
+            completed_create.project_id,
+            completed_create.course_id,
         )
         .await?;
     assert_eq!(
@@ -677,7 +683,7 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
         .connect(&url)
         .await?;
     support::apply_environment_migrations(&pool).await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
     let instance = requested_instance();
     store
         .create("create-key-stale-reconcile", &instance)
@@ -693,6 +699,7 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
@@ -754,7 +761,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         .connect(&url)
         .await?;
     support::apply_environment_migrations(&pool).await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
 
     let mut handoff = requested_instance();
     handoff.class = contracts::authoring::EnvironmentClass::Work;
@@ -800,6 +807,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         reset_target: None,
     };
     let create = EnvironmentCreateSpec {
+        runtime_authorization: None,
         project_id: handoff.project_id,
         course_id: handoff.course_id,
         owner_actor_id: handoff.owner_id,
@@ -851,6 +859,171 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         .await?;
     assert_eq!(replay, accepted);
     assert_eq!(store.load(handoff.id).await?.revision, revision(1));
+    let profile = environment_service::ContainerNamespaceProfile::Existing {
+        namespace: "synthetic-work-tests".to_owned(),
+        namespace_uid: uuid::Uuid::from_u128(207),
+        project_id: handoff.project_id,
+    };
+    let placement = profile.for_instance(&loaded)?;
+    let plan = ContainerResourcePlan {
+        environment_id: handoff.id,
+        project_id: handoff.project_id,
+        namespace: placement.namespace.clone(),
+        namespace_uid: placement.namespace_uid,
+        image: String::new(),
+        resources: vec![],
+        plan_sha256: Sha256Digest::of_bytes(b"synthetic-existing-plan"),
+    };
+    let now = container_database_now(&pool).await?;
+    let deadline = container_add_time(now, time::Duration::minutes(1))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let envelope = container_executor_envelope(
+        plan.clone(),
+        loaded.operation.id,
+        1,
+        1,
+        1,
+        ReconcileAction::Provision,
+        deadline,
+    )?;
+    for _ in 0..2 {
+        let executor = FencedContainerExecutor::new(
+            PgContainerExecutorFenceStore::new(pool.clone())
+                .with_namespace_profile(profile.clone()),
+            CountingContainerExecutor {
+                calls: calls.clone(),
+                observed_at: now,
+            },
+        );
+        executor.execute(envelope.clone()).await?;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a new executor must replay the durable result"
+    );
+    assert_eq!(
+        environment_service::ContainerPlacement::load(&pool, handoff.id, handoff.project_id)
+            .await?,
+        placement
+    );
+    assert!(
+        environment_service::ContainerPlacement::load(&pool, handoff.id, ProjectId::new())
+            .await
+            .is_err()
+    );
+    // Changing deployment namespace UID, even after a completed request, cannot move this Work.
+    let changed_profile = environment_service::ContainerNamespaceProfile::Existing {
+        namespace: plan.namespace.clone(),
+        namespace_uid: uuid::Uuid::from_u128(208),
+        project_id: handoff.project_id,
+    };
+    let mut changed = plan.clone();
+    changed.namespace_uid = Some(uuid::Uuid::from_u128(208));
+    let executor = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()).with_namespace_profile(changed_profile),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: now,
+        },
+    );
+    assert!(matches!(
+        executor
+            .execute(container_executor_envelope(
+                changed,
+                OperationId::new(),
+                2,
+                1,
+                1,
+                ReconcileAction::Provision,
+                deadline
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::IdentityMismatch)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let executor = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()).with_namespace_profile(profile.clone()),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: now,
+        },
+    );
+    executor
+        .execute(container_executor_envelope(
+            plan.clone(),
+            OperationId::new(),
+            2,
+            1,
+            1,
+            ReconcileAction::Provision,
+            deadline,
+        )?)
+        .await?;
+    assert!(matches!(
+        executor
+            .execute(container_executor_envelope(
+                plan.clone(),
+                OperationId::new(),
+                1,
+                1,
+                1,
+                ReconcileAction::Provision,
+                deadline
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::StaleGeneration)
+    ));
+    let mut foreign = plan.clone();
+    foreign.project_id = ProjectId::new();
+    assert!(
+        executor
+            .execute(container_executor_envelope(
+                foreign,
+                OperationId::new(),
+                3,
+                1,
+                1,
+                ReconcileAction::Cleanup,
+                deadline
+            )?)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    executor
+        .execute(container_executor_envelope(
+            plan.clone(),
+            OperationId::new(),
+            3,
+            1,
+            1,
+            ReconcileAction::Cleanup,
+            deadline,
+        )?)
+        .await?;
+    let recovered = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()).with_namespace_profile(profile),
+        CountingContainerExecutor {
+            calls: calls.clone(),
+            observed_at: now,
+        },
+    );
+    assert!(matches!(
+        recovered
+            .execute(container_executor_envelope(
+                plan,
+                OperationId::new(),
+                4,
+                1,
+                1,
+                ReconcileAction::Provision,
+                deadline
+            )?)
+            .await,
+        Err(ContainerExecutorFenceError::Tombstoned)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     Ok(())
 }
 
@@ -1178,11 +1351,10 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     .await?;
     assert_eq!(delivery_state, "pending");
 
-    // Exercise the migrated Ready row through the real store and worker.  The initial
-    // migration marker is unknown compute/storage; Stop closes only compute, Restart
-    // recovers storage and starts a new known compute interval, and Delete closes both.
+    // The migrated row keeps unknown compute/storage facts. Stop closes compute; rejected
+    // legacy restart cannot claim a new known interval. Delete closes retained storage.
     let migrated_ready = store.load(instances[0].id).await?;
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     store
         .accept_command(
             "legacy-meter-stop",
@@ -1242,8 +1414,11 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     // database observation for the following Ready transition so this test
     // does not confuse its historical fixture timestamps with live boundaries.
     let restart_observed_at = store.current_time().await?;
-    let worker =
-        success_worker_with_restart_ready_observation(store.clone(), Some(restart_observed_at))?;
+    let worker = success_worker_with_restart_ready_observation(
+        store.clone(),
+        Some(restart_observed_at),
+        pool.clone(),
+    )?;
     store
         .accept_command(
             "legacy-meter-restart",
@@ -1269,10 +1444,8 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
                 timestamp("2026-07-14T00:03:00.000Z")
             )
             .await?,
-        ReconcileWorkerOutcome::Advanced {
-            state: ObservedEnvironmentState::Ready,
-            terminal: true
-        }
+        ReconcileWorkerOutcome::Failed { ref diagnostic_code }
+            if diagnostic_code == "LW_RUNTIME_ALLOCATION_PATH_UNSUPPORTED"
     ));
     let restarted_meter: Value = sqlx::query_scalar(
         "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
@@ -1280,15 +1453,9 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     .bind(migrated_ready.id.as_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        restarted_meter["computeStartedAt"],
-        serde_json::to_value(restart_observed_at)?
-    );
-    assert_eq!(
-        restarted_meter["storageStartedAt"],
-        serde_json::to_value(restart_observed_at)?
-    );
-    assert_eq!(restarted_meter["storageKnown"], true);
+    assert!(restarted_meter["computeStartedAt"].is_null());
+    assert_eq!(restarted_meter["storageKnown"], false);
+    assert!(!store.load(migrated_ready.id).await?.has_resource_lease());
 
     let restarted = store.load(migrated_ready.id).await?;
     store
@@ -1356,7 +1523,7 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()?;
-    assert_eq!(deliveries.len(), 5);
+    assert_eq!(deliveries.len(), 3);
     for request in &deliveries {
         assert!(matches!(
             request.target,
@@ -1375,13 +1542,7 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         &unknown_compute.measurement,
         UsageMeasurement::Unknown { .. }
     ));
-    let stop_boundary = unknown_compute.measured_until;
-    assert!(
-        stop_boundary <= restart_observed_at,
-        "unknown compute boundary crossed the Ready observation"
-    );
-    assert_eq!(stop_boundary, stop_event_time);
-
+    assert_eq!(unknown_compute.measured_until, stop_event_time);
     let unknown_storage = deliveries
         .iter()
         .find(|request| {
@@ -1392,35 +1553,45 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         &unknown_storage.measurement,
         UsageMeasurement::Unknown { .. }
     ));
-    assert_eq!(unknown_storage.measured_until, restart_observed_at);
-
-    let known_compute = deliveries
+    let mut storage_intervals: Vec<_> = deliveries
         .iter()
-        .find(|request| {
-            request.kind == ResourceUsageKind::Compute
-                && request.measured_from == restart_observed_at
-        })
-        .ok_or("migrated known compute delivery missing")?;
-    assert!(matches!(
-        &known_compute.measurement,
-        UsageMeasurement::Known { .. }
-    ));
-    let delete_boundary = known_compute.measured_until;
-    assert!(delete_boundary >= restart_observed_at);
-    assert_eq!(delete_boundary, delete_event_time);
-
-    let known_storage = deliveries
+        .filter(|request| request.kind == ResourceUsageKind::Storage)
+        .collect();
+    storage_intervals.sort_by_key(|request| request.measured_from);
+    assert_eq!(
+        storage_intervals
+            .first()
+            .ok_or("unknown storage interval missing")?
+            .measured_from,
+        migration_start
+    );
+    assert_eq!(
+        storage_intervals
+            .last()
+            .ok_or("unknown storage interval missing")?
+            .measured_until,
+        delete_event_time
+    );
+    assert!(
+        storage_intervals
+            .windows(2)
+            .all(|pair| pair[0].measured_until == pair[1].measured_from),
+        "a rejected restart must neither omit nor overlap retained storage time"
+    );
+    let preserved = deliveries
         .iter()
-        .find(|request| {
-            request.kind == ResourceUsageKind::Storage
-                && request.measured_from == restart_observed_at
-                && request.measured_until == delete_boundary
-        })
-        .ok_or("migrated known storage delivery missing")?;
-    assert!(matches!(
-        &known_storage.measurement,
-        UsageMeasurement::Known { .. }
-    ));
+        .find(|request| request.source_event_id == source_event_id)
+        .ok_or("pre-migration delivery missing")?;
+    assert_eq!(
+        preserved, &decoded,
+        "migration and rejected restart cannot rewrite an existing known fact"
+    );
+    assert!(
+        deliveries
+            .iter()
+            .filter(|request| request.source_event_id != source_event_id)
+            .all(|request| matches!(&request.measurement, UsageMeasurement::Unknown { .. }))
+    );
     Ok(())
 }
 
@@ -1477,7 +1648,7 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
         .clone();
     store.create("create-key-lease-refresh", &work).await?;
 
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     for index in 0..4 {
         assert!(matches!(
             worker
@@ -1604,8 +1775,8 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
             },
             None,
             stopped_refreshed.operation.lease_authorization.clone(),
-            work.project_id,
-            work.course_id,
+            stopped_refreshed.project_id,
+            stopped_refreshed.course_id,
         )
         .await?;
     let restarting = store.load(work.id).await?;
@@ -1762,14 +1933,14 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
     sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
         .execute(&pool)
         .await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
 
     let timed_out = requested_instance();
     store
         .create("create-key-timeout-worker", &timed_out)
         .await?;
     let timeout_now = timestamp("2026-07-14T00:10:01.000Z");
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     assert!(matches!(
         worker
             .run_once("environment-worker-timeout", timeout_now)
@@ -1800,7 +1971,7 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
     assert!(timeout_deleted.endpoints.is_empty());
     assert!(timeout_deleted.cleanup_evidence.is_some());
 
-    let ready_target = requested_instance();
+    let ready_target = support::funded_instance(requested_instance());
     store
         .create("create-key-ready-cancel", &ready_target)
         .await?;
@@ -2050,6 +2221,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         environment_id,
         project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{environment_id}"),
+        namespace_uid: None,
         image: format!("harbor.internal/course/image@sha256:{}", "a".repeat(64)),
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"container-plan"),
@@ -2158,6 +2330,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         environment_id: expired_environment_id,
         project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{expired_environment_id}"),
+        namespace_uid: None,
         image: String::new(),
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"expired-plan"),
@@ -2730,13 +2903,15 @@ fn kubevirt_fence(
 
 fn success_worker(
     store: PgEnvironmentStore,
+    pool: sqlx::PgPool,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
-    success_worker_with_restart_ready_observation(store, None)
+    success_worker_with_restart_ready_observation(store, None, pool)
 }
 
 fn success_worker_with_restart_ready_observation(
     store: PgEnvironmentStore,
     restart_ready_observed_at: Option<UtcTimestamp>,
+    pool: sqlx::PgPool,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(LifecycleSuccessProvider {
@@ -2745,6 +2920,7 @@ fn success_worker_with_restart_ready_observation(
     Ok(ReconcileWorker::new(
         store,
         Reconciler::new(registry, Duration::from_millis(100))?
+            .with_runtime_admission(support::stored_runtime_admission(pool))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
@@ -3222,6 +3398,7 @@ async fn pending_reconcile_changes_only_schedule_without_retry_event_or_usage()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_millis(10),

@@ -509,11 +509,24 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         0
     );
 
-    let project_id = ProjectId::new();
     let project_owner = ActorId::new();
     let course_id = CourseId::new();
-    let project = project_fixture(project_id, project_owner, Some(course_id))?;
-    insert_project(&pool, &project).await?;
+    sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)")
+        .bind(course_id.as_uuid()).bind(project_owner.as_uuid()).execute(&pool).await?;
+    let project = service
+        .create_project(
+            project_owner,
+            contracts::PlatformRole::Student,
+            &contracts::CreateProjectRequest {
+                name: "private Work publication".into(),
+                description: None,
+                course_id: Some(course_id),
+            },
+            &IdempotencyKey::parse("work-owner-project")?,
+            "2026-07-16T08:00:00.000Z".parse()?,
+        )
+        .await?;
+    let project_id = project.id;
     let policy_id = PolicyId::new();
     sqlx::query(
         "INSERT INTO control.project_llm_policies \
@@ -526,8 +539,16 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .bind(Sha256Digest::of_bytes(b"work-policy").to_string())
     .execute(&pool)
     .await?;
-    let environment_candidate =
+    let mut environment_candidate =
         environment_candidate(project_id, Some(course_id), environment_schema)?;
+    environment_candidate.spec.retention.retain_until = Some("2099-01-01T00:00:00.000Z".parse()?);
+    // The concrete Container provider probes an internal HTTP listener; TLS terminates at Access.
+    environment_candidate
+        .spec
+        .entries
+        .first_mut()
+        .ok_or("Work runtime entry")?
+        .protocol = contracts::environment::EndpointProtocol::Http;
     let package_id = ProblemPackageId::new();
     let build_context = match &environment_candidate.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
@@ -761,10 +782,13 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
 
     supply_chain.approval = Some(approval.clone());
     if let ImageArtifact::Container {
-        build_request_id, ..
+        build_request_id,
+        repository,
+        ..
     } = &mut supply_chain.artifact
     {
         *build_request_id = build_event.data.request.id;
+        *repository = build_event.data.request.output_repository.clone();
     }
     assert!(matches!(
         service
@@ -831,6 +855,16 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         work_admission, None,
         "a validated Work release has an explicit null Evaluation admission"
     );
+    Box::pin(
+        runtime_authorization_cases::assert_bindings_after_publication(
+            &pool,
+            &service,
+            &environment_candidate,
+            &release,
+            UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_microsecond(0)?)?,
+        ),
+    )
+    .await?;
     assert!(matches!(
         service
             .environment_publication_admission(
@@ -1623,7 +1657,6 @@ async fn authoring_publication_fixture(
         runtime_authorization_cases::assert_bindings_after_publication(
             &pool,
             &service,
-            &approval,
             &environment,
             &environment_release,
             now,

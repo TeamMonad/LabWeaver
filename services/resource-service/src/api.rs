@@ -41,6 +41,7 @@ mod build_costing;
 mod costing;
 mod credits;
 mod environment_funding;
+mod environment_runtime_authorization;
 mod model_costing;
 
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
@@ -208,6 +209,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .route(
             "/internal/v1/environment-credit-grants/{lease_id}",
             get(environment_funding::record),
+        )
+        .route(
+            "/internal/v1/environment-runtime-authorization",
+            post(environment_runtime_authorization::resolve),
         )
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
@@ -1413,6 +1418,9 @@ fn internal_route_permission(path: &str) -> Option<&'static str> {
         return Some("resource.usage.record");
     }
     if path.starts_with("/internal/v1/environment-credit-grants/") {
+        return Some("resource.environment.resolve");
+    }
+    if path == "/internal/v1/environment-runtime-authorization" {
         return Some("resource.environment.resolve");
     }
     if path == "/internal/v1/build-cost-admissions"

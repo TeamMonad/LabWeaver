@@ -36,6 +36,8 @@ pub enum TemplateUpgradeError {
     TargetNotNewer,
     #[error("LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL")]
     RequiresResourceApproval,
+    #[error("LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE")]
+    UpgradeUnavailable,
     #[error("LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE")]
     ReleaseUnavailable,
 }
@@ -56,6 +58,9 @@ impl TemplateUpgradeError {
             Self::TargetNotNewer => "请选择比当前固定版本更新的已发布模板。",
             Self::RequiresResourceApproval => {
                 "新模板改变了资源、网络、安全策略或连接入口；现有资源授权不覆盖这些变化，请重新申请资源。原 Work 与数据未更改。"
+            }
+            Self::UpgradeUnavailable => {
+                "本版本暂不支持在原资金租约上升级 Work 模板。请新建 Work 并自行迁移数据，确认迁移完成后再释放旧 Work。原 Work 的模板、工作目录和运行实例未更改。"
             }
             Self::ReleaseUnavailable => {
                 "模板不存在、已撤回或版本身份不匹配，不能升级。原 Work 与数据未更改。"

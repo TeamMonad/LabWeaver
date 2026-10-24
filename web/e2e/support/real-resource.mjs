@@ -7,6 +7,12 @@ import { expectJson, navigateFromHomeByUi } from './live.mjs'
 export const WORK_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 
+/** The container provider binding a student course experiment environment is approved on. */
+export const EXPERIMENT_CONTAINER_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
+  || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
+  || 'container-primary-v1'
+
 const RESOURCE_PAGE_TIMEOUT_MS = 120_000
 const RESOURCE_SETTLE_TIMEOUT_MS = 240_000
 const RESOURCE_POLL_INTERVAL_MS = 5_000
@@ -179,10 +185,12 @@ async function readResourceLists(page) {
  *
  * `kind` selects the requested capacity: `cpu` requests CPU, memory, and
  * storage only, `gpu` additionally selects the named active GPU catalog mode
- * and optional class that already has a current rate. A project without a
- * published environment template cannot express a request at all; that
- * prerequisite gap fails with a stable diagnostic instead of submitting a
- * different request.
+ * and optional class that already has a current rate. `purpose` (`work` or
+ * `experiment`) limits the offered releases to that purpose; `releaseId`
+ * selects one release, and `releaseVersion` one version of it (the newest
+ * offered version when omitted). A project without a matching published
+ * template cannot express a request at all; that prerequisite gap fails with
+ * a stable diagnostic instead of submitting a different request.
  */
 export async function requestProjectResourceByUi(page, {
   projectName,
@@ -197,6 +205,7 @@ export async function requestProjectResourceByUi(page, {
   gpuCount = 1,
   releaseId = null,
   releaseVersion = null,
+  purpose = null,
   onAccepted = null,
 } = {}) {
   if (!['cpu', 'gpu'].includes(kind)) throw new Error(`LW_ACCEPTANCE_RESOURCE_KIND_UNSUPPORTED:${kind}`)
@@ -212,8 +221,11 @@ export async function requestProjectResourceByUi(page, {
   if (gpuMode === 'container_time_slice' && gpuCount !== 1) {
     throw new Error('LW_ACCEPTANCE_GPU_TIME_SLICE_COUNT_INVALID')
   }
-  if ((releaseId === null) !== (releaseVersion === null)
-    || (releaseId !== null && (typeof releaseId !== 'string' || releaseId === '' || !Number.isInteger(releaseVersion) || releaseVersion < 1))) {
+  if (purpose !== null && !['work', 'experiment'].includes(purpose)) {
+    throw new Error(`LW_ACCEPTANCE_RESOURCE_PURPOSE_UNSUPPORTED:${purpose}`)
+  }
+  if ((releaseId !== null && (typeof releaseId !== 'string' || releaseId === ''))
+    || (releaseVersion !== null && (releaseId === null || !Number.isInteger(releaseVersion) || releaseVersion < 1))) {
     throw new Error('LW_ACCEPTANCE_RESOURCE_RELEASE_IDENTITY_INVALID')
   }
   const selectedProjectId = await openResourcePage(page, {
@@ -230,26 +242,34 @@ export async function requestProjectResourceByUi(page, {
   await expect(releaseSelect).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   // The release set is an event-sourced read model: the template release is
   // projected asynchronously, so a bare evaluateAll can observe an incomplete
-  // list before the requested release lands. Poll for the exact requested
-  // option when the caller supplied release identity; otherwise keep the
-  // default first-release journey.
+  // list before the requested release lands. Poll for a matching option when
+  // the caller named a release or a purpose; otherwise keep the default
+  // first-release journey.
   const readReleases = () => releaseSelect.locator('option').evaluateAll((elements) => elements
-    .map((element) => ({ value: element.value, label: (element.textContent ?? '').trim() }))
+    .map((element) => ({ value: element.value, label: (element.textContent ?? '').trim(), purpose: element.dataset.purpose ?? null }))
     .filter((option) => option.value !== ''))
+  const wanted = (option) => {
+    const match = option.value.match(REQUEST_KEY_OPTION)
+    return Boolean(match)
+      && (purpose === null || option.purpose === purpose)
+      && (releaseId === null || match[1] === releaseId)
+      && (releaseVersion === null || Number(match[2]) === releaseVersion)
+  }
+  const newestWanted = (options) => options.filter(wanted)
+    .sort((left, right) => Number(right.value.match(REQUEST_KEY_OPTION)[2]) - Number(left.value.match(REQUEST_KEY_OPTION)[2]))[0]
   let releases = []
-  if (releaseId === null) {
+  if (releaseId === null && purpose === null) {
     await expect(releaseSelect.locator('option:not([value=""])').first()).toBeAttached({
       timeout: RESOURCE_PAGE_TIMEOUT_MS,
     })
     releases = await readReleases()
   } else {
-    const targetReleaseValue = `${releaseId}:${releaseVersion}`
     let targetWaitError = null
     try {
       await expect.poll(
         async () => {
           releases = await readReleases()
-          return releases.some((option) => option.value === targetReleaseValue)
+          return releases.some(wanted)
         },
         { timeout: RESOURCE_PAGE_TIMEOUT_MS, intervals: [250, 500, 1000] },
       ).toBe(true)
@@ -261,23 +281,15 @@ export async function requestProjectResourceByUi(page, {
       if (releases.length === 0) {
         throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_MISSING:${scope}`, { cause: targetWaitError })
       }
-      throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_NOT_VISIBLE:${releaseId}:${releaseVersion}`, { cause: targetWaitError })
+      throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_NOT_VISIBLE:${purpose ?? 'any'}:${releaseId ?? 'any'}:${releaseVersion ?? 'newest'}`, { cause: targetWaitError })
     }
   }
   if (releases.length === 0) {
     await expect(page.getByText('当前项目没有可用的已发布版本。')).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
     throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_MISSING:${scope}`)
   }
-  if ((releaseId === null) !== (releaseVersion === null)) {
-    throw new Error('LW_ACCEPTANCE_RESOURCE_RELEASE_IDENTITY_INCOMPLETE')
-  }
-  const release = releaseId === null
-    ? releases[0]
-    : releases.find((option) => {
-      const match = option.value.match(REQUEST_KEY_OPTION)
-      return match?.[1] === releaseId && Number(match[2]) === releaseVersion
-    })
-  if (!release) throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_NOT_VISIBLE:${releaseId}:${releaseVersion}`)
+  const release = releaseId === null && purpose === null ? releases[0] : newestWanted(releases)
+  if (!release) throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_NOT_VISIBLE:${purpose ?? 'any'}:${releaseId ?? 'any'}:${releaseVersion ?? 'newest'}`)
   const releaseMatch = release.value.match(REQUEST_KEY_OPTION)
   if (!releaseMatch) throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_OPTION_INVALID:${release.value}`)
   const [, selectedReleaseId, selectedReleaseVersion] = releaseMatch
@@ -590,6 +602,118 @@ export async function approveResourceRequestByUi(page, {
     expiresAt: lease.expiresAt,
     expiresAtLabel: lease.expiresAtLabel,
   }
+}
+
+/**
+ * The resource form values an experiment's instructions ask for: the
+ * EnvironmentSpec `resources` its package declares, rounded up to the whole
+ * GiB the form takes. A declared GPU is requested in `gpuMode` with the
+ * cluster's catalog `gpuClass` and the declared count.
+ */
+export function experimentResourceRequest(resources, { gpuMode = null, gpuClass = null, durationHours = 4 } = {}) {
+  const wholeGiB = (bytes, field) => {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error(`LW_ACCEPTANCE_EXPERIMENT_RESOURCE_INVALID:${field}`)
+    return Math.ceil(bytes / 1024 ** 3)
+  }
+  if (!Number.isSafeInteger(resources?.cpuMillicores) || resources.cpuMillicores <= 0) {
+    throw new Error('LW_ACCEPTANCE_EXPERIMENT_RESOURCE_INVALID:cpuMillicores')
+  }
+  const base = {
+    cpuMillicores: resources.cpuMillicores,
+    memoryGiB: wholeGiB(resources.memoryBytes, 'memoryBytes'),
+    storageGiB: wholeGiB(resources.storageBytes, 'storageBytes'),
+    durationHours,
+  }
+  if (!resources.gpu) return { ...base, kind: 'cpu' }
+  if (!gpuMode) throw new Error('LW_ACCEPTANCE_EXPERIMENT_GPU_MODE_REQUIRED')
+  return { ...base, kind: 'gpu', gpuMode, gpuClass, gpuCount: resources.gpu.count }
+}
+
+/**
+ * Enter an approved environment from the student's "我的实验" page: click
+ * "进入环境" on the approved request until the platform attaches the browser
+ * to the environment Resource handed off. An allocation that is still running
+ * answers `LW_ENVIRONMENT_ALLOCATION_PENDING`, which the page shows as
+ * "环境准备中"; the entry is clicked again until it is accepted. Returns the
+ * attached environment id, which must be the request's target.
+ */
+export async function enterApprovedEnvironmentByUi(page, { projectId, requestId, environmentId }) {
+  const labsPath = '/student/labs'
+  const current = page.url() === 'about:blank' ? null : new URL(page.url())
+  if (current?.pathname !== labsPath || current.searchParams.get('projectId') !== projectId) {
+    await page.goto(`${labsPath}?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
+  }
+  const entry = page.locator(`[data-testid="approved-requests"] [data-request-id="${requestId}"]`)
+  let accepted = null
+  await expect.poll(async () => {
+    if ((await entry.count()) === 0) return false
+    const button = entry.getByRole('button', { name: '进入环境', exact: true })
+    if (!(await button.isEnabled())) return false
+    const responsePromise = page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/v1/environments')
+    await button.click()
+    const response = await responsePromise
+    if (response.request().postDataJSON()?.resourceRequestId !== requestId) {
+      throw new Error(`LW_ACCEPTANCE_ENVIRONMENT_ATTACH_REQUEST_MISMATCH:${requestId}`)
+    }
+    if (response.status() === 409) {
+      const problem = await response.json().catch(() => null)
+      if (problem?.diagnosticCode === 'LW_ENVIRONMENT_ALLOCATION_PENDING') {
+        await expect(entry.getByTestId('environment-preparing')).toBeVisible()
+        return false
+      }
+    }
+    accepted = await expectJson(response, 'LW_ACCEPTANCE_ENVIRONMENT_ATTACH_FAILED')
+    return true
+  }, { timeout: RESOURCE_SETTLE_TIMEOUT_MS, intervals: [1000, 3000, 5000] }).toBe(true)
+  if (accepted?.environmentId !== environmentId) {
+    throw new Error(`LW_ACCEPTANCE_ENVIRONMENT_ATTACH_MISMATCH:${accepted?.environmentId ?? 'missing'}:${environmentId}`)
+  }
+  await expect.poll(() => new URL(page.url()).searchParams.get('environmentId'), { timeout: RESOURCE_PAGE_TIMEOUT_MS })
+    .toBe(environmentId)
+  return environmentId
+}
+
+/**
+ * The student course experiment journey: submit the resource request for the
+ * experiment version with the resources its instructions ask for, keep "我的实验"
+ * open while a platform admin approves it, then enter the environment from
+ * "已批准的申请". The list is opened before the approval, so the approved entry
+ * appears there by the page's own refresh.
+ */
+export async function requestAndEnterExperimentEnvironmentByUi(studentPage, adminPage, {
+  projectId,
+  releaseId,
+  releaseVersion = null,
+  requesterId,
+  providerBinding = EXPERIMENT_CONTAINER_PROVIDER_BINDING,
+  ...resources
+}) {
+  const resource = await requestProjectResourceByUi(studentPage, {
+    ...resources,
+    projectId,
+    releaseId,
+    releaseVersion,
+    purpose: 'experiment',
+  })
+  await studentPage.goto(`/student/labs?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
+  await expect(studentPage.locator(`[data-testid="reviewing-requests"] [data-request-id="${resource.requestId}"]`))
+    .toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
+  const approval = await approveResourceRequestByUi(adminPage, {
+    requestKey: resource.requestKey,
+    projectId,
+    requestId: resource.requestId,
+    environmentId: resource.environmentId,
+    requesterId,
+    durationSeconds: resource.durationSeconds,
+    providerBinding,
+  })
+  const environmentId = await enterApprovedEnvironmentByUi(studentPage, {
+    projectId,
+    requestId: resource.requestId,
+    environmentId: resource.environmentId,
+  })
+  return { resource, approval, environmentId }
 }
 
 /**

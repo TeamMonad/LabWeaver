@@ -11,6 +11,10 @@ cursorSigningKeyPreviousFile: ""
 
 imagePullSecrets: []
 
+# Optional deployment-owned profile.json, shared by Environment and Container executor.
+# Empty preserves dedicated namespaces; this reference carries no runtime permission grant.
+containerPlacementProfileConfigMap: ""
+
 # The private configuration bundle is applied by Ansible before Helm. Binding
 # its immutable digest to every Pod template ensures services that read their
 # configuration only during startup are rolled whenever that bundle changes.

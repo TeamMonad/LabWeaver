@@ -4,7 +4,6 @@ import {
   createProjectByUi,
   configureProjectPolicyByUi,
   expectJson,
-  navigateFromHomeByUi,
   pollEnvironmentCandidate,
   pollJson,
   selectProjectByUi,
@@ -27,7 +26,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
-import { approveResourceRequestByUi } from '../support/real-resource.mjs'
+import { parse as parseYaml } from 'yaml'
+import { experimentResourceRequest, requestAndEnterExperimentEnvironmentByUi } from '../support/real-resource.mjs'
 import {
   inspectRealWorkFinanceByUi,
   readResourceRates,
@@ -258,41 +258,15 @@ async function retryFailedTrackByUi(page, projectId, run, trackKind) {
   return accepted
 }
 
-async function waitForStudentEnvironmentWithResourceApproval(request, adminPage, projectId, environmentId, requesterId) {
+async function waitForStudentEnvironmentReady(request, environmentId) {
   let latest
   await expect.poll(async () => {
     const environmentResponse = await request.get(`/api/v1/environments/${environmentId}`)
     latest = await expectJson(environmentResponse, 'LAB_EXPERIMENT_STUDENT_ENVIRONMENT_READ_FAILED')
-    if (latest.observedState === 'ready') return true
     if (['failed', 'deleted'].includes(latest.observedState)) {
       throw new Error(`LAB_EXPERIMENT_STUDENT_ENVIRONMENT_FAILED:${latest.observedState}`)
     }
-
-    const requestsResponse = await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`)
-    const requests = await expectJson(requestsResponse, 'LAB_EXPERIMENT_STUDENT_RESOURCE_REQUESTS_READ_FAILED')
-    if (!Array.isArray(requests)) throw new Error('LAB_EXPERIMENT_STUDENT_RESOURCE_REQUESTS_INVALID')
-    const pending = requests.filter((item) => (
-      item?.projectId === projectId
-      && item?.requesterId === requesterId
-      && item?.target?.kind === 'environment'
-      && item?.target?.environmentId === environmentId
-      && item.state === 'reviewing'
-    ))
-    for (const resourceRequest of pending) {
-      if (!Number.isInteger(resourceRequest.requestedDurationSeconds) || resourceRequest.requestedDurationSeconds <= 0) {
-        throw new Error(`LAB_EXPERIMENT_STUDENT_RESOURCE_DURATION_INVALID:${resourceRequest.id ?? 'missing'}`)
-      }
-      await approveResourceRequestByUi(adminPage, {
-        requestKey: resourceRequest.requestKey,
-        projectId,
-        requestId: resourceRequest.id,
-        environmentId,
-        requesterId,
-        durationSeconds: resourceRequest.requestedDurationSeconds,
-        providerBinding: AUTHORING_RESOURCE_PROVIDER_BINDING,
-      })
-    }
-    return false
+    return latest.observedState === 'ready'
   }, { timeout: 600_000, intervals: [1000, 2000, 3000] }).toBe(true)
   return latest
 }
@@ -407,20 +381,21 @@ async function readExistingPublishedApproval(
   return { approval, publication }
 }
 
-async function createEnvironmentByStudentUi(page, projectId, releaseId) {
-  if (page.url() === 'about:blank') await navigateFromHomeByUi(page, '我的实验')
-  else await page.goto(`/student/labs?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
-  await selectProjectByUi(page, projectId)
-  await page.getByRole('button', { name: /创建项目环境/ }).first().click()
-  const dialog = page.getByRole('dialog', { name: '创建项目环境', exact: true })
-  await expect(dialog).toBeVisible()
-  const releaseCard = dialog.locator('.release-card').filter({ hasText: releaseId }).first()
-  await expect(releaseCard).toBeVisible({ timeout: 120_000 })
-  const responsePromise = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/environments')
-  await releaseCard.getByRole('button', { name: '选择并创建', exact: true }).click()
-  const accepted = await expectJson(await responsePromise, 'LAB_EXPERIMENT_ENVIRONMENT_CREATE_FAILED')
-  expect(accepted).toMatchObject({ environmentId: expect.any(String), operationId: expect.any(String) })
-  return accepted.environmentId
+/**
+ * The student requests the resources the lab package's environment.yaml asks
+ * for (including its GPU), an admin approves, and the student enters the
+ * environment from "已批准的申请".
+ */
+async function createEnvironmentByStudentUi(page, adminPage, projectId, releaseId, requesterId) {
+  const spec = parseYaml(await readFile(join(LAB.root, 'environment.yaml'), 'utf8'))
+  const { environmentId } = await requestAndEnterExperimentEnvironmentByUi(page, adminPage, {
+    projectId,
+    releaseId,
+    requesterId,
+    providerBinding: AUTHORING_RESOURCE_PROVIDER_BINDING,
+    ...experimentResourceRequest(spec.resources, { gpuMode: LAB.gpuMode ?? null, gpuClass: LAB.gpuClass ?? null }),
+  })
+  return environmentId
 }
 
 async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPath) {
@@ -776,14 +751,14 @@ test('student completes a published lab experiment through its browser entry', a
     baselineChargeIds = new Set(baselineCharges
       .map((charge) => charge.id)
       .filter((id) => typeof id === 'string' && id !== ''))
-    environmentId = await createEnvironmentByStudentUi(studentPage, project.id, published.publication.environmentReleaseId)
-    const environment = await waitForStudentEnvironmentWithResourceApproval(
-      studentContext.request,
+    environmentId = await createEnvironmentByStudentUi(
+      studentPage,
       adminPage,
       project.id,
-      environmentId,
+      published.publication.environmentReleaseId,
       studentActorId,
     )
+    const environment = await waitForStudentEnvironmentReady(studentContext.request, environmentId)
     if (RETAIN_CUDA_SAMPLE) expect(environment.eligibilityExpiresAt).toBeNull()
     if (LAB.gpuMode) {
       expect(environment.gpuAllocation?.mode, 'LAB_EXPERIMENT_GPU_MODE_MISSING').toBe(LAB.gpuMode)
@@ -909,15 +884,14 @@ test('student completes a published lab experiment through its browser entry', a
     if (RETAIN_CUDA_SAMPLE) {
       retainedCudaSampleEnvironmentId = await createEnvironmentByStudentUi(
         studentPage,
-        project.id,
-        published.publication.environmentReleaseId,
-      )
-      const retainedEnvironment = await waitForStudentEnvironmentWithResourceApproval(
-        studentContext.request,
         adminPage,
         project.id,
-        retainedCudaSampleEnvironmentId,
+        published.publication.environmentReleaseId,
         studentActorId,
+      )
+      const retainedEnvironment = await waitForStudentEnvironmentReady(
+        studentContext.request,
+        retainedCudaSampleEnvironmentId,
       )
       expect(retainedEnvironment).toMatchObject({
         id: retainedCudaSampleEnvironmentId,

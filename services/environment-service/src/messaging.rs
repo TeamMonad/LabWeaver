@@ -837,7 +837,10 @@ async fn resolve_lease_authorization(
             Err(error) if error.retryable() => return Err(LeaseGateFailure::Retryable),
             Err(_) => return Err(LEASE_GATE_REJECTED),
         };
-        if instance.class == EnvironmentClass::Experiment {
+        if !instance.requires_compute_authorization(command.kind) {
+            return Ok(None);
+        }
+        if instance.class == EnvironmentClass::Experiment && !instance.has_resource_lease() {
             return Ok(None);
         }
         Some(EnvironmentLeaseVerificationRequest {
@@ -879,8 +882,8 @@ fn lease_request_from_create(
     environment_id: EnvironmentId,
     spec: &EnvironmentCreateSpec,
 ) -> Result<Option<EnvironmentLeaseVerificationRequest>, LeaseGateFailure> {
-    if spec.class == EnvironmentClass::Experiment {
-        if spec.lease_id.is_some() || spec.capacity_binding.is_some() {
+    if spec.class == EnvironmentClass::Experiment && spec.lease_id.is_none() {
+        if spec.capacity_binding.is_some() {
             return Err(LEASE_GATE_REJECTED);
         }
         return Ok(None);

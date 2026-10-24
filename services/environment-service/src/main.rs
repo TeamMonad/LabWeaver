@@ -34,13 +34,22 @@ struct RuntimeExecutorDeployment {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeExecutorNats {
-    server: String,
+    #[serde(default, deserialize_with = "deserialize_endpoint_source")]
+    server: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_endpoint_source")]
+    server_file: Option<String>,
     ca_file: String,
     client_certificate_file: String,
     client_private_key_file: String,
     credentials_file: String,
     container_request_subject: String,
     kubevirt_request_subject: String,
+}
+
+fn deserialize_endpoint_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,10 +64,21 @@ struct KubeVirtConsoleDeployment {
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
     let mut arguments = std::env::args().skip(1);
-    if arguments.next().as_deref() != Some("--mode") || arguments.size_hint().0 != 1 {
+    let option = arguments.next();
+    let value = arguments.next();
+    if arguments.next().is_some() {
         return Err(MainError::Configuration);
     }
-    match arguments.next().as_deref() {
+    if option.as_deref() == Some("--check-runtime-executor-config") {
+        let path = value.ok_or(MainError::Configuration)?;
+        parse_runtime_executor_deployment(&std::fs::read_to_string(path)?)
+            .inspect_err(|error| eprintln!("{error}"))?;
+        return Ok(());
+    }
+    if option.as_deref() != Some("--mode") {
+        return Err(MainError::Configuration);
+    }
+    match value.as_deref() {
         Some("environment-service") => run_environment_service().await,
         Some("container-executor") => Box::pin(run_runtime_executor(RuntimeKind::Container)).await,
         Some("kubevirt-executor") => Box::pin(run_runtime_executor(RuntimeKind::KubeVirt)).await,
@@ -141,10 +161,7 @@ async fn run_environment_service() -> Result<(), MainError> {
     reason = "executor startup keeps dependency and server bindings visible together"
 )]
 async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
-    let deployment = load_runtime_executor_deployment()?;
-    if deployment.database_max_connections == 0 || deployment.database_max_connections > 32 {
-        return Err(MainError::Configuration);
-    }
+    let (deployment, nats_server) = load_runtime_executor_deployment()?;
     let pool = PgPoolOptions::new()
         .max_connections(deployment.database_max_connections)
         .connect(&read_secret(&deployment.database_url_file)?)
@@ -179,7 +196,7 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
         .await?,
     );
     let nats = connect_nats_mtls(
-        &deployment.nats.server,
+        &nats_server,
         deployment.nats.ca_file.into(),
         deployment.nats.client_certificate_file.into(),
         deployment.nats.client_private_key_file.into(),
@@ -200,18 +217,29 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                     .ok_or(MainError::Configuration)?,
                 &deployment.executor,
                 service_verifier.clone().ok_or(MainError::Configuration)?,
+                pool.clone(),
             )
             .await?,
         ),
         RuntimeKind::KubeVirt => None,
     };
-    let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
+    let namespace_profile = environment_service::ContainerNamespaceProfile::from_env()
         .map_err(|_| MainError::Configuration)?;
+    let backend = KubernetesContainerExecutor::new(deployment.executor, objects)
+        .map_err(|_| MainError::Configuration)?
+        .with_namespace_profile(namespace_profile.clone());
+    let runtime_admission = environment_service::EnvironmentRuntimeAdmission::from_env(
+        environment_service::PgReleaseProjectionStore::new(pool.clone()),
+    )
+    .await?;
     match kind {
         RuntimeKind::Container => {
             let terminal = terminal.ok_or(MainError::Configuration)?;
-            let executor =
-                FencedContainerExecutor::new(PgContainerExecutorFenceStore::new(pool), backend);
+            let executor = FencedContainerExecutor::new(
+                PgContainerExecutorFenceStore::new(pool).with_namespace_profile(namespace_profile),
+                backend,
+            )
+            .with_runtime_admission(runtime_admission);
             let server = NatsContainerExecutorServer::new(
                 nats,
                 deployment.nats.container_request_subject,
@@ -253,7 +281,8 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                 PgKubeVirtExecutorFenceStore::new(pool),
                 backend,
                 instance,
-            );
+            )
+            .with_runtime_admission(runtime_admission);
             executor.prepare_startup().await?;
             let server = NatsKubeVirtExecutorServer::new(
                 nats,
@@ -279,10 +308,29 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
     Ok(())
 }
 
-fn load_runtime_executor_deployment() -> Result<RuntimeExecutorDeployment, MainError> {
+fn load_runtime_executor_deployment() -> Result<(RuntimeExecutorDeployment, String), MainError> {
     let path = std::env::var("LABWEAVER_RUNTIME_EXECUTOR_CONFIG_FILE")
         .map_err(|_| MainError::Configuration)?;
-    serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| MainError::Configuration)
+    parse_runtime_executor_deployment(&std::fs::read_to_string(path)?)
+}
+
+fn parse_runtime_executor_deployment(
+    contents: &str,
+) -> Result<(RuntimeExecutorDeployment, String), MainError> {
+    let mut deployment: RuntimeExecutorDeployment =
+        serde_yaml::from_str(contents).map_err(|_| MainError::Configuration)?;
+    if deployment.database_max_connections == 0 || deployment.database_max_connections > 32 {
+        return Err(MainError::Configuration);
+    }
+    let endpoint = match (
+        deployment.nats.server.take(),
+        deployment.nats.server_file.take(),
+    ) {
+        (Some(server), None) if !server.trim().is_empty() => server,
+        (None, Some(path)) => read_secret(&path).map_err(|_| MainError::Configuration)?,
+        _ => return Err(MainError::Configuration),
+    };
+    Ok((deployment, endpoint))
 }
 
 async fn discover_service_verifier() -> Result<Arc<ServiceTokenVerifier>, MainError> {
@@ -363,6 +411,8 @@ fn read_secret(path: &str) -> Result<String, MainError> {
 
 #[derive(Debug, thiserror::Error)]
 enum MainError {
+    #[error(transparent)]
+    ResourceUsage(#[from] environment_service::ResourceUsageClientError),
     #[error("LW_ENVIRONMENT_CONFIG_INVALID")]
     Configuration,
     #[error("LW_ENVIRONMENT_SCHEMA_UNAVAILABLE")]
@@ -396,18 +446,60 @@ enum MainError {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
-    use super::{KubeVirtConsoleDeployment, RuntimeExecutorDeployment};
+    use super::{KubeVirtConsoleDeployment, MainError, parse_runtime_executor_deployment};
 
     #[test]
     fn checked_in_runtime_executor_example_matches_the_v1_contract() {
         let example = include_str!("../../../deploy/config/runtime-executor.yaml.example");
-        let deployment: RuntimeExecutorDeployment = serde_yaml::from_str(example)
+        let (deployment, endpoint) = parse_runtime_executor_deployment(example)
             .expect("runtime executor deployment example must deserialize");
 
         assert!(deployment.database_url_file.starts_with('/'));
-        assert!(deployment.nats.server.starts_with("tls://"));
+        assert!(endpoint.starts_with("tls://"));
         assert!(deployment.nats.container_request_subject.ends_with(".v1"));
         assert!(deployment.nats.kubevirt_request_subject.ends_with(".v1"));
+    }
+
+    #[test]
+    fn runtime_endpoint_requires_one_source_and_nonempty_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let example = include_str!("../../../deploy/config/runtime-executor.yaml.example");
+        let source: serde_yaml::Value = serde_yaml::from_str(example)?;
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("nats-server");
+        std::fs::write(&file, "  tls://nats.test:4222\n")?;
+        let mut projected = source.clone();
+        projected["nats"]
+            .as_mapping_mut()
+            .ok_or("nats mapping")?
+            .remove("server");
+        projected["nats"]["serverFile"] = serde_yaml::Value::String(file.display().to_string());
+        let (_, endpoint) = parse_runtime_executor_deployment(&serde_yaml::to_string(&projected)?)?;
+        assert_eq!(endpoint, "tls://nats.test:4222");
+        let mut both = projected.clone();
+        both["nats"]["server"] = source["nats"]["server"].clone();
+        let mut neither = projected.clone();
+        neither["nats"]
+            .as_mapping_mut()
+            .ok_or("nats mapping")?
+            .remove("serverFile");
+        let mut unknown = projected.clone();
+        unknown["nats"]["unexpected"] = serde_yaml::Value::Bool(true);
+        let mut null_source = projected.clone();
+        null_source["nats"]["server"] = serde_yaml::Value::Null;
+        for invalid in [both, neither, unknown, null_source] {
+            let error = parse_runtime_executor_deployment(&serde_yaml::to_string(&invalid)?)
+                .err()
+                .ok_or("invalid config accepted")?;
+            assert!(matches!(error, MainError::Configuration));
+            assert_eq!(error.to_string(), "LW_ENVIRONMENT_CONFIG_INVALID");
+        }
+        std::fs::write(file, " \n\t")?;
+        assert!(matches!(
+            parse_runtime_executor_deployment(&serde_yaml::to_string(&projected)?),
+            Err(MainError::Configuration)
+        ));
+        Ok(())
     }
 
     #[test]

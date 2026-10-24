@@ -59,7 +59,7 @@ Bundle 目录、`.private` 目录及其内部目录必须由当前用户持有�
 | `application.ansibleVariables` | 应用角色参数。只接受 `platform_application_` 前缀 |
 | `application.workloadInputs` | chart 中每个 workload 的 `env` 和 `secretEnv`。启用的服务必须提供全部已声明必需键及所用镜像 |
 
-`configMaps` 和 `secrets` 必须完整匹配应用 manifest 的对象与键。工具拒绝缺项和额外对象。所有文件都必须被模型引用，不能把未使用的私钥顺带加入归档。两个对象可以引用同一文件。
+`configMaps` 和 `secrets` 必须包含应用 manifest 的全部必需对象和完整键。`optionalConfigMaps` 中登记的对象可以整体省略；提供时仍必须完整匹配其键，未知对象或额外键被拒绝。所有文件都必须被模型引用，不能把未使用的私钥顺带加入归档。两个对象可以引用同一文件。
 
 以下片段说明引用语法，不是完整部署输入：
 
@@ -101,13 +101,40 @@ nats:
   serverFile: /etc/labweaver/environment-authority/nats-server
 ```
 
-派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。这里交付的是同源输入绑定接口；当前 Bundle PR 不实现 `serverFile` 的 Environment 启动消费者。原非 Bundle YAML 仍支持单个 server 字符串。
+派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。Environment 的 Container/KubeVirt 执行器共用真实启动解析器，`server` 与 `serverFile` 必须恰好提供一个；缺失、同时提供或文件内容 trim 后为空均返回 `LW_ENVIRONMENT_CONFIG_INVALID`，保留未知字段拒绝。文件中的 endpoint 只读入进程内存，不写回 ConfigMap。原非 Bundle YAML 可继续提供单个 `server` 字符串。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续由 TLS 客户端读取各执行器已有 Secret；databaseUrlFile 由启动代码读取。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致；工具不签发 NATS 用户、不扩大发布/订阅/响应权限。
+
+可运行 `environment-service --check-runtime-executor-config <runtime.yaml>` 校验同一真实启动解析器及 NATS endpoint 文件读取；该入口不连接数据库、NATS、Kubernetes 或模型服务，不代表完整部署已启动。普通 local_dev 与 external-fixtures 的完整真实投影 YAML 均由 Python 部署回归送入此 Rust 入口，测试仅将挂载文件 locator 映射到临时 Secret 目录，不替换为内联 endpoint。
 
 有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
 
-`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。Environment 的实际启动消费和资金授权属于 #207，当前 PR 只交付绑定输入和明确的外部前置条件。
+`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。Environment owner 和两个运行执行器使用这同一客户端读取原资金覆盖及原审批链；缺少实际连接、服务账户授权或有效覆盖时拒绝新计算，不使用默认批准或第二次资金预占。
 
 原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照，不把 Environment 配置渲染当作已加载或已应用事实。
+
+部署前确认 Resource 的 Environment client allowlist 与该共享身份一致，服务 JWT 具有现有 `resource.environment.resolve` 权限，HTTPS audience/CA 匹配。Environment 的生命周期交接继续由 Resource 使用 `resource.environment.manage` 调用；清理读回继续使用原 `environment.work.read` 边界。不要把业务服务替换为测试响应者。
+
+Resource 的受限 ingress 对 `container-executor`、`kubevirt-executor` 仅开放 TCP 9448，供实时读取运行授权和 credit grant；不向它们开放健康端口或任意业务端口，JWT/client allowlist 保持原校验。现有 Cilium gateway/API 策略不包含 Resource 专属 ingress，Resource 的该入口由同一 Kubernetes NetworkPolicy 约束。
+
+新建 Work/Experiment 先通过 Resource 完成批准、容量分配与原租约资金预占，再由 Resource 自动发送同一 `ResourceEnvironmentHandoff`。公开 `CreateEnvironmentRequest` 必须携带该真实申请的 `resourceRequestId`，只把浏览器幂等意图附着到原环境。合法申请已批准但原 lease 尚在 Allocating，或激活后交接尚未落库时，返回 `409/LW_ENVIRONMENT_ALLOCATION_PENDING`；保留同一请求与幂等键等待重试，不重新申请或预占。只有 Resource 核对 owner/project/course/release、原 approval/claim/lease、当前审批有效期和运行策略后才判定为等待分配；撤销、过期及归属/目标错误不能当作 pending。
+
+Resource 维护循环同时有界检查 active handed-off 环境的清理读回。停止不释放原权利；仅 `Deleted` 且完整清理证据匹配最后确认的 lease fence，才对当前 request/claim/lease 做 CAS 并进入原释放流程。不要以删除请求、Pod 停止或不可读取状态强行退占。七天只读保留、恢复/导出与独立磁盘清除仍未提供。
+
+### 既有 namespace 的 Container Work 落点
+
+默认每个环境继续使用专用 namespace。若部署只允许一个指定项目的普通容器 Work 使用既有 namespace，在 Bundle 的 `application.configMaps` 中增加可选对象：
+
+```yaml
+container-placement-config:
+  profile.json: config/runtime/container-placement/profile.json
+```
+
+把审核后的配置保存到该引用文件。格式见 `deploy/config/container-placement.json.example`；`namespace`、`namespaceUid` 和 `projectId` 取自管理员批准的实际空间及项目，不从用户请求推导。该 profile 不支持 Experiment 或 VM，不开放额外容器能力或特权。
+
+Bundle 同时派生该 ConfigMap 和 `containerPlacementProfileConfigMap`。Helm 只把同一 `profile.json` 只读挂载到 Environment owner 与 Container executor。不要在 `helmValues` 再指定引用，也不要在 `workloadInputs` 的 env/secretEnv 中设置 `LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE`；独立覆盖会被拒绝。不提供可选对象即使用默认专用空间。外部直接 Helm 调用者可指定已审核的 ConfigMap 引用，但不能同时覆盖文件环境变量。
+
+部署前确认 executor 有读取该 namespace UID、完整列出 Pod 以及管理本 Work 对象所需的权限，并检查实际 PSA、quota、LimitRange、网络与存储策略。此配置不会创建或改写这些管理员对象，不会授予 RBAC。Environment 只管理该 Work 的 Deployment、Service、ServiceAccount、拉取 Secret 和 PVC；对象名称按 Work 隔离，更新与清理校验归属及 UID/resourceVersion。清盘前先退役计算，并确认本 Work Pod 或仍引用该 PVC 的 Pod 已消失；观测不完整或超时则保留盘并返回失败，不清 finalizer。
+
+Environment 在首次 Kubernetes 效果前把落点固定到已有幂等账本。重复请求和进程恢复沿用该事实；变更配置或重建同名空间不能迁移原 Work。回滚前先用当前配置收尾已固定的 Work，不能删除账本或切默认 profile 冒充迁移。Pod 退役观测不等于 CSI/node fencing；七天保留、只读导出和跨节点重建仍不属于当前能力。
 
 ## Agent 的当前模型输入复核连接
 

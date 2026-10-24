@@ -4269,6 +4269,122 @@ impl PgResourceStore {
         }))
     }
 
+    /// Bounded keyset scan of original active leases; the caller rotates its observation cursor.
+    pub async fn next_active_environment_cleanup(
+        &self,
+        after: Option<LeaseId>,
+    ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
+        let row = sqlx::query(
+            "SELECT c.contract AS claim_contract,r.contract AS request_contract,l.contract AS lease_contract,c.lease_synced_revision AS lease_synced_revision \
+             FROM resource.capacity_claims c JOIN resource.resource_requests r ON r.request_id=c.request_id \
+             JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
+             WHERE r.target_kind='environment' AND r.state='active' AND c.state='handed_off' AND l.state='active' \
+               AND ($1::uuid IS NULL OR l.lease_id>$1) ORDER BY l.lease_id LIMIT 1",
+        ).bind(after.map(LeaseId::as_uuid)).fetch_optional(&self.pool).await?;
+        row.map(|row| {
+            Ok(ProvisioningCapacityClaim {
+                claim: decode_claim(row.try_get("claim_contract")?)?,
+                request: decode_request(row.try_get("request_contract")?)?,
+                lease: decode_lease(row.try_get("lease_contract")?)?,
+                lease_synced_revision: decode_lease_synced_revision(&row)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// A verified terminal Environment readback begins the existing release saga without waiting for TTL.
+    /// Stop, requested deletion, stale revisions and foreign storage bindings cannot release capacity.
+    pub async fn begin_deleted_environment_release(
+        &self,
+        expected: &ProvisioningCapacityClaim,
+        status: &contracts::environment::ResourceWorkCleanupStatus,
+        actor: contracts::ActorId,
+    ) -> Result<ProvisioningCapacityClaim, ResourceStoreError> {
+        status
+            .validate()
+            .map_err(|_| ResourceStoreError::CapacityReadbackInvalid)?;
+        let mut tx = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut tx, expected.lease.id).await?;
+        let request = load_locked(&mut tx, lease.request_id).await?;
+        let claim = load_locked_claim(&mut tx, expected.claim.id).await?;
+        let synced: i64 = sqlx::query_scalar(
+            "SELECT lease_synced_revision FROM resource.capacity_claims WHERE claim_id=$1",
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_one(&mut *tx)
+        .await?;
+        let ResourceTarget::Environment { environment_id, .. } = request.target else {
+            return Err(ResourceStoreError::CapacityReadbackInvalid);
+        };
+        if request.revision != expected.request.revision
+            || lease.revision != expected.lease.revision
+            || claim.revision != expected.claim.revision
+            || lease.claim_id != claim.id
+            || claim.request_id != request.id
+            || request.state != ResourceRequestState::Active
+            || lease.state != ResourceLeaseState::Active
+            || claim.state != CapacityClaimState::HandedOff
+        {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        if !status.cleanup_complete
+            || status.observed_state != contracts::environment::ObservedEnvironmentState::Deleted
+            || status.environment_id != environment_id
+            || status.project_id != request.project_id
+            || status.course_id != request.course_id
+            || status.owner_actor_id != request.requester_id
+            || status.lease_id != lease.id
+            || status.lease_revision.get() != u64::try_from(synced)?
+            || status.capacity_binding != claim.id.to_string()
+        {
+            return Err(ResourceStoreError::CapacityReadbackInvalid);
+        }
+        let now = database_now(&mut tx).await?;
+        let next_lease = ResourceLifecycle::begin_lease_expiry(
+            &lease,
+            lease.revision,
+            now,
+            Some("LW_ENVIRONMENT_DELETED".into()),
+        )?;
+        let next_request = ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
+        let next_claim = transition_claim(&claim, CapacityClaimState::Releasing)?;
+        update_claim(&mut tx, &claim, &next_claim, None, None, None).await?;
+        update_lease(&mut tx, &lease, &next_lease).await?;
+        update_request(&mut tx, &request, &next_request).await?;
+        let trace = format!("resource-environment-deleted-{}", claim.id);
+        insert_transition(
+            &mut tx,
+            &next_request,
+            next_request.revision.get(),
+            Some(request.state),
+            Some(actor),
+            &trace,
+        )
+        .await?;
+        enqueue_lease_event(
+            &mut tx,
+            &next_lease,
+            &next_request,
+            LEASE_EXPIRING_SUBJECT,
+            &trace,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut tx,
+            &next_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            &trace,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ProvisioningCapacityClaim {
+            claim: next_claim,
+            request: next_request,
+            lease: next_lease,
+            lease_synced_revision: Some(status.lease_revision),
+        })
+    }
+
     /// Records the exact Lease revision acknowledged by Environment. An `expiring` Lease is
     /// accepted here because a successful owner sync may race Resource's revoke transition.
     pub async fn mark_lease_synced(
@@ -4312,7 +4428,7 @@ impl PgResourceStore {
              JOIN resource.resource_requests r ON r.request_id=c.request_id \
              JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
              WHERE r.target_kind='environment' \
-               AND c.state IN ('reserved','provisioning','blocked','handed_off','releasing') \
+               AND c.state IN ('reserved','provisioning','ready','blocked','handed_off','releasing') \
                AND (l.state='expiring' OR (l.state='active' AND l.expires_at<=clock_timestamp())) \
                AND NOT EXISTS (\
                  SELECT 1 FROM resource.capacity_attempts a \
@@ -4389,6 +4505,7 @@ impl PgResourceStore {
                 CapacityClaimState::Reserved
                     | CapacityClaimState::Provisioning
                     | CapacityClaimState::Blocked
+                    | CapacityClaimState::Ready
                     | CapacityClaimState::HandedOff
             )
         {
@@ -4397,6 +4514,43 @@ impl PgResourceStore {
         let next = transition_claim(&claim, CapacityClaimState::Releasing)?;
         update_claim(&mut transaction, &claim, &next, None, None, None).await?;
         transaction.commit().await?;
+        Ok(next)
+    }
+
+    /// Saves the owner's original accepted lease fence when a lost handoff reply is recovered at expiry.
+    pub async fn mark_capacity_releasing_with_ack(
+        &self,
+        expected: &ProvisioningCapacityClaim,
+        accepted_lease_revision: Revision,
+    ) -> Result<CapacityClaim, ResourceStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut tx, expected.lease.id).await?;
+        let claim = load_locked_claim(&mut tx, expected.claim.id).await?;
+        if lease.state != ResourceLeaseState::Expiring
+            || lease.revision != expected.lease.revision
+            || lease.claim_id != claim.id
+            || claim.request_id != expected.request.id
+            || claim.revision != expected.claim.revision
+            || accepted_lease_revision > lease.revision
+            || !matches!(
+                claim.state,
+                CapacityClaimState::Provisioning
+                    | CapacityClaimState::Ready
+                    | CapacityClaimState::Blocked
+            )
+        {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+        let next = transition_claim(&claim, CapacityClaimState::Releasing)?;
+        update_claim(&mut tx, &claim, &next, None, None, None).await?;
+        sqlx::query(
+            "UPDATE resource.capacity_claims SET lease_synced_revision=$2 WHERE claim_id=$1",
+        )
+        .bind(claim.id.as_uuid())
+        .bind(i64::try_from(accepted_lease_revision.get())?)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(next)
     }
 
@@ -4638,12 +4792,19 @@ impl PgResourceStore {
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
         let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        let lease_synced_revision: i64 = sqlx::query_scalar(
+            "SELECT lease_synced_revision FROM resource.capacity_claims WHERE claim_id=$1",
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
         if claim.revision != expected_claim_revision
             || claim.state != CapacityClaimState::Releasing
             || lease.revision != expected_lease_revision
             || lease.state != ResourceLeaseState::Expiring
             || lease.claim_id != claim.id
             || !matches!(request.target, ResourceTarget::Environment { .. })
+            || lease_synced_revision != 0
         {
             return Err(ResourceStoreError::CapacityClaimStateConflict);
         }

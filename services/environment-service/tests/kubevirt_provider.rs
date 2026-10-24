@@ -605,7 +605,8 @@ fn plan_is_deterministic_private_and_digest_bound() {
 
 #[test]
 fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
-    let projection = projection();
+    let mut projection = projection();
+    projection.environment_spec.class = EnvironmentClass::Work;
     let mut instance = instance_for(&projection);
     let lease_id = LeaseId::new();
     let capacity_binding = "vm-vgpu-capacity-1".to_owned();

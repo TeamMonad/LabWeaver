@@ -8,7 +8,7 @@
       <p class="page-subtitle">
         {{ props.teacherMode
           ? '查看当前项目下的课程实验和 Work 环境；进入控制台管理运行状态与访问授权。'
-          : '查看当前项目创建的环境；进入终端控制台或提交评测材料。' }}
+          : '查看当前项目的环境：先选择实验模板提交资源申请，审批通过后进入环境；进入终端控制台或提交评测材料。' }}
       </p>
     </header>
 
@@ -57,21 +57,93 @@
             @click="openCreateDrawer"
           >
             <SvgIcon name="add" size="sm" aria-hidden="true" />
-            <span>创建项目环境</span>
+            <span>申请实验环境</span>
           </button>
         </template>
       </GcpActionBar>
 
-      <DiagnosticBanner
-        v-if="createDiagnostic"
-        :code="createDiagnostic.code"
-        :request-id="createDiagnostic.requestId"
-        :next-step="createDiagnostic.nextStep"
-        :message="createDiagnostic.message"
-        :retryable="createDiagnostic.retryable"
-        severity="error"
-        @retry="retryCreate"
-      />
+      <section
+        v-if="!props.teacherMode"
+        class="request-section md-card"
+        aria-labelledby="experiment-requests-heading"
+        data-testid="experiment-requests"
+      >
+        <div class="request-section__head">
+          <h3 id="experiment-requests-heading">实验资源申请</h3>
+          <RouterLink class="text-button small" :to="resourceRequestLink()">查看全部资源申请</RouterLink>
+        </div>
+        <DiagnosticBanner
+          v-if="requestSectionDiagnostic"
+          :diagnostic="requestSectionDiagnostic"
+          :message="`无法读取实验资源申请，可能有已批准但尚未进入的环境：${requestSectionDiagnostic.message}`"
+          severity="warning"
+          @retry="reloadRequests"
+        />
+
+        <h4 class="request-section__subtitle">已批准的申请</h4>
+        <ul v-if="approvedRequests.length > 0" class="request-list" data-testid="approved-requests">
+          <li
+            v-for="request in approvedRequests"
+            :key="request.id"
+            class="request-row"
+            :data-request-id="request.id"
+          >
+            <div class="request-row__main">
+              <strong>{{ requestReleaseTitle(request) }}</strong>
+              <span class="request-row__meta">{{ resourceSummary(request.requestedResources) }} · 申请于 {{ formatTimestamp(request.createdAt) }}</span>
+              <span
+                v-if="attachOutcomes[request.id]?.kind === 'preparing'"
+                class="request-row__meta"
+                role="status"
+                data-testid="environment-preparing"
+              >环境准备中：申请已批准，平台正在分配资源并创建环境。请稍候再点击“进入环境”，不会重复创建。</span>
+            </div>
+            <button
+              type="button"
+              class="filled-button small"
+              :disabled="attaching.has(request.id) || !actorId"
+              @click="enterEnvironment(request)"
+            >
+              {{ attaching.has(request.id) ? '正在进入…' : '进入环境' }}
+            </button>
+            <DiagnosticBanner
+              v-if="attachFailure(request.id)"
+              class="request-row__diagnostic"
+              :diagnostic="attachFailure(request.id)"
+              @retry="enterEnvironment(request)"
+            />
+          </li>
+        </ul>
+        <p v-else class="request-section__hint" data-testid="approved-requests-empty">
+          还没有可以进入的已批准申请。请点击“申请实验环境”，选择实验模板并提交资源申请；管理员审批通过后，在这里进入环境。
+        </p>
+
+        <template v-if="reviewingRequests.length > 0">
+          <h4 class="request-section__subtitle">待审批</h4>
+          <ul class="request-list" data-testid="reviewing-requests">
+            <li v-for="request in reviewingRequests" :key="request.id" class="request-row" :data-request-id="request.id">
+              <div class="request-row__main">
+                <strong>{{ requestReleaseTitle(request) }}</strong>
+                <span class="request-row__meta">{{ resourceSummary(request.requestedResources) }} · 申请于 {{ formatTimestamp(request.createdAt) }} · 等待管理员审批</span>
+              </div>
+              <RouterLink class="outlined-button small" :to="resourceRequestLink()">查看申请</RouterLink>
+            </li>
+          </ul>
+        </template>
+
+        <template v-if="rejectedRequests.length > 0">
+          <h4 class="request-section__subtitle">已拒绝</h4>
+          <ul class="request-list" data-testid="rejected-requests">
+            <li v-for="request in rejectedRequests" :key="request.id" class="request-row" :data-request-id="request.id">
+              <div class="request-row__main">
+                <strong>{{ requestReleaseTitle(request) }}</strong>
+                <span class="request-row__meta request-row__meta--error">{{ rejectionReason(request) }}</span>
+              </div>
+              <RouterLink class="outlined-button small" :to="resourceRequestLink(request.target)">重新申请</RouterLink>
+            </li>
+          </ul>
+        </template>
+      </section>
 
       <!-- GCP Filter Bar -->
       <GcpFilterBar
@@ -156,7 +228,7 @@
           <p class="labs-hint" role="status">
             {{ props.teacherMode
               ? '点击行可查看项目环境规格与端点详情；进入控制台后可管理生命周期和访问授权。'
-              : '点击行可原地查看项目环境规格与端点详情；点击「创建项目环境」从已发布模板快速启动新环境。' }}
+              : '点击行可原地查看项目环境规格与端点详情；新环境需要先通过「申请实验环境」提交资源申请，审批通过后在「已批准的申请」中进入。' }}
           </p>
         </template>
 
@@ -164,7 +236,7 @@
           <div class="empty-labs-pane">
             <SvgIcon name="science" size="xl" aria-hidden="true" />
             <h3>暂无项目环境</h3>
-            <p>{{ props.teacherMode ? '当前项目还没有可管理的环境。' : '当前项目还没有环境。可从教师已发布的模板创建一个项目环境。' }}</p>
+            <p>{{ props.teacherMode ? '当前项目还没有可管理的环境。' : '当前项目还没有环境。请先选择教师已发布的实验模板提交资源申请，审批通过后在上方“已批准的申请”中进入环境。' }}</p>
             <button
               v-if="!props.teacherMode"
               type="button"
@@ -172,7 +244,7 @@
               @click="openCreateDrawer"
             >
               <SvgIcon name="add" size="sm" aria-hidden="true" />
-              <span>创建第一个项目环境</span>
+              <span>申请实验环境</span>
             </button>
           </div>
         </template>
@@ -237,24 +309,24 @@
       </div>
     </EvidenceSideSheet>
 
-    <!-- Create Environment Modal (GCP Style Template Selector) -->
+    <!-- Experiment template selector: choosing one opens the resource request form for it -->
     <div
       v-if="showCreateModal && !props.teacherMode"
       class="create-modal-overlay"
       role="dialog"
-      aria-label="创建项目环境"
+      aria-label="选择实验模板"
       @click.self="showCreateModal = false"
     >
       <div class="create-modal md-card">
         <div class="modal-header">
           <div class="modal-title-group">
             <SvgIcon name="add_circle" size="md" class="modal-icon" aria-hidden="true" />
-            <h3>从已发布版本创建项目环境</h3>
+            <h3>选择实验模板</h3>
           </div>
           <button
             type="button"
             class="icon-button"
-            aria-label="关闭创建弹窗"
+            aria-label="关闭选择弹窗"
             @click="showCreateModal = false"
           >
             <SvgIcon name="close" size="md" aria-hidden="true" />
@@ -262,42 +334,38 @@
         </div>
 
         <div class="modal-body">
-          <AsyncStateView :state="releases.releases" @retry="releases.load">
+          <AsyncStateView :state="experimentReleaseState" @retry="releases.load">
             <template #success="{ data: releaseList }">
-              <p class="modal-subtitle">选择教师已发布并经过门禁验证的项目环境模板：</p>
+              <p class="modal-subtitle">选择教师已发布的实验模板，然后提交资源申请；资源规格请按实验说明填写，审批通过后回到本页进入环境。</p>
               <div class="release-cards-grid">
                 <div
                   v-for="rel in releaseList"
-                  :key="rel.id"
+                  :key="`${rel.id}:${rel.version}`"
                   class="release-card"
-                  :class="{ 'release-card--creating': lifecycle.operating.has(`create:${rel.id}`) }"
+                  :data-release-id="rel.id"
                 >
                   <div class="release-card__top">
                     <span class="release-runtime-badge" :class="`badge--${rel.runtimeKind}`">
                       <SvgIcon :name="rel.runtimeKind === 'container' ? 'inventory_2' : 'dns'" size="sm" aria-hidden="true" />
                       {{ rel.runtimeKind === 'container' ? '容器' : '虚拟机' }}
                     </span>
+                    <strong class="release-title">{{ workTemplateTitle(rel) }}</strong>
                     <code class="release-id">{{ rel.id }}</code>
                   </div>
                   <div class="release-meta">
                     <span>发布者：{{ rel.publishedBy }}</span>
                     <span>发布时间：{{ formatTimestamp(rel.publishedAt) }}</span>
                   </div>
-                  <button
-                    type="button"
-                    class="filled-button small"
-                    :disabled="lifecycle.operating.has(`create:${rel.id}`)"
-                    @click="handleCreate(rel)"
-                  >
-                    {{ lifecycle.operating.has(`create:${rel.id}`) ? '正在置备…' : '选择并创建' }}
-                  </button>
+                  <RouterLink class="filled-button small" :to="resourceRequestLink({ releaseId: rel.id, releaseVersion: rel.version })">
+                    选择并申请资源
+                  </RouterLink>
                 </div>
               </div>
             </template>
             <template #empty>
               <div class="empty-release-note">
                 <SvgIcon name="info" size="lg" aria-hidden="true" />
-                <p>当前课程暂无已发布的环境版本模板，请联系课程教师在教师工作台中发布模板。</p>
+                <p>当前课程暂无已发布的实验模板，请联系课程教师在教师工作台中发布模板。</p>
               </div>
             </template>
           </AsyncStateView>
@@ -309,12 +377,14 @@
 
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { useAuth } from '@/composables/useAuth'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
+import { resourceSummary, useProjectResources } from '@/composables/useProjectResources'
 import { fetchProjectEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjects } from '@/composables/useProjects'
-import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema, ResourceRequestSchema } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
@@ -327,7 +397,10 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import { formatTimestamp, idempotencyKey } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
-import { environmentStateLabel } from '@/utils/stateLabels'
+import { actorIdFromProfile } from '@/utils/navigation'
+import { clearPendingCommand, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
+import { environmentStateLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
+import { workTemplateTitle } from '@/utils/workTemplate'
 
 const props = withDefaults(defineProps<{
   /** Route used to open the shared environment control console. */
@@ -368,8 +441,12 @@ const isProjectContextLoading = computed(() => {
 const isContextMissing = computed(() => !isInvalidProjectContext.value && !isProjectContextLoading.value && !projectId.value)
 
 const router = useRouter()
+const auth = useAuth()
+const actorId = computed(() => actorIdFromProfile(auth.user.value?.profile) ?? null)
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
 const lifecycle = useEnvironmentLifecycle(projectId, courseId)
+// The teacher inventory never enters a student's request, so it reads none.
+const resources = useProjectResources(computed(() => props.teacherMode ? null : projectId.value ?? null))
 
 const state = ref<AsyncState<EnvironmentSummary[]>>({ kind: 'idle' })
 const autoRefreshEnabled = ref(true)
@@ -378,14 +455,79 @@ let loadGeneration = 0
 
 const inspectedEnv = ref<EnvironmentSummary | null>(null)
 const showCreateModal = ref(false)
-const createDiagnostic = ref<DiagnosticViewModel | null>(null)
-const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
-const createIntentKey = ref<string | null>(null)
-const createIntentReleaseId = ref<string | null>(null)
-const createIntentReleaseVersion = ref<number | null>(null)
-const createIntentProjectId = ref<string | null>(null)
-const createIntentCourseId = ref<string | null>(null)
-let createIntentSequence = 0
+
+type EnvironmentRequest = ResourceRequestSchema & { target: Extract<ResourceRequestSchema['target'], { kind: 'environment' }> }
+type AttachOutcome = { kind: 'preparing' } | { kind: 'failed'; diagnostic: DiagnosticViewModel }
+
+/** Experiment versions the server lists for this course project that can still be requested and entered. */
+const experimentReleases = computed(() => releases.releases.kind === 'success'
+  ? releases.releases.data.filter((release) => release.purpose === 'experiment' && !release.withdrawal)
+  : [])
+const experimentReleaseState = computed<AsyncState<EnvironmentTemplateReleaseViewSchema[]>>(() => {
+  const current = releases.releases
+  if (current.kind !== 'success') return current
+  return experimentReleases.value.length > 0 ? { kind: 'success', data: experimentReleases.value } : { kind: 'empty' }
+})
+
+function requestRelease(request: EnvironmentRequest): EnvironmentTemplateReleaseViewSchema | undefined {
+  return experimentReleases.value.find((release) => (
+    release.id === request.target.releaseId && release.version === request.target.releaseVersion
+  ))
+}
+
+/** The signed-in student's own environment requests bound to an experiment version of this project. */
+const experimentRequests = computed<EnvironmentRequest[]>(() => {
+  if (resources.requests.kind !== 'success') return []
+  const actor = actorId.value
+  return resources.requests.data.filter((request): request is EnvironmentRequest => (
+    request.target.kind === 'environment'
+    && request.projectId === projectId.value
+    && request.requesterId === actor
+    && requestRelease(request as EnvironmentRequest) !== undefined
+  ))
+})
+
+/** Approved request states: Resource is allocating or has handed off the environment. */
+const APPROVED_REQUEST_STATES = new Set<ResourceRequestSchema['state']>(['allocating', 'active', 'expiring'])
+
+/**
+ * Approved requests whose environment is not in the environment list yet.
+ * Only offered once the list was actually read, so a listed environment is
+ * never offered a second entry.
+ */
+const approvedRequests = computed(() => {
+  const listed = state.value.kind === 'success'
+    ? new Set(state.value.data.map((environment) => environment.id))
+    : state.value.kind === 'empty' ? new Set<string>() : null
+  if (!listed) return []
+  return experimentRequests.value.filter((request) => (
+    APPROVED_REQUEST_STATES.has(request.state) && !listed.has(request.target.environmentId)
+  ))
+})
+const reviewingRequests = computed(() => experimentRequests.value.filter((request) => request.state === 'reviewing'))
+const rejectedRequests = computed(() => experimentRequests.value.filter((request) => request.state === 'rejected'))
+
+const requestSectionDiagnostic = computed<DiagnosticViewModel | null>(() => {
+  for (const current of [resources.requests, releases.releases]) {
+    if (current.kind !== 'success' && current.kind !== 'empty' && current.kind !== 'idle' && current.kind !== 'loading') return current.diagnostic
+  }
+  return null
+})
+
+const attaching = ref(new Set<string>())
+const attachOutcomes = ref<Record<string, AttachOutcome>>({})
+
+function setAttachOutcome(requestId: string, outcome: AttachOutcome | null) {
+  const next = { ...attachOutcomes.value }
+  if (outcome) next[requestId] = outcome
+  else delete next[requestId]
+  attachOutcomes.value = next
+}
+
+function attachFailure(requestId: string): DiagnosticViewModel | null {
+  const outcome = attachOutcomes.value[requestId]
+  return outcome?.kind === 'failed' ? outcome.diagnostic : null
+}
 
 const filterSearch = ref('')
 const activeFilterChips = ref<FilterChip[]>([])
@@ -492,66 +634,88 @@ function nextActionLabel(env: EnvironmentSummary): string {
 
 function openCreateDrawer() {
   showCreateModal.value = true
-  createDiagnostic.value = null
   void releases.load()
 }
 
-async function handleCreate(rel: EnvironmentTemplateReleaseViewSchema) {
-  const targetProjectId = projectId.value
-  if (!targetProjectId) {
-    createDiagnostic.value = makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法创建环境。', false)
-    return
-  }
-  const operationId = `create:${rel.id}`
-  if (lifecycle.operating.has(operationId)) return
-
-  const targetCourseId = courseId.value ?? null
-  const targetChanged = createIntentReleaseId.value !== rel.id
-    || createIntentReleaseVersion.value !== rel.version
-    || createIntentProjectId.value !== targetProjectId
-    || createIntentCourseId.value !== targetCourseId
-  if (targetChanged || !createIntentKey.value) {
-    createIntentKey.value = idempotencyKey()
-    createIntentReleaseId.value = rel.id
-    createIntentReleaseVersion.value = rel.version
-    createIntentProjectId.value = targetProjectId
-    createIntentCourseId.value = targetCourseId
-    createIntentSequence += 1
-  }
-  const requestSequence = createIntentSequence
-  const intentKey = createIntentKey.value
-  if (!intentKey) return
-  createDiagnostic.value = null
-  pendingRelease.value = rel
-  lifecycle.operating.add(operationId)
-  try {
-    const result = await lifecycle.create(
-      {
-        releaseId: rel.id,
-        releaseVersion: rel.version,
-      },
-      intentKey,
-    )
-    if (requestSequence !== createIntentSequence || projectId.value !== targetProjectId) return
-    if (result.ok) {
-      createIntentKey.value = null
-      createIntentReleaseId.value = null
-      createIntentReleaseVersion.value = null
-      createIntentProjectId.value = null
-      createIntentCourseId.value = null
-      pendingRelease.value = null
-      showCreateModal.value = false
-      await load()
-    } else {
-      createDiagnostic.value = result.diagnostic
-    }
-  } finally {
-    lifecycle.operating.delete(operationId)
+function resourceRequestLink(target?: { releaseId: string; releaseVersion: number }) {
+  return {
+    path: '/researcher/resources',
+    query: {
+      ...(projectId.value ? { projectId: projectId.value } : {}),
+      ...(target ? { releaseId: target.releaseId, releaseVersion: String(target.releaseVersion) } : {}),
+    },
   }
 }
 
-function retryCreate() {
-  if (pendingRelease.value) void handleCreate(pendingRelease.value)
+function requestReleaseTitle(request: EnvironmentRequest): string {
+  const release = requestRelease(request)
+  return release ? workTemplateTitle(release) : `实验版本 v${request.target.releaseVersion}`
+}
+
+/** The request carries no reviewer note, only an optional platform code. */
+function rejectionReason(request: EnvironmentRequest): string {
+  const reason = '管理员拒绝了这次资源申请，没有为它分配资源。如需了解原因，请联系课程教师或管理员；按实验说明调整资源后可以重新申请。'
+  if (!request.diagnosticCode) return reason
+  const platformReason = resourceAllocationFailureMessage(request.diagnosticCode)
+  return platformReason
+    ? `${reason}平台说明：${platformReason}（${request.diagnosticCode}）`
+    : `${reason}平台诊断码：${request.diagnosticCode}。`
+}
+
+function reloadRequests() {
+  void resources.load()
+  void releases.load()
+}
+
+/**
+ * "进入环境" attaches this browser to the environment Resource creates for the
+ * approved request. One Idempotency-Key per (student, request) is kept as a
+ * pending command, so a retry or a reload replays the same attach instead of
+ * sending a new one. Only an accepted attach drops it, and only while it is
+ * still the stored command: the server answers a completed attach before any
+ * other check, so keeping the key after a refusal is always safe. An
+ * allocation that is still running is not a failure; the student enters again
+ * once it is ready.
+ */
+async function enterEnvironment(request: EnvironmentRequest) {
+  const actor = actorId.value
+  const targetProjectId = projectId.value
+  if (!actor || !targetProjectId || request.projectId !== targetProjectId || attaching.value.has(request.id)) return
+  const scope = `environment-attach:${request.id}`
+  const fingerprint = [request.id, request.projectId, request.courseId ?? '', request.target.releaseId, request.target.releaseVersion].join(':')
+  const stored = readPendingCommand<null>(actor, scope)
+  const command = stored?.fingerprint === fingerprint ? stored : { fingerprint, idempotencyKey: idempotencyKey(), data: null }
+  writePendingCommand(actor, scope, command)
+  // A late answer for another project or student only updates storage, never this page.
+  const current = () => projectId.value === targetProjectId && actorId.value === actor
+  attaching.value.add(request.id)
+  setAttachOutcome(request.id, null)
+  try {
+    const result = await lifecycle.create(
+      {
+        resourceRequestId: request.id,
+        releaseId: request.target.releaseId,
+        releaseVersion: request.target.releaseVersion,
+        courseId: request.courseId ?? null,
+      },
+      command.idempotencyKey,
+    )
+    if (result.ok) {
+      clearPendingCommand(actor, scope, command.idempotencyKey)
+      if (!current()) return
+      void router.push({
+        path: props.environmentPath,
+        query: { environmentId: result.accepted.environmentId, projectId: targetProjectId },
+      })
+      return
+    }
+    if (!current()) return
+    setAttachOutcome(request.id, result.diagnostic.code === 'LW_ENVIRONMENT_ALLOCATION_PENDING'
+      ? { kind: 'preparing' }
+      : { kind: 'failed', diagnostic: result.diagnostic })
+  } finally {
+    attaching.value.delete(request.id)
+  }
 }
 
 async function load() {
@@ -634,14 +798,7 @@ watch(
 )
 
 watch(projectId, () => {
-  createIntentSequence += 1
-  createIntentKey.value = null
-  createIntentReleaseId.value = null
-  createIntentReleaseVersion.value = null
-  createIntentProjectId.value = null
-  createIntentCourseId.value = null
-  pendingRelease.value = null
-  createDiagnostic.value = null
+  attachOutcomes.value = {}
 })
 
 watch(projectId, load, { immediate: true })
@@ -765,6 +922,82 @@ function openEnvironment(environmentId: string) {
   margin: var(--space-2) 0 0;
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.request-section {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+}
+
+.request-section__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.request-section__head h3 {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-medium);
+}
+
+.request-section__subtitle {
+  margin: var(--space-1) 0 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-large);
+}
+
+.request-section__hint {
+  margin: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.request-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.request-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.request-row__main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.request-row__main strong {
+  overflow-wrap: anywhere;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-small);
+}
+
+.request-row__meta {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.request-row__meta--error {
+  color: var(--md-sys-color-error);
+}
+
+.request-row__diagnostic {
+  grid-column: 1 / -1;
 }
 
 .empty-labs-pane {
@@ -938,6 +1171,11 @@ function openEnvironment(environmentId: string) {
 .release-id {
   font-family: monospace;
   font-size: 12px;
+}
+
+.release-title {
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-small);
 }
 
 .release-meta {

@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "CapacityClaimId": {
+      "description": "Strongly typed UUIDv7 identifier for `CapacityClaimId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "EnvironmentOperationAccepted": {
+      "additionalProperties": false,
+      "description": "Environment-specific accepted response. Existing OperationAccepted fields keep their v1\nmeaning while `environmentId` removes the need to parse an undeclared status URL.",
+      "properties": {
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "statusUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operationId",
+        "revision",
+        "statusUrl",
+        "environmentId"
+      ],
+      "type": "object"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Durable acknowledgement of the original Environment creation, not a new execution grant.",
+  "properties": {
+    "accepted": {
+      "$ref": "#/$defs/EnvironmentOperationAccepted"
+    },
+    "claimId": {
+      "$ref": "#/$defs/CapacityClaimId"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "leaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "requestId": {
+      "$ref": "#/$defs/ResourceRequestId"
+    }
+  },
+  "required": [
+    "accepted",
+    "requestId",
+    "leaseId",
+    "leaseRevision",
+    "claimId"
+  ],
+  "title": "ResourceEnvironmentHandoffReceipt",
+  "type": "object"
+}

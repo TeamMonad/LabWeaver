@@ -2154,6 +2154,7 @@ async fn owned_environment_requests_use_current_control_actions_and_reject_remov
     let course = contracts::CourseId::new();
     let timestamp: contracts::UtcTimestamp = "2026-10-12T00:00:00.000Z".parse()?;
     let instance = EnvironmentInstance {
+        runtime_authorization: None,
         id: environment_id,
         project_id: project,
         course_id: Some(course),

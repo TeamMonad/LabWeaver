@@ -82,7 +82,7 @@
             <AppSelect v-model="selectedReleaseKey" required :disabled="options.releases.kind !== 'success'">
               <option value="">选择用于绑定的版本</option>
               <option v-if="selectedReleaseKey && !selectedRelease" :value="selectedReleaseKey">先前选择的版本（当前不可用）</option>
-              <option v-for="release in releaseOptions" :key="releaseKey(release.id, release.version)" :value="releaseKey(release.id, release.version)">
+              <option v-for="release in releaseOptions" :key="releaseKey(release.id, release.version)" :value="releaseKey(release.id, release.version)" :data-purpose="release.purpose">
                 {{ release.label }}
               </option>
             </AppSelect>
@@ -93,6 +93,7 @@
               <RouterLink v-if="canPublishEnvironmentTemplates" class="text-button" :to="{ path: '/teacher/materials', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">教师发布模板</RouterLink>
               <RouterLink class="text-button" :to="{ path: '/researcher/software', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">生成 Work 模板</RouterLink>
             </div>
+            <small v-if="selectedRelease?.purpose === 'experiment'" class="field-note" data-testid="experiment-resource-note" role="note">这是课程实验版本：资源规格（包括 GPU）请按实验说明填写，平台按审批通过的资源创建环境。审批通过后回到“我的实验”，在“已批准的申请”中进入环境。</small>
           </label>
           </fieldset>
           <fieldset class="form-section">

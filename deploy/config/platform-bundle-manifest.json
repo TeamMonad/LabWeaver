@@ -193,6 +193,9 @@
       "target_key-cert.pub"
     ]
   },
+  "optionalConfigMaps": {
+    "container-placement-config": ["profile.json"]
+  },
   "optionalSecrets": {
     "agent-service-secrets": ["cursor-signing-key-previous"]
   }

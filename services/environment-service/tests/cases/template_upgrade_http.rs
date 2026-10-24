@@ -20,9 +20,7 @@ use contracts::environment::{
     OperationState,
 };
 use contracts::events::{DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
-use contracts::http::{
-    EnvironmentOperationAccepted, StrongEtag, UpgradeEnvironmentTemplateRequest,
-};
+use contracts::http::{StrongEtag, UpgradeEnvironmentTemplateRequest};
 use contracts::{
     ArtifactRef, EnvironmentId, EventId, LeaseId, PolicyId, ReleaseId, ResourceRequestId, Revision,
     Sequence, UtcTimestamp,
@@ -435,11 +433,10 @@ async fn requested_work(store: &PgEnvironmentStore) -> TestResult<EnvironmentIns
     Ok(instance)
 }
 
-fn provider_worker(
-    store: PgEnvironmentStore,
+fn container_provider(
     releases: PgReleaseProjectionStore,
     backend: Arc<KubernetesBoundary>,
-) -> TestResult<ReconcileWorker> {
+) -> TestResult<ContainerProvider<KubernetesBoundary, PgReleaseProjectionStore>> {
     let provider = ContainerProvider::new(
         "container-primary-v1".to_owned(),
         backend,
@@ -454,6 +451,15 @@ fn provider_worker(
             "ReadWriteMany",
         )?,
     )?;
+    Ok(provider)
+}
+
+fn provider_worker(
+    store: PgEnvironmentStore,
+    releases: PgReleaseProjectionStore,
+    backend: Arc<KubernetesBoundary>,
+) -> TestResult<ReconcileWorker> {
+    let provider = container_provider(releases, backend)?;
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(provider))?;
     Ok(ReconcileWorker::new(
@@ -534,7 +540,7 @@ impl Harness {
         let backend = Arc::new(KubernetesBoundary::default());
         let worker = provider_worker(store.clone(), releases.clone(), Arc::clone(&backend))?;
         store.create("http-upgrade-create", &instance).await?;
-        drive_ready(&store, &worker, instance.id).await?;
+        seed_existing_running_work(&store, &releases, &backend, &instance).await?;
         let ready = store.load(instance.id).await?;
         let peers = Arc::new(Peers::default());
         let mut tasks = Tasks(Vec::new());
@@ -614,7 +620,35 @@ impl Harness {
         };
         self.peers.acknowledge.store(true, Ordering::SeqCst);
         if expected == ObservedEnvironmentState::Failed {
-            self.backend.fail_restart.store(true, Ordering::SeqCst);
+            // A store-level legacy intent cannot authorize new compute.
+            let now = self.store.current_time().await?;
+            self.store
+                .accept_api_command(
+                    "seed-operation-state",
+                    &LifecycleCommand {
+                        environment_id: self.ready.id,
+                        kind: EnvironmentOperationKind::Restart,
+                        expected_revision: self.ready.revision,
+                        actor_id: self.ready.owner_id,
+                        trace_id: "seed-missing-runtime-authority".into(),
+                        accepted_at: now,
+                        deadline_at: UtcTimestamp::from_utc(
+                            now.get() + time::Duration::seconds(30),
+                        )?,
+                        access_revocation_revision: Some(revision(9)),
+                        preserve_mutable_disk: true,
+                        max_attempts: 3,
+                        reset_target: None,
+                    },
+                    None,
+                    self.ready.operation.lease_authorization.clone(),
+                    self.ready.project_id,
+                    self.ready.course_id,
+                )
+                .await?;
+            drive_state(&self.store, &self.worker, self.ready.id, expected).await?;
+            self.ready = self.store.load(self.ready.id).await?;
+            return Ok(());
         }
         let response = self
             .request(
@@ -691,18 +725,49 @@ async fn serve_authenticated_api(
     Ok((authority, base, token))
 }
 
-async fn drive_ready(
+// A pre-existing running Work is data for the C-stage entry guard, not evidence of
+// a new Resource authorization. The real funded startup path lives in Control's
+// environment_funded_handoff journey; this fixture never fabricates that authority.
+async fn seed_existing_running_work(
     store: &PgEnvironmentStore,
-    worker: &ReconcileWorker,
-    environment_id: EnvironmentId,
+    releases: &PgReleaseProjectionStore,
+    backend: &Arc<KubernetesBoundary>,
+    instance: &EnvironmentInstance,
 ) -> TestResult {
-    drive_state(
-        store,
-        worker,
-        environment_id,
-        ObservedEnvironmentState::Ready,
-    )
-    .await
+    use environment_service::ContainerReleaseResolver as _;
+    let resolved = releases
+        .resolve(instance.release_id, instance.release_version)
+        .await?;
+    let provider = container_provider(releases.clone(), Arc::clone(backend))?;
+    backend
+        .install(&provider.plan(
+            instance,
+            &resolved,
+            environment_service::ReconcileAction::Provision,
+        )?)
+        .await
+        .map_err(|failure| {
+            std::io::Error::other(format!(
+                "fixture Kubernetes observation failed: {failure:?}"
+            ))
+        })?;
+    let lease = store
+        .claim_due("existing-running-fixture", Duration::from_secs(10))
+        .await?
+        .ok_or("fixture operation missing")?;
+    let mut ready = lease.instance.clone();
+    ready.revision = revision(ready.revision.get() + 1);
+    ready.observed_generation = ready.generation;
+    ready.observed_state = ObservedEnvironmentState::Ready;
+    ready.operation.state = OperationState::Succeeded;
+    ready.endpoints = support::ready_instance().endpoints;
+    let observed_at = store.current_time().await?;
+    for endpoint in &mut ready.endpoints {
+        endpoint.revision = ready.revision;
+        endpoint.observed_at = observed_at;
+    }
+    store.save_reconciled(&lease, &ready).await?;
+    Ok(())
 }
 
 async fn drive_state(
@@ -728,103 +793,43 @@ async fn drive_state(
 }
 
 #[tokio::test]
-async fn authenticated_http_upgrade_requires_restart_revocation_ack_and_preserves_workspace()
--> TestResult {
-    let harness = Harness::start().await?;
-    let original = harness
-        .backend
-        .installed
-        .lock()
-        .await
-        .clone()
-        .ok_or("source runtime missing")?;
+async fn authenticated_http_original_lease_upgrade_is_rejected_without_side_effects() -> TestResult
+{
+    let harness = Box::pin(Harness::start()).await?;
+    let original = harness.backend.installed.lock().await.clone();
+    let counts = database_counts(&harness.pool).await?;
     let anonymous = harness.upgrade("http-upgrade-anonymous", false).await?;
     assert_eq!(anonymous.status(), reqwest::StatusCode::UNAUTHORIZED);
-    let before: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM environment.environment_operations WHERE environment_id=$1",
-    )
-    .bind(harness.ready.id.as_uuid())
-    .fetch_one(&harness.pool)
-    .await?;
-    let refused = harness.upgrade("http-upgrade-no-ack", true).await?;
-    assert_eq!(refused.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    let refusal: serde_json::Value = refused.json().await?;
-    assert_eq!(
-        refusal["diagnosticCode"],
-        "LW_ENVIRONMENT_ACCESS_REVOCATION_TIMEOUT"
-    );
-    assert_eq!(harness.store.load(harness.ready.id).await?, harness.ready);
-    let after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM environment.environment_operations WHERE environment_id=$1",
-    )
-    .bind(harness.ready.id.as_uuid())
-    .fetch_one(&harness.pool)
-    .await?;
-    assert_eq!(
-        before, after,
-        "failed revocation cannot enter upgrade persistence"
-    );
-    assert_eq!(
-        harness.backend.installed.lock().await.as_ref(),
-        Some(&original)
-    );
-    harness.peers.acknowledge.store(true, Ordering::SeqCst);
-    let accepted = harness.upgrade("http-upgrade-acknowledged", true).await?;
-    let status = accepted.status();
-    let value: serde_json::Value = accepted.json().await?;
-    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "{value}");
-    let accepted: EnvironmentOperationAccepted = serde_json::from_value(value)?;
-    assert_eq!(
-        harness.store.load(harness.ready.id).await?.release_id,
-        harness.target.release.id
-    );
-    drive_ready(&harness.store, &harness.worker, harness.ready.id).await?;
-    let upgraded = harness.store.load(harness.ready.id).await?;
-    let installed = harness
-        .backend
-        .installed
-        .lock()
-        .await
-        .clone()
-        .ok_or("target runtime missing")?;
-    assert_ne!(installed.image, original.image);
-    assert_eq!(
-        installed.image,
-        harness
-            .target
-            .release
-            .artifact
-            .container_reference()
-            .map(|(repository, digest)| format!("{repository}@{digest}"))
-            .ok_or("container identity missing")?
-    );
-    assert_eq!(installed.namespace, original.namespace);
-    assert_eq!(installed.workspace_claim, original.workspace_claim);
-    assert_eq!(upgraded.capacity_binding, harness.ready.capacity_binding);
-    assert_eq!(upgraded.lease_id, harness.ready.lease_id);
-    assert_eq!(upgraded.operation.state, OperationState::Succeeded);
-    let replay = harness.upgrade("http-upgrade-acknowledged", true).await?;
-    assert_eq!(replay.status(), reqwest::StatusCode::ACCEPTED);
-    assert_eq!(
-        replay.json::<EnvironmentOperationAccepted>().await?,
-        accepted
-    );
-    assert_eq!(harness.peers.revocations.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        *harness.peers.reasons.lock().await,
-        [AccessReason::Restarted, AccessReason::Restarted]
-    );
-    assert_eq!(harness.backend.restart_count.load(Ordering::SeqCst), 1);
+    for key in ["http-upgrade-c", "http-upgrade-c", "http-upgrade-c-new-key"] {
+        let response = harness.upgrade(key, true).await?;
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        let problem: serde_json::Value = response.json().await?;
+        assert_eq!(
+            problem["diagnosticCode"],
+            "LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE"
+        );
+        assert!(
+            problem["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("新建 Work") && detail.contains("迁移"))
+        );
+        assert_eq!(harness.store.load(harness.ready.id).await?, harness.ready);
+        assert_eq!(database_counts(&harness.pool).await?, counts);
+        assert_eq!(*harness.backend.installed.lock().await, original);
+        assert_eq!(harness.backend.restart_count.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.peers.revocations.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.peers.lease_queries.load(Ordering::SeqCst), 0);
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn authenticated_http_restart_rejects_expired_and_revoked_leases_after_revocation_ack()
+async fn authenticated_http_restart_does_not_trust_legacy_lease_without_runtime_authority()
 -> TestResult {
     const COUNTS: &str = "SELECT (SELECT count(*) FROM environment.environment_instances), \
         (SELECT count(*) FROM environment.environment_operations), \
         (SELECT count(*) FROM environment.outbox_events)";
-    let harness = Harness::start().await?;
+    let harness = Box::pin(Harness::start()).await?;
     harness.peers.acknowledge.store(true, Ordering::SeqCst);
     let before: (i64, i64, i64) = sqlx::query_as(COUNTS).fetch_one(&harness.pool).await?;
     let installed = harness.backend.installed.lock().await.clone();
@@ -858,21 +863,25 @@ async fn authenticated_http_restart_rejects_expired_and_revoked_leases_after_rev
             .header("Idempotency-Key", format!("http-restart-lease-{label}"))
             .send()
             .await?;
-        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{label}");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "{label}"
+        );
         let problem: serde_json::Value = response.json().await?;
         assert_eq!(
-            problem["diagnosticCode"], "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            problem["diagnosticCode"], "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
             "{label}: {problem}"
         );
         assert_eq!(
             harness.peers.revocations.load(Ordering::SeqCst),
             index + 1,
-            "{label}: production revocation must receive its valid ack before the lease denial"
+            "{label}: revocation precedes fresh runtime admission"
         );
         assert_eq!(
             harness.peers.lease_queries.load(Ordering::SeqCst),
-            index + 1,
-            "{label}: the signed HTTP request must reach lease verification"
+            0,
+            "{label}: legacy capacity verification cannot replace runtime authority"
         );
         assert_eq!(
             harness.store.load(harness.ready.id).await?,
@@ -937,10 +946,10 @@ async fn assert_lease_rejection(
     );
     assert_eq!(
         harness.peers.lease_queries.load(Ordering::SeqCst),
-        queries + 1,
+        queries + usize::from(route.ends_with("work-lease-updates")),
         "{route}, mode {mode}"
     );
-    // Upgrade verifies the lease before revoking; Restart/Reset revoke before verification.
+    // Public Restart/Reset revoke before fresh admission; internal lease routes do not.
     let revokes = ["/restart", "/reset"]
         .iter()
         .any(|suffix| route.ends_with(suffix));
@@ -961,7 +970,7 @@ async fn assert_lease_rejection(
 }
 
 #[tokio::test]
-async fn authenticated_http_work_operations_distinguish_inactive_leases_from_protocol_damage()
+async fn authenticated_http_work_operations_require_runtime_authority_or_reject_upgrade()
 -> TestResult {
     for operation in [
         "start",
@@ -971,7 +980,7 @@ async fn authenticated_http_work_operations_distinguish_inactive_leases_from_pro
         "reset",
         "template-upgrade",
     ] {
-        let mut harness = Harness::start().await?;
+        let mut harness = Box::pin(Harness::start()).await?;
         harness.prepare_state(operation).await?;
         let route = format!("/api/v1/environments/{}/{operation}", harness.ready.id);
         let body = match operation {
@@ -991,17 +1000,28 @@ async fn authenticated_http_work_operations_distinguish_inactive_leases_from_pro
             })?),
             _ => None,
         };
-        for &case in LEASE_REJECTIONS {
-            assert_lease_rejection(&harness, &route, body.as_ref(), &harness.token, case).await?;
-        }
+        let case = if operation == "template-upgrade" {
+            (
+                0,
+                reqwest::StatusCode::CONFLICT,
+                "LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE",
+            )
+        } else {
+            (
+                0,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
+            )
+        };
+        assert_lease_rejection(&harness, &route, body.as_ref(), &harness.token, case).await?;
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_leases_from_protocol_damage()
+async fn authenticated_resource_handoff_requires_runtime_authority_and_renewal_keeps_lease_diagnostics()
 -> TestResult {
-    let harness = Harness::start().await?;
+    let harness = Box::pin(Harness::start()).await?;
     let authorization = harness
         .ready
         .operation
@@ -1015,7 +1035,7 @@ async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_le
         AUDIENCE,
         [RESOURCE_PERMISSION],
     )?;
-    let handoff = contracts::environment::ResourceWorkHandoff {
+    let handoff = contracts::environment::ResourceEnvironmentHandoff {
         version: 1,
         request_id: authorization.resource_request_id,
         request_revision: revision(1),
@@ -1058,8 +1078,23 @@ async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_le
             serde_json::to_value(update)?,
         ),
     ] {
-        for &case in LEASE_REJECTIONS {
-            assert_lease_rejection(&harness, route, Some(&body), &token, case).await?;
+        if route.ends_with("work-handoffs") {
+            assert_lease_rejection(
+                &harness,
+                route,
+                Some(&body),
+                &token,
+                (
+                    0,
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
+                ),
+            )
+            .await?;
+        } else {
+            for &case in LEASE_REJECTIONS {
+                assert_lease_rejection(&harness, route, Some(&body), &token, case).await?;
+            }
         }
     }
     Ok(())
@@ -1139,8 +1174,9 @@ async fn restart_consumer(
 }
 
 #[tokio::test]
-async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -> TestResult {
-    let harness = Harness::start().await?;
+async fn nats_work_restart_deduplicates_intent_but_legacy_lease_cannot_authorize_execution()
+-> TestResult {
+    let harness = Box::pin(Harness::start()).await?;
     let (context, mut consumer) = restart_consumer(&harness.client).await?;
     let mut quarantined = harness.client.subscribe(QUARANTINE_SUBJECT).await?;
     harness.client.flush().await?;
@@ -1211,8 +1247,23 @@ async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -
     .fetch_one(&harness.pool)
     .await?;
     assert_eq!(after, before + 1);
-    drive_ready(&harness.store, &harness.worker, harness.ready.id).await?;
-    assert_eq!(harness.backend.restart_count.load(Ordering::SeqCst), 1);
+    drive_state(
+        &harness.store,
+        &harness.worker,
+        harness.ready.id,
+        ObservedEnvironmentState::Failed,
+    )
+    .await?;
+    assert_eq!(
+        harness
+            .store
+            .load(harness.ready.id)
+            .await?
+            .last_diagnostic_code
+            .as_deref(),
+        Some("LW_RUNTIME_AUTHORITY_UNAVAILABLE")
+    );
+    assert_eq!(harness.backend.restart_count.load(Ordering::SeqCst), 0);
     assert_eq!(
         harness.peers.lease_queries.load(Ordering::SeqCst),
         LEASE_REJECTIONS.len() + 2
