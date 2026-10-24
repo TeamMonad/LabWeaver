@@ -1280,13 +1280,15 @@ impl KubernetesEvaluationRunner {
             .await?;
         let facts = self
             .freezes
-            .model_input_facts(
+            .model_input_facts_for_task(
                 frozen.id,
                 frozen.project_id,
                 frozen.course_id,
                 frozen.actor_id,
                 context.release.id,
                 context.release.revision,
+                context.lease.task_run_id,
+                &contracts::http::model_input_parent_lease_sha256(context.lease.lease_token()),
             )
             .await
             .map_err(|_| ExecutionError::Backend("advisory_input_facts_unavailable".to_owned()))?;
@@ -2938,6 +2940,8 @@ fn frozen_input_request(
         .map_err(|_| ExecutionError::IdentityMismatch)?
         .to_string();
     if facts["frozenSubmissionId"] != serde_json::json!(frozen.id)
+        || facts["taskRunId"] != serde_json::json!(context.lease.task_run_id)
+        || facts["stepId"] != context.lease.step_id
         || facts["projectId"] != serde_json::json!(frozen.project_id)
         || facts["courseId"] != serde_json::json!(frozen.course_id)
         || facts["ownerActorId"] != serde_json::json!(frozen.actor_id)
@@ -3013,6 +3017,8 @@ fn validate_frozen_input_binding(
         .collect::<Result<Vec<_>, _>>()?;
     if binding.context() != request.input_authorization_context
         || source.task_run_id != request.task_run_id
+        || facts["taskRunId"] != serde_json::json!(request.task_run_id)
+        || facts["stepId"] != source.step_id
         || source.parent_lease_sha256 != request.parent_lease_sha256
         || source.frozen_submission_id != frozen.id
         || source.manifest_revision != frozen.manifest_revision
@@ -3244,6 +3250,7 @@ mod tests {
         };
         let source = contracts::http::FrozenModelInputSource {
             task_run_id,
+            step_id: "review".to_owned(),
             parent_lease_sha256: contracts::http::model_input_parent_lease_sha256(
                 uuid::Uuid::new_v4(),
             ),

@@ -186,8 +186,13 @@ binding in required `InternalAgentLlmReviewRequest.inputAuthorization`.
 Control uses the task-limited metadata route
 `GET /internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`.
 This route requires the existing `evaluation.control.invoke`, the original scope/owner headers
-and If-Match, plus one `x-labweaver-evaluation-lease-sha256` header. The response has exactly the
-original fact fields. No raw lease token, worker credentials or content is returned. Evaluation
+and If-Match, plus one `x-labweaver-evaluation-lease-sha256` header. In addition to the frozen
+fact fields, the response includes `taskRunId` and `stepId` from the protected current-attempt
+join. Control selects that exact advisory step, then checks its include set and rubric; it never
+infers a step from selected paths. Multiple advisory steps may share the same include set.
+The immutable binding includes `source.stepId` in its selection digest, and Evaluation compares
+it with both the task metadata and its original leased step before any content read.
+No raw lease token, worker credentials or content is returned. Evaluation
 checks the actual run/step/current attempt, owner/scope/freeze/release, durable cancellation,
 current database lease digest and expiry, and original deadline. Unknown or inactive parents
 are refused. The ordinary metadata route cannot substitute for task admission.

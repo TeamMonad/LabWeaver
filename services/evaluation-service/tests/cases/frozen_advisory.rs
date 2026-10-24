@@ -16,6 +16,10 @@ struct ReviewFixture {
 
 impl ReviewFixture {
     async fn start(cluster: &MockCluster) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_spec(cluster, advisory_spec()?).await
+    }
+
+    async fn start_with_spec(cluster: &MockCluster, evaluation_spec: EvaluationSpec) -> Result<Self, Box<dyn Error>> {
         let mut db = DbFixture::start().await?;
         let now = db.store.authority_now().await?;
         db.store
@@ -87,7 +91,7 @@ impl ReviewFixture {
             .bind(frozen.id.as_uuid()).bind(db.project_id.as_uuid()).bind(db.course_id.as_uuid()).bind(frozen.environment.environment_id.as_uuid())
             .bind(&command.idempotency_key).bind(Sha256Digest::of_bytes(b"fixture-freeze-identity").to_string()).bind(serde_json::to_value(&frozen)?).execute(&db.pool).await?;
         let mut publish = publish_request(db.project_id, db.course_id, db.actor_id)?;
-        publish.evaluation_spec = advisory_spec()?;
+        publish.evaluation_spec = evaluation_spec;
         publish.execution_binding.package.files[0].path = "rubric.md".to_owned();
         db.release = match db
             .store
@@ -141,6 +145,7 @@ impl ReviewFixture {
         let rubric = &publish.execution_binding.package.files[0];
         let source = FrozenModelInputSource {
             task_run_id: lease.task_run_id,
+            step_id: lease.step_id.clone(),
             parent_lease_sha256: contracts::http::model_input_parent_lease_sha256(
                 lease.lease_token(),
             ),
@@ -538,4 +543,33 @@ async fn frozen_advisory_cancel_deadline_and_expired_database_lease_block_sends(
 
 mod parent_admission_tests {
     include!("parent_admission.rs");
+}
+
+#[tokio::test]
+async fn frozen_advisory_rejects_cross_step_binding_with_identical_includes() -> Result<(), Box<dyn Error>> {
+    let mut spec = serde_json::to_value(advisory_spec()?)?;
+    let steps = spec["spec"]["steps"].as_array_mut().ok_or("steps missing")?;
+    let mut other = steps[0].clone();
+    other["id"] = json!("other-review");
+    steps.insert(1, other);
+    let mut cluster = spawn_cluster().await?;
+    let authority = spawn_authority().await?;
+    let temp = TempDir::new()?;
+    let fixture = ReviewFixture::start_with_spec(&cluster, serde_json::from_value(spec)?).await?;
+    let runner = build_runner(&cluster, &authority, &temp, &fixture.db.pool).await?;
+    let original = build(&fixture, &runner).await?;
+    let ModelInputAuthorizationSource::FrozenSubmission(source) = &original.input_authorization.source else { return Err("wrong source".into()) };
+    assert_eq!(source.step_id, fixture.context.lease.step_id);
+    fixture.reset(&cluster).await?;
+    let mut swapped = fixture.binding.clone();
+    let ModelInputAuthorizationSource::FrozenSubmission(source) = &mut swapped.source else { return Err("wrong source".into()) };
+    source.step_id = "other-review".to_owned();
+    swapped.selection_sha256 = contracts::http::frozen_model_input_selection_sha256(source, &[("answer.txt".to_owned(), fixture.frozen.files[0].sha256.clone())])?;
+    swapped.validate()?;
+    cluster.state.lock().await.model_binding = Some(serde_json::to_value(swapped)?);
+    assert!(matches!(build(&fixture, &runner).await, Err(crate::execution::ExecutionError::IdentityMismatch)));
+    assert_eq!(counts(&cluster).await, (0, 0));
+    assert_eq!(cluster.state.lock().await.model_requests.len(), 1);
+    cluster.stop().await;
+    Ok(())
 }

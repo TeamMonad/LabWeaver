@@ -70,6 +70,7 @@ fn frozen_binding_json() -> Value {
     let archive = json!({"artifactId": contracts::ArtifactId::new(), "storeBinding":"synthetic", "objectVersion":"archive-v1", "sizeBytes": 50, "mediaType":"application/gzip"});
     binding["source"] = json!({
         "kind":"frozen_submission", "taskRunId":contracts::TaskRunId::new(), "parentLeaseSha256":"d".repeat(64),
+        "stepId":"review",
         "frozenSubmissionId":contracts::FrozenSubmissionId::new(), "manifestRevision":3,
         "manifestSha256":"a".repeat(64), "archive":archive,
         "contentSha256":"b".repeat(64), "evaluationReleaseId":contracts::EvaluationReleaseId::new(),
@@ -158,6 +159,33 @@ fn frozen_recovery_requires_original_parent_lease_and_binds_it_to_selection()
     let files = vec![("submission.md".to_owned(), "a".repeat(64))];
     let original = frozen_model_input_selection_sha256(&source, &files)?;
     source.parent_lease_sha256 = model_input_parent_lease_sha256(token);
+    assert_ne!(
+        frozen_model_input_selection_sha256(&source, &files)?,
+        original
+    );
+    Ok(())
+}
+
+#[test]
+fn frozen_step_identity_is_required_and_bound_to_selection()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::http::{
+        ModelInputAuthorizationBinding, ModelInputAuthorizationSource,
+        frozen_model_input_selection_sha256,
+    };
+    let mut value = frozen_binding_json();
+    value["source"]
+        .as_object_mut()
+        .ok_or("source missing")?
+        .remove("stepId");
+    assert!(serde_json::from_value::<ModelInputAuthorizationBinding>(value).is_err());
+    let binding: ModelInputAuthorizationBinding = serde_json::from_value(frozen_binding_json())?;
+    let ModelInputAuthorizationSource::FrozenSubmission(mut source) = binding.source else {
+        return Err("wrong source".into());
+    };
+    let files = vec![("submission.md".to_owned(), "a".repeat(64))];
+    let original = frozen_model_input_selection_sha256(&source, &files)?;
+    source.step_id = "other-review".to_owned();
     assert_ne!(
         frozen_model_input_selection_sha256(&source, &files)?,
         original

@@ -1312,21 +1312,37 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
     Ok(())
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PublicationCase {
+    Publication,
+    RubricRules,
+    FrozenSharedInputs,
+}
+
 #[tokio::test]
 async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
 -> Result<(), Box<dyn std::error::Error>> {
-    Box::pin(authoring_publication_fixture(false)).await
+    Box::pin(authoring_publication_fixture(PublicationCase::Publication)).await
 }
 
 #[tokio::test]
 async fn rubric_rules_require_current_instructor_and_exact_content_and_revoke()
 -> Result<(), Box<dyn std::error::Error>> {
-    Box::pin(authoring_publication_fixture(true)).await
+    Box::pin(authoring_publication_fixture(PublicationCase::RubricRules)).await
+}
+
+#[tokio::test]
+async fn frozen_advisory_steps_with_identical_include_bind_their_current_step()
+-> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(authoring_publication_fixture(
+        PublicationCase::FrozenSharedInputs,
+    ))
+    .await
 }
 
 #[allow(clippy::too_many_lines)]
 async fn authoring_publication_fixture(
-    rubric_only: bool,
+    case: PublicationCase,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let url = format!(
@@ -1586,11 +1602,13 @@ async fn authoring_publication_fixture(
         ready.submission_manifest.is_none(),
         "system-facts evaluations must not project a workspace submission manifest"
     );
-    if rubric_only {
+    if case != PublicationCase::Publication {
         rubric_model_input_cases::assert_rubric_authority(
             &pool,
             &package,
             &evaluation_release,
+            &environment_release,
+            case,
             now,
         )
         .await?;
@@ -5657,6 +5675,7 @@ async fn frozen_inputs_without_connected_authority_deny_before_database_or_objec
     let source = FrozenModelInputSource {
         parent_lease_sha256: "d".repeat(64),
         task_run_id: contracts::TaskRunId::new(),
+        step_id: "review".to_owned(),
         frozen_submission_id: contracts::FrozenSubmissionId::new(),
         manifest_revision: Revision::new(3)?,
         manifest_sha256: "a".repeat(64),

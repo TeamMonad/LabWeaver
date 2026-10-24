@@ -49,6 +49,11 @@ pub struct FreezeLease {
     lease_token: Uuid,
 }
 
+struct ModelInputTaskScope {
+    deadline: UtcTimestamp,
+    step_id: String,
+}
+
 /// Evaluation-owned durable freeze store.
 #[derive(Clone, Debug)]
 pub struct PgFreezeStore {
@@ -98,8 +103,7 @@ impl PgFreezeStore {
     /// Validates current parent admission and returns its fixed deadline without contents.
     #[allow(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
-        reason = "one read binds the complete parent scope and immutable checkpoint metadata"
+        reason = "bind the current task, owner and release"
     )]
     pub(crate) async fn model_input_task_deadline(
         &self,
@@ -112,6 +116,37 @@ impl PgFreezeStore {
         task_id: contracts::TaskRunId,
         parent_lease_sha256: &str,
     ) -> Result<UtcTimestamp, FreezeStoreError> {
+        Ok(self
+            .model_input_task_scope(
+                submission_id,
+                project_id,
+                course_id,
+                owner_id,
+                release_id,
+                release_revision,
+                task_id,
+                parent_lease_sha256,
+            )
+            .await?
+            .deadline)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one read binds the complete parent scope and immutable checkpoint metadata"
+    )]
+    async fn model_input_task_scope(
+        &self,
+        submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        owner_id: contracts::ActorId,
+        release_id: contracts::EvaluationReleaseId,
+        release_revision: Revision,
+        task_id: contracts::TaskRunId,
+        parent_lease_sha256: &str,
+    ) -> Result<ModelInputTaskScope, FreezeStoreError> {
         if parent_lease_sha256.len() != 64
             || !parent_lease_sha256
                 .bytes()
@@ -132,6 +167,7 @@ impl PgFreezeStore {
                     'projectId',a.execution_resources#>'{request,projectId}','courseId',a.execution_resources#>'{request,courseId}', \
                     'frozenSubmissionId',a.execution_resources#>'{request,frozenSubmissionId}', \
                     'deadlineAt',a.execution_resources#>'{request,deadlineAt}', \
+                    'stepId',a.execution_resources#>'{request,inputAuthorization,source,stepId}', \
                     'parentLeaseSha256',a.execution_resources#>'{request,inputAuthorization,source,parentLeaseSha256}') AS intent \
              FROM evaluation.evaluation_runs r JOIN evaluation.evaluation_step_runs s ON s.run_id=r.run_id \
              JOIN evaluation.evaluation_step_attempts a ON a.step_run_id=s.step_run_id \
@@ -144,6 +180,7 @@ impl PgFreezeStore {
                AND a.task_run_id=$7 AND a.state='running' AND a.lease_expires_at>clock_timestamp() \
                AND r.contract->>'state'='running' AND r.contract->>'cancellationRequested'='false' \
                AND s.contract->>'state'='running' \
+               AND s.contract->>'stepId'=s.step_id \
                AND s.contract->'revision'=to_jsonb(s.revision) \
                AND s.contract->'currentAttempt'=to_jsonb(a.attempt)",
         ).bind(submission_id.as_uuid()).bind(project_id.as_uuid()).bind(course_id.map(CourseId::as_uuid))
@@ -184,6 +221,7 @@ impl PgFreezeStore {
                 || intent["courseId"] != serde_json::json!(course_id)
                 || intent["frozenSubmissionId"] != serde_json::json!(submission_id)
                 || intent["parentLeaseSha256"] != parent_lease_sha256
+                || intent["stepId"] != step_id
             {
                 return Err(FreezeStoreError::ContractInvalid);
             }
@@ -200,10 +238,10 @@ impl PgFreezeStore {
         if deadline.get() <= row.try_get::<OffsetDateTime, _>("authority_now")? {
             return Err(FreezeStoreError::NotFound);
         }
-        Ok(deadline)
+        Ok(ModelInputTaskScope { deadline, step_id })
     }
 
-    /// Returns the unchanged frozen projection after current parent task admission succeeds.
+    /// Returns frozen metadata plus the authoritative task and current advisory step identity.
     ///
     /// # Errors
     ///
@@ -224,26 +262,34 @@ impl PgFreezeStore {
         task_id: contracts::TaskRunId,
         parent_lease_sha256: &str,
     ) -> Result<Value, FreezeStoreError> {
-        self.model_input_task_deadline(
-            submission_id,
-            project_id,
-            course_id,
-            owner_id,
-            release_id,
-            release_revision,
-            task_id,
-            parent_lease_sha256,
-        )
-        .await?;
-        self.model_input_facts(
-            submission_id,
-            project_id,
-            course_id,
-            owner_id,
-            release_id,
-            release_revision,
-        )
-        .await
+        let task = self
+            .model_input_task_scope(
+                submission_id,
+                project_id,
+                course_id,
+                owner_id,
+                release_id,
+                release_revision,
+                task_id,
+                parent_lease_sha256,
+            )
+            .await?;
+        let mut facts = self
+            .model_input_facts(
+                submission_id,
+                project_id,
+                course_id,
+                owner_id,
+                release_id,
+                release_revision,
+            )
+            .await?;
+        let object = facts
+            .as_object_mut()
+            .ok_or(FreezeStoreError::ContractInvalid)?;
+        object.insert("taskRunId".to_owned(), serde_json::json!(task_id));
+        object.insert("stepId".to_owned(), Value::String(task.step_id));
+        Ok(facts)
     }
 
     /// Reads ledger metadata for Control's model-input authorization without reading objects.
