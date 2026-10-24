@@ -23,12 +23,18 @@ const CAPABILITY_COOKIE: &str = "__Secure-labweaver_runtime";
 const HANDOFF_SECONDS: i64 = 30;
 const CAPABILITY_SECONDS: i64 = 300;
 
-fn runtime_host(state: &AppState, headers: &HeaderMap) -> bool {
+fn runtime_host(state: &AppState, uri: &Uri, headers: &HeaderMap) -> bool {
     // Configuration validation requires an exact canonical origin with no path.
     let Some((_, authority)) = state.deployment.browser.runtime_origin.split_once("://") else {
         return false;
     };
-    headers.get(header::HOST).and_then(|h| h.to_str().ok()) == Some(authority)
+    // HTTP/2 carries :authority in the URI rather than a Host header.
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    uri.authority()
+        .map(axum::http::uri::Authority::as_str)
+        .or(host)
+        == Some(authority)
+        && host.is_none_or(|host| host == authority)
 }
 
 /// Enforce the origin boundary even when an ingress is bypassed or misconfigured.
@@ -37,7 +43,7 @@ pub(super) async fn isolate_origin(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let runtime = runtime_host(&state, request.headers());
+    let runtime = runtime_host(&state, request.uri(), request.headers());
     let path = request.uri().path();
     let admission =
         path.starts_with("/runtime-bootstrap/") || path.starts_with("/runtime-handoff/");
@@ -85,7 +91,7 @@ pub(super) async fn connect(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if runtime_host(&state, &headers) {
+    if runtime_host(&state, &uri, &headers) {
         return proxy::forward_runtime(State(state), method, uri, headers, body).await;
     }
     if method != Method::GET {
@@ -186,10 +192,11 @@ pub(super) async fn consume(
 
 pub(super) async fn authenticated_capability(
     state: &AppState,
+    uri: &Uri,
     headers: &HeaderMap,
     grant: EndpointGrantId,
 ) -> Result<auth::BffSession, ApiError> {
-    if !runtime_host(state, headers) {
+    if !runtime_host(state, uri, headers) {
         return Err(denied());
     }
     let capability = cookie(headers, CAPABILITY_COOKIE)

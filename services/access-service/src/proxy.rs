@@ -1541,7 +1541,7 @@ pub(super) async fn forward_runtime(
     }
     let (endpoint_grant_id, runtime_path) = parse_runtime_path(uri.path())?;
     let session =
-        super::runtime::authenticated_capability(&state, &headers, endpoint_grant_id).await?;
+        super::runtime::authenticated_capability(&state, &uri, &headers, endpoint_grant_id).await?;
     let target = authorize_runtime(
         &state,
         session.actor_id,

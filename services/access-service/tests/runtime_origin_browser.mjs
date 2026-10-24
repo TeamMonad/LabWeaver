@@ -34,7 +34,9 @@ try {
     const headers = await request.allHeaders()
     assert(!headers.cookie?.includes('__Host-labweaver_session='))
   }
-  const blocked = page.waitForResponse(response => response.url() === `${portal}/api/v1/auth/csrf`)
+  // Chromium deliberately does not expose the rejected CORS response to the page.
+  // The HTTP regression separately asserts Access returns 403 without allow-origin.
+  const blocked = page.waitForEvent('requestfailed', { predicate: request => request.url() === `${portal}/api/v1/auth/csrf` })
   const stolen = await page.evaluate(async portal => {
     try {
       const response = await fetch(`${portal}/api/v1/auth/csrf`, { credentials: 'include' })
@@ -42,7 +44,7 @@ try {
     } catch { return null }
   }, portal)
   assert.equal(stolen, null, 'untrusted script must not read a portal CSRF token')
-  assert.equal((await blocked).status(), 403)
+  assert((await blocked).failure(), 'the browser must reject the cross-origin API fetch')
   const localApi = await page.evaluate(async () => (await fetch('/api/v1/auth/session')).status)
   assert.equal(localApi, 403)
   const posted = await page.evaluate(async () => {
