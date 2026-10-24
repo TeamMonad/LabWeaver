@@ -797,10 +797,16 @@ const ALPINE_V3_21_PKGS: &[(&str, &str, &str)] = &[
         "f89752780981d11707e7eee3ca7b5a7f52e91e60ee28bd9e1815c7da05741c4a",
         "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/libpanelw-6.5_p20241006-r3.apk",
     ),
+    // musl-dev requires the exact musl revision, including on pinned older builders.
     (
-        "musl-dev-1.2.5-r11.apk",
-        "d3b5ab01046a92b9a168b790f516606e320f015cbd4deeb584c5e115a02124ba",
-        "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/musl-dev-1.2.5-r11.apk",
+        "musl-1.2.5-r12.apk",
+        "abfcfe822d37bb6fa621d7d682e26eba95152c642dc5619b768b4e4a9789133e",
+        "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/musl-1.2.5-r12.apk",
+    ),
+    (
+        "musl-dev-1.2.5-r12.apk",
+        "0b0357736d51253ddf82a4338378848cfbbe6d695aba60cf7790423670d61b2a",
+        "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/musl-dev-1.2.5-r12.apk",
     ),
     (
         "ncurses-libs-6.5_p20241006-r3.apk",

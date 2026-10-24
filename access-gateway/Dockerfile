@@ -9,7 +9,9 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 COPY containers/alpine-3.21-pkgs /vendor/alpine
-RUN apk add --no-network --allow-untrusted /vendor/alpine/musl-dev-1.2.5-r11.apk
+RUN apk add --no-network --allow-untrusted \
+      /vendor/alpine/musl-1.2.5-r12.apk \
+      /vendor/alpine/musl-dev-1.2.5-r12.apk
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY .cargo .cargo
