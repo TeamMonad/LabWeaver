@@ -27,4 +27,5 @@ CREATE UNIQUE INDEX credit_holds_model_call_idx ON resource.credit_holds(model_c
 ALTER TABLE resource.credit_holds DROP CONSTRAINT credit_holds_target_check;
 ALTER TABLE resource.credit_holds ADD CONSTRAINT credit_holds_target_check CHECK (
     num_nonnulls(request_id, build_request_id, model_call_id) = 1
+    AND (build_request_id IS NULL) = (build_attempt IS NULL)
 );

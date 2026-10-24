@@ -274,4 +274,4 @@ domains:
         sha256: 3889f72ee93635cfc8b030d55840625a799124e2307519352862d9b9102fdf3d
       - id: 22
         file: resource/0022_model_token_rates.sql
-        sha256: 6e0ddf8a1ce82362a59629ef8ce48d184f7372000fe3f3a1f09e17a7842af7cf
+        sha256: f07859f9a005583c2021e11d147ae25b9988bdc3cf4642ca2b24f69fd2cafdf7

@@ -457,7 +457,7 @@ async fn pending_task_with_resources(
         diagnostic_code: None,
     };
     store
-        .create(&id.to_string(), &req, "synthetic-task-cost")
+        .create_task(&id.to_string(), &req, 60_000, "synthetic-task-cost")
         .await?;
     let approval = ResourceApproval {
         runtime_authorization: None,

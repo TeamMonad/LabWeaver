@@ -1681,7 +1681,45 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
     .bind(work.id.as_uuid())
     .fetch_all(&pool)
     .await?;
-    assert_eq!(deliveries.len(), 3);
+    let decoded = deliveries
+        .iter()
+        .cloned()
+        .map(serde_json::from_value::<RecordResourceUsageRequest>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        decoded
+            .iter()
+            .filter(|record| record.kind == ResourceUsageKind::Compute)
+            .count(),
+        2
+    );
+    let storage = decoded
+        .iter()
+        .filter(|record| record.kind == ResourceUsageKind::Storage)
+        .collect::<Vec<_>>();
+    let first = storage.first().ok_or("missing storage interval")?;
+    let last = storage.last().ok_or("missing final storage interval")?;
+    for pair in storage.windows(2) {
+        assert_eq!(
+            pair[0].measured_until, pair[1].measured_from,
+            "split storage must have no gaps or overlap"
+        );
+    }
+    let mut actual = 0_u128;
+    for record in &storage {
+        let UsageMeasurement::Known { quantities } = &record.measurement else {
+            return Err("known storage became unknown".into());
+        };
+        assert_eq!(quantities.quantity_divisor, 1000);
+        actual += u128::from(quantities.storage_byte_seconds);
+    }
+    let milliseconds = u128::try_from(
+        (last.measured_until.get() - first.measured_from.get()).whole_milliseconds(),
+    )?;
+    assert_eq!(
+        actual,
+        u128::from(work.approved_resources.storage_bytes) * milliseconds
+    );
     let resource_request_id = renewed_authorization.resource_request_id;
     let lease_id = work.lease_id.ok_or("expected Work lease id")?;
     for delivery in deliveries {
