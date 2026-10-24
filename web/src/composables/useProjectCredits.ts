@@ -13,7 +13,7 @@ import {
 } from '@/generated/contracts'
 import { diagnosticFromError, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey } from '@/utils/format'
-import { clearPendingCommand, listPendingCommands, readPendingCommand, writePendingCommand, type PendingCommand } from '@/utils/pendingCommands'
+import { clearPendingCommand, listPendingCommands, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 
 const fixedDecimalPattern = /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/
 
@@ -130,14 +130,6 @@ const NOT_APPLIED_CODES = ['LW_CREDITS_INVALID', 'LW_CREDITS_PRECISION', 'LW_CRE
 
 const PENDING_SCOPE_PREFIX = 'credits-admin:'
 
-/**
- * Same-page fallback for unconfirmed commands, keyed by actor + scope. Session
- * storage can refuse a write (disabled, quota exhausted); the original key
- * must still be reused for every retry until this page is closed.
- */
-const unpersistedCommands = new Map<string, PendingCommand<CreditAdminFormInput>>()
-const memoryKey = (actor: string, scope: string) => `${actor}\u0000${scope}`
-
 export interface PendingCreditOperation {
   scope: string
   input: CreditAdminFormInput
@@ -187,26 +179,10 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
   function refreshPending() {
     const id = projectId.value
     const actor = actorId.value
-    if (!id || !actor) {
-      pendingOperations.value = []
-      return
-    }
-    const prefix = `${PENDING_SCOPE_PREFIX}${id}:`
-    const stored = listPendingCommands<CreditAdminFormInput>(actor, prefix)
-    const storedScopes = new Set(stored.map(({ scope }) => scope))
-    const unpersisted = [...unpersistedCommands.entries()]
-      .filter(([key]) => key.startsWith(memoryKey(actor, prefix)))
-      .map(([key, command]) => ({ scope: key.slice(actor.length + 1), command }))
-      .filter(({ scope }) => !storedScopes.has(scope))
-    pendingOperations.value = [
-      ...stored.map(({ scope, command }) => ({ scope, input: command.data, persisted: true })),
-      ...unpersisted.map(({ scope, command }) => ({ scope, input: command.data, persisted: false })),
-    ]
-  }
-
-  function forgetCommand(actor: string, scope: string, key: string) {
-    clearPendingCommand(actor, scope, key)
-    if (unpersistedCommands.get(memoryKey(actor, scope))?.idempotencyKey === key) unpersistedCommands.delete(memoryKey(actor, scope))
+    pendingOperations.value = id && actor
+      ? listPendingCommands<CreditAdminFormInput>(actor, `${PENDING_SCOPE_PREFIX}${id}:`)
+        .map(({ scope, command, persisted }) => ({ scope, input: command.data, persisted }))
+      : []
   }
 
   async function loadLedgerPage(id: string, page: number, generation: number) {
@@ -369,13 +345,10 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
 
     const scope = `${PENDING_SCOPE_PREFIX}${id}:${JSON.stringify(body)}`
     const command = readPendingCommand<CreditAdminFormInput>(actor, scope)
-      ?? unpersistedCommands.get(memoryKey(actor, scope))
       ?? { fingerprint: scope, idempotencyKey: idempotencyKey(), data: { ...input, reason } }
     // Recorded before sending: a response lost after this point is replayed, never re-minted.
-    // The memory copy keeps the key when storage refuses the write.
+    // When storage refuses it, pendingCommands keeps it in page memory under the same owner rules.
     const persisted = writePendingCommand(actor, scope, command)
-    if (persisted) unpersistedCommands.delete(memoryKey(actor, scope))
-    else unpersistedCommands.set(memoryKey(actor, scope), command)
     const requestContext = context
     const isCurrent = () => !disposed && requestContext === context
     acting.value = input.action
@@ -388,14 +361,14 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
         body,
       })
       if (result.error) throw result.error
-      forgetCommand(actor, scope, command.idempotencyKey)
+      clearPendingCommand(actor, scope, command.idempotencyKey)
       next = {
         kind: 'success',
         diagnostic: makeDiagnostic('CREDITS_ADMIN_OPERATION_SUCCEEDED', `${creditActionLabel(input.action)}已入账，账户和账目已刷新。`, false),
       }
     } catch (error) {
       const diagnostic = diagnosticFromError(error, 'CREDITS_ADMIN_OPERATION_FAILED', `${creditActionLabel(input.action)}的结果尚未确认。重新提交同一操作不会重复入账。`)
-      if (NOT_APPLIED_CODES.includes(diagnostic.code)) forgetCommand(actor, scope, command.idempotencyKey)
+      if (NOT_APPLIED_CODES.includes(diagnostic.code)) clearPendingCommand(actor, scope, command.idempotencyKey)
       else if (!persisted) diagnostic.nextStep = NOT_PERSISTED_NEXT_STEP
       next = { kind: 'error', diagnostic }
     }

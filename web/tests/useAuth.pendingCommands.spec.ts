@@ -103,3 +103,82 @@ describe('pending commands across identity changes (real loadUser)', () => {
     expect(window.sessionStorage.getItem(PENDING_B)).not.toBeNull()
   })
 })
+
+describe('pending commands held in page memory across identity changes (real loadUser)', () => {
+  const SCOPE = 'credits-admin:project-1:{"action":"grant"}'
+  const command = { fingerprint: SCOPE, idempotencyKey: 'key-memory-a', data: { reason: 'A 的发放' } }
+
+  beforeEach(() => {
+    vi.resetModules()
+    window.sessionStorage.clear()
+    // Session storage refuses every write, so commands live only in page memory.
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+  })
+
+  /** Same module instance as the freshly imported useAuth. */
+  async function pendingCommands() {
+    return import('@/utils/pendingCommands')
+  }
+
+  it.each([
+    ['a 503 session read', new Response('{}', { status: 503 })],
+    ['a network failure', new TypeError('Failed to fetch')],
+  ])('keeps a memory-only command when %s leaves the identity unknown', async (_label, failure) => {
+    const auth = await authWith(session(ACTOR_A), failure)
+    const pending = await pendingCommands()
+    await auth.loadUser()
+    expect(pending.writePendingCommand(ACTOR_A, SCOPE, command)).toBe(false)
+
+    await auth.loadUser()
+    expect(pending.readPendingCommand(ACTOR_A, SCOPE)?.idempotencyKey).toBe('key-memory-a')
+    expect(pending.listPendingCommands(ACTOR_A, 'credits-admin:project-1:')).toEqual([
+      expect.objectContaining({ scope: SCOPE, persisted: false }),
+    ])
+  })
+
+  it('drops a memory-only command on an explicit sign-out and does not restore it for the same actor later', async () => {
+    const auth = await authWith(
+      session(ACTOR_A),
+      new Response(JSON.stringify({ csrfToken: 'csrf' }), { status: 200 }),
+      new Response(JSON.stringify({ logoutUrl: 'https://identity.example.test/logout' }), { status: 200 }),
+      session(ACTOR_A),
+    )
+    const pending = await pendingCommands()
+    await auth.loadUser()
+    pending.writePendingCommand(ACTOR_A, SCOPE, command)
+
+    await auth.logout()
+    await auth.loadUser()
+    expect(auth.isAuthenticated.value).toBe(true)
+    expect(pending.readPendingCommand(ACTOR_A, SCOPE)).toBeNull()
+    expect(pending.listPendingCommands(ACTOR_A, 'credits-admin:')).toEqual([])
+  })
+
+  it('drops a memory-only command when the session read says the user is signed out', async () => {
+    const auth = await authWith(session(ACTOR_A), new Response('{}', { status: 401 }))
+    const pending = await pendingCommands()
+    await auth.loadUser()
+    pending.writePendingCommand(ACTOR_A, SCOPE, command)
+    await auth.loadUser()
+    expect(pending.readPendingCommand(ACTOR_A, SCOPE)).toBeNull()
+  })
+
+  it('drops the previous actor\'s memory-only command when another actor is confirmed, and switching back does not restore it', async () => {
+    const auth = await authWith(session(ACTOR_A), session(ACTOR_B), session(ACTOR_A))
+    const pending = await pendingCommands()
+    await auth.loadUser()
+    pending.writePendingCommand(ACTOR_A, SCOPE, command)
+
+    await auth.loadUser()
+    expect(pending.readPendingCommand(ACTOR_A, SCOPE)).toBeNull()
+    await auth.loadUser()
+    expect(pending.readPendingCommand(ACTOR_A, SCOPE)).toBeNull()
+    expect(pending.listPendingCommands(ACTOR_A, 'credits-admin:')).toEqual([])
+  })
+})

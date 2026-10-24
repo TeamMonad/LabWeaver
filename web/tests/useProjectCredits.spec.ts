@@ -15,6 +15,7 @@ import {
   isPositiveCreditsAmount,
   useProjectCredits,
 } from '@/composables/useProjectCredits'
+import { syncPendingCommandOwner } from '@/utils/pendingCommands'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -95,6 +96,8 @@ const accepted = () => Promise.resolve({ data: [], error: undefined } as never)
 describe('useProjectCredits', () => {
   beforeEach(() => {
     window.sessionStorage.clear()
+    // The real owner boundary also empties the page-memory fallback between tests.
+    syncPendingCommandOwner(null)
     vi.mocked(getProjectCredits).mockReset()
     vi.mocked(listProjectCreditLedger).mockReset()
     vi.mocked(listProjectCreditHolds).mockReset()
@@ -282,6 +285,55 @@ describe('useProjectCredits', () => {
       expect(await other.credits.retryPending(other.credits.pendingOperations.value[0]!.scope)).toBe('accepted')
       expect(keyOf(1)).toBe(keyOf(0))
       expect(other.credits.pendingOperations.value).toEqual([])
+    } finally {
+      broken.mockRestore()
+    }
+  })
+
+  it.each([
+    ['a confirmed sign-out', null],
+    ['another confirmed actor', 'actor-other'],
+  ])('does not restore a memory-only operation for the old actor after %s', async (_label, nextOwner) => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementation(lostResponse)
+    const broken = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })
+    try {
+      const { credits, actorId } = setup()
+      await flushPromises()
+      expect(await credits.submitAdminOperation(grant)).toBe('failed')
+      expect(credits.pendingOperations.value).toHaveLength(1)
+
+      syncPendingCommandOwner(nextOwner)
+      actorId.value = nextOwner
+      await flushPromises()
+      actorId.value = 'actor-admin'
+      await flushPromises()
+      expect(credits.pendingOperations.value).toEqual([])
+
+      vi.mocked(createCreditAdminOperation).mockImplementation(accepted)
+      expect(await credits.submitAdminOperation(grant)).toBe('accepted')
+      expect(keyOf(1)).not.toBe(keyOf(0))
+    } finally {
+      broken.mockRestore()
+    }
+  })
+
+  it('keeps a memory-only operation while the identity is only temporarily unknown', async () => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementationOnce(lostResponse).mockImplementation(accepted)
+    const broken = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })
+    try {
+      const { credits, actorId } = setup()
+      await flushPromises()
+      expect(await credits.submitAdminOperation(grant)).toBe('failed')
+      // A 503 or network error leaves the actor unknown without a confirmed sign-out: no owner sync runs.
+      actorId.value = null
+      await flushPromises()
+      actorId.value = 'actor-admin'
+      await flushPromises()
+      expect(credits.pendingOperations.value).toEqual([expect.objectContaining({ persisted: false })])
+      expect(await credits.retryPending(credits.pendingOperations.value[0]!.scope)).toBe('accepted')
+      expect(keyOf(1)).toBe(keyOf(0))
     } finally {
       broken.mockRestore()
     }
