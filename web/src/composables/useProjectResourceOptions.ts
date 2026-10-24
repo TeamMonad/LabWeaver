@@ -83,11 +83,13 @@ export function selectCurrentGpuRate(
   return selectCurrentGpuRateSelection(rates, entry, at).rate
 }
 
-/** A release option carries only the identity Resource needs to bind a Work request. */
+/** A release option carries only the identity Resource needs to bind an environment request. */
 export interface ProjectReleaseOption {
   id: string
   version: number
   runtimeKind: 'container' | 'virtual_machine'
+  /** `experiment` only appears for a course project; it creates the student's course experiment environment. */
+  purpose: 'work' | 'experiment'
   label: string
   source: 'control'
 }
@@ -201,14 +203,19 @@ export function useProjectResourceOptions(
     if (releaseResult.error) {
       releases.value = { kind: 'error', diagnostic: diagnostic(releaseResult.error, 'PROJECT_RELEASES_LOAD_FAILED', '加载已发布版本失败') }
     } else {
-      // Only Work releases create Work; course experiments are started from their course.
-      const items = releaseResult.items.filter(isWorkTemplate)
+      // Work releases create Work. A course project also offers the course
+      // experiment releases the server returned to this user, so a student
+      // can request the resources for their own experiment environment.
+      const projectCourseId = courseId.value ?? null
+      const items = releaseResult.items.filter((item) => isWorkTemplate(item)
+        || (projectCourseId !== null && item.purpose === 'experiment' && !item.withdrawal))
       releases.value = stateFromItems(
         items.map((item) => ({
           id: item.id,
           version: item.version,
           runtimeKind: item.runtimeKind,
-          label: `${workTemplateTitle(item)} · 发布于 ${formatTimestamp(item.publishedAt)}`,
+          purpose: item.purpose,
+          label: `${item.purpose === 'experiment' ? '课程实验 · ' : ''}${workTemplateTitle(item)} · 发布于 ${formatTimestamp(item.publishedAt)}`,
           source: 'control' as const,
         })),
       )

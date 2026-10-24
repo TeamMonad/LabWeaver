@@ -11,11 +11,10 @@ import { useEnvironmentSubmission } from '@/composables/useEnvironmentSubmission
 import { useProjects } from '@/composables/useProjects'
 import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import type { TimelineEvent } from '@/components/common/EventTimeline.vue'
-import type { ConsoleKind, EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import type { ConsoleKind, EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema } from '@/generated/contracts'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { accessGrantBlockReason, canIssueAccessGrant, operationTimelineDescription } from '@/utils/environmentLifecycle'
 import { grantIsUsable } from '@/utils/environmentConnection'
-import { idempotencyKey } from '@/utils/format'
 import { environmentOperationKindLabel, environmentOperationStateLabel } from '@/utils/stateLabels'
 
 export type EnvironmentEntryTab = 'overview' | 'terminal' | 'operations' | 'freeze'
@@ -41,7 +40,6 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
   )
   const environmentIdInput = ref(selectedEnvironmentId.value ?? '')
   const environmentToolsOpen = ref(false)
-  const createDiagnostic = ref<DiagnosticViewModel | null>(null)
   const createGrantDiagnostic = ref<DiagnosticViewModel | null>(null)
   const consoleSessionKey = ref(0)
 
@@ -79,17 +77,14 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     ? '查看项目环境'
     : isWorkConnection.value ? '返回 Work 列表' : '选择已有实验环境')
   const environmentEmptyHint = computed(() => teacherMode.value
-    ? '请从教师项目环境列表选择已有环境，或从上方创建环境。'
+    ? '请从教师项目环境列表选择已有环境。'
     : isWorkConnection.value
       ? '请在 Work 列表中选择已有 Work，或选择模板新建 Work。'
-      : '请从课程实验列表选择已有环境，或从上方已发布模板创建环境。')
+      : '请从“我的实验”选择已有环境；新环境需要先提交资源申请，审批通过后再进入。')
   const breadcrumbLabel = computed(() => teacherMode.value
     ? '教师项目环境'
     : isWorkConnection.value ? 'Work 环境' : '课程实验环境')
-  const environmentToolsLabel = computed(() => {
-    if (isWorkRoute.value) return environmentToolsOpen.value ? '收起切换' : '按环境 ID 切换'
-    return environmentToolsOpen.value ? '收起创建与切换' : '创建或切换环境'
-  })
+  const environmentToolsLabel = computed(() => environmentToolsOpen.value ? '收起切换' : '按环境 ID 切换')
 
   const releases = useEnvironmentTemplateReleases(projectId, courseId)
   const lifecycle = useEnvironmentLifecycle(projectId, courseId)
@@ -97,10 +92,9 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
   /**
    * Actions in the project the server checks: the open environment's own
    * project once it is loaded (the browser cannot substitute another one),
-   * otherwise the selected project for creating an environment.
+   * otherwise the selected project.
    */
   const permissions = useProjectAvailableActions(computed(() => instance.value?.projectId ?? projectId.value))
-  const canCreateEnvironment = computed(() => permissions.allows('edit'))
   const canIssueGrantForProject = computed(() => permissions.allows('grant_access'))
   const canCancelOperation = computed(() => permissions.allows('stop'))
   /** A 403 means the actor's project responsibility changed since the page read it. */
@@ -315,46 +309,6 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     router.replace({ query: { ...route.query, environmentId: id } })
   }
 
-  // ---- Create from a published release -----------------------------------
-
-  // One Idempotency-Key per create intent (release + user), kept across retries
-  // until the intent reaches a terminal outcome, so a timeout + retry replays the
-  // same create instead of minting a duplicate environment.
-  const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
-  const createIntentKey = ref<string | null>(null)
-  const createIntentReleaseId = ref<string | null>(null)
-
-  async function createFromRelease(release: EnvironmentTemplateReleaseViewSchema) {
-    if (!canCreateEnvironment.value) return
-    createDiagnostic.value = null
-    pendingRelease.value = release
-    if (createIntentReleaseId.value !== release.id || !createIntentKey.value) {
-      createIntentKey.value = idempotencyKey()
-      createIntentReleaseId.value = release.id
-    }
-    const intentKey = createIntentKey.value
-    lifecycle.operating.add(`create:${release.id}`)
-    try {
-      const result = await lifecycle.create({ releaseId: release.id, releaseVersion: release.version }, intentKey)
-      if (!result.ok) {
-        createDiagnostic.value = result.diagnostic
-        refreshPermissionsAfter(result.diagnostic)
-      } else {
-        createIntentKey.value = null
-        createIntentReleaseId.value = null
-        if (result.accepted?.environmentId) {
-          router.replace({ query: { ...route.query, environmentId: result.accepted.environmentId } })
-        }
-      }
-    } finally {
-      lifecycle.operating.delete(`create:${release.id}`)
-    }
-  }
-
-  function retryCreate() {
-    if (pendingRelease.value) createFromRelease(pendingRelease.value)
-  }
-
   // ---- Access grant and console ------------------------------------------
 
   function accessGrantRequestEnvironment(): EnvironmentDetailSchema | null {
@@ -424,7 +378,6 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     selectedEnvironmentId,
     environmentIdInput,
     environmentToolsOpen,
-    createDiagnostic,
     createGrantDiagnostic,
     consoleSessionKey,
     env,
@@ -444,7 +397,6 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     lifecycle,
     access,
     permissions,
-    canCreateEnvironment,
     canCancelOperation,
     canRequestAccessGrant,
     grantBlockReason,
@@ -465,8 +417,6 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     cancelCurrentOperation,
     syncEnvironmentToolsOpen,
     applyEnvironmentId,
-    createFromRelease,
-    retryCreate,
     issueAccessGrant,
     reconnectConsole,
     revokeAccessGrant,

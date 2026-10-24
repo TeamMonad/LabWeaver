@@ -60,13 +60,17 @@ function readableDiagnosticMessage(code: string, message: string): string {
     case 'LW_AGENT_CONFIGURATION_UNREADABLE':
       return '平台无法读取项目的 Agent 配置。'
     case 'LW_RUNTIME_LEASE_NOT_ACTIVE':
-      return '这个 Work 的资源使用授权已到期、被回收或尚未生效，不能继续启动、重启、恢复或升级。'
+      return '这个环境的资源使用授权已到期、被回收或尚未生效，不能继续创建、启动、重启、恢复或升级。'
+    case 'LW_ENVIRONMENT_ALLOCATION_PENDING':
+      return '资源申请已批准，平台正在分配资源并创建这个环境，环境还没有就绪。'
     case 'LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID':
       return '平台暂时无法核验这个 Work 的资源使用授权，本次操作没有执行。'
     case 'LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM':
       return '虚拟机 Work 不支持在原 Work 内升级模板：需要导出/导入流程，当前不可用。'
-    case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
+    case 'LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE':
       return '本版本暂不支持在原资金租约上升级模板。可以用新版本新建 Work，再自行迁移 /workspace 数据。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
+      return '目标版本的资源、网络、安全或入口配置与当前 Work 不同，需要重新申请资源，不能在原 Work 内升级。'
     default:
       return message
   }
@@ -76,11 +80,16 @@ function readableDiagnosticMessage(code: string, message: string): string {
 function codeNextStep(code: string): string | undefined {
   switch (code) {
     case 'LW_RUNTIME_LEASE_NOT_ACTIVE':
-      return '请提交新的资源申请；申请审批通过后，平台会创建一个新的 Work。'
+      return '请提交新的资源申请；申请审批通过后，平台会创建新的环境。'
+    case 'LW_ENVIRONMENT_ALLOCATION_PENDING':
+      return '请稍候片刻再点击“重试”；重试沿用同一请求，不会重复创建环境。'
     case 'LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID':
       return '请稍后重试；多次失败请把下方诊断信息发给管理员。'
     case 'LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM':
       return '如需使用新版本，请用新版本模板新建 Work，再自行把需要的数据迁移过去。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE':
+    case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
+      return '请用新版本模板新建 Work，迁移并检查数据后再释放原 Work。'
     default:
       return undefined
   }
