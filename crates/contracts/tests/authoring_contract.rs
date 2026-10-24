@@ -322,6 +322,72 @@ fn environment_spec_value(gpu: Option<Value>) -> Value {
 }
 
 #[test]
+fn runtime_permission_projection_covers_every_authority_bearing_field()
+-> Result<(), Box<dyn std::error::Error>> {
+    let original = environment_spec_value(None);
+    let spec: EnvironmentSpec = serde_json::from_value(original.clone())?;
+    let projection = serde_json::to_value(spec.permission_projection())?;
+    assert_eq!(
+        projection,
+        json!({
+            "class": original["class"], "resources": original["resources"],
+            "network": original["network"], "security": original["security"],
+            "entries": original["entries"], "runtime": {
+                "kind": "container", "provider_binding": "container-primary-v1", "service_port": 8080
+            }
+        })
+    );
+    for (path, value) in [
+        ("/class", json!("work")),
+        ("/resources/cpuMillicores", json!(2000)),
+        ("/resources/memoryBytes", json!(2_147_483_648_u64)),
+        ("/resources/storageBytes", json!(2_147_483_648_u64)),
+        ("/network", json!({"mode":"allow_all"})),
+        (
+            "/security/securityProfileBinding",
+            json!("restricted-other"),
+        ),
+        ("/entries/0/name", json!("other")),
+        ("/runtime/provider_binding", json!("container-other")),
+        ("/runtime/service_port", json!(8081)),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).ok_or("projection path")? = value;
+        if path == "/runtime/service_port" {
+            changed["entries"][0]["servicePort"] = json!(8081);
+        }
+        let changed: EnvironmentSpec = serde_json::from_value(changed)?;
+        assert_ne!(
+            serde_json::to_value(changed.permission_projection())?,
+            projection,
+            "{path}"
+        );
+    }
+    let gpu: EnvironmentSpec = serde_json::from_value(environment_spec_value(Some(
+        json!({"class":"a100-exclusive","count":1}),
+    )))?;
+    assert_ne!(
+        serde_json::to_value(gpu.permission_projection())?,
+        projection
+    );
+    for (path, value) in [
+        ("/name", json!("new software")),
+        ("/runtime/build_context/objectVersion", json!("new-context")),
+        ("/retention/policyRevision", json!(2)),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).ok_or("non-permission path")? = value;
+        let changed: EnvironmentSpec = serde_json::from_value(changed)?;
+        assert_eq!(
+            serde_json::to_value(changed.permission_projection())?,
+            projection,
+            "{path}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn environment_spec_gpu_is_optional_and_validated() -> Result<(), Box<dyn std::error::Error>> {
     let absent: EnvironmentSpec = serde_json::from_value(environment_spec_value(None))?;
     assert!(absent.resources.gpu.is_none());

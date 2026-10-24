@@ -6,6 +6,9 @@ use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::message::PublishMessage;
 use async_trait::async_trait;
+use contracts::access::{
+    AccessRevocationReason, AccessRevocationRequest, AccessRevocationResponse,
+};
 use contracts::authoring::EnvironmentClass;
 use contracts::environment::{
     EnvironmentCreateSpec, EnvironmentInstance, EnvironmentLeaseAuthorization,
@@ -225,17 +228,8 @@ impl NatsAccessRevoker {
         instance: &EnvironmentInstance,
         reason: &'static str,
     ) -> Result<Revision, NatsMessagingError> {
-        if !matches!(
-            reason,
-            "environment_stopped"
-                | "environment_restarted"
-                | "environment_reset"
-                | "environment_deleted"
-                | "environment_cancelled"
-                | "environment_expired"
-        ) {
-            return Err(NatsMessagingError::Configuration);
-        }
+        let reason =
+            AccessRevocationReason::parse(reason).ok_or(NatsMessagingError::Configuration)?;
         let request = AccessRevocationRequest {
             version: 1,
             environment_id: instance.id,
@@ -264,24 +258,6 @@ impl NatsAccessRevoker {
         }
         Ok(response.access_revocation_revision)
     }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AccessRevocationRequest {
-    version: u8,
-    environment_id: EnvironmentId,
-    environment_revision: Revision,
-    reason: &'static str,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AccessRevocationResponse {
-    version: u8,
-    environment_id: EnvironmentId,
-    environment_revision: Revision,
-    access_revocation_revision: Revision,
 }
 
 impl NatsEnvironmentProvider {

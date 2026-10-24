@@ -12,6 +12,10 @@ use async_trait::async_trait;
 use auth::{
     ServiceAuthConfig, ServiceTokenVerifier, TransportSecurityMode, no_redirect_http_client,
 };
+use contracts::access::{
+    ACCESS_REVOCATION_SUBJECT, AccessRevocationReason, AccessRevocationRequest,
+    AccessRevocationResponse,
+};
 use contracts::authoring::EnvironmentClass;
 use contracts::environment::{
     EnvironmentInstance, EnvironmentLeaseAuthorization, EnvironmentLeaseState,
@@ -35,7 +39,6 @@ use environment_service::{
     WorkAdmissionResolver, environment_api_router, with_service_auth,
 };
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     collections::BTreeSet,
@@ -74,47 +77,8 @@ const LEASE_REJECTIONS: &[LeaseCase] = &[
     (9, reqwest::StatusCode::SERVICE_UNAVAILABLE, INVALID_CODE),
     (10, reqwest::StatusCode::SERVICE_UNAVAILABLE, INVALID_CODE),
 ];
-const REVOKE_SUBJECT: &str = "labweaver.access.environment.revoke.v1";
 const LEASE_SUBJECT: &str = "labweaver.resource.lease.verify.v1";
 const QUARANTINE_SUBJECT: &str = "private.environment.command.quarantine.v1";
-
-// These six wire values are the receiver's allowlist in
-// services/access-service/src/grants.rs:1666-1676 (valid_environment_revocation_request).
-// Access and Environment currently retain separate private DTOs/lists, not a shared contracts DTO.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum AccessReason {
-    #[serde(rename = "environment_stopped")]
-    Stopped,
-    #[serde(rename = "environment_restarted")]
-    Restarted,
-    #[serde(rename = "environment_reset")]
-    Reset,
-    #[serde(rename = "environment_deleted")]
-    Deleted,
-    #[serde(rename = "environment_cancelled")]
-    Cancelled,
-    #[serde(rename = "environment_expired")]
-    Expired,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RevokeRequest {
-    version: u8,
-    environment_id: EnvironmentId,
-    environment_revision: Revision,
-    reason: AccessReason,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RevokeResponse {
-    version: u8,
-    environment_id: EnvironmentId,
-    environment_revision: Revision,
-    access_revocation_revision: Revision,
-}
 
 #[derive(Default)]
 struct Peers {
@@ -122,7 +86,7 @@ struct Peers {
     lease_mode: AtomicU8,
     revocations: AtomicUsize,
     lease_queries: AtomicUsize,
-    reasons: Mutex<Vec<AccessReason>>,
+    reasons: Mutex<Vec<AccessRevocationReason>>,
 }
 
 struct Tasks(Vec<tokio::task::AbortHandle>);
@@ -306,7 +270,7 @@ async fn spawn_peers(
     peers: Arc<Peers>,
     tasks: &mut Tasks,
 ) -> TestResult {
-    let mut revocations = client.subscribe(REVOKE_SUBJECT).await?;
+    let mut revocations = client.subscribe(ACCESS_REVOCATION_SUBJECT).await?;
     let mut leases = client.subscribe(LEASE_SUBJECT).await?;
     client.flush().await?;
     let responder = client.clone();
@@ -314,7 +278,7 @@ async fn spawn_peers(
     let revoke_id = authorization.environment_id;
     tasks.track(tokio::spawn(async move {
         while let Some(message) = revocations.next().await {
-            let request: RevokeRequest = contracts::parse_strict_json(&message.payload)?;
+            let request: AccessRevocationRequest = contracts::parse_strict_json(&message.payload)?;
             assert_eq!(request.version, 1);
             assert_eq!(request.environment_id, revoke_id);
             revoke_peers.reasons.lock().await.push(request.reason);
@@ -323,7 +287,7 @@ async fn spawn_peers(
                 continue;
             }
             let reply = message.reply.ok_or("revocation reply missing")?;
-            let response = RevokeResponse {
+            let response = AccessRevocationResponse {
                 version: 1,
                 environment_id: request.environment_id,
                 environment_revision: request.environment_revision,
@@ -698,7 +662,7 @@ async fn serve_authenticated_api(
         store.clone(),
         releases.clone(),
         NatsAccessRevoker::new(
-            REVOKE_SUBJECT.to_owned(),
+            ACCESS_REVOCATION_SUBJECT.to_owned(),
             client.clone(),
             Duration::from_millis(200),
         )?,
@@ -725,9 +689,8 @@ async fn serve_authenticated_api(
     Ok((authority, base, token))
 }
 
-// A pre-existing running Work is data for the C-stage entry guard, not evidence of
-// a new Resource authorization. The real funded startup path lives in Control's
-// environment_funded_handoff journey; this fixture never fabricates that authority.
+// This fixture deliberately lacks Resource runtime authority. The real funded startup and
+// compatible upgrade journey lives in Control's environment_funded_handoff tests.
 async fn seed_existing_running_work(
     store: &PgEnvironmentStore,
     releases: &PgReleaseProjectionStore,
@@ -793,7 +756,7 @@ async fn drive_state(
 }
 
 #[tokio::test]
-async fn authenticated_http_original_lease_upgrade_is_rejected_without_side_effects() -> TestResult
+async fn authenticated_http_upgrade_requires_runtime_authority_without_side_effects() -> TestResult
 {
     let harness = Box::pin(Harness::start()).await?;
     let original = harness.backend.installed.lock().await.clone();
@@ -802,16 +765,11 @@ async fn authenticated_http_original_lease_upgrade_is_rejected_without_side_effe
     assert_eq!(anonymous.status(), reqwest::StatusCode::UNAUTHORIZED);
     for key in ["http-upgrade-c", "http-upgrade-c", "http-upgrade-c-new-key"] {
         let response = harness.upgrade(key, true).await?;
-        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
         let problem: serde_json::Value = response.json().await?;
         assert_eq!(
             problem["diagnosticCode"],
-            "LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE"
-        );
-        assert!(
-            problem["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("新建 Work") && detail.contains("迁移"))
+            "LW_RUNTIME_AUTHORITY_UNAVAILABLE"
         );
         assert_eq!(harness.store.load(harness.ready.id).await?, harness.ready);
         assert_eq!(database_counts(&harness.pool).await?, counts);
@@ -970,8 +928,7 @@ async fn assert_lease_rejection(
 }
 
 #[tokio::test]
-async fn authenticated_http_work_operations_require_runtime_authority_or_reject_upgrade()
--> TestResult {
+async fn authenticated_http_work_operations_require_runtime_authority() -> TestResult {
     for operation in [
         "start",
         "restart",
@@ -1000,19 +957,11 @@ async fn authenticated_http_work_operations_require_runtime_authority_or_reject_
             })?),
             _ => None,
         };
-        let case = if operation == "template-upgrade" {
-            (
-                0,
-                reqwest::StatusCode::CONFLICT,
-                "LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE",
-            )
-        } else {
-            (
-                0,
-                reqwest::StatusCode::SERVICE_UNAVAILABLE,
-                "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
-            )
-        };
+        let case = (
+            0,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
+        );
         assert_lease_rejection(&harness, &route, body.as_ref(), &harness.token, case).await?;
     }
     Ok(())

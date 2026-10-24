@@ -126,20 +126,39 @@ pub(crate) async fn current_inputs(
             .await
             .map_err(|_| RuntimeBindingError::Unavailable)?;
     let status = serde_json::from_value(value).map_err(|_| RuntimeBindingError::Unavailable)?;
-    let identity = RuntimeConfigurationIdentity {
-        authoring_project_id: release.project_id,
-        course_id: release.course_id,
-        release_id: release.id,
-        release_version: release.version,
-        configuration_sha256,
-        authoring_approval_id: approval.as_ref().map(|approval| approval.id),
-        teacher_scope: approval.and_then(|approval| approval.teacher_scope),
-    };
+    let identity = configuration_identity(&release, spec, configuration_sha256, approval)?;
     let spec = match release.manual_approval {
         Some(manual) => manual.spec,
         None => candidate.ok_or(RuntimeBindingError::ScopeDenied)?.spec,
     };
     Ok((identity, spec, status))
+}
+
+fn configuration_identity(
+    release: &EnvironmentTemplateRelease,
+    spec: &EnvironmentSpec,
+    configuration_sha256: String,
+    approval: Option<AuthoringApproval>,
+) -> Result<RuntimeConfigurationIdentity, RuntimeBindingError> {
+    Ok(RuntimeConfigurationIdentity {
+        authoring_project_id: release.project_id,
+        course_id: release.course_id,
+        release_id: release.id,
+        release_version: release.version,
+        configuration_sha256,
+        permission_projection_sha256: Some(
+            Sha256Digest::of_canonical(&spec.permission_projection())
+                .map_err(|_| RuntimeBindingError::Unavailable)?
+                .to_string(),
+        ),
+        template_family_id: Some(
+            release
+                .template_family_id()
+                .ok_or(RuntimeBindingError::ScopeDenied)?,
+        ),
+        authoring_approval_id: approval.as_ref().map(|approval| approval.id),
+        teacher_scope: approval.and_then(|approval| approval.teacher_scope),
+    })
 }
 
 fn release_spec<'a>(

@@ -2832,9 +2832,14 @@ export type RuntimeConfigurationIdentity = {
     authoringProjectId: EnvironmentDetailSchemaProjectId;
     configurationSha256: string;
     courseId?: EnvironmentDetailSchemaCourseId | null;
+    /**
+     * Absent only on pre-cutover approvals; never authorizes a new compute effect.
+     */
+    permissionProjectionSha256?: string | null;
     releaseId: EnvironmentDetailSchemaReleaseId;
     releaseVersion: number;
     teacherScope?: EnvironmentDetailSchemaCourseTeacherApprovalScope | null;
+    templateFamilyId?: string | null;
 };
 
 /**
@@ -3290,9 +3295,14 @@ export type EnvironmentInstanceSchemaRuntimeConfigurationIdentity = {
     authoringProjectId: EnvironmentInstanceSchemaProjectId;
     configurationSha256: string;
     courseId?: EnvironmentInstanceSchemaCourseId | null;
+    /**
+     * Absent only on pre-cutover approvals; never authorizes a new compute effect.
+     */
+    permissionProjectionSha256?: string | null;
     releaseId: EnvironmentInstanceSchemaReleaseId;
     releaseVersion: number;
     teacherScope?: EnvironmentInstanceSchemaCourseTeacherApprovalScope | null;
+    templateFamilyId?: string | null;
 };
 
 /**
@@ -13733,9 +13743,14 @@ export type RuntimeAuthorizationBindingSchemaRuntimeConfigurationIdentity = {
     authoringProjectId: RuntimeAuthorizationBindingSchemaProjectId;
     configurationSha256: string;
     courseId?: RuntimeAuthorizationBindingSchemaCourseId | null;
+    /**
+     * Absent only on pre-cutover approvals; never authorizes a new compute effect.
+     */
+    permissionProjectionSha256?: string | null;
     releaseId: RuntimeAuthorizationBindingSchemaReleaseId;
     releaseVersion: number;
     teacherScope?: RuntimeAuthorizationBindingSchemaCourseTeacherApprovalScope | null;
+    templateFamilyId?: string | null;
 };
 
 export type RuntimeAuthorizationBindingSchemaRuntimePreauthorization = {

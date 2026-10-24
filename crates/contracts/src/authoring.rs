@@ -646,6 +646,54 @@ pub struct EnvironmentSpec {
     pub retention: RetentionSnapshot,
 }
 
+impl EnvironmentSpec {
+    /// Adding a spec field requires an explicit permission classification here.
+    #[must_use]
+    pub fn permission_projection(
+        &self,
+    ) -> crate::runtime_authorization::RuntimePermissionProjection<'_> {
+        let Self {
+            api_version: _,
+            kind: _,
+            name: _,
+            class,
+            resources,
+            network,
+            entries,
+            security,
+            runtime,
+            retention: _,
+        } = self;
+        let runtime = match runtime {
+            EnvironmentRuntimeSpec::Container {
+                provider_binding,
+                service_port,
+                build_context: _,
+                terminal: _,
+            } => crate::runtime_authorization::RuntimePermissionProjectionKind::Container {
+                provider_binding,
+                service_port: *service_port,
+            },
+            EnvironmentRuntimeSpec::VirtualMachine {
+                provider_binding: _,
+                base_disk: _,
+                storage_class_binding: _,
+                ssh_port: _,
+            } => crate::runtime_authorization::RuntimePermissionProjectionKind::VirtualMachine {
+                runtime,
+            },
+        };
+        crate::runtime_authorization::RuntimePermissionProjection {
+            class: *class,
+            resources,
+            network,
+            security,
+            entries,
+            runtime,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EnvironmentSpecWire {

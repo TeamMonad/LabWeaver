@@ -14,6 +14,65 @@ use crate::{
     SshPublicKeyId, UtcTimestamp,
 };
 
+pub const ACCESS_REVOCATION_SUBJECT: &str = "labweaver.service.access.revoke.v1";
+
+/// Synchronous owner-to-Access revocation wire, outside the persisted event stream.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessRevocationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub environment_revision: Revision,
+    pub reason: AccessRevocationReason,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessRevocationReason {
+    EnvironmentStopped,
+    EnvironmentRestarted,
+    EnvironmentReset,
+    EnvironmentDeleted,
+    EnvironmentCancelled,
+    EnvironmentExpired,
+}
+
+impl AccessRevocationReason {
+    #[must_use]
+    pub fn parse(reason: &str) -> Option<Self> {
+        match reason {
+            "environment_stopped" => Some(Self::EnvironmentStopped),
+            "environment_restarted" => Some(Self::EnvironmentRestarted),
+            "environment_reset" => Some(Self::EnvironmentReset),
+            "environment_deleted" => Some(Self::EnvironmentDeleted),
+            "environment_cancelled" => Some(Self::EnvironmentCancelled),
+            "environment_expired" => Some(Self::EnvironmentExpired),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EnvironmentStopped => "environment_stopped",
+            Self::EnvironmentRestarted => "environment_restarted",
+            Self::EnvironmentReset => "environment_reset",
+            Self::EnvironmentDeleted => "environment_deleted",
+            Self::EnvironmentCancelled => "environment_cancelled",
+            Self::EnvironmentExpired => "environment_expired",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessRevocationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub environment_revision: Revision,
+    pub access_revocation_revision: Revision,
+}
+
 /// Public-key algorithm frozen by the v1 Access contract.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

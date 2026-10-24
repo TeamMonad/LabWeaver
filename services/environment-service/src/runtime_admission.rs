@@ -117,8 +117,14 @@ impl EnvironmentRuntimeAdmission {
         {
             return Err(RuntimeAdmissionError::Binding);
         }
-        let digest = Sha256Digest::of_canonical(&release.projection.environment_spec)
-            .map_err(|_| RuntimeAdmissionError::Binding)?;
+        let digest = if release.projection.environment_spec.class
+            == contracts::authoring::EnvironmentClass::Work
+        {
+            Sha256Digest::of_canonical(&release.projection.environment_spec.permission_projection())
+        } else {
+            Sha256Digest::of_canonical(&release.projection.environment_spec)
+        }
+        .map_err(|_| RuntimeAdmissionError::Binding)?;
         resolution
             .validate_for(
                 request,
@@ -152,6 +158,16 @@ impl EnvironmentRuntimeAdmission {
         &self,
         instance: &EnvironmentInstance,
     ) -> Result<EnvironmentRuntimeAuthorizationResolution, RuntimeAdmissionError> {
+        self.for_release(instance, instance.release_id, instance.release_version)
+            .await
+    }
+
+    pub async fn for_release(
+        &self,
+        instance: &EnvironmentInstance,
+        release_id: contracts::ReleaseId,
+        release_version: u64,
+    ) -> Result<EnvironmentRuntimeAuthorizationResolution, RuntimeAdmissionError> {
         if !instance.has_resource_lease() {
             return Err(RuntimeAdmissionError::AllocationPathUnsupported);
         }
@@ -174,8 +190,8 @@ impl EnvironmentRuntimeAdmission {
             project_id: instance.project_id,
             course_id: instance.course_id,
             owner_actor_id: instance.owner_id,
-            release_id: instance.release_id,
-            release_version: instance.release_version,
+            release_id,
+            release_version,
         })
         .await
     }

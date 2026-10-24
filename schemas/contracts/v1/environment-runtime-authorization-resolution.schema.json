@@ -397,6 +397,14 @@
             }
           ]
         },
+        "permissionProjectionSha256": {
+          "default": null,
+          "description": "Absent only on pre-cutover approvals; never authorizes a new compute effect.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "releaseId": {
           "$ref": "#/$defs/ReleaseId"
         },
@@ -413,6 +421,13 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "templateFamilyId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
           ]
         }
       },

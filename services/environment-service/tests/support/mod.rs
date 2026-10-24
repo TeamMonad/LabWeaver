@@ -363,6 +363,14 @@ pub fn runtime_receipt(
                 )
                 .unwrap_or_else(|e| panic!("synthetic SHA: {e}"))
                 .to_string(),
+                permission_projection_sha256: Some(
+                    persistence_sqlx::Sha256Digest::of_canonical(
+                        &projection.environment_spec.permission_projection(),
+                    )
+                    .unwrap_or_else(|e| panic!("synthetic SHA: {e}"))
+                    .to_string(),
+                ),
+                template_family_id: projection.release.template_family_id(),
                 authoring_approval_id: None,
                 teacher_scope: None,
             },

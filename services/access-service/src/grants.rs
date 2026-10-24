@@ -10,11 +10,12 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use contracts::{
-    AccessGrantId, ActorId, ConsoleSessionId, CourseId, EndpointGrantId, EndpointId, EnvironmentId,
-    EventId, GatewaySessionId, PlatformRole, ProjectId, Revision, Sequence, SshPublicKeyId,
-    StreamSequence, UtcTimestamp,
+    AccessGrantId, ActorId, ConsoleSessionId, CourseId, EndpointGrantId, EndpointId, EventId,
+    GatewaySessionId, PlatformRole, ProjectId, Revision, Sequence, SshPublicKeyId, StreamSequence,
+    UtcTimestamp,
     access::{
-        AccessGrant, AccessGrantSnapshot, AccessGrantState, AuthorizationDecision,
+        ACCESS_REVOCATION_SUBJECT, AccessGrant, AccessGrantSnapshot, AccessGrantState,
+        AccessRevocationRequest, AccessRevocationResponse, AuthorizationDecision,
         AuthorizationDecisionSummary, CloseGatewaySessionRequest, CreateGatewaySessionRequest,
         EndpointAction, EndpointGrant, EndpointGrantSnapshot, EndpointGrantSnapshotState,
         GatewaySession, GatewaySessionState, HeartbeatGatewaySessionRequest, SshAuthorization,
@@ -51,28 +52,6 @@ use super::{
 
 const TERMINATION_SECONDS: i64 =
     contracts::object_authorization::MEMBER_REVOCATION_BOUND_SECONDS.cast_signed();
-// This request/reply subject deliberately sits outside the persisted
-// `labweaver.access.>` event stream. Otherwise JetStream's PubAck races the
-// authoritative Access response and the caller can observe the wrong payload.
-const ACCESS_REVOCATION_SUBJECT: &str = "labweaver.service.access.revoke.v1";
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EnvironmentAccessRevocationRequest {
-    version: u8,
-    environment_id: EnvironmentId,
-    environment_revision: Revision,
-    reason: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EnvironmentAccessRevocationResponse {
-    version: u8,
-    environment_id: EnvironmentId,
-    environment_revision: Revision,
-    access_revocation_revision: Revision,
-}
 
 fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
     contracts::parse_strict_json(body)
@@ -1496,24 +1475,23 @@ pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), Gra
             );
             continue;
         };
-        let request = match contracts::parse_strict_json::<EnvironmentAccessRevocationRequest>(
-            &message.payload,
-        ) {
-            Ok(request) if valid_environment_revocation_request(&request) => request,
-            _ => {
-                tracing::warn!(
-                    event = "access.environment_revocation.request_rejected",
-                    diagnostic = "LW_ACCESS_REVOCATION_REQUEST_INVALID"
-                );
-                continue;
-            }
-        };
+        let request =
+            match contracts::parse_strict_json::<AccessRevocationRequest>(&message.payload) {
+                Ok(request) if request.version == 1 => request,
+                _ => {
+                    tracing::warn!(
+                        event = "access.environment_revocation.request_rejected",
+                        diagnostic = "LW_ACCESS_REVOCATION_REQUEST_INVALID"
+                    );
+                    continue;
+                }
+            };
         let access_revocation_revision = revoke_environment_grants(&state.pool, &request).await?;
         state
             .console_registry
             .cancel_environment(request.environment_id)
             .await;
-        let response = EnvironmentAccessRevocationResponse {
+        let response = AccessRevocationResponse {
             version: 1,
             environment_id: request.environment_id,
             environment_revision: request.environment_revision,
@@ -1530,7 +1508,7 @@ pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), Gra
             environment_id = %request.environment_id,
             environment_revision = request.environment_revision.get(),
             access_revocation_revision = access_revocation_revision.get(),
-            reason = request.reason
+            reason = request.reason.as_str()
         );
     }
     Err(GrantRuntimeError::NatsSubscribe)
@@ -1663,22 +1641,9 @@ fn classify_environment_sequence(previous: Option<i64>, sequence: i64) -> Enviro
     }
 }
 
-fn valid_environment_revocation_request(request: &EnvironmentAccessRevocationRequest) -> bool {
-    request.version == 1
-        && matches!(
-            request.reason.as_str(),
-            "environment_stopped"
-                | "environment_restarted"
-                | "environment_reset"
-                | "environment_deleted"
-                | "environment_cancelled"
-                | "environment_expired"
-        )
-}
-
 async fn revoke_environment_grants(
     pool: &PgPool,
-    request: &EnvironmentAccessRevocationRequest,
+    request: &AccessRevocationRequest,
 ) -> Result<Revision, GrantRuntimeError> {
     let now = OffsetDateTime::now_utc();
     let terminate_by = now + time::Duration::seconds(TERMINATION_SECONDS);
@@ -1690,7 +1655,7 @@ async fn revoke_environment_grants(
     )
     .bind(request.environment_id.as_uuid())
     .bind(now)
-    .bind(&request.reason)
+    .bind(request.reason.as_str())
     .fetch_all(&mut *transaction)
     .await?;
     for row in rows {
@@ -3362,26 +3327,24 @@ mod tests {
 
     #[test]
     fn environment_revocation_request_is_strict_and_reason_bounded() {
-        let valid: EnvironmentAccessRevocationRequest = contracts::parse_strict_json(
+        let valid: AccessRevocationRequest = contracts::parse_strict_json(
             br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_deleted"}"#,
         )
         .expect("valid revocation request");
-        assert!(valid_environment_revocation_request(&valid));
+        assert_eq!(valid.version, 1);
 
-        let reset: EnvironmentAccessRevocationRequest = contracts::parse_strict_json(
+        let reset: AccessRevocationRequest = contracts::parse_strict_json(
             br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_reset"}"#,
         )
         .expect("valid reset revocation request");
-        assert!(valid_environment_revocation_request(&reset));
+        assert_eq!(reset.version, 1);
 
-        let unsupported: EnvironmentAccessRevocationRequest = contracts::parse_strict_json(
+        assert!(contracts::parse_strict_json::<AccessRevocationRequest>(
             br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"arbitrary"}"#,
-        )
-        .expect("structurally valid request");
-        assert!(!valid_environment_revocation_request(&unsupported));
+        ).is_err());
 
         assert!(
-            contracts::parse_strict_json::<EnvironmentAccessRevocationRequest>(
+            contracts::parse_strict_json::<AccessRevocationRequest>(
                 br#"{"version":1,"environmentId":"00000000-0000-7000-8000-000000000101","environmentRevision":4,"reason":"environment_deleted","extra":true}"#,
             )
             .is_err()

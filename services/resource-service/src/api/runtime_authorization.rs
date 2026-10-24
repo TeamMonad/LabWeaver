@@ -63,6 +63,9 @@ pub(super) fn detail(error: &crate::runtime_authorization::RuntimeBindingError) 
             "当前账号没有该项目或课程所需的权限，请联系成员管理者。"
         }
         RuntimeBindingError::Authorization(reason) => match reason {
+            RuntimeAuthorizationError::ReapprovalRequired => {
+                "旧资源批准没有权限投影，不能用于升级或新的运行操作。请重新提交资源申请；原 Work 与数据未更改。"
+            }
             RuntimeAuthorizationError::PolicyNotVerified => {
                 "平台运行配置尚未完成验证，请等待配置验证或联系管理员。停止和恢复入口仍可使用。"
             }
