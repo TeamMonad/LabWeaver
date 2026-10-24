@@ -174,6 +174,12 @@ pub struct GatewayState {
     pub http: reqwest::Client,
     pub authorization: crate::model_input_authorization::GatewayInputAuthorization,
 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ZeroSettlementReconciliation {
+    pub succeeded: u64,
+    pub failed: u64,
+}
+
 impl GatewayState {
     pub fn router(self) -> Router {
         Router::new()
@@ -242,18 +248,47 @@ impl GatewayState {
     /// Replays only durable, confirmed no-send observations; never infers zero from an unknown call.
     pub async fn reconcile_pending_zero_settlements(
         &self,
-    ) -> Result<u64, GatewayReconciliationError> {
-        let keys: Vec<String> = sqlx::query_scalar("SELECT idempotency_key FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND state='in_progress' AND result ? 'knownZero' ORDER BY created_at,idempotency_key LIMIT 100")
-            .fetch_all(&self.pool).await?;
-        let mut completed = 0;
+    ) -> Result<ZeroSettlementReconciliation, GatewayReconciliationError> {
+        self.reconcile_zero_batch(100).await
+    }
+
+    async fn reconcile_zero_batch(
+        &self,
+        limit: u32,
+    ) -> Result<ZeroSettlementReconciliation, GatewayReconciliationError> {
+        let keys: Vec<String> = sqlx::query_scalar("SELECT idempotency_key FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND state='in_progress' AND result ? 'knownZero' AND COALESCE((result#>>'{zeroRetry,nextAttemptAt}')::timestamptz,'-infinity'::timestamptz)<=clock_timestamp() ORDER BY (result#>>'{zeroRetry,lastAttemptAt}')::timestamptz NULLS FIRST,created_at,idempotency_key LIMIT $1")
+            .bind(i64::from(limit)).fetch_all(&self.pool).await?;
+        let mut outcome = ZeroSettlementReconciliation::default();
         for key in keys {
-            let call_id = Uuid::parse_str(&key)
-                .map_err(|_| GatewayReconciliationError::InvalidObservation)?;
-            if self.reconcile_zero_call(call_id).await? {
-                completed += 1;
+            let result = match Uuid::parse_str(&key) {
+                Ok(call_id) => self.reconcile_zero_call(call_id).await,
+                Err(_) => Err(GatewayReconciliationError::InvalidObservation),
+            };
+            match result {
+                Ok(true) => outcome.succeeded += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    outcome.failed += 1;
+                    tracing::warn!(event="agent.model.zero_settlement_retry",call_id=key.as_str(),error=%error,"confirmed zero observation retained; continuing reconciliation batch");
+                    if let Err(error) = self.defer_zero_retry(&key, &error).await {
+                        tracing::warn!(event="agent.model.zero_retry_schedule_failed",call_id=key.as_str(),error=%error,"pending zero observation retained; continuing reconciliation batch");
+                    }
+                }
             }
         }
-        Ok(completed)
+        Ok(outcome)
+    }
+
+    async fn defer_zero_retry(
+        &self,
+        key: &str,
+        error: &GatewayReconciliationError,
+    ) -> Result<(), sqlx::Error> {
+        // Metadata lives beside, never replaces, the immutable knownZero payload. Backoff is
+        // 10/20/40/80/160/300 seconds and capped; unattempted work sorts ahead of retries.
+        sqlx::query("UPDATE agent.idempotency_ledger SET result=result||jsonb_build_object('zeroRetry',jsonb_build_object('attempts',LEAST(COALESCE((result#>>'{zeroRetry,attempts}')::integer,0),15)+1,'lastAttemptAt',clock_timestamp(),'nextAttemptAt',clock_timestamp()+LEAST(10.0*power(2.0,LEAST(COALESCE((result#>>'{zeroRetry,attempts}')::integer,0),5)),300.0)*interval '1 second','lastError',$2::text)) WHERE operation='model_gateway_call' AND idempotency_key=$1 AND state='in_progress' AND result ? 'knownZero'")
+            .bind(key).bind(error.to_string()).execute(&self.pool).await?;
+        Ok(())
     }
 
     async fn reconcile_zero_call(&self, call_id: Uuid) -> Result<bool, GatewayReconciliationError> {
@@ -282,8 +317,8 @@ impl GatewayState {
             .settle_model_cost(request.hold_id, &request)
             .await?;
         // A lost Resource response or a failed Agent update replays the same stable eventId.
-        sqlx::query("UPDATE agent.idempotency_ledger SET state='completed',completed_at=clock_timestamp() WHERE operation='model_gateway_call' AND idempotency_key=$1 AND state='in_progress' AND result=$2")
-            .bind(call_id.to_string()).bind(result).execute(&self.pool).await?;
+        sqlx::query("UPDATE agent.idempotency_ledger SET state='completed',completed_at=clock_timestamp() WHERE operation='model_gateway_call' AND idempotency_key=$1 AND state='in_progress' AND result->'knownZero'=$2")
+            .bind(call_id.to_string()).bind(observation).execute(&self.pool).await?;
         Ok(true)
     }
 
@@ -305,7 +340,7 @@ impl GatewayState {
             hold_id, call_id, event_id, model_binding:model.to_owned(),
             measurement:ModelUsageMeasurement::Known {quantities:ModelTokenQuantities::default()},
         }});
-        let recorded = sqlx::query("UPDATE agent.idempotency_ledger SET result=$2 WHERE operation='model_gateway_call' AND idempotency_key=$1 AND state='in_progress' AND (result IS NULL OR result=$2)")
+        let recorded = sqlx::query("UPDATE agent.idempotency_ledger SET result=COALESCE(result,'{}'::jsonb)||$2 WHERE operation='model_gateway_call' AND idempotency_key=$1 AND state='in_progress' AND (result IS NULL OR result->'knownZero'=$2->'knownZero')")
             .bind(call_id.to_string()).bind(observation).execute(&self.pool).await;
         if !matches!(recorded, Ok(result) if result.rows_affected()==1) {
             return error_response(
@@ -993,6 +1028,175 @@ async fn authorize_tool(
 
 #[cfg(test)]
 #[tokio::test]
+async fn failing_project_does_not_block_other_zero_settlements()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_zero_reconciliation_progress(1, 100).await
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn failed_zero_settlements_cannot_fill_every_batch() -> Result<(), Box<dyn std::error::Error>>
+{
+    exercise_zero_reconciliation_progress(3, 2).await
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "native cross-project accounting, permanent PG fault and bounded retry form one scenario"
+)]
+async fn exercise_zero_reconciliation_progress(
+    failed_records: u32,
+    batch_size: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use contracts::resource::FixedDecimal;
+    use testcontainers::{ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::postgres::Postgres;
+    let pg = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(12)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            pg.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    let billing = build_billing::BuildBillingFixture::start(pool.clone()).await?;
+    model_authorization::apply(&pool, persistence_sqlx::Domain::Agent).await?;
+    let authority =
+        model_authorization::ModelAuthorizationFixture::start(pool.clone(), &billing).await?;
+    billing
+        .model_tariffs(authority.project, "failing-model", true)
+        .await?;
+    let healthy_project = contracts::ProjectId::new();
+    billing
+        .model_tariffs(healthy_project, "healthy-model", true)
+        .await?;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = calls.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream: Url = format!("http://{}/", listener.local_addr()?).parse()?;
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            Router::new().route(
+                "/v1/messages",
+                post(move || async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::Json(json!({"type":"message","stop_reason":"end_turn"}))
+                }),
+            ),
+        )
+        .await;
+    });
+    let state = GatewayState {
+        upstream,
+        upstream_key: "provider-key".to_owned(),
+        issuer: ScopedTokenIssuer::new(vec![9; 32], Duration::from_hours(24)).ok_or("signer")?,
+        pool: pool.clone(),
+        resource: billing.client.clone(),
+        http: reqwest::Client::new(),
+        authorization: authority.authorization.clone(),
+    };
+    for index in 0..=failed_records {
+        let (project, model) = if index == failed_records {
+            (healthy_project, "healthy-model")
+        } else {
+            (authority.project, "failing-model")
+        };
+        let call_id = Uuid::now_v7();
+        let admission = billing
+            .client
+            .admit_model_cost(
+                &call_id.to_string(),
+                &ModelCostAdmissionRequest {
+                    call_id,
+                    project_id: project,
+                    model_binding: model.to_owned(),
+                },
+            )
+            .await?;
+        let observation = json!({"knownZero":ModelCostSettlementRequest {hold_id:admission.hold.id,call_id,event_id:zero_settlement_event(call_id)?,model_binding:model.to_owned(),measurement:ModelUsageMeasurement::Known {quantities:ModelTokenQuantities::default()}}});
+        // Seed only durable no-send facts, with real holds created through the Resource TLS API.
+        sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state,result) VALUES('model_gateway_call',$1,$2,'in_progress',$3)")
+            .bind(call_id.to_string()).bind("f".repeat(64)).bind(observation).execute(&pool).await?;
+    }
+    let fault = format!(
+        "CREATE FUNCTION resource.test_project_zero_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM resource.credit_holds WHERE hold_id=NEW.hold_id AND project_id='{}'::uuid) THEN RAISE EXCEPTION 'isolated persistent project zero-settlement failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER test_project_zero_failure BEFORE INSERT ON resource.model_cost_observations FOR EACH ROW WHEN (NEW.contract->'measurement'->>'state'='known') EXECUTE FUNCTION resource.test_project_zero_failure();",
+        authority.project
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(&*fault))
+        .execute(&pool)
+        .await?;
+    let mut succeeded = 0;
+    let mut failed = 0;
+    for _ in 0..=failed_records / batch_size {
+        let outcome = state.reconcile_zero_batch(batch_size).await?;
+        succeeded += outcome.succeeded;
+        failed += outcome.failed;
+    }
+    assert_eq!(succeeded, 1);
+    assert_eq!(failed, u64::from(failed_records));
+    let healthy = billing.credits.account(healthy_project).await?;
+    assert_eq!(healthy.reserved, FixedDecimal::zero());
+    assert_eq!(healthy.spent, FixedDecimal::zero());
+    assert!(billing.credits.account(authority.project).await?.reserved > FixedDecimal::zero());
+    assert_eq!(
+        billing.credits.account(authority.project).await?.spent,
+        FixedDecimal::zero()
+    );
+    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND state='in_progress' AND result ? 'knownZero' AND result#>>'{zeroRetry,attempts}'='1' AND result#>>'{zeroRetry,lastError}'='LW_MODEL_ZERO_SETTLEMENT_UNAVAILABLE' AND (result#>>'{zeroRetry,nextAttemptAt}')::timestamptz-(result#>>'{zeroRetry,lastAttemptAt}')::timestamptz BETWEEN interval '10 seconds' AND interval '11 seconds'").fetch_one(&pool).await?;
+    assert_eq!(pending, i64::from(failed_records));
+    // A different gateway also honors persisted backoff. Advance only the scheduling metadata
+    // to exercise the cap without sleeps; the failed project's native PG fault remains active.
+    sqlx::query("UPDATE agent.idempotency_ledger SET result=jsonb_set(jsonb_set(result,'{zeroRetry,attempts}','15'::jsonb),'{zeroRetry,nextAttemptAt}',to_jsonb(clock_timestamp()-interval '1 second')) WHERE operation='model_gateway_call' AND state='in_progress' AND result ? 'knownZero'").execute(&pool).await?;
+    let restarted = state.clone();
+    assert_eq!(
+        restarted.reconcile_pending_zero_settlements().await?,
+        ZeroSettlementReconciliation {
+            succeeded: 0,
+            failed: u64::from(failed_records)
+        }
+    );
+    let capped: i64 = sqlx::query_scalar("SELECT count(*) FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND state='in_progress' AND result ? 'knownZero' AND result#>>'{zeroRetry,attempts}'='16' AND (result#>>'{zeroRetry,nextAttemptAt}')::timestamptz-(result#>>'{zeroRetry,lastAttemptAt}')::timestamptz BETWEEN interval '300 seconds' AND interval '301 seconds'").fetch_one(&pool).await?;
+    assert_eq!(capped, i64::from(failed_records));
+    assert_eq!(
+        state.reconcile_pending_zero_settlements().await?,
+        ZeroSettlementReconciliation::default()
+    );
+    // Once the project fault clears, each original event completes exactly once; retry metadata
+    // neither changes knownZero nor prevents the Agent fence from completing.
+    sqlx::raw_sql("DROP TRIGGER test_project_zero_failure ON resource.model_cost_observations; DROP FUNCTION resource.test_project_zero_failure();").execute(&pool).await?;
+    sqlx::query("UPDATE agent.idempotency_ledger SET result=jsonb_set(result,'{zeroRetry,nextAttemptAt}',to_jsonb(clock_timestamp()-interval '1 second')) WHERE operation='model_gateway_call' AND state='in_progress' AND result ? 'knownZero'").execute(&pool).await?;
+    assert_eq!(
+        restarted.reconcile_pending_zero_settlements().await?,
+        ZeroSettlementReconciliation {
+            succeeded: u64::from(failed_records),
+            failed: 0
+        }
+    );
+    assert_eq!(
+        state.reconcile_pending_zero_settlements().await?,
+        ZeroSettlementReconciliation::default()
+    );
+    let completed: i64 = sqlx::query_scalar("SELECT count(*) FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND state='completed' AND result ? 'knownZero'").fetch_one(&pool).await?;
+    assert_eq!(completed, i64::from(failed_records) + 1);
+    let observations: i64 = sqlx::query_scalar("SELECT count(*) FROM resource.model_cost_observations WHERE contract->'measurement'->>'state'='known'").fetch_one(&pool).await?;
+    assert_eq!(observations, i64::from(failed_records) + 1);
+    assert_eq!(
+        billing.credits.account(authority.project).await?.reserved,
+        FixedDecimal::zero()
+    );
+    assert_eq!(
+        billing.credits.account(authority.project).await?.spent,
+        FixedDecimal::zero()
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    server.abort();
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
 async fn dlp_refusal_after_admission_releases_real_hold_without_charge()
 -> Result<(), Box<dyn std::error::Error>> {
     exercise_zero_settlement(false).await
@@ -1141,8 +1345,17 @@ async fn exercise_zero_settlement(fail_first: bool) -> Result<(), Box<dyn std::e
         .await?;
         // A new gateway instance replays the persisted observation without a live user session.
         let restarted = state.as_ref().clone();
-        assert_eq!(restarted.reconcile_pending_zero_settlements().await?, 1);
-        assert_eq!(restarted.reconcile_pending_zero_settlements().await?, 0);
+        assert_eq!(
+            restarted.reconcile_pending_zero_settlements().await?,
+            ZeroSettlementReconciliation {
+                succeeded: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(
+            restarted.reconcile_pending_zero_settlements().await?,
+            ZeroSettlementReconciliation::default()
+        );
         sqlx::query("UPDATE access.bff_sessions SET revoked_at=NULL WHERE session_id=$1")
             .bind(authority.session)
             .execute(&pool)
