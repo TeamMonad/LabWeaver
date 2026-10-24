@@ -49,6 +49,8 @@ use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
+#[path = "cases/manual_work_templates.rs"]
+mod manual_work_template_cases;
 #[path = "cases/membership_governance.rs"]
 mod membership_governance_cases;
 #[path = "cases/runtime_authorization.rs"]
@@ -528,6 +530,8 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     let build_context = match &environment_candidate.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
             build_context
+                .as_ref()
+                .ok_or("Agent build context missing")?
         }
         contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
             return Err("fixture must be Container".into());
@@ -740,6 +744,8 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         match &environment_candidate.spec.runtime {
             contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
                 build_context
+                    .as_ref()
+                    .ok_or("Agent build context missing")?
             }
             contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
                 return Err("fixture must be Container".into());
@@ -748,10 +754,10 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     );
 
     let mut supply_chain = release_fixture(course_id, environment_candidate.project_id)?;
-    supply_chain.candidate_id = environment_candidate.id;
-    supply_chain.candidate_revision = environment_candidate.revision;
+    supply_chain.candidate_id = Some(environment_candidate.id);
+    supply_chain.candidate_revision = Some(environment_candidate.revision);
 
-    supply_chain.approval = approval.clone();
+    supply_chain.approval = Some(approval.clone());
     if let ImageArtifact::Container {
         build_request_id, ..
     } = &mut supply_chain.artifact
@@ -795,10 +801,11 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             &CreateEnvironmentTemplateReleaseRequest {
                 project_id: environment_candidate.project_id,
                 course_id: Some(course_id),
-                candidate_id: environment_candidate.id,
-                candidate_revision: environment_candidate.revision,
+                candidate_id: Some(environment_candidate.id),
+                candidate_revision: Some(environment_candidate.revision),
                 runtime_kind: contracts::authoring::RuntimeKind::Container,
-                approval_id: approval.id,
+                approval_id: Some(approval.id),
+                manual: None,
             },
             project_owner,
             false,
@@ -1006,7 +1013,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
     )?;
     let build_context = match &environment.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
-            build_context.clone()
+            build_context.clone().ok_or("Agent build context missing")?
         }
         contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
             return Err("fixture must be Container".into());
@@ -1299,10 +1306,7 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM control.image_artifact_projections WHERE image_artifact_id=$1"
         )
-        .bind(match artifact {
-            ImageArtifact::Container { id, .. } => id.as_uuid(),
-            ImageArtifact::VirtualMachine { .. } => unreachable!(),
-        })
+        .bind(artifact.id().as_uuid())
         .fetch_one(&pool)
         .await?,
         0
@@ -1961,7 +1965,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
     environment.validate()?;
     let environment_context = match &environment.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
-            build_context.clone()
+            build_context.clone().ok_or("Agent build context missing")?
         }
         contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
             return Err("fixture must be Container".into());
@@ -2152,7 +2156,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
         ImageArtifact::Container {
             repository, digest, ..
         } => format!("{repository}@{digest}"),
-        ImageArtifact::VirtualMachine { .. } => {
+        ImageArtifact::VirtualMachine { .. } | ImageArtifact::CatalogContainer { .. } => {
             return Err("runner fixture must be a Container artifact".into());
         }
     };
@@ -2636,21 +2640,29 @@ async fn project_release_reads_are_project_scoped_and_course_filtered()
     let project_candidate =
         environment_candidate(project_id, Some(project_course_id), environment_schema)?;
     let mut project_release = release_fixture(project_course_id, project_id)?;
-    project_release.candidate_id = project_candidate.id;
-    project_release.agent_run_id = project_candidate.run_id;
-    project_release.candidate_revision = project_candidate.revision;
-    project_release.approval.candidate_id = project_candidate.id;
-    project_release.approval.candidate_revision = project_candidate.revision;
+    project_release.candidate_id = Some(project_candidate.id);
+    project_release.agent_run_id = Some(project_candidate.run_id);
+    project_release.candidate_revision = Some(project_candidate.revision);
+    let approval = project_release
+        .approval
+        .as_mut()
+        .ok_or("missing candidate approval")?;
+    approval.candidate_id = project_candidate.id;
+    approval.candidate_revision = project_candidate.revision;
     insert_environment_candidate(&pool, &project_candidate, environment_schema).await?;
     insert_release(&pool, &project_release).await?;
 
     let project_work_candidate = environment_candidate(project_id, None, environment_schema)?;
     let mut project_work_release = release_fixture(project_course_id, project_id)?;
-    project_work_release.candidate_id = project_work_candidate.id;
-    project_work_release.agent_run_id = project_work_candidate.run_id;
-    project_work_release.candidate_revision = project_work_candidate.revision;
-    project_work_release.approval.candidate_id = project_work_candidate.id;
-    project_work_release.approval.candidate_revision = project_work_candidate.revision;
+    project_work_release.candidate_id = Some(project_work_candidate.id);
+    project_work_release.agent_run_id = Some(project_work_candidate.run_id);
+    project_work_release.candidate_revision = Some(project_work_candidate.revision);
+    let approval = project_work_release
+        .approval
+        .as_mut()
+        .ok_or("missing candidate approval")?;
+    approval.candidate_id = project_work_candidate.id;
+    approval.candidate_revision = project_work_candidate.revision;
     project_work_release.course_id = None;
     insert_environment_candidate(&pool, &project_work_candidate, environment_schema).await?;
     project_work_release.id = ReleaseId::new();
@@ -3076,8 +3088,13 @@ async fn insert_release(
     .bind(release.project_id.as_uuid())
     .bind(release.course_id.map(CourseId::as_uuid))
     .bind(i64::try_from(release.version)?)
-    .bind(release.candidate_id.as_uuid())
-    .bind(i64::try_from(release.candidate_revision.get())?)
+    .bind(release.candidate_id.map(CandidateId::as_uuid))
+    .bind(
+        release
+            .candidate_revision
+            .map(|revision| i64::try_from(revision.get()))
+            .transpose()?,
+    )
     .bind(Sha256Digest::of_bytes(b"environment-spec").to_string())
     .bind(release.artifact.id().as_uuid())
     .bind(serde_json::to_value(release)?)
@@ -3100,11 +3117,11 @@ fn release_fixture(
         project_id,
         course_id: Some(course_id),
         version: 1,
-        candidate_id,
-        agent_run_id: AgentRunId::new(),
-        candidate_revision: Revision::new(1)?,
+        candidate_id: Some(candidate_id),
+        agent_run_id: Some(AgentRunId::new()),
+        candidate_revision: Some(Revision::new(1)?),
         runtime_kind: contracts::authoring::RuntimeKind::Container,
-        approval: contracts::authoring::CandidateApproval {
+        approval: Some(contracts::authoring::CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: Revision::new(1)?,
@@ -3114,7 +3131,8 @@ fn release_fixture(
             decision: CandidateDecision::Approved,
             reason: "reviewed".to_owned(),
             decided_at: published_at,
-        },
+        }),
+        manual_approval: None,
         artifact: ImageArtifact::Container {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Project Agent configuration admission, independent of manual Work operations.\nA failed configuration read is an HTTP failure, never `unconfigured`.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "A valid project policy matches the deployment-owned model binding.\nRuntime requests still perform their own admission and provider checks.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "status": {
+          "const": "configured",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "model"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "reasonCode": {
+          "type": "string"
+        },
+        "status": {
+          "const": "unconfigured",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "reasonCode"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "reasonCode": {
+          "type": "string"
+        },
+        "status": {
+          "const": "unavailable",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "reasonCode"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ProjectAgentCapability"
+}

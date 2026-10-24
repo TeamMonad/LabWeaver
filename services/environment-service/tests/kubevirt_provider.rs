@@ -161,9 +161,9 @@ impl FixtureBackend {
             } else {
                 "10.96.0.17".parse().expect("service IP")
             },
-            ssh_host_key_sha256: Sha256Digest::of_bytes(b"vm-host-key"),
+            ssh_host_key_sha256: (!self.incomplete_readiness)
+                .then(|| Sha256Digest::of_bytes(b"vm-host-key")),
             guest_agent_connected: !self.guest_agent_disconnected,
-            ssh_ready: !self.incomplete_readiness,
             observed_at: timestamp("2026-07-16T08:01:00.000Z"),
         }
     }
@@ -845,7 +845,11 @@ async fn readiness_requires_vm_ssh_and_current_generation() {
         ObservedEnvironmentState::Provisioning
     );
     assert!(!observation.operation_complete);
-    assert!(observation.endpoints.is_empty());
+    assert_eq!(observation.endpoints.len(), 1);
+    assert_eq!(
+        observation.endpoints[0].health,
+        contracts::environment::EndpointHealth::Unknown
+    );
 
     let public_route = Arc::new(FixtureBackend {
         public_route: true,
@@ -1399,11 +1403,11 @@ fn projection() -> ReleasePublished {
         project_id,
         course_id,
         version: 1,
-        candidate_id,
-        agent_run_id: contracts::AgentRunId::new(),
-        candidate_revision: revision(1),
+        candidate_id: Some(candidate_id),
+        agent_run_id: Some(contracts::AgentRunId::new()),
+        candidate_revision: Some(revision(1)),
         runtime_kind: RuntimeKind::VirtualMachine,
-        approval: CandidateApproval {
+        approval: Some(CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision: revision(1),
@@ -1413,7 +1417,8 @@ fn projection() -> ReleasePublished {
             decision: CandidateDecision::Approved,
             reason: "reviewed".to_owned(),
             decided_at: published_at,
-        },
+        }),
+        manual_approval: None,
         artifact: ImageArtifact::VirtualMachine {
             id: artifact_id,
             base_disk: base_disk.clone(),

@@ -940,6 +940,46 @@
             "format"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Administrator-imported container, not an Agent build.",
+          "properties": {
+            "catalog_id": {
+              "$ref": "#/$defs/PlatformImageId"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "id": {
+              "$ref": "#/$defs/ImageArtifactId"
+            },
+            "kind": {
+              "const": "catalog_container",
+              "type": "string"
+            },
+            "repin_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "trust_revision": {
+              "$ref": "#/$defs/Revision"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "catalog_id",
+            "repin_generation",
+            "trust_revision",
+            "repository",
+            "digest"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -961,6 +1001,10 @@
           "type": "string"
         }
       ]
+    },
+    "PlatformImageId": {
+      "description": "Strongly typed UUIDv7 identifier for `PlatformImageId`.",
+      "type": "string"
     },
     "ProgramPhase": {
       "description": "Approved program Runner phase.",

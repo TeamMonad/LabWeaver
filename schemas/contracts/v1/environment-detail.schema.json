@@ -1,0 +1,809 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DesiredEnvironmentState": {
+      "description": "Requested steady state.",
+      "enum": [
+        "running",
+        "stopped",
+        "deleted"
+      ],
+      "type": "string"
+    },
+    "EndpointHealth": {
+      "description": "Endpoint health gates new AccessGrants.",
+      "oneOf": [
+        {
+          "enum": [
+            "pending",
+            "healthy",
+            "unhealthy",
+            "removed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The runtime exists, but no successful connection probe has been observed.",
+          "type": "string"
+        }
+      ]
+    },
+    "EndpointId": {
+      "description": "Strongly typed UUIDv7 identifier for `EndpointId`.",
+      "type": "string"
+    },
+    "EndpointProtocol": {
+      "description": "Supported controlled protocols.",
+      "enum": [
+        "http",
+        "https",
+        "ssh"
+      ],
+      "type": "string"
+    },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "EnvironmentConnectionReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "guestInstructions": {
+          "description": "Non-secret instructions. Platform authentication does not imply a guest OS login.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "instanceReady": {
+          "type": "boolean"
+        },
+        "observedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasonCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/EnvironmentConnectionState"
+        }
+      },
+      "required": [
+        "instanceReady",
+        "state",
+        "guestInstructions"
+      ],
+      "type": "object"
+    },
+    "EnvironmentConnectionState": {
+      "description": "Connection preparation is distinct from the runtime instance's lifecycle state.",
+      "enum": [
+        "preparing",
+        "ready",
+        "unknown",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "EnvironmentEndpoint": {
+      "additionalProperties": false,
+      "description": "Sanitized Environment-owned endpoint metadata.",
+      "properties": {
+        "health": {
+          "$ref": "#/$defs/EndpointHealth"
+        },
+        "id": {
+          "$ref": "#/$defs/EndpointId"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "protocol": {
+          "$ref": "#/$defs/EndpointProtocol"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "id",
+        "protocol",
+        "revision",
+        "health",
+        "observedAt"
+      ],
+      "type": "object"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "EnvironmentLeaseAuthorization": {
+      "additionalProperties": false,
+      "description": "Resource-authoritative Active Lease snapshot retained with the accepted operation.\nPrivate single-university deployment simplifies this to a TTL/PVC binding:\n`capacity_binding` maps directly to the Work PVC name and `expires_at` is\nthe authoritative TTL; no separate capacity-shell hash is required.",
+      "properties": {
+        "activeFrom": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "approvedResources": {
+          "$ref": "#/$defs/WorkloadResources",
+          "description": "The exact Resource-approved limits Environment must apply to its workload."
+        },
+        "capacityBinding": {
+          "type": "string"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "gpuAllocation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuAllocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Catalog resolution captured by Resource when a GPU was approved."
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "leaseRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "ownerActorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "resourceRequestId": {
+          "$ref": "#/$defs/ResourceRequestId",
+          "description": "The Resource request that owns this lease. Environment meters use this\nidentity when delivering usage back to Resource."
+        }
+      },
+      "required": [
+        "resourceRequestId",
+        "leaseId",
+        "leaseRevision",
+        "environmentId",
+        "projectId",
+        "ownerActorId",
+        "capacityBinding",
+        "approvedResources",
+        "activeFrom",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "EnvironmentOperation": {
+      "additionalProperties": false,
+      "description": "Idempotent accepted environment operation.",
+      "properties": {
+        "acceptedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "acceptedRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "accessRevocationRevision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cleanupStartedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deadlineAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "diagnosticCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "kind": {
+          "$ref": "#/$defs/EnvironmentOperationKind"
+        },
+        "leaseAuthorization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentLeaseAuthorization"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxAttempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nextAttemptAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "preserveMutableDisk": {
+          "type": "boolean"
+        },
+        "providerStep": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resetTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentResetTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryFromPhase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservedEnvironmentState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/OperationState"
+        },
+        "traceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "state",
+        "acceptedRevision",
+        "attempt",
+        "providerStep",
+        "maxAttempts",
+        "nextAttemptAt",
+        "actorId",
+        "traceId",
+        "acceptedAt",
+        "deadlineAt",
+        "preserveMutableDisk"
+      ],
+      "type": "object"
+    },
+    "EnvironmentOperationKind": {
+      "description": "Explicit operation kind; restart and destructive reset are never aliases.",
+      "enum": [
+        "create",
+        "start",
+        "stop",
+        "restart",
+        "reset",
+        "retry",
+        "cancel",
+        "recover",
+        "expire",
+        "delete",
+        "cleanup",
+        "freeze"
+      ],
+      "type": "string"
+    },
+    "EnvironmentResetTarget": {
+      "description": "Explicit immutable target selected for one reset operation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "experiment_baseline",
+              "type": "string"
+            },
+            "releaseId": {
+              "$ref": "#/$defs/ReleaseId"
+            },
+            "releaseVersion": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "releaseId",
+            "releaseVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authorizationRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "kind": {
+              "const": "work_snapshot",
+              "type": "string"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/ArtifactRef"
+            }
+          },
+          "required": [
+            "kind",
+            "snapshot",
+            "authorizationRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authorizationRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "configurationRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "kind": {
+              "const": "work_configuration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "configurationRevision",
+            "authorizationRevision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "GpuAllocation": {
+      "additionalProperties": false,
+      "description": "The catalog resolution captured on an approved capacity claim.",
+      "properties": {
+        "allocationBinding": {
+          "type": "string"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entryId": {
+          "$ref": "#/$defs/GpuCatalogEntryId",
+          "description": "Exact catalog row used to resolve this allocation."
+        },
+        "mode": {
+          "$ref": "#/$defs/GpuAllocationMode"
+        },
+        "providerBinding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entryId",
+        "class",
+        "count",
+        "mode",
+        "providerBinding",
+        "allocationBinding",
+        "catalogRevision"
+      ],
+      "type": "object"
+    },
+    "GpuAllocationMode": {
+      "description": "Allocation mode selected by the Resource GPU catalog.\n\nCallers submit only a catalog class and count. The mode is resolved from the\nactive catalog entry and is never accepted as an untrusted request override.",
+      "enum": [
+        "exclusive",
+        "container_time_slice",
+        "vm_vgpu"
+      ],
+      "type": "string"
+    },
+    "GpuCatalogEntryId": {
+      "description": "Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ObservedEnvironmentState": {
+      "description": "Authoritative observed lifecycle state.",
+      "enum": [
+        "requested",
+        "validating",
+        "building",
+        "provisioning",
+        "ready",
+        "stopping",
+        "stopped",
+        "updating",
+        "expiring",
+        "deleting",
+        "deleted",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "OperationState": {
+      "description": "Persistent operation state.",
+      "enum": [
+        "accepted",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public detail response: the persisted instance plus current connection preparation facts.",
+  "properties": {
+    "approvedResources": {
+      "$ref": "#/$defs/WorkloadResources"
+    },
+    "capacityBinding": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "class": {
+      "$ref": "#/$defs/EnvironmentClass"
+    },
+    "cleanupEvidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "connection": {
+      "$ref": "#/$defs/EnvironmentConnectionReadiness"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "desiredState": {
+      "$ref": "#/$defs/DesiredEnvironmentState"
+    },
+    "displayLabel": {
+      "type": "string"
+    },
+    "eligibilityExpiresAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "endpoints": {
+      "items": {
+        "$ref": "#/$defs/EnvironmentEndpoint"
+      },
+      "type": "array"
+    },
+    "failedPhase": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObservedEnvironmentState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "generation": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "gpuAllocation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuAllocation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Resource-resolved Experiment GPU allocation held while this instance exists, when present.\n\nWork environments never use this field; their allocation remains on the Lease\nauthorization. A present value is validated against the immutable instance identity."
+    },
+    "id": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "lastDiagnosticCode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "leaseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LeaseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observedGeneration": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "observedState": {
+      "$ref": "#/$defs/ObservedEnvironmentState"
+    },
+    "operation": {
+      "$ref": "#/$defs/EnvironmentOperation"
+    },
+    "ownerId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "providerBinding": {
+      "type": "string"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "resourceReservationReleased": {
+      "default": false,
+      "description": "Set only after Environment has released its Resource reservation at terminal deletion.",
+      "type": "boolean"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "runtimeKind": {
+      "$ref": "#/$defs/RuntimeKind"
+    }
+  },
+  "required": [
+    "id",
+    "displayLabel",
+    "projectId",
+    "ownerId",
+    "class",
+    "runtimeKind",
+    "releaseId",
+    "releaseVersion",
+    "approvedResources",
+    "providerBinding",
+    "desiredState",
+    "observedState",
+    "revision",
+    "generation",
+    "observedGeneration",
+    "operation",
+    "eligibilityExpiresAt",
+    "endpoints",
+    "connection"
+  ],
+  "title": "EnvironmentDetail",
+  "type": "object"
+}

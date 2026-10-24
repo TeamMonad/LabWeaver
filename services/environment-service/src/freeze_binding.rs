@@ -172,7 +172,9 @@ impl FreezeBindingService {
                 ImageArtifact::Container {
                     build_request_id, ..
                 } => Some(*build_request_id),
-                ImageArtifact::VirtualMachine { .. } => None,
+                ImageArtifact::VirtualMachine { .. } | ImageArtifact::CatalogContainer { .. } => {
+                    None
+                }
             },
         };
         let source = match instance.runtime_kind {
@@ -193,7 +195,11 @@ impl FreezeBindingService {
         };
         Ok(EnvironmentFreezeBinding {
             environment,
-            agent_run_id: release.projection.release.agent_run_id,
+            agent_run_id: release
+                .projection
+                .release
+                .agent_run_id
+                .ok_or(FreezeBindingError::ReleaseIdentityMismatch)?,
             source,
         })
     }
@@ -546,7 +552,7 @@ fn frozen_identity(
             ImageArtifact::Container {
                 build_request_id, ..
             } => Some(*build_request_id),
-            ImageArtifact::VirtualMachine { .. } => None,
+            ImageArtifact::VirtualMachine { .. } | ImageArtifact::CatalogContainer { .. } => None,
         },
     }
 }

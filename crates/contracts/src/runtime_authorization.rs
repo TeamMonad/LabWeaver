@@ -7,7 +7,7 @@ use crate::platform_configuration::{
     RuntimePreauthorization, RuntimePreauthorizationScope,
 };
 use crate::resource::{ResourceRequest, ResourceTarget};
-use crate::{ActorId, ApprovalId, CandidateId, CourseId, ProjectId, Revision};
+use crate::{ActorId, ApprovalId, CourseId, ProjectId, ReleaseId, Revision};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -27,8 +27,8 @@ pub struct CourseTeacherApprovalScope {
 pub struct RuntimeConfigurationIdentity {
     pub authoring_project_id: ProjectId,
     pub course_id: Option<CourseId>,
-    pub candidate_id: CandidateId,
-    pub candidate_revision: Revision,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
     pub configuration_sha256: String,
     pub authoring_approval_id: Option<ApprovalId>,
     pub teacher_scope: Option<CourseTeacherApprovalScope>,

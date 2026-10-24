@@ -1003,8 +1003,19 @@ async fn get_environment(
     headers: HeaderMap,
 ) -> Result<Response, EnvironmentApiError> {
     require_access_bff(caller)?;
+    require_session(&headers)?;
     let instance = load_owned(&state, environment_id, actor(&headers)?).await?;
-    instance_response(instance)
+    let vm_ready_at = if instance.runtime_kind == contracts::authoring::RuntimeKind::VirtualMachine
+    {
+        state.store.vm_runtime_ready_at(&instance).await?
+    } else {
+        None
+    };
+    let connection = connection_readiness(&instance, vm_ready_at);
+    instance_response(contracts::environment::EnvironmentDetail {
+        instance,
+        connection,
+    })
 }
 
 async fn get_environment_operation(
@@ -1249,6 +1260,42 @@ async fn accept_lifecycle(
         None
     };
     let accepted_at = state.store.current_time().await?;
+    let lease_authorization = if instance.class == EnvironmentClass::Work
+        && matches!(
+            kind,
+            EnvironmentOperationKind::Start
+                | EnvironmentOperationKind::Restart
+                | EnvironmentOperationKind::Retry
+                | EnvironmentOperationKind::Recover
+                | EnvironmentOperationKind::Reset
+        ) {
+        let lease_id = instance
+            .lease_id
+            .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
+        let capacity_binding = instance
+            .capacity_binding
+            .clone()
+            .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
+        Some(
+            state
+                .lease_verifier
+                .verify(
+                    EnvironmentLeaseVerificationRequest {
+                        version: 1,
+                        lease_id,
+                        environment_id,
+                        project_id: instance.project_id,
+                        course_id: instance.course_id,
+                        owner_actor_id: instance.owner_id,
+                        capacity_binding,
+                    },
+                    accepted_at,
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
     let command = EnvironmentLifecycleCommand {
         environment_id,
         kind,
@@ -1268,7 +1315,7 @@ async fn accept_lifecycle(
             key.as_str(),
             &command,
             None,
-            None,
+            lease_authorization,
             instance.project_id,
             instance.course_id,
         )
@@ -1353,9 +1400,72 @@ fn add_duration(
         .map_err(|_| EnvironmentApiError::ClockInvalid)
 }
 
-fn instance_response(instance: EnvironmentInstance) -> Result<Response, EnvironmentApiError> {
-    let etag = StrongEtag::from_revision(instance.revision).header_value();
-    let mut response = Json(instance).into_response();
+fn connection_readiness(
+    instance: &EnvironmentInstance,
+    vm_ready_at: Option<UtcTimestamp>,
+) -> contracts::environment::EnvironmentConnectionReadiness {
+    use contracts::environment::{
+        DesiredEnvironmentState, EnvironmentConnectionState, ObservedEnvironmentState,
+    };
+    let running = instance.desired_state == DesiredEnvironmentState::Running
+        && matches!(
+            instance.observed_state,
+            ObservedEnvironmentState::Ready | ObservedEnvironmentState::Provisioning
+        );
+    let instance_ready = running
+        && (instance.observed_state == ObservedEnvironmentState::Ready || vm_ready_at.is_some());
+    let endpoint_ready = instance.endpoints.iter().any(|endpoint| {
+        endpoint.health == EndpointHealth::Healthy && endpoint.revision == instance.revision
+    });
+    let (state, reason_code) = if !running {
+        (
+            EnvironmentConnectionState::Unavailable,
+            Some("LW_ENVIRONMENT_INSTANCE_NOT_RUNNING".to_owned()),
+        )
+    } else if endpoint_ready {
+        (EnvironmentConnectionState::Ready, None)
+    } else if instance_ready {
+        (
+            EnvironmentConnectionState::Unknown,
+            Some("LW_ENVIRONMENT_GUEST_CONNECTION_NOT_READY".to_owned()),
+        )
+    } else {
+        (
+            EnvironmentConnectionState::Preparing,
+            Some("LW_ENVIRONMENT_CONNECTION_PREPARING".to_owned()),
+        )
+    };
+    let guest_instructions = match instance.runtime_kind {
+        contracts::authoring::RuntimeKind::Container => {
+            vec!["终端通过平台控制台连接；/workspace 是持久工作目录。".to_owned()]
+        }
+        contracts::authoring::RuntimeKind::VirtualMachine => vec![
+            "平台登录不会自动登录 guest；桌面控制台使用镜像管理员提供的 guest 用户名和登录方式。"
+                .to_owned(),
+            "SSH 通过平台网关连接，请先登记自己的 SSH 公钥；SSH 探测成功前不会授予 SSH 入口。"
+                .to_owned(),
+        ],
+    };
+    contracts::environment::EnvironmentConnectionReadiness {
+        instance_ready,
+        state,
+        reason_code,
+        guest_instructions,
+        observed_at: vm_ready_at.or_else(|| {
+            instance
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.observed_at)
+                .max()
+        }),
+    }
+}
+
+fn instance_response(
+    detail: contracts::environment::EnvironmentDetail,
+) -> Result<Response, EnvironmentApiError> {
+    let etag = StrongEtag::from_revision(detail.instance.revision).header_value();
+    let mut response = Json(detail).into_response();
     response.headers_mut().insert(
         header::ETAG,
         HeaderValue::from_str(&etag).map_err(|_| EnvironmentApiError::ResponseInvalid)?,

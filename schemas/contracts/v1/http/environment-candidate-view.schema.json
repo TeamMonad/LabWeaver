@@ -282,7 +282,14 @@
           "additionalProperties": false,
           "properties": {
             "build_context": {
-              "$ref": "#/$defs/ArtifactRef"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "kind": {
               "const": "container",
@@ -311,7 +318,6 @@
           "required": [
             "kind",
             "provider_binding",
-            "build_context",
             "service_port"
           ],
           "type": "object"
@@ -506,6 +512,46 @@
             "format"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Administrator-imported container, not an Agent build.",
+          "properties": {
+            "catalog_id": {
+              "$ref": "#/$defs/PlatformImageId"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "id": {
+              "$ref": "#/$defs/ImageArtifactId"
+            },
+            "kind": {
+              "const": "catalog_container",
+              "type": "string"
+            },
+            "repin_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "trust_revision": {
+              "$ref": "#/$defs/Revision"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "catalog_id",
+            "repin_generation",
+            "trust_revision",
+            "repository",
+            "digest"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -560,6 +606,10 @@
           "type": "object"
         }
       ]
+    },
+    "PlatformImageId": {
+      "description": "Strongly typed UUIDv7 identifier for `PlatformImageId`.",
+      "type": "string"
     },
     "PolicyId": {
       "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",

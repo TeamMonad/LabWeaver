@@ -36,6 +36,8 @@ export type EnvironmentExecutionBinding = EnvironmentExecutionBindingSchema;
 
 export type EnvironmentExecutionBindingRequest = EnvironmentExecutionBindingRequestSchema;
 
+export type EnvironmentInstance = EnvironmentInstanceSchema;
+
 export type EnvironmentWorkConfigurationTarget = EnvironmentWorkConfigurationTargetSchema;
 
 export type EnvironmentWorkConfigurationTargetQuery = EnvironmentWorkConfigurationTargetQuerySchema;
@@ -215,7 +217,7 @@ export type EndpointGrantId = string;
 /**
  * Endpoint health gates new AccessGrants.
  */
-export type EndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed';
+export type EndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed' | 'unknown';
 
 /**
  * Strongly typed UUIDv7 identifier for `EndpointId`.
@@ -896,6 +898,14 @@ export type ImageArtifact = {
     format: VirtualMachineDiskFormat;
     id: ImageArtifactId;
     kind: 'virtual_machine';
+} | {
+    catalog_id: PlatformImageId;
+    digest: string;
+    id: ImageArtifactId;
+    kind: 'catalog_container';
+    repin_generation: number;
+    repository: string;
+    trust_revision: AuthoringApprovalPublicationStatusSchemaRevision;
 };
 
 /**
@@ -913,6 +923,11 @@ export type PathRule = {
     kind: 'directoryTree';
     path: string;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
@@ -1086,12 +1101,25 @@ export type AuthoringApprovalSchemaImageArtifact = {
     format: AuthoringApprovalSchemaVirtualMachineDiskFormat;
     id: AuthoringApprovalSchemaImageArtifactId;
     kind: 'virtual_machine';
+} | {
+    catalog_id: AuthoringApprovalSchemaPlatformImageId;
+    digest: string;
+    id: AuthoringApprovalSchemaImageArtifactId;
+    kind: 'catalog_container';
+    repin_generation: number;
+    repository: string;
+    trust_revision: AuthoringApprovalSchemaRevision;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
 export type AuthoringApprovalSchemaImageArtifactId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type AuthoringApprovalSchemaPlatformImageId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
@@ -2323,6 +2351,323 @@ export type CsrfTokenResponseSchema = {
 export type CsrfTokenResponseSchemaUtcTimestamp = string;
 
 /**
+ * EnvironmentDetail
+ *
+ * Public detail response: the persisted instance plus current connection preparation facts.
+ */
+export type EnvironmentDetailSchema = {
+    approvedResources: WorkloadResources;
+    capacityBinding?: string | null;
+    class: EnvironmentDetailSchemaEnvironmentClass;
+    cleanupEvidence?: EnvironmentDetailSchemaArtifactRef | null;
+    connection: EnvironmentConnectionReadiness;
+    courseId?: EnvironmentDetailSchemaCourseId | null;
+    desiredState: DesiredEnvironmentState;
+    displayLabel: string;
+    eligibilityExpiresAt: string | null;
+    endpoints: Array<EnvironmentEndpoint>;
+    failedPhase?: ObservedEnvironmentState | null;
+    generation: number;
+    /**
+     * Resource-resolved Experiment GPU allocation held while this instance exists, when present.
+     *
+     * Work environments never use this field; their allocation remains on the Lease
+     * authorization. A present value is validated against the immutable instance identity.
+     */
+    gpuAllocation?: GpuAllocation | null;
+    id: EnvironmentDetailSchemaEnvironmentId;
+    lastDiagnosticCode?: string | null;
+    leaseId?: EnvironmentDetailSchemaLeaseId | null;
+    observedGeneration: number;
+    observedState: ObservedEnvironmentState;
+    operation: EnvironmentOperation;
+    ownerId: EnvironmentDetailSchemaActorId;
+    projectId: EnvironmentDetailSchemaProjectId;
+    providerBinding: string;
+    releaseId: EnvironmentDetailSchemaReleaseId;
+    releaseVersion: number;
+    /**
+     * Set only after Environment has released its Resource reservation at terminal deletion.
+     */
+    resourceReservationReleased?: boolean;
+    revision: EnvironmentDetailSchemaRevision;
+    runtimeKind: EnvironmentDetailSchemaRuntimeKind;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type EnvironmentDetailSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type EnvironmentDetailSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type EnvironmentDetailSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: EnvironmentDetailSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type EnvironmentDetailSchemaCourseId = string;
+
+/**
+ * Requested steady state.
+ */
+export type DesiredEnvironmentState = 'running' | 'stopped' | 'deleted';
+
+/**
+ * Endpoint health gates new AccessGrants.
+ */
+export type EnvironmentDetailSchemaEndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed' | 'unknown';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EndpointId`.
+ */
+export type EnvironmentDetailSchemaEndpointId = string;
+
+/**
+ * Supported controlled protocols.
+ */
+export type EnvironmentDetailSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentDetailSchemaEnvironmentClass = 'experiment' | 'work';
+
+export type EnvironmentConnectionReadiness = {
+    /**
+     * Non-secret instructions. Platform authentication does not imply a guest OS login.
+     */
+    guestInstructions: Array<string>;
+    instanceReady: boolean;
+    observedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
+    reasonCode?: string | null;
+    state: EnvironmentConnectionState;
+};
+
+/**
+ * Connection preparation is distinct from the runtime instance's lifecycle state.
+ */
+export type EnvironmentConnectionState = 'preparing' | 'ready' | 'unknown' | 'unavailable';
+
+/**
+ * Sanitized Environment-owned endpoint metadata.
+ */
+export type EnvironmentEndpoint = {
+    health: EnvironmentDetailSchemaEndpointHealth;
+    id: EnvironmentDetailSchemaEndpointId;
+    observedAt: EnvironmentDetailSchemaUtcTimestamp;
+    protocol: EnvironmentDetailSchemaEndpointProtocol;
+    revision: EnvironmentDetailSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type EnvironmentDetailSchemaEnvironmentId = string;
+
+/**
+ * Resource-authoritative Active Lease snapshot retained with the accepted operation.
+ * Private single-university deployment simplifies this to a TTL/PVC binding:
+ * `capacity_binding` maps directly to the Work PVC name and `expires_at` is
+ * the authoritative TTL; no separate capacity-shell hash is required.
+ */
+export type EnvironmentLeaseAuthorization = {
+    activeFrom: EnvironmentDetailSchemaUtcTimestamp;
+    /**
+     * The exact Resource-approved limits Environment must apply to its workload.
+     */
+    approvedResources: WorkloadResources;
+    capacityBinding: string;
+    courseId?: EnvironmentDetailSchemaCourseId | null;
+    environmentId: EnvironmentDetailSchemaEnvironmentId;
+    expiresAt: EnvironmentDetailSchemaUtcTimestamp;
+    /**
+     * Catalog resolution captured by Resource when a GPU was approved.
+     */
+    gpuAllocation?: GpuAllocation | null;
+    leaseId: EnvironmentDetailSchemaLeaseId;
+    leaseRevision: EnvironmentDetailSchemaRevision;
+    ownerActorId: EnvironmentDetailSchemaActorId;
+    projectId: EnvironmentDetailSchemaProjectId;
+    /**
+     * The Resource request that owns this lease. Environment meters use this
+     * identity when delivering usage back to Resource.
+     */
+    resourceRequestId: EnvironmentDetailSchemaResourceRequestId;
+};
+
+/**
+ * Idempotent accepted environment operation.
+ */
+export type EnvironmentOperation = {
+    acceptedAt: EnvironmentDetailSchemaUtcTimestamp;
+    acceptedRevision: EnvironmentDetailSchemaRevision;
+    accessRevocationRevision?: EnvironmentDetailSchemaRevision | null;
+    actorId: EnvironmentDetailSchemaActorId;
+    attempt: number;
+    cleanupStartedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
+    deadlineAt: EnvironmentDetailSchemaUtcTimestamp;
+    diagnosticCode?: string | null;
+    id: OperationId;
+    kind: EnvironmentOperationKind;
+    leaseAuthorization?: EnvironmentLeaseAuthorization | null;
+    maxAttempts: number;
+    nextAttemptAt: EnvironmentDetailSchemaUtcTimestamp;
+    preserveMutableDisk: boolean;
+    providerStep: number;
+    resetTarget?: EnvironmentResetTarget | null;
+    retryFromPhase?: ObservedEnvironmentState | null;
+    state: OperationState;
+    traceId: string;
+};
+
+/**
+ * Explicit operation kind; restart and destructive reset are never aliases.
+ */
+export type EnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+
+/**
+ * Explicit immutable target selected for one reset operation.
+ */
+export type EnvironmentResetTarget = {
+    kind: 'experiment_baseline';
+    releaseId: EnvironmentDetailSchemaReleaseId;
+    releaseVersion: number;
+} | {
+    authorizationRevision: EnvironmentDetailSchemaRevision;
+    kind: 'work_snapshot';
+    snapshot: EnvironmentDetailSchemaArtifactRef;
+} | {
+    authorizationRevision: EnvironmentDetailSchemaRevision;
+    configurationRevision: EnvironmentDetailSchemaRevision;
+    kind: 'work_configuration';
+};
+
+/**
+ * The catalog resolution captured on an approved capacity claim.
+ */
+export type GpuAllocation = {
+    allocationBinding: string;
+    catalogRevision: EnvironmentDetailSchemaRevision;
+    class: string;
+    count: number;
+    /**
+     * Exact catalog row used to resolve this allocation.
+     */
+    entryId: GpuCatalogEntryId;
+    mode: GpuAllocationMode;
+    providerBinding: string;
+};
+
+/**
+ * Allocation mode selected by the Resource GPU catalog.
+ *
+ * Callers submit only a catalog class and count. The mode is resolved from the
+ * active catalog entry and is never accepted as an untrusted request override.
+ */
+export type GpuAllocationMode = 'exclusive' | 'container_time_slice' | 'vm_vgpu';
+
+/**
+ * Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.
+ */
+export type GpuCatalogEntryId = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type GpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type EnvironmentDetailSchemaLeaseId = string;
+
+/**
+ * Authoritative observed lifecycle state.
+ */
+export type ObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
+
+/**
+ * Strongly typed UUIDv7 identifier for `OperationId`.
+ */
+export type OperationId = string;
+
+/**
+ * Persistent operation state.
+ */
+export type OperationState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type EnvironmentDetailSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type EnvironmentDetailSchemaReleaseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type EnvironmentDetailSchemaResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentDetailSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type EnvironmentDetailSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentDetailSchemaUtcTimestamp = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type WorkloadResources = {
+    cpuMillicores: number;
+    gpu?: GpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
  * EnvironmentEndpoint
  *
  * Sanitized Environment-owned endpoint metadata.
@@ -2338,7 +2683,7 @@ export type EnvironmentEndpointSchema = {
 /**
  * Endpoint health gates new AccessGrants.
  */
-export type EnvironmentEndpointSchemaEndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed';
+export type EnvironmentEndpointSchemaEndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed' | 'unknown';
 
 /**
  * Strongly typed UUIDv7 identifier for `EndpointId`.
@@ -2366,16 +2711,16 @@ export type EnvironmentEndpointSchemaUtcTimestamp = string;
  * PostgreSQL-authoritative environment view.
  */
 export type EnvironmentInstanceSchema = {
-    approvedResources: WorkloadResources;
+    approvedResources: EnvironmentInstanceSchemaWorkloadResources;
     capacityBinding?: string | null;
     class: EnvironmentInstanceSchemaEnvironmentClass;
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId?: EnvironmentInstanceSchemaCourseId | null;
-    desiredState: DesiredEnvironmentState;
+    desiredState: EnvironmentInstanceSchemaDesiredEnvironmentState;
     displayLabel: string;
     eligibilityExpiresAt: string | null;
-    endpoints: Array<EnvironmentEndpoint>;
-    failedPhase?: ObservedEnvironmentState | null;
+    endpoints: Array<EnvironmentInstanceSchemaEnvironmentEndpoint>;
+    failedPhase?: EnvironmentInstanceSchemaObservedEnvironmentState | null;
     generation: number;
     /**
      * Resource-resolved Experiment GPU allocation held while this instance exists, when present.
@@ -2383,13 +2728,13 @@ export type EnvironmentInstanceSchema = {
      * Work environments never use this field; their allocation remains on the Lease
      * authorization. A present value is validated against the immutable instance identity.
      */
-    gpuAllocation?: GpuAllocation | null;
+    gpuAllocation?: EnvironmentInstanceSchemaGpuAllocation | null;
     id: EnvironmentInstanceSchemaEnvironmentId;
     lastDiagnosticCode?: string | null;
     leaseId?: EnvironmentInstanceSchemaLeaseId | null;
     observedGeneration: number;
-    observedState: ObservedEnvironmentState;
-    operation: EnvironmentOperation;
+    observedState: EnvironmentInstanceSchemaObservedEnvironmentState;
+    operation: EnvironmentInstanceSchemaEnvironmentOperation;
     ownerId: EnvironmentInstanceSchemaActorId;
     projectId: EnvironmentInstanceSchemaProjectId;
     providerBinding: string;
@@ -2447,12 +2792,12 @@ export type EnvironmentInstanceSchemaCourseId = string;
 /**
  * Requested steady state.
  */
-export type DesiredEnvironmentState = 'running' | 'stopped' | 'deleted';
+export type EnvironmentInstanceSchemaDesiredEnvironmentState = 'running' | 'stopped' | 'deleted';
 
 /**
  * Endpoint health gates new AccessGrants.
  */
-export type EnvironmentInstanceSchemaEndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed';
+export type EnvironmentInstanceSchemaEndpointHealth = 'pending' | 'healthy' | 'unhealthy' | 'removed' | 'unknown';
 
 /**
  * Strongly typed UUIDv7 identifier for `EndpointId`.
@@ -2472,7 +2817,7 @@ export type EnvironmentInstanceSchemaEnvironmentClass = 'experiment' | 'work';
 /**
  * Sanitized Environment-owned endpoint metadata.
  */
-export type EnvironmentEndpoint = {
+export type EnvironmentInstanceSchemaEnvironmentEndpoint = {
     health: EnvironmentInstanceSchemaEndpointHealth;
     id: EnvironmentInstanceSchemaEndpointId;
     observedAt: EnvironmentInstanceSchemaUtcTimestamp;
@@ -2491,12 +2836,12 @@ export type EnvironmentInstanceSchemaEnvironmentId = string;
  * `capacity_binding` maps directly to the Work PVC name and `expires_at` is
  * the authoritative TTL; no separate capacity-shell hash is required.
  */
-export type EnvironmentLeaseAuthorization = {
+export type EnvironmentInstanceSchemaEnvironmentLeaseAuthorization = {
     activeFrom: EnvironmentInstanceSchemaUtcTimestamp;
     /**
      * The exact Resource-approved limits Environment must apply to its workload.
      */
-    approvedResources: WorkloadResources;
+    approvedResources: EnvironmentInstanceSchemaWorkloadResources;
     capacityBinding: string;
     courseId?: EnvironmentInstanceSchemaCourseId | null;
     environmentId: EnvironmentInstanceSchemaEnvironmentId;
@@ -2504,7 +2849,7 @@ export type EnvironmentLeaseAuthorization = {
     /**
      * Catalog resolution captured by Resource when a GPU was approved.
      */
-    gpuAllocation?: GpuAllocation | null;
+    gpuAllocation?: EnvironmentInstanceSchemaGpuAllocation | null;
     leaseId: EnvironmentInstanceSchemaLeaseId;
     leaseRevision: EnvironmentInstanceSchemaRevision;
     ownerActorId: EnvironmentInstanceSchemaActorId;
@@ -2519,7 +2864,7 @@ export type EnvironmentLeaseAuthorization = {
 /**
  * Idempotent accepted environment operation.
  */
-export type EnvironmentOperation = {
+export type EnvironmentInstanceSchemaEnvironmentOperation = {
     acceptedAt: EnvironmentInstanceSchemaUtcTimestamp;
     acceptedRevision: EnvironmentInstanceSchemaRevision;
     accessRevocationRevision?: EnvironmentInstanceSchemaRevision | null;
@@ -2528,28 +2873,28 @@ export type EnvironmentOperation = {
     cleanupStartedAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
     deadlineAt: EnvironmentInstanceSchemaUtcTimestamp;
     diagnosticCode?: string | null;
-    id: OperationId;
-    kind: EnvironmentOperationKind;
-    leaseAuthorization?: EnvironmentLeaseAuthorization | null;
+    id: EnvironmentInstanceSchemaOperationId;
+    kind: EnvironmentInstanceSchemaEnvironmentOperationKind;
+    leaseAuthorization?: EnvironmentInstanceSchemaEnvironmentLeaseAuthorization | null;
     maxAttempts: number;
     nextAttemptAt: EnvironmentInstanceSchemaUtcTimestamp;
     preserveMutableDisk: boolean;
     providerStep: number;
-    resetTarget?: EnvironmentResetTarget | null;
-    retryFromPhase?: ObservedEnvironmentState | null;
-    state: OperationState;
+    resetTarget?: EnvironmentInstanceSchemaEnvironmentResetTarget | null;
+    retryFromPhase?: EnvironmentInstanceSchemaObservedEnvironmentState | null;
+    state: EnvironmentInstanceSchemaOperationState;
     traceId: string;
 };
 
 /**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
-export type EnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+export type EnvironmentInstanceSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
 
 /**
  * Explicit immutable target selected for one reset operation.
  */
-export type EnvironmentResetTarget = {
+export type EnvironmentInstanceSchemaEnvironmentResetTarget = {
     kind: 'experiment_baseline';
     releaseId: EnvironmentInstanceSchemaReleaseId;
     releaseVersion: number;
@@ -2566,7 +2911,7 @@ export type EnvironmentResetTarget = {
 /**
  * The catalog resolution captured on an approved capacity claim.
  */
-export type GpuAllocation = {
+export type EnvironmentInstanceSchemaGpuAllocation = {
     allocationBinding: string;
     catalogRevision: EnvironmentInstanceSchemaRevision;
     class: string;
@@ -2574,8 +2919,8 @@ export type GpuAllocation = {
     /**
      * Exact catalog row used to resolve this allocation.
      */
-    entryId: GpuCatalogEntryId;
-    mode: GpuAllocationMode;
+    entryId: EnvironmentInstanceSchemaGpuCatalogEntryId;
+    mode: EnvironmentInstanceSchemaGpuAllocationMode;
     providerBinding: string;
 };
 
@@ -2585,17 +2930,17 @@ export type GpuAllocation = {
  * Callers submit only a catalog class and count. The mode is resolved from the
  * active catalog entry and is never accepted as an untrusted request override.
  */
-export type GpuAllocationMode = 'exclusive' | 'container_time_slice' | 'vm_vgpu';
+export type EnvironmentInstanceSchemaGpuAllocationMode = 'exclusive' | 'container_time_slice' | 'vm_vgpu';
 
 /**
  * Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.
  */
-export type GpuCatalogEntryId = string;
+export type EnvironmentInstanceSchemaGpuCatalogEntryId = string;
 
 /**
  * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
  */
-export type GpuRequest = {
+export type EnvironmentInstanceSchemaGpuRequest = {
     class: string;
     count: number;
 };
@@ -2608,17 +2953,17 @@ export type EnvironmentInstanceSchemaLeaseId = string;
 /**
  * Authoritative observed lifecycle state.
  */
-export type ObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
+export type EnvironmentInstanceSchemaObservedEnvironmentState = 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed';
 
 /**
  * Strongly typed UUIDv7 identifier for `OperationId`.
  */
-export type OperationId = string;
+export type EnvironmentInstanceSchemaOperationId = string;
 
 /**
  * Persistent operation state.
  */
-export type OperationState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
+export type EnvironmentInstanceSchemaOperationState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -2653,9 +2998,9 @@ export type EnvironmentInstanceSchemaUtcTimestamp = string;
 /**
  * Requested or approved workload resources, independent of Kubernetes quantity syntax.
  */
-export type WorkloadResources = {
+export type EnvironmentInstanceSchemaWorkloadResources = {
     cpuMillicores: number;
-    gpu?: GpuRequest | null;
+    gpu?: EnvironmentInstanceSchemaGpuRequest | null;
     memoryBytes: number;
     storageBytes: number;
 };
@@ -4148,12 +4493,25 @@ export type CompleteAuthoringApprovalRequestSchemaImageArtifact = {
     format: CompleteAuthoringApprovalRequestSchemaVirtualMachineDiskFormat;
     id: CompleteAuthoringApprovalRequestSchemaImageArtifactId;
     kind: 'virtual_machine';
+} | {
+    catalog_id: CompleteAuthoringApprovalRequestSchemaPlatformImageId;
+    digest: string;
+    id: CompleteAuthoringApprovalRequestSchemaImageArtifactId;
+    kind: 'catalog_container';
+    repin_generation: number;
+    repository: string;
+    trust_revision: CompleteAuthoringApprovalRequestSchemaRevision;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
 export type CompleteAuthoringApprovalRequestSchemaImageArtifactId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type CompleteAuthoringApprovalRequestSchemaPlatformImageId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
@@ -4499,10 +4857,14 @@ export type CreateEnvironmentRequestSchemaReleaseId = string;
  * CreateEnvironmentTemplateReleaseRequest
  */
 export type CreateEnvironmentTemplateReleaseRequestSchema = {
-    approvalId: CreateEnvironmentTemplateReleaseRequestSchemaApprovalId;
-    candidateId: CreateEnvironmentTemplateReleaseRequestSchemaCandidateId;
-    candidateRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
+    approvalId?: CreateEnvironmentTemplateReleaseRequestSchemaApprovalId | null;
+    candidateId?: CreateEnvironmentTemplateReleaseRequestSchemaCandidateId | null;
+    candidateRevision?: CreateEnvironmentTemplateReleaseRequestSchemaRevision | null;
     courseId?: CreateEnvironmentTemplateReleaseRequestSchemaCourseId | null;
+    /**
+     * Reviewed manual configuration; mutually exclusive with all Agent candidate fields.
+     */
+    manual?: ManualWorkTemplateRequest | null;
     projectId: CreateEnvironmentTemplateReleaseRequestSchemaProjectId;
     runtimeKind: CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind;
 };
@@ -4511,6 +4873,37 @@ export type CreateEnvironmentTemplateReleaseRequestSchema = {
  * Strongly typed UUIDv7 identifier for `ApprovalId`.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: CreateEnvironmentTemplateReleaseRequestSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
 
 /**
  * Strongly typed UUIDv7 identifier for `CandidateId`.
@@ -4523,19 +4916,208 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaCandidateId = string;
 export type CreateEnvironmentTemplateReleaseRequestSchemaCourseId = string;
 
 /**
+ * Supported controlled protocols.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
+
+export type EnvironmentApiVersion = 'environment.labweaver.io/v1';
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaEnvironmentClass = 'experiment' | 'work';
+
+export type EnvironmentDocumentKind = 'EnvironmentSpec';
+
+/**
+ * One named service entry exposed only through the controlled access plane.
+ */
+export type EnvironmentEntrySpec = {
+    name: string;
+    protocol: CreateEnvironmentTemplateReleaseRequestSchemaEndpointProtocol;
+    servicePort: number;
+};
+
+/**
+ * Strict runtime-specific environment shape.
+ */
+export type EnvironmentRuntimeSpec = {
+    build_context?: CreateEnvironmentTemplateReleaseRequestSchemaArtifactRef | null;
+    kind: 'container';
+    provider_binding: string;
+    service_port: number;
+    terminal?: TerminalSpec | null;
+} | {
+    base_disk: CreateEnvironmentTemplateReleaseRequestSchemaVirtualMachineBaseDisk;
+    kind: 'virtual_machine';
+    provider_binding: string;
+    ssh_port: number;
+    storage_class_binding: string;
+};
+
+/**
+ * Runtime-independent minimum security posture.
+ */
+export type EnvironmentSecuritySpec = {
+    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
+    publicExposurePolicy: PublicExposurePolicy;
+    rootFilesystemPolicy: RootFilesystemPolicy;
+    securityProfileBinding: string;
+    userPolicy: RuntimeUserPolicy;
+};
+
+/**
+ * Stable EnvironmentSpec v1.
+ */
+export type EnvironmentSpec = {
+    apiVersion: EnvironmentApiVersion;
+    class: CreateEnvironmentTemplateReleaseRequestSchemaEnvironmentClass;
+    entries: Array<EnvironmentEntrySpec>;
+    kind: EnvironmentDocumentKind;
+    name: string;
+    network: NetworkPolicySpec;
+    resources: ResourceRequirements;
+    retention: CreateEnvironmentTemplateReleaseRequestSchemaRetentionSnapshot;
+    runtime: EnvironmentRuntimeSpec;
+    security: EnvironmentSecuritySpec;
+};
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * One explicit human approval publishes this exact platform image and Work specification.
+ */
+export type ManualWorkTemplateRequest = {
+    confirmed: boolean;
+    description: string;
+    platformImageGeneration: number;
+    platformImageId: CreateEnvironmentTemplateReleaseRequestSchemaPlatformImageId;
+    reason: string;
+    spec: EnvironmentSpec;
+    templateFamilyId: string;
+};
+
+/**
+ * Network egress posture for a published environment.
+ */
+export type NetworkPolicySpec = {
+    mode: 'allow_all';
+} | {
+    mode: 'deny_all';
+} | {
+    mode: 'restricted';
+    policy_binding: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaPlatformImageId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaPolicyId = string;
+
+export type PrivilegeEscalationPolicy = 'deny';
+
+/**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaProjectId = string;
+
+export type PublicExposurePolicy = 'deny';
+
+/**
+ * Bounded runtime resources expressed without Kubernetes-dependent parsing.
+ */
+export type ResourceRequirements = {
+    cpuMillicores: number;
+    /**
+     * Policy-catalogued GPU class and count. It never carries a Kubernetes resource name.
+     */
+    gpu?: CreateEnvironmentTemplateReleaseRequestSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
+ * Retention classes with distinct privacy and recovery requirements.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+
+/**
+ * Required action after retention expires.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
+
+/**
+ * Frozen data-retention decision for an immutable resource.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaRetentionSnapshot = {
+    /**
+     * Stable retention class.
+     */
+    class: CreateEnvironmentTemplateReleaseRequestSchemaRetentionClass;
+    /**
+     * Required terminal disposition.
+     */
+    disposition: CreateEnvironmentTemplateReleaseRequestSchemaRetentionDisposition;
+    /**
+     * Policy identity.
+     */
+    policyId: CreateEnvironmentTemplateReleaseRequestSchemaPolicyId;
+    /**
+     * Exact policy revision used at creation.
+     */
+    policyRevision: CreateEnvironmentTemplateReleaseRequestSchemaRevision;
+    /**
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
+     */
+    retainUntil: string | null;
+};
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaRevision = number;
 
+export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
+
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+export type RuntimeUserPolicy = 'non_root_required';
+
+/**
+ * Bounded direct-exec terminal owned by an immutable Container release.
+ */
+export type TerminalSpec = {
+    args?: Array<string>;
+    executable: string;
+    workingDirectory: string;
+};
+
+/**
+ * Deployment-owned immutable KubeVirt base-disk identity.
+ *
+ * Unlike an object-store `ArtifactRef`, this identifies a CDI source image and its imported
+ * disk content. `capacity_bytes` is the reviewed PVC capacity, not a fabricated object length.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaVirtualMachineBaseDisk = {
+    binding: string;
+    capacityBytes: number;
+    sourceRegistryDigest: string;
+};
 
 /**
  * CreateEvaluationReleaseRequest
@@ -5174,7 +5756,7 @@ export type EnvironmentCandidateViewSchemaDiagnosticCode = string;
  */
 export type EnvironmentCandidateViewSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
 
-export type EnvironmentApiVersion = 'environment.labweaver.io/v1';
+export type EnvironmentCandidateViewSchemaEnvironmentApiVersion = 'environment.labweaver.io/v1';
 
 /**
  * Immutable validated Environment candidate.
@@ -5188,7 +5770,7 @@ export type EnvironmentCandidate = {
     projectId: EnvironmentCandidateViewSchemaProjectId;
     revision: EnvironmentCandidateViewSchemaRevision;
     runId: EnvironmentCandidateViewSchemaAgentRunId;
-    spec: EnvironmentSpec;
+    spec: EnvironmentCandidateViewSchemaEnvironmentSpec;
 };
 
 /**
@@ -5196,12 +5778,12 @@ export type EnvironmentCandidate = {
  */
 export type EnvironmentCandidateViewSchemaEnvironmentClass = 'experiment' | 'work';
 
-export type EnvironmentDocumentKind = 'EnvironmentSpec';
+export type EnvironmentCandidateViewSchemaEnvironmentDocumentKind = 'EnvironmentSpec';
 
 /**
  * One named service entry exposed only through the controlled access plane.
  */
-export type EnvironmentEntrySpec = {
+export type EnvironmentCandidateViewSchemaEnvironmentEntrySpec = {
     name: string;
     protocol: EnvironmentCandidateViewSchemaEndpointProtocol;
     servicePort: number;
@@ -5210,12 +5792,12 @@ export type EnvironmentEntrySpec = {
 /**
  * Strict runtime-specific environment shape.
  */
-export type EnvironmentRuntimeSpec = {
-    build_context: EnvironmentCandidateViewSchemaArtifactRef;
+export type EnvironmentCandidateViewSchemaEnvironmentRuntimeSpec = {
+    build_context?: EnvironmentCandidateViewSchemaArtifactRef | null;
     kind: 'container';
     provider_binding: string;
     service_port: number;
-    terminal?: TerminalSpec | null;
+    terminal?: EnvironmentCandidateViewSchemaTerminalSpec | null;
 } | {
     base_disk: EnvironmentCandidateViewSchemaVirtualMachineBaseDisk;
     kind: 'virtual_machine';
@@ -5227,28 +5809,28 @@ export type EnvironmentRuntimeSpec = {
 /**
  * Runtime-independent minimum security posture.
  */
-export type EnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
-    publicExposurePolicy: PublicExposurePolicy;
-    rootFilesystemPolicy: RootFilesystemPolicy;
+export type EnvironmentCandidateViewSchemaEnvironmentSecuritySpec = {
+    privilegeEscalationPolicy: EnvironmentCandidateViewSchemaPrivilegeEscalationPolicy;
+    publicExposurePolicy: EnvironmentCandidateViewSchemaPublicExposurePolicy;
+    rootFilesystemPolicy: EnvironmentCandidateViewSchemaRootFilesystemPolicy;
     securityProfileBinding: string;
-    userPolicy: RuntimeUserPolicy;
+    userPolicy: EnvironmentCandidateViewSchemaRuntimeUserPolicy;
 };
 
 /**
  * Stable EnvironmentSpec v1.
  */
-export type EnvironmentSpec = {
-    apiVersion: EnvironmentApiVersion;
+export type EnvironmentCandidateViewSchemaEnvironmentSpec = {
+    apiVersion: EnvironmentCandidateViewSchemaEnvironmentApiVersion;
     class: EnvironmentCandidateViewSchemaEnvironmentClass;
-    entries: Array<EnvironmentEntrySpec>;
-    kind: EnvironmentDocumentKind;
+    entries: Array<EnvironmentCandidateViewSchemaEnvironmentEntrySpec>;
+    kind: EnvironmentCandidateViewSchemaEnvironmentDocumentKind;
     name: string;
-    network: NetworkPolicySpec;
-    resources: ResourceRequirements;
+    network: EnvironmentCandidateViewSchemaNetworkPolicySpec;
+    resources: EnvironmentCandidateViewSchemaResourceRequirements;
     retention: EnvironmentCandidateViewSchemaRetentionSnapshot;
-    runtime: EnvironmentRuntimeSpec;
-    security: EnvironmentSecuritySpec;
+    runtime: EnvironmentCandidateViewSchemaEnvironmentRuntimeSpec;
+    security: EnvironmentCandidateViewSchemaEnvironmentSecuritySpec;
 };
 
 /**
@@ -5273,6 +5855,14 @@ export type EnvironmentCandidateViewSchemaImageArtifact = {
     format: EnvironmentCandidateViewSchemaVirtualMachineDiskFormat;
     id: EnvironmentCandidateViewSchemaImageArtifactId;
     kind: 'virtual_machine';
+} | {
+    catalog_id: EnvironmentCandidateViewSchemaPlatformImageId;
+    digest: string;
+    id: EnvironmentCandidateViewSchemaImageArtifactId;
+    kind: 'catalog_container';
+    repin_generation: number;
+    repository: string;
+    trust_revision: EnvironmentCandidateViewSchemaRevision;
 };
 
 /**
@@ -5283,7 +5873,7 @@ export type EnvironmentCandidateViewSchemaImageArtifactId = string;
 /**
  * Network egress posture for a published environment.
  */
-export type NetworkPolicySpec = {
+export type EnvironmentCandidateViewSchemaNetworkPolicySpec = {
     mode: 'allow_all';
 } | {
     mode: 'deny_all';
@@ -5293,23 +5883,28 @@ export type NetworkPolicySpec = {
 };
 
 /**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type EnvironmentCandidateViewSchemaPlatformImageId = string;
+
+/**
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
 export type EnvironmentCandidateViewSchemaPolicyId = string;
 
-export type PrivilegeEscalationPolicy = 'deny';
+export type EnvironmentCandidateViewSchemaPrivilegeEscalationPolicy = 'deny';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type EnvironmentCandidateViewSchemaProjectId = string;
 
-export type PublicExposurePolicy = 'deny';
+export type EnvironmentCandidateViewSchemaPublicExposurePolicy = 'deny';
 
 /**
  * Bounded runtime resources expressed without Kubernetes-dependent parsing.
  */
-export type ResourceRequirements = {
+export type EnvironmentCandidateViewSchemaResourceRequirements = {
     cpuMillicores: number;
     /**
      * Policy-catalogued GPU class and count. It never carries a Kubernetes resource name.
@@ -5361,14 +5956,14 @@ export type EnvironmentCandidateViewSchemaRetentionSnapshot = {
  */
 export type EnvironmentCandidateViewSchemaRevision = number;
 
-export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
+export type EnvironmentCandidateViewSchemaRootFilesystemPolicy = 'read_only_required' | 'mutable_required';
 
-export type RuntimeUserPolicy = 'non_root_required';
+export type EnvironmentCandidateViewSchemaRuntimeUserPolicy = 'non_root_required';
 
 /**
  * Bounded direct-exec terminal owned by an immutable Container release.
  */
-export type TerminalSpec = {
+export type EnvironmentCandidateViewSchemaTerminalSpec = {
     args?: Array<string>;
     executable: string;
     workingDirectory: string;
@@ -5761,16 +6356,21 @@ export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
  * Read model that keeps the immutable release separate from its append-only withdrawal fact.
  */
 export type EnvironmentTemplateReleaseViewSchema = {
-    agentRunId: EnvironmentTemplateReleaseViewSchemaAgentRunId;
-    approval: EnvironmentTemplateReleaseViewSchemaCandidateApproval;
+    agentRunId?: EnvironmentTemplateReleaseViewSchemaAgentRunId | null;
+    approval?: EnvironmentTemplateReleaseViewSchemaCandidateApproval | null;
     artifact: EnvironmentTemplateReleaseViewSchemaImageArtifact;
-    candidateId: EnvironmentTemplateReleaseViewSchemaCandidateId;
-    candidateRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    candidateId?: EnvironmentTemplateReleaseViewSchemaCandidateId | null;
+    candidateRevision?: EnvironmentTemplateReleaseViewSchemaRevision | null;
+    capabilities: Array<TemplateCapability>;
     courseId?: EnvironmentTemplateReleaseViewSchemaCourseId | null;
+    description: string;
     id: EnvironmentTemplateReleaseViewSchemaReleaseId;
+    manualApproval?: ManualTemplateApproval | null;
+    name: string;
     projectId: EnvironmentTemplateReleaseViewSchemaProjectId;
     publishedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
     publishedBy: EnvironmentTemplateReleaseViewSchemaActorId;
+    purpose: EnvironmentTemplateReleaseViewSchemaEnvironmentClass;
     runtimeKind: EnvironmentTemplateReleaseViewSchemaRuntimeKind;
     /**
      * Workspace submission manifest from the exact ready authoring publication, when present.
@@ -5778,6 +6378,7 @@ export type EnvironmentTemplateReleaseViewSchema = {
      * Work releases and system-facts evaluations intentionally omit this projection.
      */
     submissionManifest?: EnvironmentTemplateReleaseViewSchemaSubmissionManifest | null;
+    templateFamilyId: string;
     version: number;
     withdrawal?: ReleaseWithdrawal | null;
 };
@@ -5796,6 +6397,37 @@ export type EnvironmentTemplateReleaseViewSchemaAgentRunId = string;
  * Strongly typed UUIDv7 identifier for `ApprovalId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaApprovalId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ArtifactId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaArtifactId = string;
+
+/**
+ * Immutable object-store identity without a machine-local path or credential.
+ */
+export type EnvironmentTemplateReleaseViewSchemaArtifactRef = {
+    /**
+     * Stable metadata identity resolved by the owning service.
+     */
+    artifactId: EnvironmentTemplateReleaseViewSchemaArtifactId;
+    /**
+     * Registered media type.
+     */
+    mediaType: string;
+    /**
+     * Immutable backend object version.
+     */
+    objectVersion: string;
+    /**
+     * Raw object length.
+     */
+    sizeBytes: number;
+    /**
+     * Explicit object-store binding from deployment configuration.
+     */
+    storeBinding: string;
+};
 
 /**
  * Strongly typed UUIDv7 identifier for `BuildRequestId`.
@@ -5833,6 +6465,81 @@ export type EnvironmentTemplateReleaseViewSchemaCandidateId = string;
 export type EnvironmentTemplateReleaseViewSchemaCourseId = string;
 
 /**
+ * Supported controlled protocols.
+ */
+export type EnvironmentTemplateReleaseViewSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
+
+export type EnvironmentTemplateReleaseViewSchemaEnvironmentApiVersion = 'environment.labweaver.io/v1';
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentTemplateReleaseViewSchemaEnvironmentClass = 'experiment' | 'work';
+
+export type EnvironmentTemplateReleaseViewSchemaEnvironmentDocumentKind = 'EnvironmentSpec';
+
+/**
+ * One named service entry exposed only through the controlled access plane.
+ */
+export type EnvironmentTemplateReleaseViewSchemaEnvironmentEntrySpec = {
+    name: string;
+    protocol: EnvironmentTemplateReleaseViewSchemaEndpointProtocol;
+    servicePort: number;
+};
+
+/**
+ * Strict runtime-specific environment shape.
+ */
+export type EnvironmentTemplateReleaseViewSchemaEnvironmentRuntimeSpec = {
+    build_context?: EnvironmentTemplateReleaseViewSchemaArtifactRef | null;
+    kind: 'container';
+    provider_binding: string;
+    service_port: number;
+    terminal?: EnvironmentTemplateReleaseViewSchemaTerminalSpec | null;
+} | {
+    base_disk: EnvironmentTemplateReleaseViewSchemaVirtualMachineBaseDisk;
+    kind: 'virtual_machine';
+    provider_binding: string;
+    ssh_port: number;
+    storage_class_binding: string;
+};
+
+/**
+ * Runtime-independent minimum security posture.
+ */
+export type EnvironmentTemplateReleaseViewSchemaEnvironmentSecuritySpec = {
+    privilegeEscalationPolicy: EnvironmentTemplateReleaseViewSchemaPrivilegeEscalationPolicy;
+    publicExposurePolicy: EnvironmentTemplateReleaseViewSchemaPublicExposurePolicy;
+    rootFilesystemPolicy: EnvironmentTemplateReleaseViewSchemaRootFilesystemPolicy;
+    securityProfileBinding: string;
+    userPolicy: EnvironmentTemplateReleaseViewSchemaRuntimeUserPolicy;
+};
+
+/**
+ * Stable EnvironmentSpec v1.
+ */
+export type EnvironmentTemplateReleaseViewSchemaEnvironmentSpec = {
+    apiVersion: EnvironmentTemplateReleaseViewSchemaEnvironmentApiVersion;
+    class: EnvironmentTemplateReleaseViewSchemaEnvironmentClass;
+    entries: Array<EnvironmentTemplateReleaseViewSchemaEnvironmentEntrySpec>;
+    kind: EnvironmentTemplateReleaseViewSchemaEnvironmentDocumentKind;
+    name: string;
+    network: EnvironmentTemplateReleaseViewSchemaNetworkPolicySpec;
+    resources: EnvironmentTemplateReleaseViewSchemaResourceRequirements;
+    retention: EnvironmentTemplateReleaseViewSchemaRetentionSnapshot;
+    runtime: EnvironmentTemplateReleaseViewSchemaEnvironmentRuntimeSpec;
+    security: EnvironmentTemplateReleaseViewSchemaEnvironmentSecuritySpec;
+};
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type EnvironmentTemplateReleaseViewSchemaGpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
  * Complete immutable runtime artifact identity.
  */
 export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
@@ -5846,12 +6553,46 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
     format: EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat;
     id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
     kind: 'virtual_machine';
+} | {
+    catalog_id: EnvironmentTemplateReleaseViewSchemaPlatformImageId;
+    digest: string;
+    id: EnvironmentTemplateReleaseViewSchemaImageArtifactId;
+    kind: 'catalog_container';
+    repin_generation: number;
+    repository: string;
+    trust_revision: EnvironmentTemplateReleaseViewSchemaRevision;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaImageArtifactId = string;
+
+/**
+ * Human-reviewed Work configuration. No model, Agent run, or LLM policy is fabricated.
+ */
+export type ManualTemplateApproval = {
+    approvedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    approvedBy: EnvironmentTemplateReleaseViewSchemaActorId;
+    description: string;
+    platformImage: EnvironmentTemplateReleaseViewSchemaPlatformImageEntry;
+    reason: string;
+    spec: EnvironmentTemplateReleaseViewSchemaEnvironmentSpec;
+    templateFamilyId: string;
+    trustRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+};
+
+/**
+ * Network egress posture for a published environment.
+ */
+export type EnvironmentTemplateReleaseViewSchemaNetworkPolicySpec = {
+    mode: 'allow_all';
+} | {
+    mode: 'deny_all';
+} | {
+    mode: 'restricted';
+    policy_binding: string;
+};
 
 /**
  * Strict safe path selector shared by packages, collectors, and LLM allowlists.
@@ -5865,9 +6606,63 @@ export type EnvironmentTemplateReleaseViewSchemaPathRule = {
 };
 
 /**
+ * One pinned platform image identity as persisted by the Agent authority.
+ */
+export type EnvironmentTemplateReleaseViewSchemaPlatformImageEntry = {
+    binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
+    catalogId: EnvironmentTemplateReleaseViewSchemaPlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: EnvironmentTemplateReleaseViewSchemaVirtualMachineDiskFormat | null;
+    kind: EnvironmentTemplateReleaseViewSchemaPlatformImageKind;
+    mediaType: string;
+    pinnedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+    repinGeneration: number;
+    resolvedDigest: string;
+    sizeBytes: number;
+    sourceReference: string;
+    status: PlatformImageStatus;
+    trustRevision: number;
+    updatedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaPlatformImageId = string;
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type EnvironmentTemplateReleaseViewSchemaPlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Catalog lifecycle status.
+ */
+export type PlatformImageStatus = 'active' | 'disabled';
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type EnvironmentTemplateReleaseViewSchemaPolicyId = string;
+
+export type EnvironmentTemplateReleaseViewSchemaPrivilegeEscalationPolicy = 'deny';
+
+/**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaProjectId = string;
+
+export type EnvironmentTemplateReleaseViewSchemaPublicExposurePolicy = 'deny';
 
 /**
  * Strongly typed UUIDv7 identifier for `ReleaseId`.
@@ -5886,14 +6681,68 @@ export type ReleaseWithdrawal = {
 };
 
 /**
+ * Bounded runtime resources expressed without Kubernetes-dependent parsing.
+ */
+export type EnvironmentTemplateReleaseViewSchemaResourceRequirements = {
+    cpuMillicores: number;
+    /**
+     * Policy-catalogued GPU class and count. It never carries a Kubernetes resource name.
+     */
+    gpu?: EnvironmentTemplateReleaseViewSchemaGpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
+ * Retention classes with distinct privacy and recovery requirements.
+ */
+export type EnvironmentTemplateReleaseViewSchemaRetentionClass = 'course_material' | 'build_evidence' | 'run_evidence' | 'student_submission' | 'security_audit';
+
+/**
+ * Required action after retention expires.
+ */
+export type EnvironmentTemplateReleaseViewSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
+
+/**
+ * Frozen data-retention decision for an immutable resource.
+ */
+export type EnvironmentTemplateReleaseViewSchemaRetentionSnapshot = {
+    /**
+     * Stable retention class.
+     */
+    class: EnvironmentTemplateReleaseViewSchemaRetentionClass;
+    /**
+     * Required terminal disposition.
+     */
+    disposition: EnvironmentTemplateReleaseViewSchemaRetentionDisposition;
+    /**
+     * Policy identity.
+     */
+    policyId: EnvironmentTemplateReleaseViewSchemaPolicyId;
+    /**
+     * Exact policy revision used at creation.
+     */
+    policyRevision: EnvironmentTemplateReleaseViewSchemaRevision;
+    /**
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
+     */
+    retainUntil: string | null;
+};
+
+/**
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type EnvironmentTemplateReleaseViewSchemaRevision = number;
+
+export type EnvironmentTemplateReleaseViewSchemaRootFilesystemPolicy = 'read_only_required' | 'mutable_required';
 
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type EnvironmentTemplateReleaseViewSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+export type EnvironmentTemplateReleaseViewSchemaRuntimeUserPolicy = 'non_root_required';
 
 export type EnvironmentTemplateReleaseViewSchemaSubmissionApiVersion = 'evaluation.labweaver.io/v1';
 
@@ -5920,6 +6769,20 @@ export type EnvironmentTemplateReleaseViewSchemaSubmissionManifest = {
  * Source available to a bounded Collector.
  */
 export type EnvironmentTemplateReleaseViewSchemaSubmissionSource = 'workspace' | 'system_facts';
+
+/**
+ * Supported template features, not live connection or model availability promises.
+ */
+export type TemplateCapability = 'terminal' | 'desktop' | 'ssh' | 'applications' | 'files' | 'agent';
+
+/**
+ * Bounded direct-exec terminal owned by an immutable Container release.
+ */
+export type EnvironmentTemplateReleaseViewSchemaTerminalSpec = {
+    args?: Array<string>;
+    executable: string;
+    workingDirectory: string;
+};
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -6388,6 +7251,14 @@ export type EvaluationCandidateViewSchemaImageArtifact = {
     format: EvaluationCandidateViewSchemaVirtualMachineDiskFormat;
     id: EvaluationCandidateViewSchemaImageArtifactId;
     kind: 'virtual_machine';
+} | {
+    catalog_id: EvaluationCandidateViewSchemaPlatformImageId;
+    digest: string;
+    id: EvaluationCandidateViewSchemaImageArtifactId;
+    kind: 'catalog_container';
+    repin_generation: number;
+    repository: string;
+    trust_revision: EvaluationCandidateViewSchemaRevision;
 };
 
 /**
@@ -6399,6 +7270,11 @@ export type EvaluationCandidateViewSchemaImageArtifactId = string;
  * Conditions that force manual teacher review.
  */
 export type EvaluationCandidateViewSchemaManualReviewReason = 'infrastructureError' | 'invalidEvidence';
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type EvaluationCandidateViewSchemaPlatformImageId = string;
 
 /**
  * Approved program Runner phase.
@@ -7389,7 +8265,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentId = string;
  * Strict runtime-specific environment shape.
  */
 export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
-    build_context: InternalAgentRunOutcomeSchemaArtifactRef;
+    build_context?: InternalAgentRunOutcomeSchemaArtifactRef | null;
     kind: 'container';
     provider_binding: string;
     service_port: number;
@@ -8475,12 +9351,30 @@ export type InternalImageArtifactResolutionSchemaImageArtifact = {
     format: InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat;
     id: InternalImageArtifactResolutionSchemaImageArtifactId;
     kind: 'virtual_machine';
+} | {
+    catalog_id: InternalImageArtifactResolutionSchemaPlatformImageId;
+    digest: string;
+    id: InternalImageArtifactResolutionSchemaImageArtifactId;
+    kind: 'catalog_container';
+    repin_generation: number;
+    repository: string;
+    trust_revision: InternalImageArtifactResolutionSchemaRevision;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
 export type InternalImageArtifactResolutionSchemaImageArtifactId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type InternalImageArtifactResolutionSchemaPlatformImageId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalImageArtifactResolutionSchemaRevision = number;
 
 /**
  * Deployment-owned immutable KubeVirt base-disk identity.
@@ -8505,7 +9399,7 @@ export type InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat = 'qco
  * Short Agent response used by Control while polling a durable import job.
  */
 export type InternalPlatformImageImportJobStatusSchema = {
-    catalogId?: PlatformImageId | null;
+    catalogId?: InternalPlatformImageImportJobStatusSchemaPlatformImageId | null;
     diagnostic?: string | null;
     revision: InternalPlatformImageImportJobStatusSchemaRevision;
     state: PlatformImageImportJobState;
@@ -8515,7 +9409,7 @@ export type InternalPlatformImageImportJobStatusSchema = {
 /**
  * Strongly typed UUIDv7 identifier for `PlatformImageId`.
  */
-export type PlatformImageId = string;
+export type InternalPlatformImageImportJobStatusSchemaPlatformImageId = string;
 
 /**
  * Agent-owned lifecycle state for one durable platform image import job.
@@ -9143,7 +10037,7 @@ export type PlatformImageCatalogViewSchemaPlatformImageEntryView = {
     resolvedDigest: string;
     sizeBytes: number;
     sourceReference: string;
-    status: PlatformImageStatus;
+    status: PlatformImageCatalogViewSchemaPlatformImageStatus;
     trustRevision: number;
     updatedAt: PlatformImageCatalogViewSchemaUtcTimestamp;
 };
@@ -9161,7 +10055,7 @@ export type PlatformImageCatalogViewSchemaPlatformImageKind = 'container' | 'vir
 /**
  * Catalog lifecycle status.
  */
-export type PlatformImageStatus = 'active' | 'disabled';
+export type PlatformImageCatalogViewSchemaPlatformImageStatus = 'active' | 'disabled';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -9682,6 +10576,23 @@ export type ProblemPackageUploadSessionSchemaUploadSessionId = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ProblemPackageUploadSessionSchemaUtcTimestamp = string;
+
+/**
+ * ProjectAgentCapability
+ *
+ * Project Agent configuration admission, independent of manual Work operations.
+ * A failed configuration read is an HTTP failure, never `unconfigured`.
+ */
+export type ProjectAgentCapabilitySchema = {
+    model: string;
+    status: 'configured';
+} | {
+    reasonCode: string;
+    status: 'unconfigured';
+} | {
+    reasonCode: string;
+    status: 'unavailable';
+};
 
 /**
  * RegisterPlatformImageRequest
@@ -12356,11 +13267,6 @@ export type RuntimeAuthorizationBindingSchemaActorId = string;
 export type RuntimeAuthorizationBindingSchemaApprovalId = string;
 
 /**
- * Strongly typed UUIDv7 identifier for `CandidateId`.
- */
-export type RuntimeAuthorizationBindingSchemaCandidateId = string;
-
-/**
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type RuntimeAuthorizationBindingSchemaCourseId = string;
@@ -12425,10 +13331,10 @@ export type RuntimeAdmissionBasis = 'restricted_baseline' | 'project_preauthoriz
 export type RuntimeConfigurationIdentity = {
     authoringApprovalId?: RuntimeAuthorizationBindingSchemaApprovalId | null;
     authoringProjectId: RuntimeAuthorizationBindingSchemaProjectId;
-    candidateId: RuntimeAuthorizationBindingSchemaCandidateId;
-    candidateRevision: RuntimeAuthorizationBindingSchemaRevision;
     configurationSha256: string;
     courseId?: RuntimeAuthorizationBindingSchemaCourseId | null;
+    releaseId: RuntimeAuthorizationBindingSchemaReleaseId;
+    releaseVersion: number;
     teacherScope?: RuntimeAuthorizationBindingSchemaCourseTeacherApprovalScope | null;
 };
 
@@ -15159,7 +16065,7 @@ export type GetEnvironmentResponses = {
     /**
      * Successful response
      */
-    200: EnvironmentInstanceSchema;
+    200: EnvironmentDetailSchema;
 };
 
 export type GetEnvironmentResponse = GetEnvironmentResponses[keyof GetEnvironmentResponses];
@@ -16813,6 +17719,73 @@ export type UpdateProjectResponses = {
 };
 
 export type UpdateProjectResponse = UpdateProjectResponses[keyof UpdateProjectResponses];
+
+export type GetProjectAgentCapabilityData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/agent-capability';
+};
+
+export type GetProjectAgentCapabilityErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectAgentCapabilityError = GetProjectAgentCapabilityErrors[keyof GetProjectAgentCapabilityErrors];
+
+export type GetProjectAgentCapabilityResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectAgentCapabilitySchema;
+};
+
+export type GetProjectAgentCapabilityResponse = GetProjectAgentCapabilityResponses[keyof GetProjectAgentCapabilityResponses];
 
 export type ListProjectAgentRunsData = {
     body?: never;
@@ -20579,6 +21552,73 @@ export type CreateProjectResourceRequestResponses = {
 };
 
 export type CreateProjectResourceRequestResponse = CreateProjectResourceRequestResponses[keyof CreateProjectResourceRequestResponses];
+
+export type ListProjectTemplateImagesData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/template-images';
+};
+
+export type ListProjectTemplateImagesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectTemplateImagesError = ListProjectTemplateImagesErrors[keyof ListProjectTemplateImagesErrors];
+
+export type ListProjectTemplateImagesResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformImageCatalogSchema;
+};
+
+export type ListProjectTemplateImagesResponse = ListProjectTemplateImagesResponses[keyof ListProjectTemplateImagesResponses];
 
 export type ListProjectResourceUsageData = {
     body?: never;

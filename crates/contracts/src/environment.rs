@@ -1134,9 +1134,41 @@ pub enum EndpointProtocol {
 #[serde(rename_all = "snake_case")]
 pub enum EndpointHealth {
     Pending,
+    /// The runtime exists, but no successful connection probe has been observed.
+    Unknown,
     Healthy,
     Unhealthy,
     Removed,
+}
+
+/// Connection preparation is distinct from the runtime instance's lifecycle state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentConnectionState {
+    Preparing,
+    Ready,
+    Unknown,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentConnectionReadiness {
+    pub instance_ready: bool,
+    pub state: EnvironmentConnectionState,
+    pub reason_code: Option<String>,
+    /// Non-secret instructions. Platform authentication does not imply a guest OS login.
+    pub guest_instructions: Vec<String>,
+    pub observed_at: Option<UtcTimestamp>,
+}
+
+/// Public detail response: the persisted instance plus current connection preparation facts.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentDetail {
+    #[serde(flatten)]
+    pub instance: EnvironmentInstance,
+    pub connection: EnvironmentConnectionReadiness,
 }
 
 /// PostgreSQL-authoritative environment view.

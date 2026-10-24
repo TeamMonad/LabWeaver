@@ -64,6 +64,9 @@ domains:
       - id: 19
         file: control/0019_runtime_authorization_reads.sql
         sha256: 9d8a06ba7f3baf03b41b1317688b423c68cdf5a9362b0a8405258024fdf918d3
+      - id: 20
+        file: control/0020_manual_work_templates.sql
+        sha256: 12e3cca0ad24c15532e09c6acdad93f5fbb6a794e1d0bd9be4bb3101849a713c
   - name: access
     migrations:
       - id: 1
@@ -110,6 +113,9 @@ domains:
       - id: 7
         file: environment/0007_permanent_material_eligibility.sql
         sha256: 393824fd7f130f7161ed2b2a3542a467c37b2cfad58b794812c1c6fc2f1981f4
+      - id: 8
+        file: environment/0008_guest_connection_readiness.sql
+        sha256: 9ed85f2219c44d7a017821021e5b7736aba3f2b2a9eb930b203a52e444d6a0b7
   - name: agent
     migrations:
       - id: 1

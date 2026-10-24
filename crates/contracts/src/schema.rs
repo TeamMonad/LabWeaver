@@ -260,6 +260,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::EnvironmentInstance
     );
     document!(
+        "schemas/contracts/v1/environment-detail.schema.json",
+        crate::environment::EnvironmentDetail
+    );
+    document!(
         "schemas/contracts/v1/internal/environment-execution-binding-request.schema.json",
         crate::environment::EnvironmentExecutionBindingRequest
     );
@@ -798,6 +802,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/evaluation-candidate-view.schema.json",
         crate::http::EvaluationCandidateView
+    );
+    document!(
+        "schemas/contracts/v1/http/project-agent-capability.schema.json",
+        crate::http::ProjectAgentCapability
     );
     document!(
         "schemas/contracts/v1/http/create-environment-template-release-request.schema.json",
@@ -1875,6 +1883,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
                 ,"EnvironmentWorkConfigurationTargetQuery": contract_ref("http/environment-work-configuration-target-query")
+                ,"EnvironmentInstance": contract_ref("environment-instance")
                  ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
                  ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
                  ,"InternalAgentLlmReviewRequest": contract_ref("http/internal-agent-llm-review-request")
@@ -2331,6 +2340,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
         "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
+        "getProjectAgentCapability" => contract_ref("http/project-agent-capability"),
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"
@@ -2368,7 +2378,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listEnvironmentTemplateReleases" => {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("http/environment-template-release-view")},"nextCursor":{"type":["string","null"]}}})
         }
-        "getEnvironment" => contract_ref("environment-instance"),
+        "getEnvironment" => contract_ref("environment-detail"),
         "getInternalAuthoringPublicationAdmission"
         | "getInternalEnvironmentPublicationAdmission" => {
             contract_ref("http/authoring-publication-admission-binding")
@@ -2457,6 +2467,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("gateway-session")
         }
         "listPlatformImages" => contract_ref("http/platform-image-catalog-view"),
+        "listProjectTemplateImages" => contract_ref("http/platform-image-catalog"),
         "getPlatformImageUpload" => contract_ref("http/platform-image-upload-status"),
         "registerPlatformImage" | "repinPlatformImage" | "disablePlatformImage" => {
             contract_ref("http/platform-image-entry-view")

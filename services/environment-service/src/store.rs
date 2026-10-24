@@ -138,6 +138,28 @@ impl PgEnvironmentStore {
         Ok(UtcTimestamp::from_utc(value)?)
     }
 
+    /// Current-generation VM runtime readiness, independent of an SSH handshake succeeding.
+    pub async fn vm_runtime_ready_at(
+        &self,
+        instance: &EnvironmentInstance,
+    ) -> Result<Option<UtcTimestamp>, EnvironmentStoreError> {
+        let observed: Option<time::OffsetDateTime> = sqlx::query_scalar(
+            "SELECT observed_at FROM environment.kubevirt_runtime_observations \
+             WHERE environment_id=$1 AND environment_generation=$2 AND state='running'",
+        )
+        .bind(instance.id.as_uuid())
+        .bind(
+            i64::try_from(instance.generation)
+                .map_err(|_| EnvironmentStoreError::InvalidCreateAggregate)?,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        observed
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// Inserts an already validated create aggregate with its operation and Outbox event atomically.
     pub async fn create(
         &self,

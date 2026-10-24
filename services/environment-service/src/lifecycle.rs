@@ -90,6 +90,7 @@ pub fn plan_command_authorized(
     if matches!(
         command.kind,
         EnvironmentOperationKind::Start
+            | EnvironmentOperationKind::Restart
             | EnvironmentOperationKind::Retry
             | EnvironmentOperationKind::Recover
             | EnvironmentOperationKind::Reset
@@ -149,6 +150,7 @@ pub fn plan_command_authorized(
         && matches!(
             command.kind,
             EnvironmentOperationKind::Start
+                | EnvironmentOperationKind::Restart
                 | EnvironmentOperationKind::Retry
                 | EnvironmentOperationKind::Recover
                 | EnvironmentOperationKind::Reset
