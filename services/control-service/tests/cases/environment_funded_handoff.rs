@@ -855,21 +855,19 @@ async fn exercise_execution(
             .rsplit_once('/')
             .ok_or("image repository prefix")?
             .0;
-        assert_eq!(
-            repository,
-            &format!(
-                "{prefix}/project-{}-{}",
-                projection.release.project_id, projection.release.candidate_id
-            )
-        );
         assert_eq!(instance.project_id, projection.release.project_id);
         assert_eq!(instance.release_id, projection.release.id);
         assert_eq!(instance.release_version, projection.release.version);
+        let approval = projection
+            .release
+            .approval
+            .as_ref()
+            .ok_or("generated container approval")?;
         let configuration = environment_service::ContainerProviderConfiguration::new(
             environment_service::ContainerReleasePolicy::new(
                 contracts::PolicyId::new(),
-                projection.release.approval.policy_revision,
-                projection.release.approval.trust_revision,
+                approval.policy_revision,
+                approval.trust_revision,
             )?,
             prefix.into(),
             "synthetic-access".into(),

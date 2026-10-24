@@ -1327,9 +1327,14 @@ fn projection() -> ReleasePublished {
         artifact: ImageArtifact::Container {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),
-            repository: format!(
-                "harbor.internal/labweaver-system/project-{project_id}-{candidate_id}"
-            ),
+            repository: match course_id {
+                Some(course_id) => {
+                    format!("harbor.internal/labweaver-system/course-{course_id}-{candidate_id}")
+                }
+                None => {
+                    format!("harbor.internal/labweaver-system/project-{project_id}-{candidate_id}")
+                }
+            },
             digest: format!("sha256:{artifact_sha256}"),
         },
         published_by: ActorId::new(),

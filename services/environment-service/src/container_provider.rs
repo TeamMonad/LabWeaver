@@ -1466,10 +1466,16 @@ where
                     .release
                     .candidate_id
                     .ok_or(ReleaseProjectionError::IdentityMismatch)?;
-                let expected_repository = format!(
-                    "{}/project-{}-{}",
-                    self.image_repository_prefix, projection.release.project_id, candidate_id
-                );
+                let expected_repository = match projection.release.course_id {
+                    Some(course_id) => format!(
+                        "{}/course-{course_id}-{candidate_id}",
+                        self.image_repository_prefix
+                    ),
+                    None => format!(
+                        "{}/project-{}-{candidate_id}",
+                        self.image_repository_prefix, projection.release.project_id
+                    ),
+                };
                 if repository != expected_repository {
                     return Err(ReleaseProjectionError::IdentityMismatch);
                 }

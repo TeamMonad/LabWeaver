@@ -542,6 +542,13 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     let mut environment_candidate =
         environment_candidate(project_id, Some(course_id), environment_schema)?;
     environment_candidate.spec.retention.retain_until = Some("2099-01-01T00:00:00.000Z".parse()?);
+    // The concrete Container provider probes an internal HTTP listener; TLS terminates at Access.
+    environment_candidate
+        .spec
+        .entries
+        .first_mut()
+        .ok_or("Work runtime entry")?
+        .protocol = contracts::environment::EndpointProtocol::Http;
     let package_id = ProblemPackageId::new();
     let build_context = match &environment_candidate.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {

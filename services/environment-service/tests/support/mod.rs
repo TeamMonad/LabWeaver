@@ -283,11 +283,11 @@ pub fn runtime_projection(instance: &EnvironmentInstance) -> contracts::events::
             project_id: instance.project_id,
             course_id: instance.course_id,
             version: instance.release_version,
-            candidate_id,
-            agent_run_id: contracts::AgentRunId::new(),
-            candidate_revision: revision(1),
+            candidate_id: Some(candidate_id),
+            agent_run_id: Some(contracts::AgentRunId::new()),
+            candidate_revision: Some(revision(1)),
             runtime_kind: instance.runtime_kind,
-            approval: CandidateApproval {
+            approval: Some(CandidateApproval {
                 id: contracts::ApprovalId::new(),
                 candidate_id,
                 candidate_revision: revision(1),
@@ -297,7 +297,8 @@ pub fn runtime_projection(instance: &EnvironmentInstance) -> contracts::events::
                 decision: CandidateDecision::Approved,
                 reason: "synthetic".to_owned(),
                 decided_at: instance.operation.accepted_at,
-            },
+            }),
+            manual_approval: None,
             artifact: ImageArtifact::Container {
                 id: contracts::ImageArtifactId::new(),
                 build_request_id: contracts::BuildRequestId::new(),
@@ -355,8 +356,8 @@ pub fn runtime_receipt(
             configuration: RuntimeConfigurationIdentity {
                 authoring_project_id: projection.release.project_id,
                 course_id: projection.release.course_id,
-                candidate_id: projection.release.candidate_id,
-                candidate_revision: projection.release.candidate_revision,
+                release_id: projection.release.id,
+                release_version: projection.release.version,
                 configuration_sha256: persistence_sqlx::Sha256Digest::of_canonical(
                     &projection.environment_spec,
                 )

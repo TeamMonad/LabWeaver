@@ -1578,9 +1578,18 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
             .all(|pair| pair[0].measured_until == pair[1].measured_from),
         "a rejected restart must neither omit nor overlap retained storage time"
     );
+    let preserved = deliveries
+        .iter()
+        .find(|request| request.source_event_id == source_event_id)
+        .ok_or("pre-migration delivery missing")?;
+    assert_eq!(
+        preserved, &decoded,
+        "migration and rejected restart cannot rewrite an existing known fact"
+    );
     assert!(
         deliveries
             .iter()
+            .filter(|request| request.source_event_id != source_event_id)
             .all(|request| matches!(&request.measurement, UsageMeasurement::Unknown { .. }))
     );
     Ok(())

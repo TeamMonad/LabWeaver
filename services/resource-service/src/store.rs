@@ -4428,7 +4428,7 @@ impl PgResourceStore {
              JOIN resource.resource_requests r ON r.request_id=c.request_id \
              JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
              WHERE r.target_kind='environment' \
-               AND c.state IN ('reserved','provisioning','blocked','handed_off','releasing') \
+               AND c.state IN ('reserved','provisioning','ready','blocked','handed_off','releasing') \
                AND (l.state='expiring' OR (l.state='active' AND l.expires_at<=clock_timestamp())) \
                AND NOT EXISTS (\
                  SELECT 1 FROM resource.capacity_attempts a \

@@ -88,29 +88,32 @@ async fn public_operation_and_lifecycle_routes_preserve_scope_cursor_and_status_
         spawn_revocation_responder(nats_client.clone()).await?;
 
     let releases = PgReleaseProjectionStore::new(pool.clone());
-    let api = environment_api_router(EnvironmentApiState::new(
-        PgEnvironmentStore::new(pool.clone()),
-        releases.clone(),
-        NatsAccessRevoker::new(
-            ACCESS_REVOKE_SUBJECT.to_owned(),
-            nats_client.clone(),
-            Duration::from_secs(2),
-        )?,
-        NatsResourceLeaseVerifier::new(
-            LEASE_VERIFY_SUBJECT.to_owned(),
-            nats_client,
-            Duration::from_secs(2),
-        )?,
-        FreezeBindingService::new_with_admission_resolver(
-            pool.clone(),
-            releases,
-            FreezeBindingConfiguration {
-                container_workspace_storage_class: "test-storage".to_owned(),
-                vm: None,
-            },
-            UnusedAdmission,
-        )?,
-    ));
+    let api = environment_api_router(
+        EnvironmentApiState::new(
+            PgEnvironmentStore::new(pool.clone()),
+            releases.clone(),
+            NatsAccessRevoker::new(
+                ACCESS_REVOKE_SUBJECT.to_owned(),
+                nats_client.clone(),
+                Duration::from_secs(2),
+            )?,
+            NatsResourceLeaseVerifier::new(
+                LEASE_VERIFY_SUBJECT.to_owned(),
+                nats_client,
+                Duration::from_secs(2),
+            )?,
+            FreezeBindingService::new_with_admission_resolver(
+                pool.clone(),
+                releases,
+                FreezeBindingConfiguration {
+                    container_workspace_storage_class: "test-storage".to_owned(),
+                    vm: None,
+                },
+                UnusedAdmission,
+            )?,
+        )
+        .with_runtime_admission(support::stored_runtime_admission(pool.clone())),
+    );
 
     let identity = access_identity();
     let session_id = uuid::Uuid::now_v7();
@@ -508,6 +511,7 @@ async fn failed_instance(
     instance.owner_id = owner_id;
     instance.eligibility_expires_at = Some(timestamp("2099-01-01T00:00:00.000Z"));
     instance.operation.actor_id = owner_id;
+    let instance = support::funded_instance(instance);
     store.create(key, &instance).await?;
 
     let mut held = Vec::new();

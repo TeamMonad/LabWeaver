@@ -43,9 +43,10 @@ impl Cluster {
             root_disk_uid: self.disk,
             guest_ip: std::net::Ipv4Addr::new(10, 0, 0, 10).into(),
             service_cluster_ip: std::net::Ipv4Addr::new(10, 96, 0, 10).into(),
-            ssh_host_key_sha256: persistence_sqlx::Sha256Digest::of_bytes(b"synthetic-host-key"),
+            ssh_host_key_sha256: Some(persistence_sqlx::Sha256Digest::of_bytes(
+                b"synthetic-host-key",
+            )),
             guest_agent_connected: false,
-            ssh_ready: true,
             observed_at: self.now().await?,
         }))
     }
@@ -161,7 +162,12 @@ pub(super) fn register(
         base_disk.capacity_bytes,
     )?;
     let configuration = environment_service::KubeVirtProviderConfiguration::new(
-        projection.release.approval.trust_revision,
+        projection
+            .release
+            .approval
+            .as_ref()
+            .ok_or("generated VM approval")?
+            .trust_revision,
         vec![base],
         None,
         ssh,

@@ -730,7 +730,7 @@ async fn drive_state(
 #[tokio::test]
 async fn authenticated_http_upgrade_requires_restart_revocation_ack_and_preserves_workspace()
 -> TestResult {
-    let harness = Harness::start().await?;
+    let harness = Box::pin(Harness::start()).await?;
     let original = harness
         .backend
         .installed
@@ -824,7 +824,7 @@ async fn authenticated_http_restart_rejects_expired_and_revoked_leases_after_rev
     const COUNTS: &str = "SELECT (SELECT count(*) FROM environment.environment_instances), \
         (SELECT count(*) FROM environment.environment_operations), \
         (SELECT count(*) FROM environment.outbox_events)";
-    let harness = Harness::start().await?;
+    let harness = Box::pin(Harness::start()).await?;
     harness.peers.acknowledge.store(true, Ordering::SeqCst);
     let before: (i64, i64, i64) = sqlx::query_as(COUNTS).fetch_one(&harness.pool).await?;
     let installed = harness.backend.installed.lock().await.clone();
@@ -971,7 +971,7 @@ async fn authenticated_http_work_operations_distinguish_inactive_leases_from_pro
         "reset",
         "template-upgrade",
     ] {
-        let mut harness = Harness::start().await?;
+        let mut harness = Box::pin(Harness::start()).await?;
         harness.prepare_state(operation).await?;
         let route = format!("/api/v1/environments/{}/{operation}", harness.ready.id);
         let body = match operation {
@@ -1001,7 +1001,7 @@ async fn authenticated_http_work_operations_distinguish_inactive_leases_from_pro
 #[tokio::test]
 async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_leases_from_protocol_damage()
 -> TestResult {
-    let harness = Harness::start().await?;
+    let harness = Box::pin(Harness::start()).await?;
     let authorization = harness
         .ready
         .operation
@@ -1015,7 +1015,7 @@ async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_le
         AUDIENCE,
         [RESOURCE_PERMISSION],
     )?;
-    let handoff = contracts::environment::ResourceWorkHandoff {
+    let handoff = contracts::environment::ResourceEnvironmentHandoff {
         version: 1,
         request_id: authorization.resource_request_id,
         request_revision: revision(1),
@@ -1140,7 +1140,7 @@ async fn restart_consumer(
 
 #[tokio::test]
 async fn nats_work_restart_requires_current_lease_and_deduplicates_execution() -> TestResult {
-    let harness = Harness::start().await?;
+    let harness = Box::pin(Harness::start()).await?;
     let (context, mut consumer) = restart_consumer(&harness.client).await?;
     let mut quarantined = harness.client.subscribe(QUARANTINE_SUBJECT).await?;
     harness.client.flush().await?;

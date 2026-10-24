@@ -1438,7 +1438,6 @@ fn build_create_instance(
     {
         return Err(EnvironmentStoreError::LeaseAuthorizationRequired);
     }
-    let eligibility_expires_at = spec.eligibility_expires_at;
     let instance = EnvironmentInstance {
         id: command.environment_id,
         display_label: spec.display_label.clone(),

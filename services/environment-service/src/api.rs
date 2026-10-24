@@ -1459,12 +1459,9 @@ fn template_upgrade_problem(error: &crate::TemplateUpgradeError) -> Response {
         .into_response()
 }
 
-impl IntoResponse for EnvironmentApiError {
-    fn into_response(self) -> Response {
-        if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
-            return template_upgrade_problem(error);
-        }
-        let status = match &self {
+impl EnvironmentApiError {
+    fn status(&self) -> StatusCode {
+        match self {
             Self::CallerDenied
             | Self::ScopeDenied
             | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied) => StatusCode::FORBIDDEN,
@@ -1505,9 +1502,11 @@ impl IntoResponse for EnvironmentApiError {
                 StatusCode::CONFLICT
             }
             Self::RuntimeAdmission(crate::RuntimeAdmissionError::Binding)
-            | Self::Store(EnvironmentStoreError::LeaseAuthorizationInvalid)
+            | Self::Store(
+                EnvironmentStoreError::LeaseAuthorizationInvalid
+                | EnvironmentStoreError::RevisionConflict,
+            )
             | Self::RevisionConflict
-            | Self::Store(EnvironmentStoreError::RevisionConflict)
             | Self::LeaseFenceInvalid
             | Self::WorkExecution(
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
@@ -1538,7 +1537,16 @@ impl IntoResponse for EnvironmentApiError {
             )
             | Self::Messaging(NatsMessagingError::LeaseNotActive) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
-        };
+        }
+    }
+}
+
+impl IntoResponse for EnvironmentApiError {
+    fn into_response(self) -> Response {
+        if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
+            return template_upgrade_problem(error);
+        }
+        let status = self.status();
         let rendered = self.to_string();
         let diagnostic = rendered
             .split(':')
