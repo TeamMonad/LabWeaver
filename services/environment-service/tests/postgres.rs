@@ -459,6 +459,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
@@ -525,6 +526,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let restarted_worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(crash_registry, Duration::from_millis(100))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
@@ -681,7 +683,7 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
         .connect(&url)
         .await?;
     support::apply_environment_migrations(&pool).await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
     let instance = requested_instance();
     store
         .create("create-key-stale-reconcile", &instance)
@@ -697,6 +699,7 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
@@ -1348,11 +1351,10 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     .await?;
     assert_eq!(delivery_state, "pending");
 
-    // Exercise the migrated Ready row through the real store and worker.  The initial
-    // migration marker is unknown compute/storage; Stop closes only compute, Restart
-    // recovers storage and starts a new known compute interval, and Delete closes both.
+    // The migrated row keeps unknown compute/storage facts. Stop closes compute; rejected
+    // legacy restart cannot claim a new known interval. Delete closes retained storage.
     let migrated_ready = store.load(instances[0].id).await?;
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     store
         .accept_command(
             "legacy-meter-stop",
@@ -1412,8 +1414,11 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     // database observation for the following Ready transition so this test
     // does not confuse its historical fixture timestamps with live boundaries.
     let restart_observed_at = store.current_time().await?;
-    let worker =
-        success_worker_with_restart_ready_observation(store.clone(), Some(restart_observed_at))?;
+    let worker = success_worker_with_restart_ready_observation(
+        store.clone(),
+        Some(restart_observed_at),
+        pool.clone(),
+    )?;
     store
         .accept_command(
             "legacy-meter-restart",
@@ -1548,14 +1553,31 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         &unknown_storage.measurement,
         UsageMeasurement::Unknown { .. }
     ));
-    let storage_tail = deliveries
+    let mut storage_intervals: Vec<_> = deliveries
         .iter()
-        .find(|request| {
-            request.kind == ResourceUsageKind::Storage
-                && request.measured_from == unknown_storage.measured_until
-        })
-        .ok_or("unknown storage tail after rejected restart missing")?;
-    assert_eq!(storage_tail.measured_until, delete_event_time);
+        .filter(|request| request.kind == ResourceUsageKind::Storage)
+        .collect();
+    storage_intervals.sort_by_key(|request| request.measured_from);
+    assert_eq!(
+        storage_intervals
+            .first()
+            .ok_or("unknown storage interval missing")?
+            .measured_from,
+        migration_start
+    );
+    assert_eq!(
+        storage_intervals
+            .last()
+            .ok_or("unknown storage interval missing")?
+            .measured_until,
+        delete_event_time
+    );
+    assert!(
+        storage_intervals
+            .windows(2)
+            .all(|pair| pair[0].measured_until == pair[1].measured_from),
+        "a rejected restart must neither omit nor overlap retained storage time"
+    );
     assert!(
         deliveries
             .iter()
@@ -1617,7 +1639,7 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
         .clone();
     store.create("create-key-lease-refresh", &work).await?;
 
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     for index in 0..4 {
         assert!(matches!(
             worker
@@ -1902,14 +1924,14 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
     sqlx::raw_sql(sqlx::AssertSqlSafe(&*migrations))
         .execute(&pool)
         .await?;
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
 
     let timed_out = requested_instance();
     store
         .create("create-key-timeout-worker", &timed_out)
         .await?;
     let timeout_now = timestamp("2026-07-14T00:10:01.000Z");
-    let worker = success_worker(store.clone())?;
+    let worker = success_worker(store.clone(), pool.clone())?;
     assert!(matches!(
         worker
             .run_once("environment-worker-timeout", timeout_now)
@@ -2872,13 +2894,15 @@ fn kubevirt_fence(
 
 fn success_worker(
     store: PgEnvironmentStore,
+    pool: sqlx::PgPool,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
-    success_worker_with_restart_ready_observation(store, None)
+    success_worker_with_restart_ready_observation(store, None, pool)
 }
 
 fn success_worker_with_restart_ready_observation(
     store: PgEnvironmentStore,
     restart_ready_observed_at: Option<UtcTimestamp>,
+    pool: sqlx::PgPool,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(LifecycleSuccessProvider {
@@ -2887,6 +2911,7 @@ fn success_worker_with_restart_ready_observation(
     Ok(ReconcileWorker::new(
         store,
         Reconciler::new(registry, Duration::from_millis(100))?
+            .with_runtime_admission(support::stored_runtime_admission(pool))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
@@ -3364,6 +3389,7 @@ async fn pending_reconcile_changes_only_schedule_without_retry_event_or_usage()
     let worker = ReconcileWorker::new(
         store.clone(),
         Reconciler::new(registry, Duration::from_secs(1))?
+            .with_runtime_admission(support::stored_runtime_admission(pool.clone()))
             .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_millis(10),

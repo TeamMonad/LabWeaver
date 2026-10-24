@@ -837,6 +837,9 @@ async fn resolve_lease_authorization(
             Err(error) if error.retryable() => return Err(LeaseGateFailure::Retryable),
             Err(_) => return Err(LEASE_GATE_REJECTED),
         };
+        if !instance.requires_compute_authorization(command.kind) {
+            return Ok(None);
+        }
         if instance.class == EnvironmentClass::Experiment && !instance.has_resource_lease() {
             return Ok(None);
         }

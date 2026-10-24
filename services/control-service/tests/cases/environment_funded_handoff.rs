@@ -24,11 +24,15 @@ use resource_service::{
     runtime_authorization::CurrentEnvironmentAuthorization, store::PgResourceStore,
 };
 use sqlx::{PgPool, Row};
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, runners::AsyncRunner};
 use tower::ServiceExt;
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+#[path = "environment_funded_auth.rs"]
+mod service_auth;
+#[path = "environment_funded_vm.rs"]
+mod vm_boundary;
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 const OWNER: &str = "synthetic-environment";
 
 #[derive(Clone)]
@@ -64,13 +68,10 @@ impl EnvironmentRuntimeAuthority for PgAuthority {
         )
         .await
         .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
-        let policy = &value.applied_configuration.configuration.runtime_policy;
         Ok(EnvironmentRuntimeAuthorizationResolution {
             valid_until: value.lease.expires_at.min(value.approval_valid_until),
             provider_binding: value.provider_binding,
             owner_actor_id: value.lease.owner_actor_id,
-            default_container_uid: policy.default_container_uid,
-            privileged_execution_location: policy.privileged_execution_location.clone(),
             authorization: value.binding,
             lease_authorization: value.lease,
         })
@@ -91,7 +92,9 @@ pub(super) async fn exercise(
     resource: &PgResourceStore,
     original: &CurrentEnvironmentAuthorization,
 ) -> Result {
-    super::super::apply_domain_migrations(pool, persistence_sqlx::Domain::Environment).await?;
+    super::super::apply_domain_migrations(pool, persistence_sqlx::Domain::Environment)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let row=sqlx::query("SELECT release_contract,candidate_contract FROM control.runtime_authorization_configurations WHERE release_id=$1")
         .bind(match original.binding.target {contracts::resource::ResourceTarget::Environment {release_id,..}=>release_id.as_uuid(),contracts::resource::ResourceTarget::Task { .. }=>return Err("environment target".into())}).fetch_one(pool).await?;
     let release: contracts::supply_chain::EnvironmentTemplateRelease =
@@ -102,10 +105,11 @@ pub(super) async fn exercise(
         release,
         environment_spec: candidate.spec,
     };
-    assert_ne!(
-        projection.release.project_id, original.lease.project_id,
-        "the normal classroom payer differs from the teacher's authoring project"
-    );
+    if projection.environment_spec.class == contracts::authoring::EnvironmentClass::Experiment {
+        assert_ne!(projection.release.project_id, original.lease.project_id);
+    } else {
+        assert_eq!(projection.release.project_id, original.lease.project_id);
+    }
     let releases = PgReleaseProjectionStore::new(pool.clone());
     let contract = EVENT_CONTRACTS
         .iter()
@@ -173,7 +177,7 @@ pub(super) async fn exercise(
     };
     assert_eq!(
         handoff.class_for_release(&projection)?,
-        contracts::authoring::EnvironmentClass::Experiment
+        projection.environment_spec.class
     );
     let broker = GenericImage::new("nats", "2.11.8-alpine")
         .with_exposed_port(4222.tcp())
@@ -236,56 +240,39 @@ pub(super) async fn exercise(
         )
         .with_runtime_admission(admission.clone()),
     );
-    let caller = auth::ServiceIdentity {
-        issuer: "synthetic".into(),
-        subject: "synthetic-resource".into(),
-        client_id: "synthetic-resource".into(),
-        expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
-        permissions: BTreeSet::from(["resource.environment.manage".into()]),
-    };
+    let authority = service_auth::start().await?;
+    let api = environment_service::with_service_auth(api, authority.verifier.clone());
+    let rejected = api
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/v1/resource/work-handoffs")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&handoff)?))?,
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
     let send = |router: Router, body: serde_json::Value| {
-        let caller = caller.clone();
-        async move {
+        let token = authority.token.clone();
+        Box::pin(async move {
             let mut req = Request::builder()
                 .method("POST")
                 .uri("/internal/v1/resource/work-handoffs")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))?;
-            req.extensions_mut().insert(caller);
             req.extensions_mut()
                 .insert(telemetry::RequestContext::generate());
             let response = router.oneshot(req).await?;
             let status = response.status();
             let body = to_bytes(response.into_body(), 1_048_576).await?;
-            Ok::<_, Box<dyn std::error::Error>>((
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
                 status,
                 serde_json::from_slice::<serde_json::Value>(&body)?,
             ))
-        }
+        })
     };
-    let first = send(api.clone(), serde_json::to_value(&handoff)?).await?;
-    assert_eq!(first.0, StatusCode::ACCEPTED, "{}", first.1);
-    let replay = send(api.clone(), serde_json::to_value(&handoff)?).await?;
-    assert_eq!(replay, first);
-    resource
-        .mark_capacity_handed_off(
-            claim.id,
-            claim.revision,
-            original.lease.lease_id,
-            original.lease.lease_revision,
-        )
-        .await?;
-    let instance = store.load(handoff.environment_id).await?;
-    assert_eq!(
-        instance.class,
-        contracts::authoring::EnvironmentClass::Experiment
-    );
-    assert!(instance.has_resource_lease());
-    assert_eq!(instance.generation, 1);
-    assert_eq!(
-        instance.operation.lease_authorization.as_ref(),
-        Some(&original.lease)
-    );
     let public = contracts::http::CreateEnvironmentRequest {
         resource_request_id: request.id,
         project_id: request.project_id,
@@ -294,31 +281,163 @@ pub(super) async fn exercise(
         release_version: projection.release.version,
         display_label: None,
     };
-    let attached = store
-        .bind_funded_api_create(
-            "funded-browser-create",
-            &public,
-            request.requester_id,
-            instance.id,
+    let create = |router: Router, body: serde_json::Value, actor: contracts::ActorId| {
+        let token = authority.access_token.clone();
+        Box::pin(async move {
+            let mut input = Request::builder()
+                .method("POST")
+                .uri("/api/v1/environments")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-labweaver-actor-id", actor.to_string())
+                .header("x-labweaver-session-id", uuid::Uuid::now_v7().to_string())
+                .header("idempotency-key", "funded-browser-create")
+                .body(Body::from(body.to_string()))?;
+            input
+                .extensions_mut()
+                .insert(telemetry::RequestContext::generate());
+            let response = router.oneshot(input).await?;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1_048_576).await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes)?,
+            ))
+        })
+    };
+    let mut incomplete = serde_json::to_value(&public)?;
+    incomplete
+        .as_object_mut()
+        .ok_or("create intent object")?
+        .remove("resourceRequestId");
+    assert_eq!(
+        create(api.clone(), incomplete, request.requester_id)
+            .await?
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let pending = create(
+        api.clone(),
+        serde_json::to_value(&public)?,
+        request.requester_id,
+    )
+    .await?;
+    assert_eq!(pending.0, StatusCode::CONFLICT, "{}", pending.1);
+    assert_eq!(
+        pending.1["diagnosticCode"],
+        "LW_ENVIRONMENT_ALLOCATION_PENDING"
+    );
+    let mut altered = handoff.clone();
+    altered.approved_resources.cpu_millicores += 1;
+    assert_eq!(
+        send(api.clone(), serde_json::to_value(&altered)?).await?.0,
+        StatusCode::PRECONDITION_FAILED
+    );
+    altered = handoff.clone();
+    altered.claim_id = contracts::CapacityClaimId::new();
+    assert_ne!(
+        send(api.clone(), serde_json::to_value(&altered)?).await?.0,
+        StatusCode::ACCEPTED
+    );
+    let (first, replay) = tokio::join!(
+        send(api.clone(), serde_json::to_value(&handoff)?),
+        send(api.clone(), serde_json::to_value(&handoff)?),
+    );
+    let first = first?;
+    assert_eq!(first.0, StatusCode::ACCEPTED, "{}", first.1);
+    assert_eq!(replay?, first);
+    let receipt: contracts::environment::ResourceEnvironmentHandoffReceipt =
+        serde_json::from_value(first.1.clone())?;
+    assert_eq!(receipt.request_id, request.id);
+    assert_eq!(receipt.accepted.environment_id, handoff.environment_id);
+    assert_eq!(
+        store.load_resource_handoff_receipt(request.id).await?,
+        receipt
+    );
+    resource
+        .mark_capacity_handed_off(
+            claim.id,
+            claim.revision,
+            original.lease.lease_id,
+            receipt.lease_revision,
         )
         .await?;
-    assert_eq!(attached.environment_id, instance.id);
-    assert_eq!(attached.operation_id, instance.operation.id);
+    let instance = store.load(handoff.environment_id).await?;
+    assert_eq!(instance.class, projection.environment_spec.class);
+    assert!(instance.has_resource_lease());
+    assert_eq!(instance.generation, 1);
     assert_eq!(
-        store
-            .bind_funded_api_create(
-                "funded-browser-create",
-                &public,
-                request.requester_id,
-                instance.id
-            )
-            .await?,
+        instance.operation.lease_authorization.as_ref(),
+        Some(&original.lease)
+    );
+    let attached = create(
+        api.clone(),
+        serde_json::to_value(&public)?,
+        request.requester_id,
+    )
+    .await?;
+    assert_eq!(attached.0, StatusCode::ACCEPTED, "{}", attached.1);
+    assert_eq!(attached.1["environmentId"], instance.id.to_string());
+    assert_eq!(attached.1["operationId"], instance.operation.id.to_string());
+    assert_eq!(
+        create(
+            api.clone(),
+            serde_json::to_value(&public)?,
+            request.requester_id
+        )
+        .await?,
         attached
+    );
+    let mut changed = public.clone();
+    changed.resource_request_id = contracts::ResourceRequestId::new();
+    assert_eq!(
+        create(
+            api.clone(),
+            serde_json::to_value(&changed)?,
+            request.requester_id
+        )
+        .await?
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_ne!(
+        create(
+            api.clone(),
+            serde_json::to_value(&public)?,
+            contracts::ActorId::new()
+        )
+        .await?
+        .0,
+        StatusCode::ACCEPTED
     );
     assert_eq!(
         admission.for_instance(&instance).await?.lease_authorization,
         original.lease
     );
+    sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
+        .bind(request.course_id.ok_or("course scope")?.as_uuid()).bind(request.requester_id.as_uuid()).execute(pool).await?;
+    assert!(matches!(
+        resource_service::runtime_authorization::current_environment_authorization(
+            pool,
+            request.id,
+            Some(original.lease.lease_id)
+        )
+        .await,
+        Err(resource_service::runtime_authorization::RuntimeBindingError::ScopeDenied)
+    ));
+    assert!(admission.for_instance(&instance).await.is_err());
+    let mut retry = handoff.clone();
+    retry.request_revision = Revision::new(handoff.request_revision.get() + 1)?;
+    retry.lease_revision = Revision::new(handoff.lease_revision.get() + 1)?;
+    retry.claim_revision = Revision::new(handoff.claim_revision.get() + 1)?;
+    retry.trace_id = "new-trace-after-lost-response".into();
+    assert_eq!(
+        send(api.clone(), serde_json::to_value(&retry)?).await?,
+        first,
+        "a known accepted handoff must replay without granting new execution after revocation"
+    );
+    sqlx::query("UPDATE control.course_memberships SET state='active',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
+        .bind(request.course_id.ok_or("course scope")?.as_uuid()).bind(request.requester_id.as_uuid()).execute(pool).await?;
     assert_eq!(
         resource
             .environment_credit_grant(OWNER, original.lease.lease_id)
@@ -347,86 +466,174 @@ pub(super) async fn exercise(
     let mut foreign = handoff.clone();
     foreign.environment_id = contracts::EnvironmentId::new();
     assert_ne!(
-        send(api, serde_json::to_value(&foreign)?).await?.0,
+        send(api.clone(), serde_json::to_value(&foreign)?).await?.0,
         StatusCode::ACCEPTED
     );
+    let http = LifecycleHttp {
+        router: api,
+        access_token: authority.access_token.clone(),
+        usage_identity: authority.usage_identity.clone(),
+    };
     Box::pin(exercise_execution(
-        pool, resource, &store, &admission, &instance, &grant,
+        pool, resource, &store, &admission, &instance, &grant, &http,
     ))
     .await?;
     replies.abort();
     Ok(())
 }
 
-// Real lifecycle/ledger; only the cluster observation boundary is synthetic.
+// Kubernetes effects are the only simulated provider boundary; lifecycle projection is production.
 struct ClusterFixture {
     store: PgEnvironmentStore,
-    binding: String,
     calls: Arc<std::sync::atomic::AtomicUsize>,
+    reject_next_restart: Arc<std::sync::atomic::AtomicBool>,
 }
-#[async_trait]
-impl environment_service::EnvironmentProvider for ClusterFixture {
-    fn binding(&self) -> &str {
-        &self.binding
-    }
-    async fn execute(
+impl ClusterFixture {
+    async fn observation(
         &self,
-        action: environment_service::ReconcileAction,
-        instance: &contracts::environment::EnvironmentInstance,
     ) -> std::result::Result<
-        environment_service::ProviderOutcome<environment_service::ProviderObservation>,
+        environment_service::ContainerApplyObservation,
         environment_service::ProviderFailure,
     > {
-        use contracts::environment::ObservedEnvironmentState as State;
-        use environment_service::ReconcileAction as Action;
-        let next = match (action, instance.observed_state) {
-            (Action::Validate, State::Requested) => State::Validating,
-            (Action::Validate, State::Validating) => State::Building,
-            (Action::Build, State::Building) => State::Provisioning,
-            (Action::Provision | Action::Restart | Action::Start | Action::Reset, _) => {
-                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                State::Ready
-            }
-            (Action::Stop, _) => State::Stopped,
-            (Action::Cleanup, _) => State::Deleted,
-            _ => {
-                return Err(environment_service::ProviderFailure {
-                    code: environment_service::ProviderFailureCode::Rejected,
-                    retryable: false,
-                });
-            }
-        };
-        let endpoints = if next == State::Ready {
-            vec![contracts::environment::EnvironmentEndpoint {
-                id: contracts::EndpointId::new(),
-                protocol: contracts::environment::EndpointProtocol::Https,
-                revision: Revision::new(instance.revision.get() + 1).map_err(|_| {
-                    environment_service::ProviderFailure {
-                        code: environment_service::ProviderFailureCode::Rejected,
-                        retryable: false,
-                    }
-                })?,
-                health: contracts::environment::EndpointHealth::Healthy,
-                observed_at: self.store.current_time().await.map_err(|_| {
-                    environment_service::ProviderFailure {
-                        code: environment_service::ProviderFailureCode::Rejected,
-                        retryable: false,
-                    }
-                })?,
-            }]
-        } else {
-            vec![]
-        };
-        Ok(environment_service::ProviderOutcome::Completed(
-            environment_service::ProviderObservation {
-                next_state: next,
-                endpoints,
-                cleanup_evidence: (next == State::Deleted).then(cleanup_evidence),
-                operation_complete: matches!(next, State::Ready | State::Stopped | State::Deleted),
-            },
-        ))
+        Ok(environment_service::ContainerApplyObservation {
+            ready: true,
+            observed_at: self.store.current_time().await.map_err(|_| {
+                environment_service::ProviderFailure {
+                    code: environment_service::ProviderFailureCode::Unavailable,
+                    retryable: true,
+                }
+            })?,
+        })
     }
 }
+#[async_trait]
+impl environment_service::ContainerProviderBackend for ClusterFixture {
+    async fn apply(
+        &self,
+        _: &environment_service::ContainerBackendFence,
+        _: &environment_service::ContainerResourcePlan,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.observation().await
+    }
+    async fn observe(
+        &self,
+        _: &environment_service::ContainerBackendFence,
+        _: &environment_service::ContainerResourcePlan,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
+        self.observation().await
+    }
+    async fn scale(
+        &self,
+        _: &environment_service::ContainerBackendFence,
+        _: &environment_service::ContainerResourcePlan,
+        replicas: u32,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
+        if replicas > 0 {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.observation().await
+    }
+    async fn restart(
+        &self,
+        _: &environment_service::ContainerBackendFence,
+        _: &environment_service::ContainerResourcePlan,
+        _: Revision,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
+        if self
+            .reject_next_restart
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(environment_service::ProviderFailure {
+                code: environment_service::ProviderFailureCode::Rejected,
+                retryable: false,
+            });
+        }
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.observation().await
+    }
+    async fn delete_namespace(
+        &self,
+        _: &environment_service::ContainerBackendFence,
+        _: &environment_service::ContainerResourcePlan,
+    ) -> std::result::Result<contracts::ArtifactRef, environment_service::ProviderFailure> {
+        Ok(cleanup_evidence())
+    }
+}
+fn assert_native_access_fence(
+    instance: &contracts::environment::EnvironmentInstance,
+    now: UtcTimestamp,
+) -> Result {
+    use contracts::environment::{
+        EnvironmentAccessSubjectKind, EnvironmentEndpointEligibilityRequest,
+        EnvironmentOwnerResolutionRequest,
+    };
+    let owner = EnvironmentOwnerResolutionRequest {
+        environment_id: instance.id,
+        project_id: instance.project_id,
+        course_id: instance.course_id,
+        owner_actor_id: instance.owner_id,
+        expected_revision: instance.revision,
+    };
+    let lease = instance
+        .operation
+        .lease_authorization
+        .as_ref()
+        .ok_or("native access lease")?;
+    let resolved = environment_service::authorize_owner_resolution(instance, &owner, now)?;
+    assert_eq!(
+        resolved
+            .lease_fence
+            .as_ref()
+            .ok_or("owner lease fence")?
+            .lease_id,
+        lease.lease_id
+    );
+    let endpoints = EnvironmentEndpointEligibilityRequest {
+        environment_id: instance.id,
+        project_id: instance.project_id,
+        course_id: instance.course_id,
+        actor_id: instance.owner_id,
+        subject_kind: EnvironmentAccessSubjectKind::Owner,
+        expected_revision: instance.revision,
+        endpoint_ids: instance.endpoints.iter().map(|entry| entry.id).collect(),
+    };
+    assert_eq!(
+        environment_service::authorize_endpoint_eligibility(instance, &endpoints, now)?.lease_fence,
+        resolved.lease_fence
+    );
+    let mut expired = instance.clone();
+    expired
+        .operation
+        .lease_authorization
+        .as_mut()
+        .ok_or("native access lease")?
+        .expires_at = now;
+    assert!(environment_service::authorize_owner_resolution(&expired, &owner, now).is_err());
+    assert!(
+        environment_service::authorize_endpoint_eligibility(&expired, &endpoints, now).is_err()
+    );
+    let mut missing = instance.clone();
+    missing.operation.lease_authorization = None;
+    assert!(environment_service::authorize_owner_resolution(&missing, &owner, now).is_err());
+    let mut stale = instance.clone();
+    stale.observed_generation = 0;
+    assert!(environment_service::authorize_owner_resolution(&stale, &owner, now).is_err());
+    Ok(())
+}
+
 fn cleanup_evidence() -> contracts::ArtifactRef {
     contracts::ArtifactRef {
         artifact_id: contracts::ArtifactId::new(),
@@ -524,6 +731,62 @@ fn physical_envelope(
         request,
     })
 }
+struct LifecycleHttp {
+    router: Router,
+    access_token: String,
+    usage_identity: auth::ServiceIdentity,
+}
+
+impl LifecycleHttp {
+    async fn send(
+        &self,
+        instance: &contracts::environment::EnvironmentInstance,
+        action: &str,
+    ) -> Result<(StatusCode, serde_json::Value)> {
+        let mut input = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/environments/{}/{action}", instance.id))
+            .header("authorization", format!("Bearer {}", self.access_token))
+            .header("x-labweaver-actor-id", instance.owner_id.to_string())
+            .header("x-labweaver-session-id", uuid::Uuid::now_v7().to_string())
+            .header(
+                "if-match",
+                contracts::http::StrongEtag::from_revision(instance.revision).header_value(),
+            )
+            .header(
+                "idempotency-key",
+                format!(
+                    "funded-{action}-{}-{}",
+                    instance.id,
+                    instance.revision.get()
+                ),
+            )
+            .body(Body::empty())?;
+        input
+            .extensions_mut()
+            .insert(telemetry::RequestContext::generate());
+        let response = self.router.clone().oneshot(input).await?;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1_048_576).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
+    }
+
+    async fn command(
+        &self,
+        instance: &contracts::environment::EnvironmentInstance,
+        action: &str,
+    ) -> Result {
+        let first = self.send(instance, action).await?;
+        assert_eq!(first.0, StatusCode::ACCEPTED, "{}", first.1);
+        assert_eq!(
+            self.send(instance, action).await?,
+            first,
+            "lost-response replay cannot create another operation"
+        );
+        Ok(())
+    }
+}
+
 async fn lifecycle_command(
     store: &PgEnvironmentStore,
     instance: &contracts::environment::EnvironmentInstance,
@@ -547,7 +810,8 @@ async fn lifecycle_command(
                     contracts::environment::EnvironmentOperationKind::Stop
                         | contracts::environment::EnvironmentOperationKind::Delete
                 )
-                .then_some(instance.revision),
+                .then_some(instance.revision)
+                .or(instance.operation.access_revocation_revision),
                 preserve_mutable_disk: true,
                 max_attempts: 3,
                 reset_target: None,
@@ -567,19 +831,78 @@ async fn exercise_execution(
     admission: &EnvironmentRuntimeAdmission,
     instance: &contracts::environment::EnvironmentInstance,
     initial: &EnvironmentCreditGrant,
+    http: &LifecycleHttp,
 ) -> Result {
     use contracts::environment::{
         EnvironmentOperationKind as Kind, ObservedEnvironmentState as State,
     };
-    use environment_service::{ReconcileWorkerOutcome, RuntimeAdmissionError};
+    use environment_service::{
+        ContainerReleaseResolver as _, ReconcileWorkerOutcome, RuntimeAdmissionError,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
+    let reject_next_restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut registry = environment_service::ProviderRegistry::default();
-    registry.register(Arc::new(ClusterFixture {
-        store: store.clone(),
-        binding: instance.provider_binding.clone(),
-        calls: calls.clone(),
-    }))?;
+    let projections = PgReleaseProjectionStore::new(pool.clone());
+    let resolved = projections
+        .resolve(instance.release_id, instance.release_version)
+        .await?;
+    let projection = &resolved.projection;
+    if let contracts::supply_chain::ImageArtifact::Container { repository, .. } =
+        &projection.release.artifact
+    {
+        let prefix = repository
+            .rsplit_once('/')
+            .ok_or("image repository prefix")?
+            .0;
+        assert_eq!(
+            repository,
+            &format!(
+                "{prefix}/project-{}-{}",
+                projection.release.project_id, projection.release.candidate_id
+            )
+        );
+        assert_eq!(instance.project_id, projection.release.project_id);
+        assert_eq!(instance.release_id, projection.release.id);
+        assert_eq!(instance.release_version, projection.release.version);
+        let configuration = environment_service::ContainerProviderConfiguration::new(
+            environment_service::ContainerReleasePolicy::new(
+                contracts::PolicyId::new(),
+                projection.release.approval.policy_revision,
+                projection.release.approval.trust_revision,
+            )?,
+            prefix.into(),
+            "synthetic-access".into(),
+            "synthetic-access".into(),
+            "registry-pull".into(),
+            "synthetic-storage".into(),
+            "ReadWriteOnce",
+        )?;
+        let provider = environment_service::ContainerProvider::new(
+            instance.provider_binding.clone(),
+            Arc::new(ClusterFixture {
+                store: store.clone(),
+                calls: calls.clone(),
+                reject_next_restart: reject_next_restart.clone(),
+            }),
+            Arc::new(projections),
+            configuration,
+        )?;
+        provider.plan(
+            instance,
+            &resolved,
+            environment_service::ReconcileAction::Validate,
+        )?;
+        registry.register(Arc::new(provider))?;
+    } else {
+        vm_boundary::register(
+            &mut registry,
+            pool,
+            projection,
+            calls.clone(),
+            reject_next_restart.clone(),
+        )?;
+    }
     let worker = environment_service::ReconcileWorker::new(
         store.clone(),
         environment_service::Reconciler::new(registry, Duration::from_millis(100))?
@@ -601,6 +924,7 @@ async fn exercise_execution(
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let ready = store.load(instance.id).await?;
+    assert_native_access_fence(&ready, store.current_time().await?)?;
     assert_eq!(ready.lease_id, instance.lease_id);
     let physical_calls = Arc::new(AtomicUsize::new(0));
     let executor = environment_service::FencedContainerExecutor::new(
@@ -610,31 +934,48 @@ async fn exercise_execution(
     .with_runtime_admission(admission.clone());
     let deadline =
         UtcTimestamp::from_utc(store.current_time().await?.get() + time::Duration::seconds(30))?;
-    for foreign in [
-        contracts::environment::EnvironmentInstance {
-            project_id: contracts::ProjectId::new(),
-            ..ready.clone()
-        },
-        contracts::environment::EnvironmentInstance {
-            generation: ready.generation + 1,
-            ..ready.clone()
-        },
-    ] {
-        assert!(matches!(
-            executor
-                .execute(physical_envelope(&foreign, 1, false, deadline)?)
-                .await,
-            Err(
-                environment_service::ContainerExecutorFenceError::RuntimeAdmission(
-                    RuntimeAdmissionError::Binding
-                )
-            )
-        ));
-    }
-    assert_eq!(physical_calls.load(Ordering::SeqCst), 0);
+    let container = instance.runtime_kind == contracts::authoring::RuntimeKind::Container;
     let first = physical_envelope(&ready, 1, false, deadline)?;
-    executor.execute(first.clone()).await?;
-    assert_eq!(physical_calls.load(Ordering::SeqCst), 1);
+    if !container {
+        assert!(
+            matches!(
+                executor.execute(first.clone()).await,
+                Err(
+                    environment_service::ContainerExecutorFenceError::RuntimeAdmission(
+                        RuntimeAdmissionError::Binding
+                    )
+                )
+            ),
+            "an original VM grant cannot authorize a Container executor effect"
+        );
+        assert_eq!(physical_calls.load(Ordering::SeqCst), 0);
+    }
+    if container {
+        for foreign in [
+            contracts::environment::EnvironmentInstance {
+                project_id: contracts::ProjectId::new(),
+                ..ready.clone()
+            },
+            contracts::environment::EnvironmentInstance {
+                generation: ready.generation + 1,
+                ..ready.clone()
+            },
+        ] {
+            assert!(matches!(
+                executor
+                    .execute(physical_envelope(&foreign, 1, false, deadline)?)
+                    .await,
+                Err(
+                    environment_service::ContainerExecutorFenceError::RuntimeAdmission(
+                        RuntimeAdmissionError::Binding
+                    )
+                )
+            ));
+        }
+        assert_eq!(physical_calls.load(Ordering::SeqCst), 0);
+        executor.execute(first.clone()).await?;
+        assert_eq!(physical_calls.load(Ordering::SeqCst), 1);
+    }
     let new_until =
         UtcTimestamp::from_utc(initial.covered_until.get() + time::Duration::seconds(60))?;
     let renewed = resource
@@ -669,6 +1010,9 @@ async fn exercise_execution(
     let refreshed = store
         .refresh_work_lease(ready.id, current.lease_authorization.clone())
         .await?;
+    resource
+        .mark_lease_synced(initial.claim_id, current.lease_authorization.lease_revision)
+        .await?;
     assert_eq!(refreshed.generation, ready.generation);
     assert_eq!(refreshed.owner_id, ready.owner_id);
     lifecycle_command(store, &refreshed, Kind::Stop, None).await?;
@@ -680,13 +1024,31 @@ async fn exercise_execution(
         }
     ));
     let stopped = store.load(instance.id).await?;
-    lifecycle_command(
-        store,
-        &stopped,
-        Kind::Restart,
-        Some(current.lease_authorization.clone()),
-    )
-    .await?;
+    let retained = resource
+        .next_active_environment_cleanup(None)
+        .await?
+        .ok_or("active native lease")?;
+    let stop_status = store.load_cleanup_status(stopped.id).await?;
+    assert!(!stop_status.cleanup_complete);
+    assert!(matches!(
+        resource
+            .begin_deleted_environment_release(&retained, &stop_status, contracts::ActorId::new())
+            .await,
+        Err(resource_service::store::ResourceStoreError::CapacityReadbackInvalid)
+    ));
+    assert_eq!(
+        resource.load_lease(initial.lease_id).await?.state,
+        contracts::resource::ResourceLeaseState::Active
+    );
+    assert_eq!(
+        resource
+            .environment_credit_grant(OWNER, initial.lease_id)
+            .await?
+            .hold
+            .state,
+        contracts::resource::credits::CreditHoldState::Pending
+    );
+    http.command(&stopped, "start").await?;
     assert!(matches!(
         run_due(&worker, store, "native-restart").await?,
         ReconcileWorkerOutcome::Advanced {
@@ -698,6 +1060,68 @@ async fn exercise_execution(
     assert_eq!(restarted.generation, stopped.generation + 1);
     assert_eq!(restarted.lease_id, ready.lease_id);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    reject_next_restart.store(true, Ordering::SeqCst);
+    lifecycle_command(
+        store,
+        &restarted,
+        Kind::Restart,
+        Some(current.lease_authorization.clone()),
+    )
+    .await?;
+    assert!(matches!(
+        run_due(&worker, store, "native-interrupted-restart").await?,
+        ReconcileWorkerOutcome::Failed { .. }
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the failed cluster call created no replacement"
+    );
+    let interrupted = store.load(instance.id).await?;
+    http.command(&interrupted, "recover").await?;
+    assert!(matches!(
+        run_due(&worker, store, "native-recovered-original-lease").await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: State::Ready,
+            ..
+        }
+    ));
+    let restarted = store.load(instance.id).await?;
+    assert_eq!(restarted.lease_id, initial.lease_id.into());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        resource
+            .environment_credit_grant(OWNER, initial.lease_id)
+            .await?
+            .hold
+            .id,
+        initial.hold.id
+    );
+    if container {
+        lifecycle_command(store, &restarted, Kind::Delete, None).await?;
+        assert!(matches!(
+            run_due(&worker, store, "native-known-funded-delete").await?,
+            ReconcileWorkerOutcome::Advanced {
+                state: State::Deleted,
+                ..
+            }
+        ));
+        let deleted = store.load(instance.id).await?;
+        executor
+            .execute(physical_envelope(&deleted, 1, true, deadline)?)
+            .await?;
+        assert_eq!(physical_calls.load(Ordering::SeqCst), 2);
+        assert_original_release(
+            pool,
+            resource,
+            store,
+            &deleted,
+            initial,
+            &http.usage_identity,
+        )
+        .await?;
+        return Ok(());
+    }
     let credits = resource_service::credits::PgCreditStore::new(pool.clone());
     let unknown = credits
         .resolve(
@@ -705,6 +1129,7 @@ async fn exercise_execution(
             OWNER,
             initial.hold.id,
             &contracts::resource::credits::CreditHoldResolutionRequest::Unknown {
+                event_id: Some(contracts::EventId::new()),
                 reason: "synthetic metering unavailable".into(),
             },
         )
@@ -713,24 +1138,28 @@ async fn exercise_execution(
         admission.for_instance(&restarted).await,
         Err(RuntimeAdmissionError::FundingInactive)
     ));
-    assert!(matches!(
-        executor
-            .execute(physical_envelope(&restarted, 1, false, deadline)?)
-            .await,
-        Err(
-            environment_service::ContainerExecutorFenceError::RuntimeAdmission(
-                RuntimeAdmissionError::FundingInactive
+    if container {
+        assert!(matches!(
+            executor
+                .execute(physical_envelope(&restarted, 1, false, deadline)?)
+                .await,
+            Err(
+                environment_service::ContainerExecutorFenceError::RuntimeAdmission(
+                    RuntimeAdmissionError::FundingInactive
+                )
             )
-        )
-    ));
+        ));
+    }
     // A restarted executor replays an already completed effect, despite loss of current funding.
     let recovered = environment_service::FencedContainerExecutor::new(
         environment_service::PgContainerExecutorFenceStore::new(pool.clone()),
         PhysicalClusterFixture(physical_calls.clone(), store.current_time().await?),
     )
     .with_runtime_admission(admission.clone());
-    recovered.execute(first).await?;
-    assert_eq!(physical_calls.load(Ordering::SeqCst), 1);
+    if container {
+        recovered.execute(first).await?;
+        assert_eq!(physical_calls.load(Ordering::SeqCst), 1);
+    }
     lifecycle_command(store, &restarted, Kind::Stop, None).await?;
     assert!(matches!(
         run_due(&worker, store, "native-unfunded-stop").await?,
@@ -750,7 +1179,7 @@ async fn exercise_execution(
     assert!(
         matches!(run_due(&worker, store, "native-unfunded-restart").await?, ReconcileWorkerOutcome::Failed { ref diagnostic_code } if diagnostic_code == "LW_RUNTIME_FUNDING_INACTIVE")
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     credits
         .expire_unknown_at(unknown.reconciliation_due_at.ok_or("unknown due")?)
         .await?;
@@ -766,16 +1195,22 @@ async fn exercise_execution(
         admission.for_instance(&failed).await,
         Err(RuntimeAdmissionError::FundingInactive)
     ));
-    assert!(matches!(
-        recovered
-            .execute(physical_envelope(&failed, 1, false, deadline)?)
-            .await,
-        Err(
-            environment_service::ContainerExecutorFenceError::RuntimeAdmission(
-                RuntimeAdmissionError::FundingInactive
+    let rejected = http.send(&failed, "recover").await?;
+    assert_eq!(rejected.0, StatusCode::CONFLICT, "{}", rejected.1);
+    assert_eq!(rejected.1["diagnosticCode"], "LW_RUNTIME_FUNDING_INACTIVE");
+    assert_eq!(store.load(instance.id).await?.revision, failed.revision);
+    if container {
+        assert!(matches!(
+            recovered
+                .execute(physical_envelope(&failed, 1, false, deadline)?)
+                .await,
+            Err(
+                environment_service::ContainerExecutorFenceError::RuntimeAdmission(
+                    RuntimeAdmissionError::FundingInactive
+                )
             )
-        )
-    ));
+        ));
+    }
     lifecycle_command(store, &failed, Kind::Delete, None).await?;
     assert!(matches!(
         run_due(&worker, store, "native-unfunded-cleanup").await?,
@@ -785,11 +1220,22 @@ async fn exercise_execution(
         }
     ));
     let deleted = store.load(instance.id).await?;
-    recovered
-        .execute(physical_envelope(&deleted, 1, true, deadline)?)
-        .await?;
-    assert_eq!(physical_calls.load(Ordering::SeqCst), 2);
+    if container {
+        recovered
+            .execute(physical_envelope(&deleted, 1, true, deadline)?)
+            .await?;
+        assert_eq!(physical_calls.load(Ordering::SeqCst), 2);
+    }
     assert_eq!(deleted.lease_id, initial.lease_id.into());
+    assert_original_release(
+        pool,
+        resource,
+        store,
+        &deleted,
+        initial,
+        &http.usage_identity,
+    )
+    .await?;
     let legacy: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM resource.environment_resource_reservations WHERE environment_id=$1",
     )
@@ -822,10 +1268,207 @@ async fn run_due(
         loop {
             let result = worker.run_once(label, store.current_time().await?).await?;
             if result != environment_service::ReconcileWorkerOutcome::Idle {
-                return Ok::<_, Box<dyn std::error::Error>>(result);
+                return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(result);
             }
             tokio::task::yield_now().await;
         }
     })
     .await?
+}
+
+async fn assert_original_release(
+    pool: &PgPool,
+    resource: &PgResourceStore,
+    store: &PgEnvironmentStore,
+    instance: &contracts::environment::EnvironmentInstance,
+    initial: &EnvironmentCreditGrant,
+    usage_identity: &auth::ServiceIdentity,
+) -> Result {
+    let item = resource
+        .next_active_environment_cleanup(None)
+        .await?
+        .ok_or("active lease cleanup candidate")?;
+    assert_eq!(item.lease.id, initial.lease_id);
+    assert!(
+        resource
+            .next_active_environment_cleanup(Some(item.lease.id))
+            .await?
+            .is_none()
+    );
+    let status = store.load_cleanup_status(instance.id).await?;
+    assert!(status.cleanup_complete);
+    for changed in [
+        contracts::environment::ResourceWorkCleanupStatus {
+            capacity_binding: contracts::CapacityClaimId::new().to_string(),
+            ..status.clone()
+        },
+        contracts::environment::ResourceWorkCleanupStatus {
+            lease_revision: Revision::new(1)?,
+            ..status.clone()
+        },
+    ] {
+        assert!(matches!(
+            resource
+                .begin_deleted_environment_release(&item, &changed, contracts::ActorId::new())
+                .await,
+            Err(resource_service::store::ResourceStoreError::CapacityReadbackInvalid)
+        ));
+    }
+    assert_usage_settlement_replay(pool, resource, store, instance, usage_identity).await?;
+    let before = resource_service::credits::PgCreditStore::new(pool.clone())
+        .account(instance.project_id)
+        .await?;
+    let releasing = resource
+        .begin_deleted_environment_release(&item, &status, contracts::ActorId::new())
+        .await?;
+    let released = resource
+        .complete_capacity_release(
+            releasing.claim.id,
+            releasing.claim.revision,
+            releasing.lease.id,
+            releasing.lease.revision,
+            contracts::ActorId::new(),
+            "native-delete-release",
+        )
+        .await?;
+    assert!(matches!(
+        released.state,
+        contracts::resource::ResourceLeaseState::Expired
+            | contracts::resource::ResourceLeaseState::Revoked
+    ));
+    let ledger: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource.credit_ledger_entries WHERE hold_id=$1")
+            .bind(initial.hold.id)
+            .fetch_one(pool)
+            .await?;
+    assert!(
+        resource
+            .complete_capacity_release(
+                releasing.claim.id,
+                releasing.claim.revision,
+                releasing.lease.id,
+                releasing.lease.revision,
+                contracts::ActorId::new(),
+                "native-delete-release-replay"
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.credit_ledger_entries WHERE hold_id=$1"
+        )
+        .bind(initial.hold.id)
+        .fetch_one(pool)
+        .await?,
+        ledger
+    );
+    let after = resource_service::credits::PgCreditStore::new(pool.clone())
+        .account(instance.project_id)
+        .await?;
+    assert_eq!(after.reserved, contracts::resource::FixedDecimal::zero());
+    assert_eq!(after.spent, before.spent);
+    assert!(
+        resource
+            .next_active_environment_cleanup(None)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.credit_holds WHERE request_id=$1"
+        )
+        .bind(initial.request_id.as_uuid())
+        .fetch_one(pool)
+        .await?,
+        1
+    );
+    Ok(())
+}
+
+async fn assert_usage_settlement_replay(
+    pool: &PgPool,
+    resource: &PgResourceStore,
+    store: &PgEnvironmentStore,
+    instance: &contracts::environment::EnvironmentInstance,
+    caller: &auth::ServiceIdentity,
+) -> Result {
+    let requests: Vec<serde_json::Value> = sqlx::query_scalar("SELECT request FROM environment.resource_meter_deliveries WHERE environment_id=$1 ORDER BY measured_from,delivery_id")
+        .bind(instance.id.as_uuid()).fetch_all(pool).await?;
+    assert!(
+        !requests.is_empty(),
+        "physical lifecycle must produce real meter facts"
+    );
+    let credits = resource_service::credits::PgCreditStore::new(pool.clone());
+    let mut nonzero_charge = false;
+    for input in requests {
+        let input: contracts::http::RecordResourceUsageRequest = serde_json::from_value(input)?;
+        let observed_at = store.current_time().await?;
+        let first = resource
+            .record_usage_internal(
+                &input,
+                observed_at,
+                caller,
+                OWNER,
+                &std::collections::BTreeSet::new(),
+            )
+            .await?;
+        let charge = resource.settle_usage(first.id).await?;
+        nonzero_charge |= charge
+            .as_ref()
+            .is_some_and(|value| value.total.amount.scaled() > 0);
+        let account = credits.account(instance.project_id).await?;
+        let ledger: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM resource.credit_ledger_entries WHERE project_id=$1",
+        )
+        .bind(instance.project_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+        let replay = resource
+            .record_usage_internal(
+                &input,
+                store.current_time().await?,
+                caller,
+                OWNER,
+                &std::collections::BTreeSet::new(),
+            )
+            .await?;
+        assert_eq!(replay.id, first.id);
+        assert_eq!(
+            resource
+                .settle_usage(replay.id)
+                .await?
+                .map(|value| value.id),
+            charge.map(|value| value.id)
+        );
+        let repeated = credits.account(instance.project_id).await?;
+        assert_eq!(
+            (
+                repeated.balance,
+                repeated.reserved,
+                repeated.spent,
+                repeated.platform_absorbed
+            ),
+            (
+                account.balance,
+                account.reserved,
+                account.spent,
+                account.platform_absorbed
+            )
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM resource.credit_ledger_entries WHERE project_id=$1"
+            )
+            .bind(instance.project_id.as_uuid())
+            .fetch_one(pool)
+            .await?,
+            ledger
+        );
+    }
+    assert!(
+        nonzero_charge,
+        "the configured nonzero CPU rate must produce an actual charge even when the platform absorbs it"
+    );
+    Ok(())
 }

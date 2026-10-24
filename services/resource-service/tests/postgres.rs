@@ -4254,6 +4254,64 @@ async fn invalid_work_handoff_releases_the_pre_handoff_claim_without_retry()
 }
 
 #[tokio::test]
+async fn recovered_handoff_receipt_cannot_use_the_unaccepted_release_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let (store, _request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
+    let expiring = store
+        .begin_lease_expiry(lease.id, lease.revision, None, actor, "receipt-expiry")
+        .await?;
+    let item = store
+        .next_lease_cleanup(actor)
+        .await?
+        .ok_or("uncertain handoff cleanup")?;
+    assert_eq!(item.lease.revision, expiring.revision);
+    let mut stale = item.clone();
+    stale.lease.revision = lease.revision;
+    assert!(matches!(
+        store
+            .mark_capacity_releasing_with_ack(&stale, lease.revision)
+            .await,
+        Err(ResourceStoreError::CapacityClaimStateConflict)
+    ));
+    let releasing = store
+        .mark_capacity_releasing_with_ack(&item, lease.revision)
+        .await?;
+    assert_eq!(
+        releasing.state,
+        contracts::resource::CapacityClaimState::Releasing
+    );
+    assert!(matches!(
+        store
+            .complete_pre_handoff_release(
+                claim.id,
+                releasing.revision,
+                lease.id,
+                expiring.revision,
+                actor,
+                "receipt-is-not-absence"
+            )
+            .await,
+        Err(ResourceStoreError::CapacityClaimStateConflict)
+    ));
+    let observed = store
+        .next_lease_cleanup(actor)
+        .await?
+        .ok_or("accepted owner cleanup still pending")?;
+    assert_eq!(observed.lease_synced_revision, Some(lease.revision));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM resource.gpu_capacity_reservations WHERE claim_id=$1"
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "reserved"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn work_handoff_does_not_reactivate_a_request_when_revoke_has_won()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;

@@ -477,10 +477,15 @@ fn expire_stop_checkpoint_is_followed_by_cleanup() -> Result<(), Box<dyn std::er
 
 #[test]
 fn failed_expire_can_retry_or_recover_through_cleanup() -> Result<(), Box<dyn std::error::Error>> {
-    let current = ready_instance();
+    assert_expiry_cleanup_recovery(&ready_instance())
+}
+
+fn assert_expiry_cleanup_recovery(
+    current: &contracts::environment::EnvironmentInstance,
+) -> Result<(), Box<dyn std::error::Error>> {
     let expire = plan_command(
-        &current,
-        &command(&current, EnvironmentOperationKind::Expire),
+        current,
+        &command(current, EnvironmentOperationKind::Expire),
         OperationId::new(),
     )?;
     let failed = apply_provider_failure(
@@ -500,6 +505,10 @@ fn failed_expire_can_retry_or_recover_through_cleanup() -> Result<(), Box<dyn st
     ] {
         let resumed = plan_command(&failed, &command(&failed, kind), OperationId::new())?;
         assert_eq!(resumed.desired_state, DesiredEnvironmentState::Deleted);
+        assert_eq!(
+            resumed.operation.lease_authorization,
+            current.operation.lease_authorization
+        );
         assert_eq!(resumed.observed_state, ObservedEnvironmentState::Expiring);
         assert_eq!(
             resumed.operation.retry_from_phase,
@@ -547,6 +556,24 @@ fn failed_expire_can_retry_or_recover_through_cleanup() -> Result<(), Box<dyn st
         )?;
         assert_eq!(deleted.observed_state, ObservedEnvironmentState::Deleted);
         assert_eq!(deleted.operation.state, OperationState::Succeeded);
+    }
+    Ok(())
+}
+
+#[test]
+fn funded_cleanup_recovery_does_not_require_an_active_new_compute_grant()
+-> Result<(), Box<dyn std::error::Error>> {
+    for class in [EnvironmentClass::Work, EnvironmentClass::Experiment] {
+        let mut instance = support::funded_instance(ready_instance());
+        instance.class = class;
+        instance.eligibility_expires_at = Some(timestamp("2026-07-14T00:00:01.000Z"));
+        instance
+            .operation
+            .lease_authorization
+            .as_mut()
+            .ok_or("native lease")?
+            .expires_at = timestamp("2026-07-14T00:00:01.000Z");
+        assert_expiry_cleanup_recovery(&instance)?;
     }
     Ok(())
 }

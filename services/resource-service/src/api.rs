@@ -210,7 +210,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             "/internal/v1/environment-credit-grants/{lease_id}",
             get(environment_funding::record),
         )
-        .route("/internal/v1/environment-runtime-authorization", post(environment_runtime_authorization::resolve))
+        .route(
+            "/internal/v1/environment-runtime-authorization",
+            post(environment_runtime_authorization::resolve),
+        )
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
             "/internal/v1/task-resources/{task_run_id}/request",

@@ -158,6 +158,7 @@ impl FreezeBindingService {
             || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
+            || release.projection.environment_spec.class != instance.class
         {
             return Err(FreezeBindingError::ReleaseIdentityMismatch);
         }
@@ -364,6 +365,7 @@ impl FreezeBindingService {
             || !crate::runtime_admission::release_project_matches(&instance, &release.projection)
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
+            || release.projection.environment_spec.class != instance.class
         {
             return Err(FreezeBindingError::ReleaseIdentityMismatch);
         }

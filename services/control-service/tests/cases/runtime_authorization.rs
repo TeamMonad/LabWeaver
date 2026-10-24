@@ -1,6 +1,6 @@
 //! Real Control and Resource approval bindings with synthetic executor observations.
 use super::{apply_domain_migrations, verified_teacher_fixture};
-use contracts::authoring::{AuthoringApproval, EnvironmentCandidate};
+use contracts::authoring::EnvironmentCandidate;
 use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
     ApplyPlatformConfigurationRequest, LinuxCapability, PlatformConfigurationApplyStage as Stage,
@@ -8,6 +8,7 @@ use contracts::platform_configuration::{
     RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
     UpdatePlatformConfigurationRequest,
 };
+use contracts::resource::{CapacityClaim, CapacityClaimState, ResourceApproval};
 use contracts::resource::{
     ResourceRequest, ResourceRequestState, ResourceTarget, WorkloadResources,
 };
@@ -17,12 +18,14 @@ use contracts::{
     ActorId, AuthenticatedActor, CourseId, EnvironmentId, PlatformRole, ResourceRequestId,
     Revision, UtcTimestamp,
 };
+use contracts::{CapacityClaimId, LeaseId, ResourceApprovalId};
 use control_service::{ControlError, ControlService, platform_configuration as configuration};
 use persistence_sqlx::{Domain, Sha256Digest};
 use resource_service::runtime_authorization::{RuntimeBindingError, resolve_binding};
-use resource_service::{ApprovalPolicy, store::{PendingAllocation, PgResourceStore}};
-use contracts::resource::{CapacityClaim, CapacityClaimState, ResourceApproval};
-use contracts::{CapacityClaimId, ResourceApprovalId, LeaseId};
+use resource_service::{
+    ApprovalPolicy,
+    store::{PendingAllocation, PgResourceStore},
+};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -192,34 +195,47 @@ async fn verified(
 pub(super) async fn assert_bindings_after_publication(
     pool: &PgPool,
     control: &ControlService,
-    _approval: &AuthoringApproval,
     candidate: &EnvironmentCandidate,
     release: &EnvironmentTemplateRelease,
     now: UtcTimestamp,
 ) -> TestResult {
-    sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
-        .execute(pool)
-        .await?;
-    apply_domain_migrations(pool, Domain::Access).await?;
+    let work = candidate.spec.class == contracts::authoring::EnvironmentClass::Work;
+    if !work {
+        sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
+            .execute(pool)
+            .await?;
+        apply_domain_migrations(pool, Domain::Access).await?;
+    }
     apply_domain_migrations(pool, Domain::Resource).await?;
-    let student = ActorId::new();
+    let student = if work {
+        release.published_by
+    } else {
+        ActorId::new()
+    };
     sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256,username,display_name) VALUES($1,'https://synthetic.invalid',$2,'payer','payer')").bind(student.as_uuid()).bind(Sha256Digest::of_bytes(student.as_uuid().as_bytes()).to_string()).execute(pool).await?;
     let course_id = release.course_id.ok_or("course required")?;
-    sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)").bind(course_id.as_uuid()).bind(student.as_uuid()).execute(pool).await?;
-    let payer = control
-        .create_project(
-            student,
-            PlatformRole::Student,
-            &contracts::CreateProjectRequest {
-                name: "runtime-paying-project".to_owned(),
-                description: None,
-                course_id: None,
-            },
-            &IdempotencyKey::parse("runtime-payer")?,
-            now,
-        )
-        .await?;
-    assert_ne!(payer.id, release.project_id);
+    if !work {
+        sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)").bind(course_id.as_uuid()).bind(student.as_uuid()).execute(pool).await?;
+    }
+    let payer_project_id = if work {
+        release.project_id
+    } else {
+        let payer = control
+            .create_project(
+                student,
+                PlatformRole::Student,
+                &contracts::CreateProjectRequest {
+                    name: "runtime-paying-project".into(),
+                    description: None,
+                    course_id: None,
+                },
+                &IdempotencyKey::parse("runtime-payer")?,
+                now,
+            )
+            .await?;
+        assert_ne!(payer.id, release.project_id);
+        payer.id
+    };
     let resources = WorkloadResources {
         cpu_millicores: 1000,
         memory_bytes: 1_073_741_824,
@@ -231,7 +247,7 @@ pub(super) async fn assert_bindings_after_publication(
         generation: 1,
         request_key: "runtime-binding".to_owned(),
         requester_id: student,
-        project_id: payer.id,
+        project_id: payer_project_id,
         course_id: Some(course_id),
         target: ResourceTarget::Environment {
             environment_id: EnvironmentId::new(),
@@ -333,18 +349,6 @@ pub(super) async fn assert_bindings_after_publication(
             )
             .await?;
     }
-    resource_service::credits::PgCreditStore::new(pool.clone())
-        .admin(
-            "runtime-funds",
-            ActorId::new(),
-            &[PlatformRole::PlatformAdmin],
-            &contracts::resource::credits::CreditAdminOperation::Grant {
-                project_id: request.project_id,
-                amount: contracts::resource::FixedDecimal::parse("1000.000000")?,
-                reason: "synthetic integration allowance".into(),
-            },
-        )
-        .await?;
     store
         .create("runtime-create", &request, "runtime-create")
         .await?;
@@ -371,6 +375,7 @@ pub(super) async fn assert_bindings_after_publication(
     };
     let allocation = PendingAllocation {
         claim: CapacityClaim {
+            updated_at: Some(now),
             id: CapacityClaimId::new(),
             request_id: request.id,
             approval_id: resource_approval.id,

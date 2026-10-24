@@ -224,6 +224,126 @@ impl PgEnvironmentStore {
         Ok(accepted)
     }
 
+    /// Reads only an already committed handoff receipt; it never refreshes permission or creates an instance.
+    pub async fn load_resource_handoff_receipt(
+        &self,
+        request_id: contracts::ResourceRequestId,
+    ) -> Result<contracts::environment::ResourceEnvironmentHandoffReceipt, EnvironmentStoreError>
+    {
+        let row = sqlx::query("SELECT state,result FROM environment.idempotency_ledger WHERE operation='resource-environment-handoff' AND idempotency_key=$1")
+            .bind(request_id.to_string()).fetch_optional(&self.pool).await?
+            .ok_or(EnvironmentStoreError::ResourceHandoffNotFound)?;
+        if row.try_get::<String, _>("state")? != "completed" {
+            return Err(EnvironmentStoreError::IdempotencyInProgress);
+        }
+        Ok(serde_json::from_value(row.try_get("result")?)?)
+    }
+
+    /// Reads a completed transport receipt before fresh admission; replay never authorizes another effect.
+    pub async fn lookup_resource_handoff_replay(
+        &self,
+        handoff: &contracts::environment::ResourceEnvironmentHandoff,
+    ) -> Result<
+        Option<contracts::environment::ResourceEnvironmentHandoffReceipt>,
+        EnvironmentStoreError,
+    > {
+        match IdempotencyStore::lookup(
+            &self.pool,
+            Domain::Environment,
+            "resource-environment-handoff",
+            &handoff.request_id.to_string(),
+            resource_handoff_hash(handoff)?,
+        )
+        .await?
+        {
+            None => Ok(None),
+            Some(IdempotencyDecision::Replay(value)) => Ok(Some(serde_json::from_value(value)?)),
+            Some(IdempotencyDecision::Conflict) => Err(EnvironmentStoreError::IdempotencyConflict),
+            Some(_) => Err(EnvironmentStoreError::IdempotencyInProgress),
+        }
+    }
+
+    /// Commits the stable Resource handoff receipt with the aggregate and existing create ledger.
+    pub async fn accept_resource_handoff(
+        &self,
+        handoff: contracts::environment::ResourceEnvironmentHandoff,
+        command: &LifecycleCommand,
+        release: &contracts::events::ReleasePublished,
+        runtime: contracts::environment::EnvironmentRuntimeAuthorizationResolution,
+    ) -> Result<contracts::environment::ResourceEnvironmentHandoffReceipt, EnvironmentStoreError>
+    {
+        let mut tx = self.pool.begin().await?;
+        let key = handoff.request_id.to_string();
+        match IdempotencyStore::reserve(
+            &mut tx,
+            Domain::Environment,
+            "resource-environment-handoff",
+            &key,
+            resource_handoff_hash(&handoff)?,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => {
+                tx.commit().await?;
+                return Ok(serde_json::from_value(value)?);
+            }
+            IdempotencyDecision::Conflict => {
+                return Err(EnvironmentStoreError::IdempotencyConflict);
+            }
+            IdempotencyDecision::InProgress => {
+                return Err(EnvironmentStoreError::IdempotencyInProgress);
+            }
+            IdempotencyDecision::Reserved => {}
+        }
+        let authorization = runtime.lease_authorization.clone();
+        let create = EnvironmentCreateSpec {
+            project_id: handoff.project_id,
+            course_id: handoff.course_id,
+            owner_actor_id: handoff.owner_actor_id,
+            display_label: handoff.display_label,
+            class: release.environment_spec.class,
+            runtime_kind: release.release.runtime_kind,
+            release_id: handoff.release_id,
+            release_version: handoff.release_version,
+            provider_binding: handoff.provider_binding,
+            runtime_authorization: Some(runtime),
+            lease_id: Some(handoff.lease_id),
+            capacity_binding: Some(handoff.capacity_binding),
+            approved_resources: handoff.approved_resources,
+            gpu_allocation: None,
+            retention: release.environment_spec.retention.clone(),
+            eligibility_expires_at: release.environment_spec.retention.retain_until,
+        };
+        let accepted = accept_command_in_transaction(
+            &mut tx,
+            &format!("resource-environment-{}", handoff.request_id),
+            command,
+            Some(&create),
+            Some(authorization),
+            Some(handoff.project_id),
+            handoff.course_id,
+            None,
+        )
+        .await?;
+        let receipt = contracts::environment::ResourceEnvironmentHandoffReceipt {
+            accepted,
+            request_id: handoff.request_id,
+            lease_id: handoff.lease_id,
+            lease_revision: handoff.lease_revision,
+            claim_id: handoff.claim_id,
+        };
+        IdempotencyStore::complete(
+            &mut tx,
+            Domain::Environment,
+            "resource-environment-handoff",
+            &key,
+            &serde_json::to_value(&receipt)?,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(receipt)
+    }
+
     /// Accepts a public create command with the request-level idempotency identity computed
     /// before release or Resource side effects.  The hash is committed with the same aggregate
     /// transaction, so retries use the exact identity that was visible at the HTTP boundary.
@@ -2194,6 +2314,19 @@ fn accepted_response(instance: &EnvironmentInstance) -> EnvironmentOperationAcce
     }
 }
 
+fn resource_handoff_hash(
+    handoff: &contracts::environment::ResourceEnvironmentHandoff,
+) -> Result<Sha256Digest, EnvironmentStoreError> {
+    // Revisions and trace IDs advance during renewal/retry; the original business identity does not.
+    canonical_hash(
+        &json!({"requestId":handoff.request_id,"leaseId":handoff.lease_id,"claimId":handoff.claim_id,
+        "environmentId":handoff.environment_id,"projectId":handoff.project_id,"courseId":handoff.course_id,
+        "ownerId":handoff.owner_actor_id,"releaseId":handoff.release_id,"releaseVersion":handoff.release_version,
+        "displayLabel":handoff.display_label,"providerBinding":handoff.provider_binding,
+        "capacityBinding":handoff.capacity_binding,"approvedResources":handoff.approved_resources,"gpuAllocation":handoff.gpu_allocation}),
+    )
+}
+
 fn create_request_hash(
     instance: &EnvironmentInstance,
 ) -> Result<Sha256Digest, EnvironmentStoreError> {
@@ -2221,6 +2354,7 @@ fn create_api_request_hash(
     actor_id: ActorId,
 ) -> Result<Sha256Digest, EnvironmentStoreError> {
     canonical_hash(&json!({
+        "resourceRequestId": request.resource_request_id,
         "projectId": request.project_id,
         "courseId": request.course_id,
         "ownerId": actor_id,
@@ -2332,6 +2466,8 @@ pub enum EnvironmentStoreError {
     TemplateUpgrade(#[from] TemplateUpgradeError),
     #[error("LW_ENVIRONMENT_ALLOCATION_PENDING")]
     AllocationPending,
+    #[error("LW_ENVIRONMENT_HANDOFF_NOT_ACCEPTED")]
+    ResourceHandoffNotFound,
     #[error("LW_ENVIRONMENT_NOT_FOUND")]
     EnvironmentNotFound,
     #[error("LW_ENVIRONMENT_OPERATION_NOT_FOUND")]

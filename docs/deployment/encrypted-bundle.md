@@ -105,9 +105,15 @@ nats:
 
 有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
 
-`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。Environment 的实际启动消费和资金授权属于 #207，当前 PR 只交付绑定输入和明确的外部前置条件。
+`environmentExecutorAuthority` 是派生输出，不能手写到 Bundle helmValues。该投影不修改 RBAC、namespace、工作负载权限或 Resource 资金算法。Environment owner 和两个运行执行器使用这同一客户端读取原资金覆盖及原审批链；缺少实际连接、服务账户授权或有效覆盖时拒绝新计算，不使用默认批准或第二次资金预占。
 
 原 Control `/internal/v1/platform-configuration/loaded` 与只读副本观察器继续报告 Control 的实际进程快照，不把 Environment 配置渲染当作已加载或已应用事实。
+
+部署前确认 Resource 的 Environment client allowlist 与该共享身份一致，服务 JWT 具有现有 `resource.environment.resolve` 权限，HTTPS audience/CA 匹配。Environment 的生命周期交接继续由 Resource 使用 `resource.environment.manage` 调用；清理读回继续使用原 `environment.work.read` 边界。不要把业务服务替换为测试响应者。
+
+新建 Work/Experiment 先通过 Resource 完成批准、容量分配与原租约资金预占，再由 Resource 自动发送同一 `ResourceEnvironmentHandoff`。公开 `CreateEnvironmentRequest` 现在必须携带该真实申请的 `resourceRequestId`，只把浏览器幂等意图附着到原环境；不得使用旧 Experiment 独立 reservation 创建另一份环境。申请目标、owner、项目、课程、发布版本或原租约不符时拒绝。交接尚未落库时返回 `LW_ENVIRONMENT_ALLOCATION_PENDING`，重试保留同一请求与幂等键。
+
+Resource 维护循环同时有界检查 active handed-off 环境的清理读回。停止不释放原权利；仅 `Deleted` 且完整清理证据匹配最后确认的 lease fence，才对当前 request/claim/lease 做 CAS 并进入原释放流程。不要以删除请求、Pod 停止或不可读取状态强行退占。七天只读保留、恢复/导出与独立磁盘清除仍未提供。
 
 ### 既有 namespace 的 Container Work 落点
 

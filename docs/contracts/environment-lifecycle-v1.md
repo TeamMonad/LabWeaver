@@ -85,7 +85,7 @@ VM runtime 运行事实可先于 SSH 握手入库，此时 `instanceReady=true`�
 
 停止、删除和设备释放由实际执行结果确认。失败保留明确状态和诊断，不虚报 Deleted 或可用容量。保留存储与计算资源分别处理，Environment 向 Resource 提供可信状态变化用于计量；异常清理期间费用待核实。
 
-Access 的 `0008_funded_experiment_console_fence.sql` 将控制台能力的租约 CHECK 改为按实际资金租约而非用途分类：Work 必须带完整 lease fence；Experiment 可以保留旧的无租约形态，也可以带完整 fence。任一字段缺失或能力到期超过 lease 到期均拒绝。Rust 的能力与发现结果校验使用同一规则，精确 lease 身份仍参与消费匹配。该迁移不创建租约、批准或资金预占，也不单独开启 funded Experiment 创建；资金生命周期消费需在 Resource 原资金接口落地后接入。
+Access 的 `0008_funded_experiment_console_fence.sql` 将控制台能力的租约 CHECK 改为按实际资金租约而非用途分类：Work 必须带完整 lease fence；Experiment 可以保留旧的无租约形态，也可以携带完整原租约 fence。任一字段缺失或能力有效期超过 lease 到期均拒绝。Environment 的 owner/endpoint/console 解析与终端升级保留同一完整租约身份、当前有效窗及观测代次；迁移本身不创建租约、批准或资金预占。
 
 ## 验证
 
@@ -101,16 +101,17 @@ under the existing `resource.environment.resolve` permission and Environment cli
 allowlist. It supplies `resourceRequestId`, optional `expectedLeaseId`, optional
 `environmentId` for first-create target resolution, project/course/owner and exact
 release ID/version. Resource reuses the original request→lease→claim→approval
-helper and returns that binding, its lease and values from the same verified
-platform version. The receipt expires at the earlier approval/lease deadline.
-There is no second grant, runtime approval table or independently configurable UID.
+helper and returns the original binding and lease. The verified platform revision
+and canonical hash stay on that binding; this slice transports no new UID or
+privileged-execution policy. The receipt expires at the earlier approval/lease
+deadline. There is no second grant or runtime approval table.
 
 Work and funded Experiment use the original Resource handoff, Environment target and lease IDs. Before provision/start/restart/reset,
 including retry/recovery that creates compute, Environment reads the authority
 again. Request, owner/project/course, release, canonical spec, provider and original
-Environment target must agree. Provider and executor admission derive the same
-security context; executor compares the rendered context with the durable instance
-and immutable release. Stop and cleanup do not require a new runtime grant.
+Environment target must agree. Native executor admission also checks the exact
+runtime kind, operation and generation before a new effect. Existing baseline security
+projection remains unchanged. Stop and cleanup do not require a new runtime grant.
 
 
 Public `CreateEnvironmentRequest` requires `resourceRequestId`; its approved target
@@ -123,6 +124,23 @@ teacher's published release belongs to the authoring project; the existing teach
 course, actor and configuration checks still apply. Work and an unscoped Experiment
 require the same project. A supplied display label must match the Resource request's
 original label; omit it to use that label.
+
+`POST /internal/v1/resource/work-handoffs` returns a `ResourceEnvironmentHandoffReceipt`:
+the original `accepted` create operation plus request/lease/claim IDs and the lease
+revision actually accepted by Environment. That receipt commits atomically with the
+aggregate on the existing idempotency ledger. Its business fingerprint excludes mutable
+request/lease/claim revisions and trace IDs; changing an immutable identity still conflicts.
+A completed handoff replays before fresh runtime admission, even after permission or
+funding is revoked. It reports a prior acceptance only; every new physical effect still
+requires a fresh grant. Resource records the returned lease revision, never the newer
+revision it merely attempted to send, then uses the original lease-sync path if needed.
+
+If a handoff reply is lost until expiry, Resource reads
+`GET /internal/v1/resource/work-handoffs/{requestId}` under the existing manage permission.
+A known receipt requires real Environment cleanup and preserves the original acknowledged
+fence. Only the owner's explicit `LW_ENVIRONMENT_HANDOFF_NOT_ACCEPTED` result establishes
+non-acceptance; transport errors, unknown 404s and malformed replies retain capacity.
+No missing acknowledgement is treated as proof that no environment exists.
 
 Before handoff finishes, public create returns `LW_ENVIRONMENT_ALLOCATION_PENDING` (409,
 retryable), and a retry uses the same intent. Identity mismatch returns 412;
@@ -139,9 +157,19 @@ approval receipt. Execution requires a currently covered, known Pending hold.
 Unknown, Released or expired funding returns `LW_RUNTIME_FUNDING_INACTIVE` (409).
 A renewal committed between the two reads returns retryable
 `LW_RUNTIME_FUNDING_CHANGED` and is retried within the existing operation budget.
-The execution deadline is bounded by runtime approval and credit coverage.
+The execution deadline is bounded by operation budget, immutable material eligibility,
+runtime approval, the original lease and credit coverage. Cleanup recovery does not
+require a new compute grant or renewed material eligibility.
 Renewal extends the original lease and hold; Environment refresh retains ownership
-and generation. Stop/delete retain that lease through the original cleanup handshake.
+and generation. Stop preserves that lease and capacity; a stop request is not release.
+Resource observes one active handed-off Environment per bounded keyset maintenance
+pass, rotating the cursor. Only `Deleted` plus verified `cleanupComplete` and the exact
+last acknowledged lease/claim binding begins the original release saga; stopped,
+unknown, foreign and stale readbacks cannot release anything. The current Resource
+lease/request/claim revisions are checked transactionally, so concurrent renewal or
+revoke requires a new read. Existing completion releases the same hold once; ordinary
+Delete does not wait until the original lease TTL. No new reservation or refund ledger
+is introduced.
 Metering uses `resource_request` for both funded purposes; the legacy
 `experiment_environment` target remains only for historical unleased aggregates.
 

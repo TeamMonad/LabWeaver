@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use contracts::access::ConsoleLeaseFence;
-use contracts::authoring::{EnvironmentClass, EnvironmentRuntimeSpec, RuntimeKind};
+use contracts::authoring::{EnvironmentRuntimeSpec, RuntimeKind};
 use contracts::environment::{
     DesiredEnvironmentState, EndpointHealth, EnvironmentAccessSubjectKind,
     EnvironmentConsoleBinding, EnvironmentConsoleEligibility, EnvironmentConsoleEligibilityRequest,
@@ -291,14 +291,23 @@ pub(crate) fn resource_lease_fence(
     instance: &EnvironmentInstance,
     now: UtcTimestamp,
 ) -> Result<Option<ConsoleLeaseFence>, OwnerResolverError> {
-    instance.validate().map_err(|_| OwnerResolverError::EnvironmentUnavailable)?;
+    instance
+        .validate()
+        .map_err(|_| OwnerResolverError::EnvironmentUnavailable)?;
     if !instance.has_resource_lease() {
         return Ok(None);
     }
-    let lease = instance.operation.lease_authorization.as_ref()
+    let lease = instance
+        .operation
+        .lease_authorization
+        .as_ref()
         .filter(|lease| lease.active_from <= now && lease.expires_at > now)
         .ok_or(OwnerResolverError::EnvironmentUnavailable)?;
-    Ok(Some(ConsoleLeaseFence { lease_id: lease.lease_id, lease_revision: lease.lease_revision, expires_at: lease.expires_at }))
+    Ok(Some(ConsoleLeaseFence {
+        lease_id: lease.lease_id,
+        lease_revision: lease.lease_revision,
+        expires_at: lease.expires_at,
+    }))
 }
 
 fn resource_lease_active(instance: &EnvironmentInstance, now: UtcTimestamp) -> bool {

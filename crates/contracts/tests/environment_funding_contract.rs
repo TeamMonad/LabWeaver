@@ -25,7 +25,7 @@ fn projection() -> ReleasePublished {
         "network":{"mode":"deny_all"},
         "entries":[{"name":"web","protocol":"http","servicePort":8080}],
         "security":{
-            "runAsUser":65534,
+            "userPolicy":"non_root_required",
             "rootFilesystemPolicy":"read_only_required",
             "privilegeEscalationPolicy":"deny",
             "publicExposurePolicy":"deny",

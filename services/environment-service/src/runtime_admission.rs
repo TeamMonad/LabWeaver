@@ -99,6 +99,10 @@ impl EnvironmentRuntimeAdmission {
             .authority
             .resolve_runtime_authorization(request)
             .await?;
+        if let Some(material_deadline) = release.projection.environment_spec.retention.retain_until
+        {
+            resolution.valid_until = resolution.valid_until.min(material_deadline);
+        }
         let provider_binding = match &release.projection.environment_spec.runtime {
             contracts::authoring::EnvironmentRuntimeSpec::Container {
                 provider_binding, ..
@@ -230,27 +234,37 @@ impl RuntimeAdmissionError {
     }
 }
 
+pub(crate) struct RuntimeAdmissionFence {
+    pub environment_id: contracts::EnvironmentId,
+    pub project_id: Option<contracts::ProjectId>,
+    pub runtime_kind: contracts::authoring::RuntimeKind,
+    pub operation_id: contracts::OperationId,
+    pub generation: u64,
+    pub deadline_at: contracts::UtcTimestamp,
+}
+
 /// Fresh execution permission is read before opening the executor's fencing transaction.
 /// A completed response can still be replayed if this read fails; a new effect cannot start.
 pub(crate) async fn executor_authorization(
     admission: Option<&EnvironmentRuntimeAdmission>,
     pool: sqlx::PgPool,
-    environment_id: contracts::EnvironmentId,
-    project_id: Option<contracts::ProjectId>,
-    operation_id: contracts::OperationId,
-    generation: u64,
-    deadline: contracts::UtcTimestamp,
+    expected: RuntimeAdmissionFence,
 ) -> Result<(), RuntimeAdmissionError> {
     let admission = admission.ok_or(RuntimeAdmissionError::Unavailable)?;
     let store = crate::PgEnvironmentStore::new(pool);
-    let (instance, now) = store.load_for_owner_resolution(environment_id).await?;
-    if project_id.is_some_and(|id| id != instance.project_id)
-        || instance.operation.id != operation_id
-        || instance.generation != generation
+    let (instance, now) = store
+        .load_for_owner_resolution(expected.environment_id)
+        .await?;
+    if expected
+        .project_id
+        .is_some_and(|id| id != instance.project_id)
+        || instance.operation.id != expected.operation_id
+        || instance.generation != expected.generation
+        || instance.runtime_kind != expected.runtime_kind
     {
         return Err(RuntimeAdmissionError::Binding);
     }
-    let remaining = std::time::Duration::try_from(deadline.get() - now.get())
+    let remaining = std::time::Duration::try_from(expected.deadline_at.get() - now.get())
         .map_err(|_| RuntimeAdmissionError::Deadline)?;
     if remaining.is_zero() {
         return Err(RuntimeAdmissionError::Deadline);
@@ -258,7 +272,7 @@ pub(crate) async fn executor_authorization(
     let receipt = tokio::time::timeout(remaining, admission.for_instance(&instance))
         .await
         .map_err(|_| RuntimeAdmissionError::Deadline)??;
-    if deadline > receipt.valid_until {
+    if expected.deadline_at > receipt.valid_until {
         return Err(RuntimeAdmissionError::Deadline);
     }
     Ok(())
@@ -301,29 +315,47 @@ fn validate_credit_grant(
     Ok(())
 }
 
-
 /// Classroom authoring and payer projects may differ only under the original exact receipt.
-pub(crate) fn release_project_matches(instance: &EnvironmentInstance, projection: &contracts::events::ReleasePublished) -> bool {
+pub(crate) fn release_project_matches(
+    instance: &EnvironmentInstance,
+    projection: &contracts::events::ReleasePublished,
+) -> bool {
     if instance.project_id == projection.release.project_id {
         return true;
-
     }
-    if instance.class != contracts::authoring::EnvironmentClass::Experiment || instance.course_id.is_none() || !instance.has_resource_lease() {
+    if instance.class != contracts::authoring::EnvironmentClass::Experiment
+        || instance.course_id.is_none()
+        || !instance.has_resource_lease()
+    {
         return false;
     }
-    let Some(receipt) = &instance.runtime_authorization else { return false; };
-    let Ok(digest) = Sha256Digest::of_canonical(&projection.environment_spec) else { return false; };
+    let Some(receipt) = &instance.runtime_authorization else {
+        return false;
+    };
+    let Ok(digest) = Sha256Digest::of_canonical(&projection.environment_spec) else {
+        return false;
+    };
     receipt.authorization.configuration.authoring_project_id == projection.release.project_id
-        && receipt.validate_for(&ResolveEnvironmentRuntimeAuthorizationRequest {
-            expected_lease_id: instance.lease_id, resource_request_id: receipt.authorization.request_id,
-            environment_id: Some(instance.id), project_id: instance.project_id, course_id: instance.course_id,
-            owner_actor_id: instance.owner_id, release_id: instance.release_id, release_version: instance.release_version,
-        }, &projection.environment_spec, &digest.to_string()).is_ok()
+        && receipt
+            .validate_for(
+                &ResolveEnvironmentRuntimeAuthorizationRequest {
+                    expected_lease_id: instance.lease_id,
+                    resource_request_id: receipt.authorization.request_id,
+                    environment_id: Some(instance.id),
+                    project_id: instance.project_id,
+                    course_id: instance.course_id,
+                    owner_actor_id: instance.owner_id,
+                    release_id: instance.release_id,
+                    release_version: instance.release_version,
+                },
+                &projection.environment_spec,
+                &digest.to_string(),
+            )
+            .is_ok()
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     #[test]
     fn funding_checks_original_identity_coverage_revision_and_unknown_state()
     -> Result<(), Box<dyn std::error::Error>> {

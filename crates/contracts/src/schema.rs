@@ -315,11 +315,21 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         "schemas/contracts/v1/environment-lease-verification-response.schema.json",
         crate::environment::EnvironmentLeaseVerificationResponse
     );
-    document!("schemas/contracts/v1/resolve-environment-runtime-authorization-request.schema.json", crate::environment::ResolveEnvironmentRuntimeAuthorizationRequest);
-    document!("schemas/contracts/v1/environment-runtime-authorization-resolution.schema.json", crate::environment::EnvironmentRuntimeAuthorizationResolution);
+    document!(
+        "schemas/contracts/v1/resolve-environment-runtime-authorization-request.schema.json",
+        crate::environment::ResolveEnvironmentRuntimeAuthorizationRequest
+    );
+    document!(
+        "schemas/contracts/v1/environment-runtime-authorization-resolution.schema.json",
+        crate::environment::EnvironmentRuntimeAuthorizationResolution
+    );
     document!(
         "schemas/contracts/v1/resource-work-handoff.schema.json",
-        crate::environment::ResourceWorkHandoff
+        crate::environment::ResourceEnvironmentHandoff
+    );
+    document!(
+        "schemas/contracts/v1/resource-environment-handoff-receipt.schema.json",
+        crate::environment::ResourceEnvironmentHandoffReceipt
     );
     document!(
         "schemas/contracts/v1/resource-work-lease-update.schema.json",
@@ -2356,7 +2366,10 @@ fn request_schema(operation_id: &str) -> Option<Value> {
             "http/withdraw-environment-template-release-request"
         }
         "createEnvironment" => "http/create-environment-request",
-        "resolveEnvironmentRuntimeAuthorization" => "resolve-environment-runtime-authorization-request",
+        "resolveEnvironmentRuntimeAuthorization" => {
+            "resolve-environment-runtime-authorization-request"
+        }
+        "acceptResourceEnvironmentHandoff" => "resource-work-handoff",
         "resetEnvironment" => "http/reset-environment-request",
         "upgradeEnvironmentTemplate" => "http/upgrade-environment-template-request",
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
@@ -2551,7 +2564,12 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "getProjectCredits" => contract_ref("credit-account"),
         "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
         "getEnvironmentCreditGrant" => contract_ref("environment-credit-grant"),
-        "resolveEnvironmentRuntimeAuthorization" => contract_ref("environment-runtime-authorization-resolution"),
+        "resolveEnvironmentRuntimeAuthorization" => {
+            contract_ref("environment-runtime-authorization-resolution")
+        }
+        "acceptResourceEnvironmentHandoff" | "getResourceEnvironmentHandoffReceipt" => {
+            contract_ref("resource-environment-handoff-receipt")
+        }
         "claimBuildCostReconciliations" => {
             json!({"type":"array","items":contract_ref("build-cost-reconciliation")})
         }

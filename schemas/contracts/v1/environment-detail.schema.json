@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
+    "ApprovalId": {
+      "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
+      "type": "string"
+    },
     "ArtifactId": {
       "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
       "type": "string"
@@ -47,6 +51,27 @@
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
+    },
+    "CourseTeacherApprovalScope": {
+      "additionalProperties": false,
+      "description": "Captured by Control while the verified teacher and current course instructor are checked.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "membershipRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "actorId",
+        "courseId",
+        "membershipRevision"
+      ],
+      "type": "object"
     },
     "DesiredEnvironmentState": {
       "description": "Requested steady state.",
@@ -473,6 +498,35 @@
         }
       ]
     },
+    "EnvironmentRuntimeAuthorizationResolution": {
+      "additionalProperties": false,
+      "description": "A read-only transport receipt; Resource remains the single approval authority.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/RuntimeAuthorizationBinding"
+        },
+        "leaseAuthorization": {
+          "$ref": "#/$defs/EnvironmentLeaseAuthorization"
+        },
+        "ownerActorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "providerBinding": {
+          "type": "string"
+        },
+        "validUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "providerBinding",
+        "validUntil",
+        "leaseAuthorization",
+        "authorization",
+        "ownerActorId"
+      ],
+      "type": "object"
+    },
     "EnvironmentTemplateUpgrade": {
       "additionalProperties": false,
       "description": "Accepted container Work cutover. The release is desired until the operation succeeds.",
@@ -582,6 +636,53 @@
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
+    "LinuxCapability": {
+      "description": "Linux capability names from the kernel UAPI. `ALL` is never an addition.",
+      "enum": [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "DAC_READ_SEARCH",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "SETGID",
+        "SETUID",
+        "SETPCAP",
+        "LINUX_IMMUTABLE",
+        "NET_BIND_SERVICE",
+        "NET_BROADCAST",
+        "NET_ADMIN",
+        "NET_RAW",
+        "IPC_LOCK",
+        "IPC_OWNER",
+        "SYS_MODULE",
+        "SYS_RAWIO",
+        "SYS_CHROOT",
+        "SYS_PTRACE",
+        "SYS_PACCT",
+        "SYS_ADMIN",
+        "SYS_BOOT",
+        "SYS_NICE",
+        "SYS_RESOURCE",
+        "SYS_TIME",
+        "SYS_TTY_CONFIG",
+        "MKNOD",
+        "LEASE",
+        "AUDIT_WRITE",
+        "AUDIT_CONTROL",
+        "SETFCAP",
+        "MAC_OVERRIDE",
+        "MAC_ADMIN",
+        "SYSLOG",
+        "WAKE_ALARM",
+        "BLOCK_SUSPEND",
+        "AUDIT_READ",
+        "PERFMON",
+        "BPF",
+        "CHECKPOINT_RESTORE"
+      ],
+      "type": "string"
+    },
     "ObservedEnvironmentState": {
       "description": "Authoritative observed lifecycle state.",
       "enum": [
@@ -628,11 +729,185 @@
       "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
       "type": "string"
     },
+    "ResourceTarget": {
+      "description": "Immutable identity of a Resource request's target.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Capacity for a long-lived Environment/Work aggregate that already owns its identity.",
+          "properties": {
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "const": "environment",
+              "type": "string"
+            },
+            "releaseId": {
+              "$ref": "#/$defs/ReleaseId"
+            },
+            "releaseVersion": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "releaseId",
+            "releaseVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Capacity for a one-shot task. Resource does not create a fake Environment row.",
+          "properties": {
+            "kind": {
+              "const": "task",
+              "type": "string"
+            },
+            "taskRunId": {
+              "$ref": "#/$defs/TaskRunId"
+            }
+          },
+          "required": [
+            "kind",
+            "taskRunId"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
       "minimum": 1,
       "type": "integer"
+    },
+    "RuntimeAdmissionBasis": {
+      "enum": [
+        "restricted_baseline",
+        "project_preauthorization",
+        "course_preauthorization"
+      ],
+      "type": "string"
+    },
+    "RuntimeAuthorizationBinding": {
+      "additionalProperties": false,
+      "description": "Part of the existing immutable ResourceApproval, with no independent approval lifecycle.",
+      "properties": {
+        "basis": {
+          "$ref": "#/$defs/RuntimeAdmissionBasis"
+        },
+        "configuration": {
+          "$ref": "#/$defs/RuntimeConfigurationIdentity"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permissions": {
+          "$ref": "#/$defs/RuntimePreauthorization"
+        },
+        "platformConfigurationRevision": {
+          "$ref": "#/$defs/Revision",
+          "description": "This is the verified applied platform version, never the candidate's LLM policy revision."
+        },
+        "platformConfigurationSha256": {
+          "type": "string"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "requestGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requestId": {
+          "$ref": "#/$defs/ResourceRequestId"
+        },
+        "target": {
+          "$ref": "#/$defs/ResourceTarget"
+        }
+      },
+      "required": [
+        "requestId",
+        "projectId",
+        "requestGeneration",
+        "target",
+        "configuration",
+        "platformConfigurationRevision",
+        "platformConfigurationSha256",
+        "permissions",
+        "basis"
+      ],
+      "type": "object"
+    },
+    "RuntimeConfigurationIdentity": {
+      "additionalProperties": false,
+      "description": "Control-owned immutable configuration identity. Clients cannot supply a replacement digest.",
+      "properties": {
+        "authoringApprovalId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "authoringProjectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "configurationSha256": {
+          "type": "string"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "releaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "releaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "teacherScope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseTeacherApprovalScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "authoringProjectId",
+        "releaseId",
+        "releaseVersion",
+        "configurationSha256"
+      ],
+      "type": "object"
     },
     "RuntimeKind": {
       "description": "Runtime kind shared by candidates, releases, and instances.",
@@ -640,6 +915,73 @@
         "container",
         "virtual_machine"
       ],
+      "type": "string"
+    },
+    "RuntimePreauthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/LinuxCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "privileged": {
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/$defs/RuntimePreauthorizationScope"
+        }
+      },
+      "required": [
+        "scope",
+        "capabilities",
+        "privileged"
+      ],
+      "type": "object"
+    },
+    "RuntimePreauthorizationScope": {
+      "description": "Object scope for a runtime preauthorization, never a builder authorization.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "projectId": {
+              "$ref": "#/$defs/ProjectId"
+            }
+          },
+          "required": [
+            "kind",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "courseId": {
+              "$ref": "#/$defs/CourseId"
+            },
+            "kind": {
+              "const": "course",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "courseId"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
       "type": "string"
     },
     "UtcTimestamp": {
@@ -830,6 +1172,17 @@
     },
     "revision": {
       "$ref": "#/$defs/Revision"
+    },
+    "runtimeAuthorization": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentRuntimeAuthorizationResolution"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Read-only receipt of the original Resource approval, refreshed before new compute."
     },
     "runtimeKind": {
       "$ref": "#/$defs/RuntimeKind"

@@ -271,7 +271,7 @@ pub fn runtime_projection(instance: &EnvironmentInstance) -> contracts::events::
         "apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"synthetic-runtime",
         "class":"experiment","resources":{"cpuMillicores":1,"memoryBytes":1,"storageBytes":1},
         "network":{"mode":"deny_all"},"entries":[{"name":"web","protocol":"http","servicePort":8080}],
-        "security":{"publicExposurePolicy":"deny","securityProfileBinding":"synthetic-v1"},
+        "security":{"userPolicy":"non_root_required","rootFilesystemPolicy":"read_only_required","privilegeEscalationPolicy":"deny","publicExposurePolicy":"deny","securityProfileBinding":"synthetic-v1"},
         "runtime":{"kind":"container","provider_binding":"container-primary-v1","service_port":8080,
             "build_context":{"artifactId":"00000000-0000-7000-8000-000000000001","storeBinding":"synthetic","objectVersion":"one","sizeBytes":1,"mediaType":"application/octet-stream"}},
         "retention":{"policyId":"00000000-0000-7000-8000-000000000002","policyRevision":1,"class":"run_evidence","retainUntil":"2027-07-15T00:00:00.000Z","disposition":"delete"}
@@ -378,8 +378,6 @@ pub fn runtime_receipt(
         },
         lease_authorization: lease,
         owner_actor_id: instance.owner_id,
-        default_container_uid: 0,
-        privileged_execution_location: None,
     }
 }
 

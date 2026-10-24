@@ -16,13 +16,13 @@ use contracts::{
     authoring::EnvironmentRuntimeSpec,
     environment::{
         EndpointHealth, EnvironmentAccessEligibilityState, EnvironmentAccessEligibilitySummary,
-        EnvironmentCreateSpec, EnvironmentExecutionBinding, EnvironmentExecutionBindingRequest,
+        EnvironmentExecutionBinding, EnvironmentExecutionBindingRequest,
         EnvironmentExecutionPurpose, EnvironmentInstance, EnvironmentLeaseVerificationRequest,
         EnvironmentLifecycleCommand, EnvironmentOperationKind, EnvironmentOwnerRelation,
         EnvironmentOwnerSummary, EnvironmentResetTarget, EnvironmentSummary,
         EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
-        ResolveEnvironmentRuntimeAuthorizationRequest, ResourceWorkCleanup,
-        ResourceWorkCleanupStatus, ResourceWorkHandoff, ResourceWorkLeaseUpdate,
+        ResolveEnvironmentRuntimeAuthorizationRequest, ResourceEnvironmentHandoff,
+        ResourceWorkCleanup, ResourceWorkCleanupStatus, ResourceWorkLeaseUpdate,
     },
     http::{
         ContainerWorkExecutionQuery, ContainerWorkExecutionReceipt, ContainerWorkExecutionRequest,
@@ -38,8 +38,7 @@ use crate::{
     ContainerReleaseResolver, ContainerWorkExecutionService, EnvironmentInventoryFilter,
     EnvironmentStoreError, FreezeBindingError, FreezeBindingService, NatsAccessRevoker,
     NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore,
-    ReleaseProjectionError, WorkExecutionError,
-    work_execution::validate_work_environment,
+    ReleaseProjectionError, WorkExecutionError, work_execution::validate_work_environment,
 };
 
 const ACCESS_PERMISSION: &str = "access.environment.forward";
@@ -186,6 +185,10 @@ fn internal_environment_routes() -> Router<EnvironmentApiState> {
             post(accept_resource_work_handoff),
         )
         .route(
+            "/internal/v1/resource/work-handoffs/{request_id}",
+            get(read_resource_handoff),
+        )
+        .route(
             "/internal/v1/resource/work-lease-updates",
             post(accept_resource_work_lease_update),
         )
@@ -325,8 +328,12 @@ async fn accept_resource_work_lease_update(
         return Err(EnvironmentApiError::LeaseFenceInvalid);
     }
     let instance = state.store.load(update.environment_id).await?;
-    let receipt = state.runtime_admission.as_ref().ok_or(crate::RuntimeAdmissionError::Unavailable)?
-        .for_instance(&instance).await?;
+    let receipt = state
+        .runtime_admission
+        .as_ref()
+        .ok_or(crate::RuntimeAdmissionError::Unavailable)?
+        .for_instance(&instance)
+        .await?;
     if receipt.lease_authorization != authorization {
         return Err(EnvironmentApiError::LeaseFenceInvalid);
     }
@@ -438,17 +445,40 @@ fn require_resource_service(
     require_permission(caller, RESOURCE_PERMISSION)
 }
 
+async fn read_resource_handoff(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(request_id): Path<contracts::ResourceRequestId>,
+) -> Result<Json<contracts::environment::ResourceEnvironmentHandoffReceipt>, EnvironmentApiError> {
+    require_resource_service(caller)?;
+    Ok(Json(
+        state
+            .store
+            .load_resource_handoff_receipt(request_id)
+            .await?,
+    ))
+}
+
 async fn accept_resource_work_handoff(
     State(state): State<EnvironmentApiState>,
     caller: Option<Extension<auth::ServiceIdentity>>,
     body: Bytes,
-) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+) -> Result<
+    (
+        StatusCode,
+        Json<contracts::environment::ResourceEnvironmentHandoffReceipt>,
+    ),
+    EnvironmentApiError,
+> {
     require_permission(caller, RESOURCE_PERMISSION)?;
-    let handoff = contracts::parse_strict_json::<ResourceWorkHandoff>(&body)
+    let handoff = contracts::parse_strict_json::<ResourceEnvironmentHandoff>(&body)
         .map_err(|_| EnvironmentApiError::RequestInvalid)?;
     handoff
         .validate()
         .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    if let Some(receipt) = state.store.lookup_resource_handoff_replay(&handoff).await? {
+        return Ok((StatusCode::ACCEPTED, Json(receipt)));
+    }
     let release = state
         .releases
         .resolve(handoff.release_id, handoff.release_version)
@@ -456,7 +486,7 @@ async fn accept_resource_work_handoff(
     if release.withdrawn_at.is_some() {
         return Err(EnvironmentApiError::ReleaseDenied);
     }
-    let class = handoff
+    handoff
         .class_for_release(&release.projection)
         .map_err(|_| EnvironmentApiError::ReleaseDenied)?;
     let provider_binding = match &release.projection.environment_spec.runtime {
@@ -471,33 +501,28 @@ async fn accept_resource_work_handoff(
         return Err(EnvironmentApiError::ReleaseDenied);
     }
     let now = state.store.current_time().await?;
-    let authorization = state
-        .lease_verifier
-        .verify(
-            EnvironmentLeaseVerificationRequest {
-                version: 1,
-                lease_id: handoff.lease_id,
-                environment_id: handoff.environment_id,
-                project_id: handoff.project_id,
-                course_id: handoff.course_id,
-                owner_actor_id: handoff.owner_actor_id,
-                capacity_binding: handoff.capacity_binding.clone(),
-            },
-            now,
-        )
-        .await?;
-    if authorization.lease_revision != handoff.lease_revision {
-        return Err(EnvironmentApiError::LeaseFenceInvalid);
-    }
-    let runtime_authorization = state.runtime_admission.as_ref()
+    let runtime_authorization = state
+        .runtime_admission
+        .as_ref()
         .ok_or(crate::RuntimeAdmissionError::Unavailable)?
         .resolve(&ResolveEnvironmentRuntimeAuthorizationRequest {
-            expected_lease_id: Some(handoff.lease_id), resource_request_id: handoff.request_id,
-            environment_id: Some(handoff.environment_id), project_id: handoff.project_id,
-            course_id: handoff.course_id, owner_actor_id: handoff.owner_actor_id,
-            release_id: handoff.release_id, release_version: handoff.release_version,
-        }).await?;
-    if runtime_authorization.lease_authorization != authorization {
+            expected_lease_id: Some(handoff.lease_id),
+            resource_request_id: handoff.request_id,
+            environment_id: Some(handoff.environment_id),
+            project_id: handoff.project_id,
+            course_id: handoff.course_id,
+            owner_actor_id: handoff.owner_actor_id,
+            release_id: handoff.release_id,
+            release_version: handoff.release_version,
+        })
+        .await?;
+    let authorization = &runtime_authorization.lease_authorization;
+    if authorization.lease_revision != handoff.lease_revision
+        || authorization.capacity_binding != handoff.claim_id.to_string()
+        || authorization.capacity_binding != handoff.capacity_binding
+        || authorization.approved_resources != handoff.approved_resources
+        || authorization.gpu_allocation != handoff.gpu_allocation
+    {
         return Err(EnvironmentApiError::LeaseFenceInvalid);
     }
     let command = EnvironmentLifecycleCommand {
@@ -513,38 +538,13 @@ async fn accept_resource_work_handoff(
         max_attempts: 3,
         reset_target: None,
     };
-    let create = EnvironmentCreateSpec {
-        project_id: handoff.project_id,
-        course_id: handoff.course_id,
-        owner_actor_id: handoff.owner_actor_id,
-        display_label: handoff.display_label,
-        class,
-        runtime_authorization: Some(runtime_authorization),
-        runtime_kind: release.projection.release.runtime_kind,
-        release_id: handoff.release_id,
-        release_version: handoff.release_version,
-        provider_binding: handoff.provider_binding,
-        lease_id: Some(handoff.lease_id),
-        capacity_binding: Some(handoff.capacity_binding),
-        approved_resources: handoff.approved_resources.clone(),
-        gpu_allocation: None,
-        retention: release.projection.environment_spec.retention.clone(),
-        eligibility_expires_at: release.projection.environment_spec.retention.retain_until,
-    };
-    let idempotency_key = format!(
-        "resource-work-{}-{}",
-        handoff.request_id,
-        handoff.request_revision.get()
-    );
     let accepted = state
         .store
-        .accept_api_command(
-            &idempotency_key,
+        .accept_resource_handoff(
+            handoff,
             &command,
-            Some(&create),
-            Some(authorization),
-            handoff.project_id,
-            handoff.course_id,
+            &release.projection,
+            runtime_authorization,
         )
         .await?;
     Ok((StatusCode::ACCEPTED, Json(accepted)))
@@ -808,12 +808,21 @@ async fn create_environment(
     if release.withdrawn_at.is_some() || release.projection.release.course_id != request.course_id {
         return Err(EnvironmentApiError::ReleaseDenied);
     }
-    let resolution = state.runtime_admission.as_ref().ok_or(crate::RuntimeAdmissionError::Unavailable)?
+    let resolution = state
+        .runtime_admission
+        .as_ref()
+        .ok_or(crate::RuntimeAdmissionError::Unavailable)?
         .resolve(&ResolveEnvironmentRuntimeAuthorizationRequest {
-            expected_lease_id: None, resource_request_id: request.resource_request_id,
-            environment_id: None, project_id: request.project_id, course_id: request.course_id,
-            owner_actor_id: actor_id, release_id: request.release_id, release_version: request.release_version,
-        }).await?;
+            expected_lease_id: None,
+            resource_request_id: request.resource_request_id,
+            environment_id: None,
+            project_id: request.project_id,
+            course_id: request.course_id,
+            owner_actor_id: actor_id,
+            release_id: request.release_id,
+            release_version: request.release_version,
+        })
+        .await?;
     let environment_id = resolution.lease_authorization.environment_id;
     // Resource owns allocation and delivers the single original handoff. Public create only
     // attaches its idempotent intent to that aggregate; it cannot reserve or create another one.
@@ -1141,26 +1150,31 @@ async fn accept_lifecycle(
         Some(state.access_revoker.revoke(&instance, reason).await?)
     } else if matches!(
         kind,
-        EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover
+        EnvironmentOperationKind::Start
+            | EnvironmentOperationKind::Retry
+            | EnvironmentOperationKind::Recover
     ) {
         instance.operation.access_revocation_revision
     } else {
         None
     };
     let accepted_at = state.store.current_time().await?;
-    let lease_authorization = if instance.class == EnvironmentClass::Work
-        && matches!(
-            kind,
-            EnvironmentOperationKind::Start
-                | EnvironmentOperationKind::Restart
-                | EnvironmentOperationKind::Retry
-                | EnvironmentOperationKind::Recover
-                | EnvironmentOperationKind::Reset
-        ) {
-        Some(verify_work_lease(state, &instance, accepted_at).await?)
+    let runtime = if instance.requires_compute_authorization(kind) {
+        Some(
+            state
+                .runtime_admission
+                .as_ref()
+                .ok_or(crate::RuntimeAdmissionError::Unavailable)?
+                .for_instance(&instance)
+                .await?,
+        )
     } else {
         None
     };
+    let deadline_at = add_duration(accepted_at, OPERATION_DEADLINE)?;
+    let deadline_at = runtime
+        .as_ref()
+        .map_or(deadline_at, |receipt| deadline_at.min(receipt.valid_until));
     let command = EnvironmentLifecycleCommand {
         environment_id,
         kind,
@@ -1168,7 +1182,7 @@ async fn accept_lifecycle(
         actor_id: instance.owner_id,
         trace_id: trace_id.to_owned(),
         accepted_at,
-        deadline_at: add_duration(accepted_at, OPERATION_DEADLINE)?,
+        deadline_at,
         access_revocation_revision,
         preserve_mutable_disk,
         max_attempts: 3,
@@ -1180,7 +1194,7 @@ async fn accept_lifecycle(
             key.as_str(),
             &command,
             None,
-            lease_authorization,
+            runtime.map(|receipt| receipt.lease_authorization),
             instance.project_id,
             instance.course_id,
         )
@@ -1498,7 +1512,8 @@ impl IntoResponse for EnvironmentApiError {
             | Self::WorkExecution(
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
             ) => StatusCode::PRECONDITION_FAILED,
-            Self::ReleaseDenied
+            Self::RuntimeAdmission(crate::RuntimeAdmissionError::AllocationPathUnsupported)
+            | Self::ReleaseDenied
             | Self::Store(EnvironmentStoreError::InvalidCreateAggregate)
             | Self::WorkExecution(WorkExecutionError::EnvironmentNotEligible)
             | Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {
@@ -1506,6 +1521,7 @@ impl IntoResponse for EnvironmentApiError {
             }
             Self::Store(
                 EnvironmentStoreError::EnvironmentNotFound
+                | EnvironmentStoreError::ResourceHandoffNotFound
                 | EnvironmentStoreError::OperationNotFound,
             )
             | Self::Release(ReleaseProjectionError::NotFound)

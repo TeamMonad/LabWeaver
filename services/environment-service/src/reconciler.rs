@@ -444,23 +444,41 @@ impl Reconciler {
         now: UtcTimestamp,
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
-        let mut authorized = instance.clone();
-        if matches!(action, ReconcileAction::Provision | ReconcileAction::Start | ReconcileAction::Restart | ReconcileAction::Reset | ReconcileAction::Configure) {
-            let receipt = self.runtime_admission.as_ref().ok_or(crate::RuntimeAdmissionError::Unavailable)?
-                .for_instance(instance).await?;
+        let authorized = if matches!(
+            action,
+            ReconcileAction::Provision
+                | ReconcileAction::Start
+                | ReconcileAction::Restart
+                | ReconcileAction::Reset
+                | ReconcileAction::Configure
+        ) {
+            let receipt = self
+                .runtime_admission
+                .as_ref()
+                .ok_or(crate::RuntimeAdmissionError::Unavailable)?
+                .for_instance(instance)
+                .await?;
             if receipt.provider_binding != instance.provider_binding || receipt.valid_until <= now {
                 return Err(crate::RuntimeAdmissionError::Binding.into());
             }
-            authorized.operation.deadline_at = authorized.operation.deadline_at.min(receipt.valid_until);
+            let mut authorized = instance.clone();
+            authorized.operation.deadline_at =
+                authorized.operation.deadline_at.min(receipt.valid_until);
             authorized.runtime_authorization = Some(receipt);
-        }
+            Some(authorized)
+        } else {
+            None
+        };
         if requires_experiment_activation(instance, action) {
             self.activate_experiment_reservation(instance).await?;
         }
         let provider = self.registry.resolve(&instance.provider_binding)?;
-        let result = timeout(self.provider_timeout, provider.execute(action, &authorized))
-            .await
-            .map_err(|_| ReconcileError::ProviderTimeout)?;
+        let result = timeout(
+            self.provider_timeout,
+            provider.execute(action, authorized.as_ref().unwrap_or(instance)),
+        )
+        .await
+        .map_err(|_| ReconcileError::ProviderTimeout)?;
         let outcome = result.map_err(ReconcileError::Provider)?;
         if instance.class == EnvironmentClass::Experiment
             && !instance.has_resource_lease()

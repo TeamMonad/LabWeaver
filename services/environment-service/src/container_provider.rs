@@ -763,11 +763,14 @@ impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
             crate::runtime_admission::executor_authorization(
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),
-                envelope.fence.environment_id,
-                Some(container_executor_plan(&envelope.request).project_id),
-                envelope.fence.operation_id,
-                envelope.fence.operation_generation,
-                envelope.fence.deadline_at,
+                crate::runtime_admission::RuntimeAdmissionFence {
+                    environment_id: envelope.fence.environment_id,
+                    project_id: Some(container_executor_plan(&envelope.request).project_id),
+                    runtime_kind: RuntimeKind::Container,
+                    operation_id: envelope.fence.operation_id,
+                    generation: envelope.fence.operation_generation,
+                    deadline_at: envelope.fence.deadline_at,
+                },
             )
             .await
         } else {
@@ -1436,6 +1439,7 @@ where
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
         self.validate_release_use(resolved, action)?;
         if instance.runtime_kind != RuntimeKind::Container
+            || instance.class != projection.environment_spec.class
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
             || !crate::runtime_admission::release_project_matches(instance, projection)

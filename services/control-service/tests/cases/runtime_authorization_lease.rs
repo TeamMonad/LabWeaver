@@ -29,6 +29,48 @@ pub(super) async fn assert_original_lease_chain(
         .ok_or("no capacity claim")?;
     assert_eq!(provisioning.claim.id, allocation.claim.id);
     let active_from = store.current_time().await?;
+    let denied = store
+        .activate_lease(
+            allocation.lease_id,
+            Revision::new(1)?,
+            active_from,
+            UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?,
+            approval.approver_id,
+            "runtime-chain-no-funds",
+        )
+        .await;
+    assert!(matches!(
+        denied,
+        Err(resource_service::store::ResourceStoreError::Credits(
+            resource_service::credits::CreditError::Insufficient
+        ))
+    ));
+    assert_eq!(
+        store.load_lease(allocation.lease_id).await?.state,
+        contracts::resource::ResourceLeaseState::Allocating
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.credit_holds WHERE request_id=$1"
+        )
+        .bind(approval.request_id.as_uuid())
+        .fetch_one(pool)
+        .await?,
+        0
+    );
+    let project = store.load(approval.request_id).await?.project_id;
+    resource_service::credits::PgCreditStore::new(pool.clone())
+        .admin(
+            "runtime-funds",
+            contracts::ActorId::new(),
+            &[contracts::PlatformRole::PlatformAdmin],
+            &contracts::resource::credits::CreditAdminOperation::Grant {
+                project_id: project,
+                amount: contracts::resource::FixedDecimal::parse("1000.000000")?,
+                reason: "synthetic funded lifecycle allowance".into(),
+            },
+        )
+        .await?;
     let lease = store
         .activate_lease(
             allocation.lease_id,
@@ -145,6 +187,16 @@ pub(super) async fn assert_original_lease_chain(
             .binding,
         *binding
     );
-    Box::pin(super::funded_handoff::exercise(pool, store, &result)).await?;
+    // Poll the full multi-service journey as its own task rather than retaining every parent
+    // scenario's unoptimized poll frame on the default test-thread stack.
+    let journey_pool = pool.clone();
+    let journey_store = store.clone();
+    tokio::spawn(async move {
+        super::funded_handoff::exercise(&journey_pool, &journey_store, &result)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await?
+    .map_err(std::io::Error::other)?;
     Ok(active)
 }

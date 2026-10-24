@@ -426,8 +426,6 @@ pub struct EnvironmentRuntimeAuthorizationResolution {
     pub lease_authorization: EnvironmentLeaseAuthorization,
     pub authorization: crate::runtime_authorization::RuntimeAuthorizationBinding,
     pub owner_actor_id: ActorId,
-    pub default_container_uid: u32,
-    pub privileged_execution_location: Option<crate::platform_configuration::PrivilegedExecutionLocation>,
 }
 
 impl EnvironmentRuntimeAuthorizationResolution {
@@ -437,15 +435,25 @@ impl EnvironmentRuntimeAuthorizationResolution {
         spec: &crate::authoring::EnvironmentSpec,
         expected_configuration_sha256: &str,
     ) -> Result<EnvironmentId, EnvironmentError> {
-        let crate::resource::ResourceTarget::Environment { environment_id, release_id, release_version } = self.authorization.target else {
+        let crate::resource::ResourceTarget::Environment {
+            environment_id,
+            release_id,
+            release_version,
+        } = self.authorization.target
+        else {
             return Err(EnvironmentError::InvalidResourceHandoff);
         };
         self.lease_authorization.validate()?;
-        let declared = crate::runtime_authorization::declared_baseline_permissions(spec, request.project_id)
-            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        let declared =
+            crate::runtime_authorization::declared_baseline_permissions(spec, request.project_id)
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
         let scope_matches = match self.authorization.permissions.scope {
-            crate::platform_configuration::RuntimePreauthorizationScope::Project { project_id } => project_id == request.project_id,
-            crate::platform_configuration::RuntimePreauthorizationScope::Course { course_id } => Some(course_id) == request.course_id && spec.class == EnvironmentClass::Experiment,
+            crate::platform_configuration::RuntimePreauthorizationScope::Project { project_id } => {
+                project_id == request.project_id
+            }
+            crate::platform_configuration::RuntimePreauthorizationScope::Course { course_id } => {
+                Some(course_id) == request.course_id && spec.class == EnvironmentClass::Experiment
+            }
         };
         if !scope_matches
             || self.authorization.configuration.course_id != request.course_id
@@ -454,13 +462,18 @@ impl EnvironmentRuntimeAuthorizationResolution {
             || self.lease_authorization.project_id != request.project_id
             || self.lease_authorization.course_id != request.course_id
             || self.lease_authorization.owner_actor_id != request.owner_actor_id
-            || request.expected_lease_id.is_some_and(|id| id != self.lease_authorization.lease_id)
+            || request
+                .expected_lease_id
+                .is_some_and(|id| id != self.lease_authorization.lease_id)
             || self.authorization.request_id != request.resource_request_id
             || self.authorization.project_id != request.project_id
             || self.authorization.course_id != request.course_id
             || self.owner_actor_id != request.owner_actor_id
-            || self.authorization.configuration.configuration_sha256 != expected_configuration_sha256
-            || request.environment_id.is_some_and(|expected| expected != environment_id)
+            || self.authorization.configuration.configuration_sha256
+                != expected_configuration_sha256
+            || request
+                .environment_id
+                .is_some_and(|expected| expected != environment_id)
             || release_id != request.release_id
             || release_version != request.release_version
             || self.authorization.permissions.capabilities != declared.capabilities
@@ -501,8 +514,16 @@ pub struct ResourceEnvironmentHandoff {
     pub trace_id: String,
 }
 
-/// Existing Work consumers use the same concrete handoff while #207 updates its dispatch.
-pub type ResourceWorkHandoff = ResourceEnvironmentHandoff;
+/// Durable acknowledgement of the original Environment creation, not a new execution grant.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceEnvironmentHandoffReceipt {
+    pub accepted: crate::http::EnvironmentOperationAccepted,
+    pub request_id: ResourceRequestId,
+    pub lease_id: LeaseId,
+    pub lease_revision: Revision,
+    pub claim_id: CapacityClaimId,
+}
 
 impl ResourceEnvironmentHandoff {
     /// Returns the server-owned purpose of the exact immutable release, never a caller-selected class.
@@ -1322,6 +1343,23 @@ impl EnvironmentInstance {
         self.lease_id.is_some()
     }
 
+    /// Cleanup recovery preserves the original fence without requiring funds for new compute.
+    #[must_use]
+    pub const fn requires_compute_authorization(&self, kind: EnvironmentOperationKind) -> bool {
+        matches!(
+            kind,
+            EnvironmentOperationKind::Start
+                | EnvironmentOperationKind::Restart
+                | EnvironmentOperationKind::Reset
+                | EnvironmentOperationKind::Retry
+                | EnvironmentOperationKind::Recover
+        ) && !(matches!(self.desired_state, DesiredEnvironmentState::Deleted)
+            && matches!(
+                kind,
+                EnvironmentOperationKind::Retry | EnvironmentOperationKind::Recover
+            ))
+    }
+
     /// Validates aggregate invariants without consulting provider state.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.display_label.trim().is_empty()
@@ -2069,7 +2107,7 @@ mod tests {
         EnvironmentConsoleEligibilityRequest, EnvironmentInstance, EnvironmentOperationKind,
         EnvironmentOwnerResolution, EnvironmentOwnerResolverClientConfig,
         EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
-        ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkHandoff,
+        ObservedEnvironmentState, ResourceEnvironmentHandoff, ResourceWorkCleanup,
         ResourceWorkLeaseUpdate,
     };
     use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
@@ -2192,6 +2230,23 @@ mod tests {
             },
         };
         assert!(eligibility.validate_for(&request, now).is_ok());
+        eligibility.lease_fence = Some(crate::access::ConsoleLeaseFence {
+            lease_id: LeaseId::new(),
+            lease_revision: Revision::new(2).expect("lease revision"),
+            expires_at: expires,
+        });
+        assert!(
+            eligibility.validate_for(&request, now).is_ok(),
+            "funded Experiment keeps its original lease fence"
+        );
+        eligibility.lease_fence.as_mut().expect("lease").expires_at = now;
+        assert!(eligibility.validate_for(&request, now).is_err());
+        eligibility.environment_class = EnvironmentClass::Work;
+        eligibility.lease_fence = None;
+        assert!(
+            eligibility.validate_for(&request, now).is_err(),
+            "Work cannot silently drop its lease"
+        );
     }
     const OPERATIONS: [EnvironmentOperationKind; 12] = [
         EnvironmentOperationKind::Create,
@@ -2357,7 +2412,7 @@ mod tests {
 
     #[test]
     fn resource_work_handoff_requires_all_fences_and_a_safe_display_label() {
-        let mut handoff = ResourceWorkHandoff {
+        let mut handoff = ResourceEnvironmentHandoff {
             version: 1,
             request_id: ResourceRequestId::new(),
             request_revision: Revision::new(2).expect("revision"),

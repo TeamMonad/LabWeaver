@@ -21,23 +21,20 @@ use axum::{
     http::{HeaderValue, Method, Request, StatusCode, header},
 };
 use contracts::environment::{
-    EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentInstance, EnvironmentOperationKind,
+    EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentInstance,
+    EnvironmentOperationKind,
 };
-use contracts::events::ReleasePublished;
 use contracts::http::{SnapshotPage, StrongEtag};
 use contracts::{
-    ActorId, AgentRunId, ApprovalId, BuildRequestId, CandidateId, EndpointId, EnvironmentId,
-    ImageArtifactId, OperationId, PolicyId, ProjectId, ReleaseId, Revision, UtcTimestamp,
+    ActorId, AgentRunId, EndpointId, EnvironmentId, OperationId, ProjectId, Revision, UtcTimestamp,
 };
 use environment_service::{
-    EnvironmentApiState, FreezeBindingConfiguration,
-    FreezeBindingService, NatsAccessRevoker, NatsResourceLeaseVerifier, PgEnvironmentStore,
-    PgReleaseProjectionStore, ProviderObservation,
+    EnvironmentApiState, FreezeBindingConfiguration, FreezeBindingService, NatsAccessRevoker,
+    NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore, ProviderObservation,
     WorkAdmissionClientError, WorkAdmissionResolver, apply_provider_failure,
     apply_provider_observation, environment_api_router,
 };
 use futures_util::StreamExt;
-use persistence_sqlx::Sha256Digest;
 use serde_json::{Value, json};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
@@ -65,7 +62,6 @@ impl WorkAdmissionResolver for UnusedAdmission {
         Err(WorkAdmissionClientError::Configuration)
     }
 }
-
 
 #[tokio::test]
 async fn public_operation_and_lifecycle_routes_preserve_scope_cursor_and_status_contracts()
@@ -566,91 +562,6 @@ async fn failed_instance(
         }
     }
     Ok(store.load(instance.id).await?)
-}
-
-fn gpu_release_projection(
-    project_id: ProjectId,
-    course_id: Option<contracts::CourseId>,
-) -> Result<ReleasePublished, Box<dyn Error>> {
-    let candidate_id = CandidateId::new();
-    let candidate_revision = revision(1);
-    let release_id = ReleaseId::new();
-    let published_at = timestamp("2026-07-14T00:00:00.000Z");
-    let digest = format!("sha256:{}", "0".repeat(64));
-    let projection: ReleasePublished = serde_json::from_value(json!({
-        "release": {
-            "id": release_id,
-            "projectId": project_id,
-            "courseId": course_id,
-            "version": 1,
-            "candidateId": candidate_id,
-            "agentRunId": AgentRunId::new(),
-            "candidateRevision": candidate_revision,
-            "runtimeKind": "container",
-            "approval": {
-                "id": ApprovalId::new(),
-                "candidateId": candidate_id,
-                "candidateRevision": candidate_revision,
-                "policyRevision": 1,
-                "trustRevision": 1,
-                "actorId": ActorId::new(),
-                "decision": "approved",
-                "reason": "reviewed",
-                "decidedAt": published_at
-            },
-            "artifact": {
-                "kind": "container",
-                "id": ImageArtifactId::new(),
-                "build_request_id": BuildRequestId::new(),
-                "repository": "harbor.internal/labweaver-test",
-                "digest": digest
-            },
-            "publishedBy": ActorId::new(),
-            "publishedAt": published_at
-        },
-        "environmentSpec": {
-            "apiVersion": "environment.labweaver.io/v1",
-            "kind": "EnvironmentSpec",
-            "name": "gpu-replay",
-            "class": "experiment",
-            "resources": {
-                "cpuMillicores": 1000,
-                "memoryBytes": 1_073_741_824_u64,
-                "storageBytes": 1_073_741_824_u64,
-                "gpu": {"class": "a100", "count": 1}
-            },
-            "network": {"mode": "deny_all"},
-            "entries": [{"name": "web", "protocol": "http", "servicePort": 8080}],
-            "security": {
-                "userPolicy": "non_root_required",
-                "rootFilesystemPolicy": "read_only_required",
-                "privilegeEscalationPolicy": "deny",
-                "publicExposurePolicy": "deny",
-                "securityProfileBinding": "restricted-v1"
-            },
-            "runtime": {
-                "kind": "container",
-                "provider_binding": "container-primary-v1",
-                "build_context": {
-                    "artifactId": contracts::ArtifactId::new(),
-                    "storeBinding": "artifact-store-v1",
-                    "objectVersion": "version-1",
-                    "sizeBytes": 128,
-                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"
-                },
-                "service_port": 8080
-            },
-            "retention": {
-                "policyId": PolicyId::new(),
-                "policyRevision": 1,
-                "class": "run_evidence",
-                "retainUntil": "2099-01-01T00:00:00.000Z",
-                "disposition": "delete"
-            }
-        }
-    }))?;
-    projection.validate()?;
-    Ok(projection)
 }
 
 async fn converge_to_ready(

@@ -90,6 +90,7 @@ impl ResourceCapacityConfiguration {
             }
         }
         Ok(CapacityReconcileWorker {
+            active_cleanup_cursor: tokio::sync::Mutex::new(None),
             store,
             environment_handoff: EnvironmentHandoffClient::new(
                 self.environment_handoff,
@@ -760,7 +761,8 @@ impl EnvironmentHandoffClient {
     async fn handoff(
         &self,
         item: &crate::store::ProvisioningCapacityClaim,
-    ) -> Result<(), CapacityProviderError> {
+    ) -> Result<contracts::environment::ResourceEnvironmentHandoffReceipt, CapacityProviderError>
+    {
         if item.lease.state != ResourceLeaseState::Active
             || !matches!(
                 item.claim.state,
@@ -811,14 +813,89 @@ impl EnvironmentHandoffClient {
             .await?;
         let status = response.status();
         if status == StatusCode::ACCEPTED {
-            Ok(())
-        } else if (status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT)
-            && status != StatusCode::TOO_MANY_REQUESTS
-        {
-            Err(CapacityProviderError::HandoffInvalid)
+            let receipt = response
+                .json::<contracts::environment::ResourceEnvironmentHandoffReceipt>()
+                .await
+                .map_err(|_| CapacityProviderError::Readback)?;
+            if !Self::handoff_receipt_matches(item, &receipt) {
+                return Err(CapacityProviderError::Readback);
+            }
+            Ok(receipt)
         } else {
-            Err(CapacityProviderError::HandoffRejected)
+            let detail = response
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|_| CapacityProviderError::HandoffRejected)?;
+            let diagnostic = detail
+                .get("diagnosticCode")
+                .and_then(serde_json::Value::as_str);
+            if matches!(
+                diagnostic,
+                Some(
+                    "LW_ENVIRONMENT_RELEASE_DENIED"
+                        | "LW_RUNTIME_SCOPE_DENIED"
+                        | "LW_RUNTIME_TEACHER_APPROVAL_REQUIRED"
+                        | "LW_RUNTIME_CONFIGURATION_BINDING_MISMATCH"
+                        | "LW_ENVIRONMENT_RESOURCE_LEASE_FENCE_INVALID"
+                )
+            ) {
+                Err(CapacityProviderError::HandoffInvalid)
+            } else {
+                Err(CapacityProviderError::HandoffRejected)
+            }
         }
+    }
+
+    fn handoff_receipt_matches(
+        item: &crate::store::ProvisioningCapacityClaim,
+        receipt: &contracts::environment::ResourceEnvironmentHandoffReceipt,
+    ) -> bool {
+        item.request.target.environment_id() == Some(receipt.accepted.environment_id)
+            && receipt.request_id == item.request.id
+            && receipt.lease_id == item.lease.id
+            && receipt.claim_id == item.claim.id
+            && receipt.lease_revision <= item.lease.revision
+    }
+
+    async fn read_handoff_receipt(
+        &self,
+        item: &crate::store::ProvisioningCapacityClaim,
+    ) -> Result<contracts::environment::ResourceEnvironmentHandoffReceipt, CapacityProviderError>
+    {
+        if item.lease.state != ResourceLeaseState::Expiring {
+            return Err(CapacityProviderError::HandoffFence);
+        }
+        let response = self
+            .send(self.client.get(self.endpoint(&format!(
+                "internal/v1/resource/work-handoffs/{}",
+                item.request.id
+            ))?))
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            let value = response
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|_| CapacityProviderError::Readback)?;
+            if value
+                .get("diagnosticCode")
+                .and_then(serde_json::Value::as_str)
+                == Some("LW_ENVIRONMENT_HANDOFF_NOT_ACCEPTED")
+            {
+                return Err(CapacityProviderError::HandoffNotAccepted);
+            }
+            return Err(CapacityProviderError::Readback);
+        }
+        if !response.status().is_success() {
+            return Err(CapacityProviderError::HandoffRejected);
+        }
+        let receipt = response
+            .json::<contracts::environment::ResourceEnvironmentHandoffReceipt>()
+            .await
+            .map_err(|_| CapacityProviderError::Readback)?;
+        if !Self::handoff_receipt_matches(item, &receipt) {
+            return Err(CapacityProviderError::Readback);
+        }
+        Ok(receipt)
     }
 
     async fn sync_lease(
@@ -942,6 +1019,7 @@ pub struct CapacityReconcileWorker {
     environment_handoff: EnvironmentHandoffClient,
     gpu_observers: BTreeMap<String, KubernetesGpuCapacityObserver>,
     poll_interval: Duration,
+    active_cleanup_cursor: tokio::sync::Mutex<Option<contracts::LeaseId>>,
 }
 
 impl CapacityReconcileWorker {
@@ -965,7 +1043,60 @@ impl CapacityReconcileWorker {
         if self.reconcile_lease_cleanup().await? {
             did_work = true;
         }
+        if self.reconcile_active_environment_cleanup().await? {
+            did_work = true;
+        }
         Ok(did_work)
+    }
+
+    async fn reconcile_active_environment_cleanup(
+        &self,
+    ) -> Result<bool, crate::store::ResourceStoreError> {
+        let after = *self.active_cleanup_cursor.lock().await;
+        let mut item = self.store.next_active_environment_cleanup(after).await?;
+        if item.is_none() && after.is_some() {
+            item = self.store.next_active_environment_cleanup(None).await?;
+        }
+        let Some(item) = item else {
+            *self.active_cleanup_cursor.lock().await = None;
+            return Ok(false);
+        };
+        *self.active_cleanup_cursor.lock().await = Some(item.lease.id);
+        let status = match self.environment_handoff.cleanup_status(&item).await {
+            Ok(status) => status,
+            Err(error) => {
+                self.store
+                    .record_reconciliation_failure(
+                        item.claim.id,
+                        "expire_environment",
+                        error.diagnostic(),
+                    )
+                    .await?;
+                return Ok(false);
+            }
+        };
+        if !status.cleanup_complete || status.observed_state != ObservedEnvironmentState::Deleted {
+            return Ok(false);
+        }
+        let releasing = self
+            .store
+            .begin_deleted_environment_release(
+                &item,
+                &status,
+                self.environment_handoff.system_actor_id,
+            )
+            .await?;
+        self.store
+            .complete_capacity_release(
+                releasing.claim.id,
+                releasing.claim.revision,
+                releasing.lease.id,
+                releasing.lease.revision,
+                self.environment_handoff.system_actor_id,
+                &format!("resource-deleted-capacity-release-{}", releasing.claim.id),
+            )
+            .await?;
+        Ok(true)
     }
 
     async fn reconcile_gpu_observations(&self) -> Result<bool, crate::store::ResourceStoreError> {
@@ -1061,46 +1192,49 @@ impl CapacityReconcileWorker {
             };
             item = refreshed;
         }
-        if let Err(error) = self.environment_handoff.handoff(&item).await {
-            tracing::error!(
-                event = "resource.capacity.handoff_failed",
-                claim_id = %item.claim.id,
-                diagnostic_code = %error.diagnostic()
-            );
-            if matches!(&error, CapacityProviderError::HandoffInvalid) {
+        match self.environment_handoff.handoff(&item).await {
+            Err(error) => {
+                tracing::error!(
+                    event = "resource.capacity.handoff_failed",
+                    claim_id = %item.claim.id,
+                    diagnostic_code = %error.diagnostic()
+                );
+                if matches!(&error, CapacityProviderError::HandoffInvalid) {
+                    self.store
+                        .fail_pre_handoff_capacity_handoff(
+                            crate::store::FailPreHandoffCapacityHandoff {
+                                claim_id: item.claim.id,
+                                expected_claim_revision: item.claim.revision,
+                                lease_id: item.lease.id,
+                                expected_lease_revision: item.lease.revision,
+                                diagnostic_code: error.diagnostic().to_owned(),
+                                actor: self.environment_handoff.system_actor_id,
+                                trace_id: format!("resource-handoff-rejected-{}", item.claim.id),
+                            },
+                        )
+                        .await?;
+                } else {
+                    self.store
+                        .retry_or_block_capacity_handoff(
+                            item.claim.id,
+                            item.claim.revision,
+                            error.diagnostic(),
+                            self.environment_handoff.system_actor_id,
+                            &format!("resource-handoff-failed-{}", item.claim.id),
+                        )
+                        .await?;
+                }
+            }
+            Ok(receipt) => {
                 self.store
-                    .fail_pre_handoff_capacity_handoff(
-                        crate::store::FailPreHandoffCapacityHandoff {
-                            claim_id: item.claim.id,
-                            expected_claim_revision: item.claim.revision,
-                            lease_id: item.lease.id,
-                            expected_lease_revision: item.lease.revision,
-                            diagnostic_code: error.diagnostic().to_owned(),
-                            actor: self.environment_handoff.system_actor_id,
-                            trace_id: format!("resource-handoff-rejected-{}", item.claim.id),
-                        },
-                    )
-                    .await?;
-            } else {
-                self.store
-                    .retry_or_block_capacity_handoff(
+                    .mark_capacity_handed_off(
                         item.claim.id,
                         item.claim.revision,
-                        error.diagnostic(),
-                        self.environment_handoff.system_actor_id,
-                        &format!("resource-handoff-failed-{}", item.claim.id),
+                        item.lease.id,
+                        receipt.lease_revision,
                     )
                     .await?;
             }
-        } else {
-            self.store
-                .mark_capacity_handed_off(
-                    item.claim.id,
-                    item.claim.revision,
-                    item.lease.id,
-                    item.lease.revision,
-                )
-                .await?;
         }
         Ok(())
     }
@@ -1110,13 +1244,13 @@ impl CapacityReconcileWorker {
             return Ok(false);
         };
         match self.environment_handoff.handoff(&item).await {
-            Ok(()) => {
+            Ok(receipt) => {
                 self.store
                     .mark_capacity_handed_off(
                         item.claim.id,
                         item.claim.revision,
                         item.lease.id,
-                        item.lease.revision,
+                        receipt.lease_revision,
                     )
                     .await?;
             }
@@ -1206,26 +1340,44 @@ impl CapacityReconcileWorker {
                         .await?;
                 }
             }
-            contracts::resource::CapacityClaimState::Reserved
-            | contracts::resource::CapacityClaimState::Provisioning
+            contracts::resource::CapacityClaimState::Reserved => {
+                self.release_unaccepted_capacity(&item).await?;
+            }
+            contracts::resource::CapacityClaimState::Provisioning
             | contracts::resource::CapacityClaimState::Blocked
             | contracts::resource::CapacityClaimState::Ready => {
-                // The target never accepted a handoff. There is no Environment object to clean;
-                // release the pre-handoff Resource reservation through the separate fence.
-                let releasing = self
-                    .store
-                    .mark_capacity_releasing(item.claim.id, item.claim.revision)
-                    .await?;
-                self.store
-                    .complete_pre_handoff_release(
-                        releasing.id,
-                        releasing.revision,
-                        item.lease.id,
-                        item.lease.revision,
-                        self.environment_handoff.system_actor_id,
-                        &format!("resource-pre-handoff-release-{}", item.claim.id),
-                    )
-                    .await?;
+                let receipt = match self.environment_handoff.read_handoff_receipt(&item).await {
+                    Ok(receipt) => receipt,
+                    Err(CapacityProviderError::HandoffNotAccepted) => {
+                        self.release_unaccepted_capacity(&item).await?;
+                        return Ok(true);
+                    }
+                    Err(error) => {
+                        self.store
+                            .record_reconciliation_failure(
+                                item.claim.id,
+                                "expire_environment",
+                                error.diagnostic(),
+                            )
+                            .await?;
+                        return Ok(true);
+                    }
+                };
+                let mut observed = item;
+                observed.lease_synced_revision = Some(receipt.lease_revision);
+                if let Err(error) = self.environment_handoff.request_cleanup(&observed).await {
+                    self.store
+                        .record_reconciliation_failure(
+                            observed.claim.id,
+                            "expire_environment",
+                            error.diagnostic(),
+                        )
+                        .await?;
+                } else {
+                    self.store
+                        .mark_capacity_releasing_with_ack(&observed, receipt.lease_revision)
+                        .await?;
+                }
             }
             contracts::resource::CapacityClaimState::Releasing => {
                 self.reconcile_releasing_capacity(&item).await?;
@@ -1233,6 +1385,27 @@ impl CapacityReconcileWorker {
             contracts::resource::CapacityClaimState::Released => {}
         }
         Ok(true)
+    }
+
+    async fn release_unaccepted_capacity(
+        &self,
+        item: &crate::store::ProvisioningCapacityClaim,
+    ) -> Result<(), crate::store::ResourceStoreError> {
+        let releasing = self
+            .store
+            .mark_capacity_releasing(item.claim.id, item.claim.revision)
+            .await?;
+        self.store
+            .complete_pre_handoff_release(
+                releasing.id,
+                releasing.revision,
+                item.lease.id,
+                item.lease.revision,
+                self.environment_handoff.system_actor_id,
+                &format!("resource-pre-handoff-release-{}", item.claim.id),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn reconcile_releasing_capacity(
@@ -1382,6 +1555,8 @@ pub enum CapacityProviderError {
     HandoffRejected,
     #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")]
     HandoffInvalid,
+    #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_NOT_ACCEPTED")]
+    HandoffNotAccepted,
     #[error("LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED")]
     LeaseSyncRejected,
     #[error("LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED")]
@@ -1415,6 +1590,7 @@ impl CapacityProviderError {
             Self::HandoffRejected | Self::HandoffInvalid => {
                 "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED"
             }
+            Self::HandoffNotAccepted => "LW_RESOURCE_ENVIRONMENT_HANDOFF_NOT_ACCEPTED",
             Self::LeaseSyncRejected => "LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED",
             Self::CleanupRejected => "LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED",
             Self::TaskOwnerRequired => "LW_RESOURCE_TASK_OWNER_REQUIRED",
