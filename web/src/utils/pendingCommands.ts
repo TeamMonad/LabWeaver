@@ -63,6 +63,27 @@ export function clearPendingCommand(actorId: string, scope: string, idempotencyK
   }
 }
 
+/**
+ * Remove every pending command of `actorId` whose scope starts with
+ * `scopePrefix`. Only for a command kind the page can no longer send: no newer
+ * command of that kind can exist, so nothing has to be compared first.
+ */
+export function clearPendingCommandsWithScopePrefix(actorId: string, scopePrefix: string) {
+  const storage = store()
+  if (!storage) return
+  try {
+    const prefix = entryKey(actorId, scopePrefix)
+    const stale: string[] = []
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (key?.startsWith(prefix)) stale.push(key)
+    }
+    for (const key of stale) storage.removeItem(key)
+  } catch {
+    // Storage disabled: nothing was stored either.
+  }
+}
+
 /** Remove every pending command that does not belong to `actorId` (all of them on sign-out). */
 export function syncPendingCommandOwner(actorId: string | null) {
   const storage = store()

@@ -23,7 +23,12 @@ import { idempotencyKey, ifMatch } from '@/utils/format'
 
 export type LifecycleAction = 'start' | 'stop' | 'restart' | 'delete'
 
-type CreateEnvironmentInput = Pick<CreateEnvironmentRequestSchema, 'releaseId' | 'releaseVersion'> &
+/**
+ * Public create only attaches to the environment that Resource's approved
+ * request already handed off, so it always names that real request. The
+ * request's own course scope is sent as-is.
+ */
+type CreateEnvironmentInput = Pick<CreateEnvironmentRequestSchema, 'resourceRequestId' | 'releaseId' | 'releaseVersion'> &
   Partial<Pick<CreateEnvironmentRequestSchema, 'courseId' | 'displayLabel'>>
 
 export type LifecycleMutationResult =
@@ -60,9 +65,9 @@ export function useEnvironmentLifecycle(
       result = await createEnvironment({
         headers: { 'Idempotency-Key': intentKey ?? idempotencyKey() },
         body: {
-          ...request,
           projectId: id,
           ...(courseId.value ? { courseId: courseId.value } : {}),
+          ...request,
         },
       })
     } catch (error) {

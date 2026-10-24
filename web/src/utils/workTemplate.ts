@@ -55,9 +55,9 @@ export function templateCapabilityLabel(capability: TemplateCapability): string 
 }
 
 /**
- * Newer Work releases this environment could be upgraded to: the same project,
- * course, template family and runtime, a higher version, not withdrawn. The
- * server re-checks compatibility (resources, network, entries) on upgrade.
+ * Newer Work releases offered as a new Work for this environment: the same
+ * project, course, template family and runtime, a higher version, not
+ * withdrawn. Newest first.
  */
 export function newerWorkReleases(
   releases: readonly Release[],
