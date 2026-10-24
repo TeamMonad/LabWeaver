@@ -136,17 +136,7 @@ impl ModelInputProxy {
         task_id: TaskRunId,
         headers: &HeaderMap,
     ) -> Result<ProjectLlmEgressPolicy, Denied> {
-        let token = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .or_else(|| {
-                headers
-                    .get("x-api-key")
-                    .and_then(|value| value.to_str().ok())
-            })
-            .filter(|value| value.len() == 64)
-            .ok_or(Denied)?;
+        let token = capability_token(headers)?;
         let row = sqlx::query("SELECT work.lease_token,dispatch.request,dispatch.policy,run.run_id,sandbox.binding FROM agent.authoring_sandbox_attempts sandbox JOIN agent.agent_track_work_items work ON work.run_id=sandbox.run_id AND work.track=sandbox.track AND work.attempt_number=sandbox.attempt_number JOIN agent.agent_runs run ON run.run_id=work.run_id JOIN agent.agent_run_dispatches dispatch ON dispatch.run_id=run.run_id WHERE sandbox.task_run_id=$1 AND sandbox.binding IS NOT NULL AND sandbox.state IN ('creating','submitted') AND work.state='running' AND work.lease_expires_at>clock_timestamp() AND run.cancellation_requested_at IS NULL AND work.attempt_started_at+((dispatch.policy->'budget'->>'timeoutMilliseconds')::bigint*interval '1 millisecond')>clock_timestamp()")
             .bind(task_id.as_uuid()).fetch_optional(self.store.pool()).await.map_err(|_| Denied)?.ok_or(Denied)?;
         let lease: Uuid = row.try_get("lease_token").map_err(|_| Denied)?;
@@ -202,21 +192,6 @@ impl ModelInputProxy {
         operation: &str,
     ) -> Result<Response, ProxyError> {
         let policy = self.authorize(task_id, &headers).await?;
-        if let Some(token) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .or_else(|| {
-                headers
-                    .get("x-api-key")
-                    .and_then(|value| value.to_str().ok())
-            })
-            && body
-                .windows(token.len())
-                .any(|bytes| bytes == token.as_bytes())
-        {
-            return Err(Denied.into());
-        }
         let document: serde_json::Value =
             contracts::parse_strict_json(&body).map_err(|_| Denied)?;
         if document.get("model").and_then(serde_json::Value::as_str)
@@ -227,7 +202,8 @@ impl ModelInputProxy {
         }
         // Classify the actual messages/tool results, not only the initial materials. Serialized
         // JSON alone would hide newlines/escapes from the existing secret classifier.
-        self.classify_strings(&document).await?;
+        self.classify_strings(&document, capability_token(&headers)?)
+            .await?;
         let mut url = self.upstream.clone();
         url.set_path(&format!(
             "{}/v1/{operation}",
@@ -267,7 +243,11 @@ impl ModelInputProxy {
         Ok(response)
     }
 
-    async fn classify_strings(&self, value: &serde_json::Value) -> Result<(), Denied> {
+    async fn classify_strings(
+        &self,
+        value: &serde_json::Value,
+        capability: &str,
+    ) -> Result<(), Denied> {
         let mut pending = vec![value];
         while let Some(value) = pending.pop() {
             match value {
@@ -279,12 +259,21 @@ impl ModelInputProxy {
                         .map_err(|_| Denied)?
                         .is_empty()
                         || text.contains(&self.credential)
+                        || text.contains(capability)
                     {
                         return Err(Denied);
                     }
                 }
                 serde_json::Value::Array(values) => pending.extend(values),
-                serde_json::Value::Object(values) => pending.extend(values.values()),
+                serde_json::Value::Object(values) => {
+                    if values
+                        .keys()
+                        .any(|key| key.contains(capability) || key.contains(&self.credential))
+                    {
+                        return Err(Denied);
+                    }
+                    pending.extend(values.values());
+                }
                 _ => {}
             }
         }
@@ -324,4 +313,18 @@ async fn count_tokens(
     proxy
         .forward(task_id, headers, body, "messages/count_tokens")
         .await
+}
+
+fn capability_token(headers: &HeaderMap) -> Result<&str, Denied> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+        })
+        .filter(|value| value.len() == 64)
+        .ok_or(Denied)
 }
