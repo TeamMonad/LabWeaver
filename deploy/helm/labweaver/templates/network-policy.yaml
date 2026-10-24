@@ -42,7 +42,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: [access-service, environment-service, evaluation-service]
+                values: [access-service, agent-service, environment-service, evaluation-service]
       ports: [{protocol: TCP, port: 9444}]
     {{- else if eq $name "environment-service" }}
     - from:
@@ -89,6 +89,16 @@ spec:
         - {protocol: TCP, port: {{ .containerPort }}}
         {{- end }}
       {{- end }}
+    {{- end }}
+    {{- if eq $name "agent-service" }}
+    # Authoring pods have only a task-local model-input capability, never a service JWT.
+    # The dedicated handler checks that capability, current user authority and live attempt.
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: labweaver-authoring}
+          podSelector:
+            matchLabels: {labweaver.io/managed-by: agent-service}
+      ports: [{protocol: TCP, port: 9445}]
     {{- end }}
     {{- if or (eq $name "web") (eq $name "access-service") (eq $name "openssh-gateway") }}
     - from:

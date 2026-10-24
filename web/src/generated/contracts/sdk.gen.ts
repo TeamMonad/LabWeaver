@@ -1167,6 +1167,22 @@ export const cancelProjectAgentRun = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
+ * getProjectAgentRunDiagnostics
+ *
+ * Permission: agent_run:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectAgentRunDiagnostics = <ThrowOnError extends boolean = false>(options: Options<GetProjectAgentRunDiagnosticsData, ThrowOnError>): RequestResult<GetProjectAgentRunDiagnosticsResponses, GetProjectAgentRunDiagnosticsErrors, ThrowOnError> => (options.client ?? client).get<GetProjectAgentRunDiagnosticsResponses, GetProjectAgentRunDiagnosticsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}/diagnostics',
+    ...options
+});
+
+/**
  * getProjectAgentTaskProgress
  *
  * Permission: agent_run:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
@@ -1668,6 +1684,42 @@ export const getActiveProjectLlmPolicy = <ThrowOnError extends boolean = false>(
         }],
     url: '/api/v1/projects/{projectId}/llm-egress-policies/active',
     ...options
+});
+
+/**
+ * getProjectRubricModelInputRules
+ *
+ * Permission: llm_policy:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectRubricModelInputRules = <ThrowOnError extends boolean = false>(options: Options<GetProjectRubricModelInputRulesData, ThrowOnError>): RequestResult<GetProjectRubricModelInputRulesResponses, GetProjectRubricModelInputRulesErrors, ThrowOnError> => (options.client ?? client).get<GetProjectRubricModelInputRulesResponses, GetProjectRubricModelInputRulesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules',
+    ...options
+});
+
+/**
+ * maintainProjectRubricModelInputRule
+ *
+ * Permission: llm_policy:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const maintainProjectRubricModelInputRule = <ThrowOnError extends boolean = false>(options: Options<MaintainProjectRubricModelInputRuleData, ThrowOnError>): RequestResult<MaintainProjectRubricModelInputRuleResponses, MaintainProjectRubricModelInputRuleErrors, ThrowOnError> => (options.client ?? client).post<MaintainProjectRubricModelInputRuleResponses, MaintainProjectRubricModelInputRuleErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**

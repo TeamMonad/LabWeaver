@@ -4444,7 +4444,7 @@ async fn model_input_rechecks_current_session_roles_membership_and_object_scope(
         )
         .await?;
     let package: ProblemPackage = serde_json::from_value(
-        serde_json::json!({"id":contracts::ProblemPackageId::new(),"projectId":project.id,"courseId":null,"revision":1,"files":[{"path":"allowed.md","object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"one","sizeBytes":25,"mediaType":"text/plain"}},{"path":"unselected.md","object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"two","sizeBytes":1,"mediaType":"text/plain"}}],"retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"course_material","retainUntil":"2027-12-31T00:00:00.000Z","disposition":"delete"},"completedAt":now}),
+        serde_json::json!({"id":contracts::ProblemPackageId::new(),"projectId":project.id,"courseId":null,"revision":1,"files":[{"path":"allowed.md","sha256":Sha256Digest::of_bytes(b"SYNTHETIC_ALLOWED_CONTENT").to_string(),"object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"one","sizeBytes":25,"mediaType":"text/plain"}},{"path":"unselected.md","sha256":Sha256Digest::of_bytes(b"x").to_string(),"object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"two","sizeBytes":1,"mediaType":"text/plain"}}],"retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"course_material","retainUntil":"2027-12-31T00:00:00.000Z","disposition":"delete"},"completedAt":now}),
     )?;
     sqlx::query("INSERT INTO control.problem_packages(package_id,project_id,course_id,revision,manifest_sha256,contract,completed_at) VALUES($1,$2,NULL,1,$3,$4,$5)").bind(package.id.as_uuid()).bind(project.id.as_uuid()).bind(Sha256Digest::of_canonical(&package.files)?.to_string()).bind(serde_json::to_value(&package)?).bind(now.get()).execute(&pool).await?;
     let paths = vec!["allowed.md".to_owned()];
@@ -4695,6 +4695,46 @@ async fn model_input_rechecks_current_session_roles_membership_and_object_scope(
             .complete_track(&track, Err(failure.clone()), now, "synthetic-capture")
             .await
             .map_err(|error| format!("complete_track at 12354: {error:?}"))?;
+        let diagnostics = store.diagnostics(run.id).await?;
+        assert_eq!(diagnostics.items.len(), 1);
+        let detail = &diagnostics.items[0];
+        assert_eq!(
+            detail.diagnostic_code,
+            "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        );
+        assert!(!detail.reason.is_empty());
+        assert!(!detail.next_step.is_empty());
+        assert_eq!(detail.usage.map(|usage| usage.requests), Some(1));
+        assert_eq!(
+            detail.expires_at.get() - detail.created_at.get(),
+            time::Duration::days(30)
+        );
+        let exported = serde_json::to_string(&diagnostics)?;
+        assert!(!exported.contains("SYNTHETIC_ALLOWED_CONTENT"));
+        assert!(!exported.contains("unselected.md"));
+        let durable_before = serde_json::to_value(store.load(run.id).await?)?;
+        let checkpoints_before = serde_json::to_value(store.load_checkpoints(run.id).await?)?;
+        sqlx::query("UPDATE agent.model_diagnostics SET created_at=clock_timestamp()-interval '31 days',expires_at=clock_timestamp()-interval '1 day' WHERE run_id=$1")
+            .bind(run.id.as_uuid()).execute(&pool).await?;
+        assert!(store.diagnostics(run.id).await?.items.is_empty());
+        assert_eq!(store.purge_expired_model_diagnostics().await?, 1);
+        assert_eq!(
+            serde_json::to_value(store.load(run.id).await?)?,
+            durable_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.load_checkpoints(run.id).await?)?,
+            checkpoints_before
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM control.problem_packages WHERE package_id=$1"
+            )
+            .bind(package.id.as_uuid())
+            .fetch_one(&pool)
+            .await?,
+            1
+        );
         let prior = completed
             .run
             .tracks
@@ -5048,13 +5088,13 @@ impl agent_service::claude_code::ProblemPackageReader for BlockingModelCaptureRe
 #[tokio::test]
 async fn model_input_queue_outlives_initial_five_second_decision()
 -> Result<(), Box<dyn std::error::Error>> {
-    exercise_initial_decision_lifetime(false).await
+    Box::pin(exercise_initial_decision_lifetime(false)).await
 }
 #[cfg(unix)]
 #[tokio::test]
 async fn model_input_schema_repair_outlives_initial_five_second_decision()
 -> Result<(), Box<dyn std::error::Error>> {
-    exercise_initial_decision_lifetime(true).await
+    Box::pin(exercise_initial_decision_lifetime(true)).await
 }
 
 #[cfg(unix)]
@@ -5233,7 +5273,7 @@ async fn exercise_initial_decision_lifetime(
         )
         .await?;
     let package: ProblemPackage = serde_json::from_value(
-        serde_json::json!({"id":contracts::ProblemPackageId::new(),"projectId":project.id,"courseId":null,"revision":1,"files":[{"path":"allowed.md","object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"one","sizeBytes":25,"mediaType":"text/plain"}}],"retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"course_material","retainUntil":"2027-12-31T00:00:00.000Z","disposition":"delete"},"completedAt":now}),
+        serde_json::json!({"id":contracts::ProblemPackageId::new(),"projectId":project.id,"courseId":null,"revision":1,"files":[{"path":"allowed.md","sha256":Sha256Digest::of_bytes(b"SYNTHETIC_ALLOWED_CONTENT").to_string(),"object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"one","sizeBytes":25,"mediaType":"text/plain"}}],"retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"course_material","retainUntil":"2027-12-31T00:00:00.000Z","disposition":"delete"},"completedAt":now}),
     )?;
     sqlx::query("INSERT INTO control.problem_packages(package_id,project_id,course_id,revision,manifest_sha256,contract,completed_at) VALUES($1,$2,NULL,1,$3,$4,$5)").bind(package.id.as_uuid()).bind(project.id.as_uuid()).bind(Sha256Digest::of_canonical(&package.files)?.to_string()).bind(serde_json::to_value(&package)?).bind(now.get()).execute(&pool).await?;
     let paths = vec!["allowed.md".to_owned()];
@@ -5442,9 +5482,9 @@ async fn exercise_initial_decision_lifetime(
         "idle_expires_at=now()-interval '1 second'",
         "revoked_at=now()",
     ] {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE access.bff_sessions SET {update} WHERE session_id=$1"
-        ))
+        )))
         .bind(session.as_uuid())
         .execute(&pool)
         .await?;

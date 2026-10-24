@@ -8298,19 +8298,6 @@ fn reject_sensitive_payload(value: &Value) -> Result<(), ControlError> {
     Ok(())
 }
 
-async fn load_contract<T>(pool: &PgPool, query: &str, id: Uuid) -> Result<T, ControlError>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::NotFound)?;
-    serde_json::from_value(row.try_get("contract").map_err(db)?)
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)
-}
 async fn load_contract_two<T>(
     pool: &PgPool,
     query: &str,

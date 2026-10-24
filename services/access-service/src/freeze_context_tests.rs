@@ -141,9 +141,9 @@ async fn freeze_context_is_server_derived_and_denied_requests_never_forward()
         StatusCode::FORBIDDEN
     );
     for (column, value) in [("object_role", "viewer"), ("state", "revoked")] {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE control.project_memberships SET {column}=$1 WHERE project_id=$2 AND actor_id=$3"
-        ))
+        )))
         .bind(value)
         .bind(project)
         .bind(actor)
@@ -202,9 +202,9 @@ async fn freeze_context_is_server_derived_and_denied_requests_never_forward()
         } else {
             format!("{column}=now()-interval '1 microsecond'")
         };
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE access.bff_sessions SET {expiry_assignment} WHERE session_id=$1"
-        ))
+        )))
         .bind(candidate.session_id)
         .execute(&state.pool)
         .await?;

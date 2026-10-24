@@ -459,6 +459,21 @@ impl AgentClient {
         Ok(outcome)
     }
 
+    pub async fn diagnostics(
+        &self,
+        run_id: AgentRunId,
+    ) -> Result<contracts::http::AgentRunDiagnostics, DownstreamError> {
+        send_json(
+            self.client.get(
+                self.config
+                    .endpoint(&format!("internal/v1/agent-runs/{run_id}/diagnostics"))?,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
     pub async fn artifact(
         &self,
         artifact_id: ImageArtifactId,

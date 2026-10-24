@@ -1,0 +1,200 @@
+{
+  "$defs": {
+    "AgentRunDiagnostic": {
+      "additionalProperties": false,
+      "description": "Sanitized failure context; never contains provider output, file contents or credentials.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "diagnosticCode": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "inputSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "nextStep": {
+          "type": "string"
+        },
+        "outputSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "packageId": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "packageRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "preparationFailed": {
+          "description": "Preparation failures have no observed model input or usage.",
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "runtimeBinding": {
+          "type": "string"
+        },
+        "track": {
+          "$ref": "#/$defs/AgentTrackKind"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "track",
+        "preparationFailed",
+        "attempt",
+        "diagnosticCode",
+        "reason",
+        "nextStep",
+        "model",
+        "runtimeBinding",
+        "packageId",
+        "packageRevision",
+        "policyId",
+        "policyRevision",
+        "createdAt",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "AgentTrackKind": {
+      "description": "Independent Agent track.",
+      "enum": [
+        "environment",
+        "evaluation",
+        "work_configuration"
+      ],
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "LlmUsage": {
+      "additionalProperties": false,
+      "description": "Frozen LLM usage for one attempt.",
+      "properties": {
+        "costMicrousd": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requests": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens",
+        "requests",
+        "costMicrousd"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Current-object-authorized failure details retained separately from durable usage receipts.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/AgentRunDiagnostic"
+      },
+      "type": "array"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "runId": {
+      "$ref": "#/$defs/AgentRunId"
+    }
+  },
+  "required": [
+    "runId",
+    "projectId",
+    "items"
+  ],
+  "title": "AgentRunDiagnostics",
+  "type": "object"
+}

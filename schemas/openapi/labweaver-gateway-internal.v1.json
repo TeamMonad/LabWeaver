@@ -16,6 +16,9 @@
       "AgentLlmReviewQuery": {
         "$ref": "../contracts/v1/http/agent-llm-review-query.schema.json"
       },
+      "AgentRunDiagnostics": {
+        "$ref": "../contracts/v1/agent-run-diagnostics.schema.json"
+      },
       "AgentRunHistoryPage": {
         "$ref": "../contracts/v1/agent-run-history-page.schema.json"
       },
@@ -441,6 +444,44 @@
           }
         ],
         "summary": "Request cancellation at an exact AgentRun revision"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/diagnostics": {
+      "get": {
+        "operationId": "getInternalAgentRunDiagnostics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunDiagnostics"
+                }
+              }
+            },
+            "description": "Unexpired sanitized failure details"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent_run:read"
+            ]
+          }
+        ]
       }
     },
     "/internal/v1/agent-runs/{runId}/outcome": {
@@ -1063,403 +1104,6 @@
             ]
           }
         ]
-      }
-    },
-    "/internal/v1/build-cost-admissions": {
-      "post": {
-        "description": "Permission: resource.credits.hold. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "admitBuildCost",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "../contracts/v1/build-cost-admission-request.schema.json"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "../contracts/v1/build-cost-record.schema.json"
-                }
-              }
-            },
-            "description": "Successful response",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "401": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "403": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "503": {
-            "$ref": "#/components/responses/Problem"
-          }
-        },
-        "security": [
-          {
-            "serviceJwt": [
-              "resource.credits.hold"
-            ]
-          }
-        ],
-        "summary": "admitBuildCost",
-        "x-labweaver-allowed-roles": [
-          "platform_admin"
-        ],
-        "x-labweaver-cancellable": false,
-        "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
-        ],
-        "x-labweaver-idempotency": "IdempotentCreate",
-        "x-labweaver-permission": "resource.credits.hold",
-        "x-labweaver-problem-content-type": "application/problem+json",
-        "x-labweaver-retryable": true,
-        "x-labweaver-scope": "service",
-        "x-labweaver-timeout-ms": 30000
-      }
-    },
-    "/internal/v1/build-cost-observations": {
-      "post": {
-        "description": "Permission: resource.usage.record. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "observeBuildCost",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "../contracts/v1/observe-build-cost-request.schema.json"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "../contracts/v1/build-cost-record.schema.json"
-                }
-              }
-            },
-            "description": "Successful response",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "401": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "403": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "503": {
-            "$ref": "#/components/responses/Problem"
-          }
-        },
-        "security": [
-          {
-            "serviceJwt": [
-              "resource.usage.record"
-            ]
-          }
-        ],
-        "summary": "observeBuildCost",
-        "x-labweaver-allowed-roles": [
-          "platform_admin"
-        ],
-        "x-labweaver-cancellable": false,
-        "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
-        ],
-        "x-labweaver-idempotency": "None",
-        "x-labweaver-permission": "resource.usage.record",
-        "x-labweaver-problem-content-type": "application/problem+json",
-        "x-labweaver-retryable": true,
-        "x-labweaver-scope": "service",
-        "x-labweaver-timeout-ms": 30000
-      }
-    },
-    "/internal/v1/build-cost-reconciliations": {
-      "get": {
-        "description": "Permission: resource.credits.hold. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "claimBuildCostReconciliations",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/build-cost-reconciliation.schema.json"
-                  },
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful response",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "401": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "403": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "503": {
-            "$ref": "#/components/responses/Problem"
-          }
-        },
-        "security": [
-          {
-            "serviceJwt": [
-              "resource.credits.hold"
-            ]
-          }
-        ],
-        "summary": "claimBuildCostReconciliations",
-        "x-labweaver-allowed-roles": [
-          "platform_admin"
-        ],
-        "x-labweaver-cancellable": false,
-        "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
-        ],
-        "x-labweaver-idempotency": "None",
-        "x-labweaver-permission": "resource.credits.hold",
-        "x-labweaver-problem-content-type": "application/problem+json",
-        "x-labweaver-retryable": true,
-        "x-labweaver-scope": "service",
-        "x-labweaver-timeout-ms": 30000
-      }
-    },
-    "/internal/v1/build-costs/{buildRequestId}/attempts/{attempt}": {
-      "get": {
-        "description": "Permission: resource.credits.hold. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "getBuildCost",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "buildRequestId",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "attempt",
-            "required": true,
-            "schema": {
-              "maximum": 2147483647,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "leaseToken",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "../contracts/v1/build-cost-record.schema.json"
-                }
-              }
-            },
-            "description": "Successful response",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "401": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "403": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "503": {
-            "$ref": "#/components/responses/Problem"
-          }
-        },
-        "security": [
-          {
-            "serviceJwt": [
-              "resource.credits.hold"
-            ]
-          }
-        ],
-        "summary": "getBuildCost",
-        "x-labweaver-allowed-roles": [
-          "platform_admin"
-        ],
-        "x-labweaver-cancellable": false,
-        "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
-        ],
-        "x-labweaver-idempotency": "None",
-        "x-labweaver-permission": "resource.credits.hold",
-        "x-labweaver-problem-content-type": "application/problem+json",
-        "x-labweaver-retryable": false,
-        "x-labweaver-scope": "service",
-        "x-labweaver-timeout-ms": 30000
       }
     },
     "/internal/v1/build-requests/{buildRequestId}": {

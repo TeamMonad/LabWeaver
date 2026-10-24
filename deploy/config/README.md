@@ -94,6 +94,19 @@ only `ANTHROPIC_MODEL` statically; each run/attempt receives a short-lived scope
 `ANTHROPIC_API_KEY` and the gateway URL. Missing files fail startup. The authoring sandbox
 NetworkPolicy permits the gateway Service and does not permit the provider endpoint directly.
 
+Authoring sandboxes do not receive that provider token. Set `sandbox.model_proxy_base_uri` to the
+Agent HTTPS origin reachable from the authoring namespace (use its full Service DNS name), and
+`sandbox.model_proxy_ca_file` to its deployed CA. Allow sandbox egress to that Agent port and the
+object-store transfer ports, not the direct model endpoint. The Agent retains the upstream token
+and proxies each model request only after checking the original user session, current object
+permissions, live attempt lease and cancellation/deadline. Per-tool hooks use the same task-local
+capability. No service-account token or Control role is mounted in an authoring Pod.
+
+Agent detailed model diagnostics expire after 30 days. The Agent retention worker deletes only
+separate diagnostic rows and marked, abandoned model temporary directories; durable usage, grades,
+business checkpoints and user volumes are not retention targets. Apply the migration catalog
+before starting an Agent binary that uses the diagnostic endpoint.
+
 The administrator image catalog binds exactly one platform registry. Put the operator-provided CA,
 robot username and robot password values in
 `secrets/agent-service-secrets/{harbor-ca.crt,harbor-username,harbor-password}` with mode `0600`;

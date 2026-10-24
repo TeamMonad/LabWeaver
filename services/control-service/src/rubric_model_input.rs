@@ -336,7 +336,7 @@ pub(super) async fn load_policy(
     query: &str,
     id: uuid::Uuid,
 ) -> Result<ProjectLlmEgressPolicy, ControlError> {
-    let value: Value = sqlx::query_scalar(query)
+    let value: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(pool)
         .await

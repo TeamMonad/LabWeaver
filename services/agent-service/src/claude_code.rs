@@ -346,9 +346,7 @@ impl ProblemPackageEgressGate {
             raw_bytes = raw_bytes
                 .checked_add(bytes.len())
                 .ok_or(EgressPreparationError::InputLimitExceeded)?;
-            if raw_bytes > MAX_EGRESS_INPUT_BYTES
-                || u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.object.size_bytes
-            {
+            if raw_bytes > MAX_EGRESS_INPUT_BYTES || !package_object_matches(file, &bytes) {
                 return Err(EgressPreparationError::ObjectIdentityMismatch);
             }
             let denied = if is_build_context_media_type(&file.object.media_type) {
@@ -403,6 +401,11 @@ impl ProblemPackageEgressGate {
             classifier_revision,
         )
     }
+}
+
+fn package_object_matches(file: &contracts::authoring::PackageFile, bytes: &[u8]) -> bool {
+    u64::try_from(bytes.len()).ok() == Some(file.object.size_bytes)
+        && Some(Sha256Digest::of_bytes(bytes)) == file.sha256.parse::<Sha256Digest>().ok()
 }
 
 #[derive(Serialize)]
@@ -941,6 +944,8 @@ async fn execute_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    crate::model_diagnostics::mark_context(workspace.path())
+        .map_err(|_| ClaudeCodeProcessError::Io)?;
     let mut child = process.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ClaudeCodeProcessError::Unavailable
@@ -1348,12 +1353,23 @@ pub struct ClaudeCodeExecution {
 }
 
 /// Failed invocation with hash-only evidence and no raw provider payload.
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Error)]
 #[error("{error}")]
 pub struct ClaudeCodeFailure {
     error: ClaudeCodeRuntimeError,
     audit: Box<ClaudeCodeAudit>,
     repair_detail: Option<String>,
+}
+
+impl Debug for ClaudeCodeFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaudeCodeFailure")
+            .field("error", &self.error)
+            .field("audit", &self.audit)
+            .field("repair_detail", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ClaudeCodeFailure {
@@ -1374,6 +1390,67 @@ impl ClaudeCodeFailure {
     #[must_use]
     pub fn is_schema_invalid(&self) -> bool {
         matches!(self.error, ClaudeCodeRuntimeError::SchemaInvalid)
+    }
+
+    /// Fixed messages only: provider text and selected material never become diagnostics.
+    #[must_use]
+    pub fn user_guidance(&self) -> (&'static str, &'static str) {
+        use ClaudeCodeRuntimeError as E;
+        match self.error {
+            E::InputAuthorizationDenied => (
+                "原会话、对象或模型输入许可已失效。",
+                "检查当前授权；需要更换会话或材料时新建任务。",
+            ),
+            E::ConfigurationInvalid | E::RuntimeUnavailable => (
+                "模型运行配置不可用。",
+                "请管理员检查已部署的模型及运行版本。",
+            ),
+            E::InputLimitExceeded => ("所选材料超过模型输入上限。", "减少所选材料后新建任务。"),
+            E::BudgetExceeded => (
+                "本次任务的模型预算已耗尽。",
+                "检查已有用量，调整策略后新建任务。",
+            ),
+            E::OutputLimitExceeded => ("模型返回内容超过捕获上限。", "缩小生成范围后重试。"),
+            E::SchemaInvalid
+            | E::ProtocolInvalid
+            | E::EnvironmentClassMismatch
+            | E::ProtectedField => (
+                "模型结果不符合任务约定，未发布候选。",
+                "检查材料与任务目标后重试；不要把失败当作发布成功。",
+            ),
+            E::MaterializationFailed => (
+                "生成内容无法绑定到可验证的构建材料。",
+                "检查所选材料和构建上下文后重试。",
+            ),
+            E::ToolDenied => (
+                "模型尝试了不允许的工具动作。",
+                "检查任务输入范围后重新提交。",
+            ),
+            E::TimedOut => (
+                "模型任务超过原定执行期限。",
+                "缩小任务范围后重试；重试不会回退已发生的用量。",
+            ),
+            E::Cancelled => (
+                "任务已取消，未启动后续模型调用。",
+                "查看已产生的用量；需要继续时显式重试。",
+            ),
+            E::ResourceApprovalTimeout | E::ResourceApprovalExpired | E::ResourceLeaseExpired => (
+                "任务的资源批准或租约已到期。",
+                "重新申请资源后重试，不复用已到期的执行授权。",
+            ),
+            E::RateLimited => (
+                "模型服务限流，任务未完成。",
+                "稍后显式重试，并查看已有用量。",
+            ),
+            E::Refused => (
+                "模型拒绝处理本次任务。",
+                "检查任务要求与模型使用政策后调整输入。",
+            ),
+            E::ExecutionFailed | E::UpstreamUnavailable => (
+                "模型服务或运行进程失败，任务未完成。",
+                "检查模型服务可用性后重试，并保留本次诊断编号。",
+            ),
+        }
     }
 }
 
@@ -3883,7 +3960,7 @@ fn preserve_declared_environment_surfaces(
 
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
 
-const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":false,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
+const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"authorization":{"modelRequests":"original_session_current_permission_and_live_attempt_proxy","toolHooks":["PreToolUse","PostToolUse"]},"bare":false,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
 
 const AUTHORING_MAX_TURNS: u32 = 60;
 const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";

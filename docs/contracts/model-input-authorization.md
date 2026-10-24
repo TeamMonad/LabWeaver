@@ -12,13 +12,13 @@ Agent 配置生成和已有 Work 配置操作只使用调用方显式选择的�
 
 `ModelInputAuthorizationContext` 表达首次已鉴别请求的会话 SHA、发起者、项目、课程、原 operation 和当次 decision 的 `validUntil`。它不包含文件身份或许可布尔值；冻结请求尚无归档时可保存这一完整证据。`validate()` 只检查传输身份格式，不授权操作，也不把旧 decision TTL 当任务期限。现有材料包 binding 可通过 `context()` 提取同一证据；Control 构造和复核入口及 Agent 命令校验使用相同检查。
 
-冻结 context 持久化及 metadata-only 事实由 Evaluation 提供。缺失记录不得从冻结 owner、服务身份或新会话补造。冻结完成后，Evaluation 使用现有 `control.authoring.read` 调用 `POST /internal/v1/authoring/frozen-model-input-authorizations`，提交原 `inputAuthorizationContext`、task/freeze/release ID、release revision 和精确 `selectedPaths`。Control 从保护的冻结事实与现行发布材料重建 binding；Evaluation 必须在读取 archive/rubric 对象前完成此检查，将返回 binding 原样填写必需的 `InternalAgentLlmReviewRequest.inputAuthorization`。消费者接线由 Evaluation owner 完成。
+Access 从原已验证 BFF 请求、真实项目/课程授权 decision 和环境 AccessGrant 构造冻结 context，并覆盖私有转发 header；浏览器自报值不进入下游。Evaluation 首次保存 context，重放不换会话。缺失记录不得从冻结 owner、服务身份或新会话补造。冻结完成后，Evaluation 使用现有 `control.authoring.read` 调用 `POST /internal/v1/authoring/frozen-model-input-authorizations`，提交原 `inputAuthorizationContext`、task/freeze/release ID、release revision 和精确 `selectedPaths`。Control 从保护的冻结事实与现行发布材料重建 binding。Evaluation 在每次 archive/rubric 对象读取前和准备完成后复核，并把返回 binding 原样填写必需的 `InternalAgentLlmReviewRequest.inputAuthorization`。
 
 binding 的 `source.kind` 区分 `problem_package` 和 `frozen_submission`。冻结来源分别保留 manifest revision/SHA、archive 精确 ArtifactRef/content SHA、Evaluation release revision、Environment release version，以及独立 rubric package/version/path/ArtifactRef/SHA。冻结 ID 不作为材料包 ID。策略全文 SHA 和选择摘要也参与一致性校验。
 
 冻结来源和创建 binding 请求必需 `parentLeaseSha256`，由 Evaluation 对真实父 `EvaluationStepLease.lease_token()` 的规范 UUID 字符串 UTF-8 计算 SHA-256。它固定进入原 binding/选择摘要；恢复不能刷新，旧缺失字段不补造。task ID 可在父 worker 恢复时保留而 lease token 轮换，因此 task ID 单独不能证明原执行代次仍有效。
 
-Control 每次创建/复核通过现有 `evaluation.control.invoke` 请求任务限定 metadata 路径 `/internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`，携带原 scope、release If-Match 及 `x-labweaver-evaluation-lease-sha256`。旧无任务路径不作 fallback，拒绝/404/错误均阻止绑定。Evaluation 端必须在返回原形状事实前核权威父 run/step/attempt 的关联、当前 lease 摘要/到期、持久取消和原执行期限；该服务端实现及完整父取消/repair 验收仍需原 Evaluation owner 接线。摘要不是许可，不返回原 lease token。Agent 既有首次/repair Control 复核使用原摘要，自己的取消与 lease 检查仍独立执行。
+Control 每次创建/复核通过现有 `evaluation.control.invoke` 请求任务限定 metadata 路径 `/internal/v1/evaluation-releases/{releaseId}/frozen-submissions/{submissionId}/model-input-facts/tasks/{taskRunId}`，携带原 scope、release If-Match 及 `x-labweaver-evaluation-lease-sha256`。旧无任务路径不作 fallback，拒绝/404/错误均阻止绑定。Evaluation 在返回事实前核父 run/step/attempt 关联、当前 lease 摘要/到期、持久取消和原执行期限。摘要不是许可，不返回原 lease token。Agent 首次/repair 复核使用原摘要，自己的取消与 lease 检查仍独立执行。响应丢失时先读取原 Agent receipt，不能重新选择内容、刷新截止或重复发送。
 
 课程当前教师兼 instructor 且具有材料项目 Edit 权限时，可以通过 `POST /api/v1/projects/{projectId}/llm-egress-policies/active/rubric-rules` 单独设置 rubric 可见性、批准目标模型使用或撤回批准。GET 同路径返回教师可见的元数据规则。请求必须提供现行 policy 的 If-Match 和 Idempotency-Key。规则保存在现有 policy 的版本化 JSON 内，批准者和课程成员 revision 从当前真源获取；请求不能自报许可。每次改变可见性都会清除模型批准。只有 `course_public` 且存在当前 instructor 的有效批准时才允许外发；hidden、未知、离任、成员 revision 变化或撤回均拒绝。Browse 和模型许可分别检查。
 
@@ -50,12 +50,28 @@ Agent 复核客户端读取下列四项现有命名的配置：
 
 四项全缺时，仅新的模型派发以 `LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE` 失败，Agent 其他 API、诊断及清理仍能启动。部分缺失或无效值明确使配置加载失败。复核 HTTP 拒绝重定向，只接收 200，并有界读取响应；无法获得所需 service token 或服务返回拒绝时，不启动模型。
 
-当前依赖基线尚未为 Agent 配置上述连接及 Agent→Control 的 `control.agent_run.read` 服务角色。部署 owner 必须在 #203 的同源配置中接线并完成权限评审。本变更没有修改 identity、Bundle、Helm 或实际运行权限，也没有执行部署。
+Bundle/Helm 从同一 Control 连接来源给 Agent 提供四项配置；服务账户需要已有 `control.agent_run.read`，Control 的入口 caller allowlist 必须包含实际 Agent 身份。网络策略允许 Agent 调用 Control 的 9444/TCP。配置/角色字符串不代表实际 IdP 已创建授权，部署后仍须验证 JWT、CA/DNS 与连通性。
 
-## 覆盖与交接
+## Sandbox 内的工具与模型请求
 
-本切片覆盖教师材料包，以及私人/共享 Work 的材料包选择和实时项目动作权限。前端材料选择交互由 Grok 接续，当前三处旧创建入口没有传 `selectedPaths`，会明确失败。
+Authoring sandbox 不持有上游模型凭据。Agent 在自己的进程中保留 `ANTHROPIC_AUTH_TOKEN`，给 sandbox 只下发当前 task/原 track lease 限定的不可反推 capability。它不能调用 Agent 的普通服务接口，也不能授权其他 task。
 
-完整冻结链路仍需串行组合 Evaluation 的 metadata-only/context/content-SHA 变更、Access 的真实 context 生产入口及 Evaluation 读取前消费者接线，并验收完整链路和真实网络角色。本切片不能单独证明完整冻结链路通过。rubric 规则的真实 PostgreSQL 测试覆盖公开声明与批准分离、精确内容身份、教师/助教/管理员区别、项目 Edit、撤回、隐藏、离任/重入、成员过期、并发 revision 冲突、幂等重放和通用策略更新保留撤权，且规则操作不读取对象。测试发布内容是合成依赖边界，内容 SHA 生产入口仍由 Evaluation/材料 owner 提供。实时 Work 会话文件许可、逐文件隐藏标签、日志留存切片，以及 Claude Code 单个进程内部的 Read/Bash/tool-result 和后续模型请求逐动作复核仍不在本切片覆盖内。
+- `sandbox.model_proxy_base_uri` 指向可达的 Agent HTTPS origin，例如 `https://agent-service.labweaver-system.svc:9445/`；sandbox 与 API 不在同一 namespace，不能使用短 DNS 名。
+- `sandbox.model_proxy_ca_file` 固定该 HTTPS 服务的 CA；Agent 把 CA 放进临时 attempt Secret，sandbox 使用独立 CA 文件。
+- sandbox 的网络只放行对象传输与 Agent 模型代理，不直接放行模型 endpoint。Helm 仅允许 `labweaver-authoring` 内 Agent 管理的 Pod 到 Agent 的 9445/TCP；普通内部 API 仍须服务 JWT。
 
-本地验证使用真实 PostgreSQL 当前会话/成员事实、原 Agent 持久化取消状态和合成 stdin 捕获进程，证明选择内容、准备期间取消、repair 前撤权，以及实际跨越创建当次 5 秒 decision TTL 的排队和 repair 仍按原会话当前权限运行。绝对/idle 期限到期、会话撤销、成员撤销、任务截止和取消均阻止新发送。Access 的 `idle_expires_at <= expires_at` 约束意味着绝对期限到期时 idle 也到期；测试保留该约束，并另外覆盖 absolute 仍未来而 idle 单独到期。该证据没有调用真实模型，也没有验证 Kubernetes sandbox 或生产 Agent→Control TLS/服务角色接线。
+Claude 的 `PreToolUse`/`PostToolUse` hook 在每个工具动作前后调用 task 专属检查。每次 Anthropic-compatible `messages`/`count_tokens` HTTP 请求也由 Agent 代理重新核对原 session、当前成员/对象许可、原策略/文件版本、当前 track lease、取消与固定任务截止。代理对实际消息和工具结果复用秘密分类器，拒绝凭据与 capability 泄漏；扫描不授予对象许可。服务端不把 sandbox 提交的 actor、project、policy 或 provider URL 当权威。模型调用已开始后不能撤回已发送内容，撤权/取消会阻止后续请求和 repair。
+
+教师创作和私人/共享 Work 配置均只把显式选择的材料包文件放进隔离 sandbox，校验实际字节的 SHA-256；未选文件不读取、不分类、不材料化。该路径不挂载、遍历或读取 Work 用户持久盘。学生 advisory 只消费冻结 manifest/step.include/llmReadable 交集和独立获准的 rubric。不能用同目录、文件名、课程相同或付款项目权限扩大输入范围。
+
+## 权限化诊断与回收
+
+`GET /api/v1/projects/{projectId}/agent-runs/{runId}/diagnostics`（SDK `getProjectAgentRunDiagnostics`）先检查当前 Project Browse，再核 Agent 权威 run 的 project/course 归属。接口返回 `AgentRunDiagnostics`，带 `Cache-Control: no-store`；它不是无需鉴别的导出链接。
+
+每条 `AgentRunDiagnostic` 包含中文原因与下一步、track/attempt、稳定诊断码、模型/运行绑定、精确材料和策略版本、已观测输入/输出摘要及用量、`createdAt`/`expiresAt`。准备失败时 `preparationFailed=true`，输入摘要和用量为 `null`；未发出的调用不会伪装成零费用或已执行。详细记录没有原始材料、provider 输出、stderr、cookie、令牌或私钥。运行错误的 Debug 输出也不包含 schema repair 正文。
+
+详细记录默认保留 30 天。读接口立即排除到期记录；Agent 每分钟有界物理删除到期 detail rows。清理不改写 Agent 用量/checkpoint、账本、成绩或业务候选。临时进程正常退出/取消时由 TempDir 回收，崩溃遗留的 `labweaver-claude-*` 目录只有具备本服务专用 marker 且超过 30 天才会删除。未标记目录、其他临时路径和用户持久盘不在扫描范围内。Sandbox 的结果、stderr 和临时材料沿现有 owner/fence 清理，仍用于结果验证的 writer 不作为“废弃日志”删除。
+
+## 前端消费
+
+创建入口必须显式选择非空精确 `selectedPaths`，不能自动全选或省略；202 仅表示任务已接受。展示失败时先显示中文原因/下一步，再提供诊断码与 requestId。浏览器不构造 binding、capability 或内部 resolve 请求。教师可见 rubric 不等于获准发给外部模型，界面需分别消费可见性、批准目标模型与撤回动作。
