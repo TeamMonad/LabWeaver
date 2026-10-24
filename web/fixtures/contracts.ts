@@ -8,6 +8,7 @@ import type {
   ConsoleCapabilityAvailabilitySchema,
   EnvironmentAccessGrantPageSchema,
   EnvironmentEndpointSchema,
+  EnvironmentDetailSchema,
   EnvironmentInstanceSchema,
   EnvironmentOperation,
   EnvironmentOperationPageSchema,
@@ -20,7 +21,10 @@ import type {
   ProjectMembershipSchema,
   ProjectSchema,
   OrganizationUserPageSchema,
+  PlatformImageCatalogSchema,
+  PlatformImageCatalogSchemaPlatformImageEntry,
   PlatformImageCatalogViewSchema,
+  ProjectAgentCapabilitySchema,
   ProblemDetails,
   ResourceLeaseSchema,
   ResourceLeaseState,
@@ -133,6 +137,90 @@ const vmRelease = {
   },
 } satisfies EnvironmentTemplateReleaseViewSchema
 
+/** The pinned container image the manual Work templates below were published from. */
+const workTemplateImage = {
+  catalogId: '0197f0e0-0000-7000-8000-000000000001',
+  kind: 'container',
+  binding: 'ubuntu-24.04-v1',
+  sourceReference: 'registry.labweaver.local/labweaver-system/ubuntu:24.04',
+  resolvedDigest: 'sha256:9a3e7c6d1f2b4a8d3e6f7a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1',
+  mediaType: 'application/vnd.oci.image.manifest.v1+json',
+  sizeBytes: 268435456,
+  status: 'active',
+  trustRevision: 4,
+  repinGeneration: 2,
+  pinnedAt: now,
+  updatedAt: later,
+} satisfies PlatformImageCatalogSchemaPlatformImageEntry
+
+/** Manually published Work templates (no Agent run) for the Work launcher preview. */
+const manualWorkSpec = {
+  apiVersion: 'environment.labweaver.io/v1',
+  kind: 'EnvironmentSpec',
+  class: 'work',
+  name: 'Python 数据分析 Work',
+  resources: { cpuMillicores: 2000, memoryBytes: 4 * GIB, storageBytes: 20 * GIB },
+  network: { mode: 'deny_all' },
+  entries: [{ name: 'app', protocol: 'http', servicePort: 8080 }],
+  security: { userPolicy: 'non_root_required', rootFilesystemPolicy: 'read_only_required', privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', securityProfileBinding: 'restricted-v1' },
+  runtime: { kind: 'container', provider_binding: 'fixture-kubernetes', service_port: 8080, terminal: { executable: '/bin/bash', args: [], workingDirectory: '/workspace' } },
+  retention: { policyId: '0197f0e0-0000-7000-8000-0000000000c1', policyRevision: 1, class: 'run_evidence', disposition: 'delete', retainUntil: '2027-03-01T00:00:00.000Z' },
+} satisfies NonNullable<EnvironmentTemplateReleaseViewSchema['manualApproval']>['spec']
+
+const workRelease = {
+  id: 'release-work-python',
+  version: 1,
+  projectId: fixtureProjectId,
+  courseId: 'course-physics-2026',
+  runtimeKind: 'container',
+  name: 'Python 数据分析 Work',
+  description: '预装 Python 3.12、JupyterLab 与常用科学计算库，工作文件保存在 /workspace。',
+  templateFamilyId: 'python-analysis',
+  purpose: 'work',
+  capabilities: ['terminal', 'files', 'applications', 'agent'],
+  publishedAt: '2026-09-10T08:00:00.000Z',
+  publishedBy: '林老师',
+  manualApproval: {
+    approvedAt: '2026-09-10T08:00:00.000Z',
+    approvedBy: 'fixture-teacher',
+    description: '预装 Python 3.12、JupyterLab 与常用科学计算库，工作文件保存在 /workspace。',
+    platformImage: workTemplateImage,
+    reason: '已核对镜像、端口与资源。',
+    spec: manualWorkSpec,
+    templateFamilyId: 'python-analysis',
+    trustRevision: 4,
+  },
+  artifact: {
+    kind: 'catalog_container',
+    id: 'artifact-work-python',
+    catalog_id: '0197f0e0-0000-7000-8000-000000000001',
+    repin_generation: 2,
+    trust_revision: 4,
+    repository: 'registry.labweaver.local/labweaver-system/ubuntu',
+    digest: 'sha256:9a3e7c6d1f2b4a8d3e6f7a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1',
+  },
+} satisfies EnvironmentTemplateReleaseViewSchema
+
+const workReleaseNext = {
+  ...workRelease,
+  id: 'release-work-python-2',
+  version: 2,
+  description: '在 v1 基础上增加 R 4.4 与 Quarto。',
+  publishedAt: '2026-09-13T08:00:00.000Z',
+  manualApproval: { ...workRelease.manualApproval, description: '在 v1 基础上增加 R 4.4 与 Quarto。' },
+} satisfies EnvironmentTemplateReleaseViewSchema
+
+const workVmRelease = {
+  ...vmRelease,
+  id: 'release-work-desktop',
+  name: 'Ubuntu 桌面 Work',
+  description: '图形桌面与 SSH，适合需要桌面软件的长期工作。',
+  templateFamilyId: 'ubuntu-desktop',
+  purpose: 'work',
+  capabilities: ['desktop', 'ssh', 'agent'],
+  submissionManifest: null,
+} satisfies EnvironmentTemplateReleaseViewSchema
+
 const resource = {
   cpuMillicores: 2000,
   memoryBytes: 4 * GIB,
@@ -218,7 +306,7 @@ function environmentClassFor(id: string): EnvironmentInstanceSchema['class'] {
   return id === 'env-workbench' ? 'work' : 'experiment'
 }
 
-function environmentInstance(id: string): EnvironmentInstanceSchema {
+function environmentInstance(id: string): EnvironmentDetailSchema {
   const state = currentEnvironmentState() ?? 'ready'
   const environmentClass = environmentClassFor(id)
   const deleted = state === 'deleted'
@@ -245,6 +333,9 @@ function environmentInstance(id: string): EnvironmentInstanceSchema {
     { id: 'endpoint-http', protocol: 'https', health: 'healthy', observedAt: now, revision: 4 },
     { id: 'endpoint-ssh', protocol: 'ssh', health: 'healthy', observedAt: now, revision: 4 },
   ]
+  const ready = state === 'ready'
+  // Work previews the manually published template; experiments keep the course release.
+  const pinned = environmentClass === 'work' ? workRelease : release
   return {
     id,
     displayLabel: environmentDisplayLabel(state),
@@ -252,8 +343,8 @@ function environmentInstance(id: string): EnvironmentInstanceSchema {
     courseId: 'course-physics-2026',
     class: environmentClass,
     runtimeKind: 'container',
-    releaseId: release.id,
-    releaseVersion: release.version,
+    releaseId: pinned.id,
+    releaseVersion: pinned.version,
     ownerId: 'fixture-student',
     providerBinding: 'fixture-kubernetes',
     capacityBinding: 'fixture-capacity-claim',
@@ -269,6 +360,15 @@ function environmentInstance(id: string): EnvironmentInstanceSchema {
     eligibilityExpiresAt: later,
     endpoints,
     operation,
+    connection: {
+      instanceReady: ready,
+      state: ready ? 'ready' : deleted || failed ? 'unavailable' : 'preparing',
+      observedAt: now,
+      reasonCode: ready ? null : `ENVIRONMENT_${state.toUpperCase()}`,
+      guestInstructions: ready && environmentClass === 'work'
+        ? ['浏览器终端以容器内的非 root 用户运行，工作目录为 /workspace。', 'Web 应用通过平台网关打开，不需要单独的系统密码。']
+        : [],
+    },
   }
 }
 
@@ -286,8 +386,8 @@ function environmentSummary(
     courseId: 'course-physics-2026',
     class: environmentClass,
     runtimeKind: 'container',
-    releaseId: release.id,
-    releaseVersion: release.version,
+    releaseId: environmentClass === 'work' ? workRelease.id : release.id,
+    releaseVersion: environmentClass === 'work' ? workRelease.version : release.version,
     createdAt: now,
     updatedAt: now,
     eligibilityExpiresAt: later,
@@ -319,10 +419,20 @@ function projectsForScene(): ProjectSchema[] {
   return activeScene.value.id === 'teacher-project-empty' ? [] : [project, archivedProject]
 }
 
+/** Scenes that create or open Work and so need Work-purpose releases. */
+const WORK_RELEASE_SCENES: Partial<Record<string, true>> = {
+  'work-launcher': true,
+  'work-upgrade': true,
+  'resource-processing': true,
+  'resource-authorized': true,
+  'resource-reclaim': true,
+}
+
 function releasesForScene(): EnvironmentTemplateReleaseViewSchema[] {
   if (authoringScene()) return authoringReleases()
-  return ['teacher-template-empty', 'resource-empty', 'work-launcher-empty'].includes(activeScene.value.id)
-    ? []
+  if (['teacher-template-empty', 'resource-empty', 'work-launcher-empty'].includes(activeScene.value.id)) return []
+  return WORK_RELEASE_SCENES[activeScene.value.id]
+    ? [workRelease, workReleaseNext, workVmRelease, release]
     : [release, vmRelease]
 }
 
@@ -631,7 +741,7 @@ function currentEnvironmentId(): string | undefined {
   return sceneEnvironmentIds[activeScene.value.id] ?? activeScene.value.environmentId
 }
 
-export async function getEnvironment(options?: FixtureOptions): Promise<FixtureResult<EnvironmentInstanceSchema>> {
+export async function getEnvironment(options?: FixtureOptions): Promise<FixtureResult<EnvironmentDetailSchema>> {
   const environmentId = options?.path?.environmentId
   if (!environmentId || environmentId !== currentEnvironmentId()) return notFoundResponse('读取环境', environmentId)
   return fixtureResponse(environmentInstance(environmentId))
@@ -852,6 +962,27 @@ export async function getPlatformImageUpload() { return unsupportedResponse('读
 export async function cancelPlatformImageUpload() { return unsupportedResponse('取消平台镜像上传会话') }
 export async function completePlatformImageUpload() { return unsupportedResponse('完成平台镜像导入') }
 
+/** Active pinned images a project reviewer may publish a manual Work template from. */
+export async function listProjectTemplateImages(options?: FixtureOptions): Promise<FixtureResult<PlatformImageCatalogSchema>> {
+  const projectId = options?.path?.projectId
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取项目平台镜像', projectId)
+  return fixtureResponse({
+    entries: platformImageCatalog.entries
+      .filter((entry) => entry.status === 'active')
+      .map(({ releaseReferenceCount: _count, ...entry }) => entry),
+  })
+}
+
+/** Work launcher scenes model a project with no model configured; Agent features are off, Work is not. */
+export async function getProjectAgentCapability(options?: FixtureOptions): Promise<FixtureResult<ProjectAgentCapabilitySchema>> {
+  const projectId = options?.path?.projectId
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取项目 Agent 配置', projectId)
+  if (activeScene.value.id.startsWith('work-')) return fixtureResponse({ status: 'unconfigured', reasonCode: 'LW_AGENT_MODEL_NOT_CONFIGURED' })
+  return unsupportedResponse('读取项目 Agent 配置')
+}
+
+export async function upgradeEnvironmentTemplate(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('升级 Work 模板') }
+
 export async function listResourceGpuCatalog(): Promise<FixtureResult<GpuCatalogEntrySchema[]>> { return fixtureResponse(gpuCatalogFixture) }
 export async function listResourceRates(_options?: FixtureOptions): Promise<FixtureResult<ResourceRateSchema[]>> { return unsupportedResponse('读取资源费率') }
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
@@ -860,16 +991,7 @@ export async function endResourceRate() { return unsupportedResponse('结束资�
 
 // Preview-only boundary: SDK operations the gallery does not cover fail
 // explicitly instead of crashing the module graph or faking a success.
-export async function getActiveProjectLlmPolicy(_options?: unknown): Promise<FixtureError> {
-  // Work launcher scenes model a project with no model configured.
-  if (activeScene.value.id.startsWith('work-launcher')) {
-    return Promise.resolve({
-      data: undefined,
-      error: { type: 'about:blank', title: '未配置', status: 404, detail: '当前项目没有已激活的项目 AI 设置。', instance: '/fixture-preview', requestId: 'fixture-llm-policy-not-found', diagnosticCode: 'LW_LLM_POLICY_NOT_FOUND', retryable: false },
-    })
-  }
-  return unsupportedResponse('读取项目 AI 设置')
-}
+export async function getActiveProjectLlmPolicy(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取项目 AI 设置') }
 export async function withdrawEnvironmentTemplateRelease(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('撤回环境模板版本') }
 export async function getOwnProjectEvaluationResult(options?: FixtureOptions): Promise<FixtureResult<StudentEvaluationResultSchema>> {
   const runId = options?.path?.runId

@@ -96,6 +96,14 @@
                       :retryable="false"
                       severity="error"
                     />
+                    <RouterLink
+                      v-if="retryDiagnostic.code === 'LW_RUNTIME_LEASE_NOT_ACTIVE' && data.class === 'work'"
+                      class="outlined-button small"
+                      data-testid="retry-lease-new-request-link"
+                      :to="{ path: '/researcher/resources', query: { projectId: data.projectId, releaseId: data.releaseId, releaseVersion: String(data.releaseVersion) } }"
+                    >
+                      提交新的资源申请
+                    </RouterLink>
                   </div>
 
                   <AsyncStateView
@@ -121,6 +129,7 @@
 </template>
 
 <script setup lang="ts">
+import { RouterLink } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import EventTimeline from '@/components/common/EventTimeline.vue'

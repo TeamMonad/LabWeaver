@@ -1,22 +1,26 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkEnvironmentsView from '@/views/researcher/WorkEnvironmentsView.vue'
 import {
-  getActiveProjectLlmPolicy,
+  createEnvironmentTemplateRelease,
+  getProjectAgentCapability,
   listEnvironments,
   listEnvironmentTemplateReleases,
   listProjectResourceLeases,
   listProjectResourceRequests,
+  listProjectTemplateImages,
 } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', () => ({
-  getActiveProjectLlmPolicy: vi.fn(),
+  createEnvironmentTemplateRelease: vi.fn(),
+  getProjectAgentCapability: vi.fn(),
   listEnvironments: vi.fn(),
   listEnvironmentTemplateReleases: vi.fn(),
   listProjectResourceLeases: vi.fn(),
   listProjectResourceRequests: vi.fn(),
+  listProjectTemplateImages: vi.fn(),
   withdrawEnvironmentTemplateRelease: vi.fn(),
 }))
 
@@ -50,22 +54,57 @@ const containerRelease = {
   projectId: 'project-1',
   courseId: null,
   runtimeKind: 'container',
+  purpose: 'work',
+  name: 'Python 分析',
+  description: '预装 Python 3.12 与 JupyterLab。',
+  templateFamilyId: 'python-analysis',
+  capabilities: ['terminal', 'files', 'applications', 'agent'],
   publishedAt: '2026-09-12T10:30:00.000Z',
   publishedBy: 'teacher-1',
-  agentRunId: 'run-1',
-  candidateId: 'candidate-1',
-  candidateRevision: 1,
-  approval: {},
-  artifact: { kind: 'container', id: 'artifact-1', build_request_id: 'build-1', repository: 'registry.example/labs/python', digest: 'sha256:0123456789abcdef0123' },
+  manualApproval: { templateFamilyId: 'python-analysis' },
+  artifact: { kind: 'catalog_container', id: 'artifact-1', catalog_id: 'image-1', repin_generation: 1, trust_revision: 1, repository: 'registry.example/labs/python', digest: 'sha256:0123456789abcdef0123' },
 }
 const vmRelease = {
   ...containerRelease,
   id: 'release-vm',
   version: 1,
   runtimeKind: 'virtual_machine',
+  name: 'Ubuntu 桌面',
+  description: '',
+  templateFamilyId: 'ubuntu-desktop',
+  capabilities: ['desktop', 'ssh', 'agent'],
+  manualApproval: null,
+  agentRunId: 'run-1',
   artifact: { kind: 'virtual_machine', id: 'artifact-2', format: 'qcow2', base_disk: { binding: 'disk', capacityBytes: 40 * 1024 ** 3, sourceRegistryDigest: 'sha256:x' } },
 }
 const withdrawnRelease = { ...containerRelease, id: 'release-old', version: 1, withdrawal: { reasonCode: 'TEACHER_WITHDRAWN' } }
+const experimentRelease = { ...containerRelease, id: 'release-experiment', version: 2, purpose: 'experiment', name: '课程实验' }
+
+const containerImage = {
+  catalogId: '0197f0e0-0000-7000-8000-000000000001',
+  kind: 'container',
+  binding: 'ubuntu-24.04-v1',
+  sourceReference: 'registry.example/labweaver-system/ubuntu:24.04',
+  resolvedDigest: 'sha256:9a3e7c6d1f2b4a8d3e6f7a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1',
+  mediaType: 'application/vnd.oci.image.manifest.v1+json',
+  sizeBytes: 1024,
+  status: 'active',
+  trustRevision: 4,
+  repinGeneration: 2,
+  pinnedAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: '2026-09-01T00:00:00.000Z',
+}
+const vmImage = {
+  ...containerImage,
+  catalogId: '0197f0e0-0000-7000-8000-000000000002',
+  kind: 'virtual_machine',
+  binding: 'ubuntu-24.04-vm-v1',
+  resolvedDigest: 'sha256:4b1d2f8a6c0e9d7b5a3f1e8c6d4b2a0f9e7c5d3b1a8f6e4c2d0b9a7f5e3c1d0b',
+  capacityBytes: 10 * 1024 ** 3,
+  format: 'qcow2',
+  repinGeneration: 1,
+}
+const disabledImage = { ...containerImage, catalogId: '0197f0e0-0000-7000-8000-000000000003', binding: 'alpine-v1', status: 'disabled' }
 
 const workSummary = {
   id: 'env-work-1',
@@ -119,32 +158,46 @@ async function mountAt(query: Record<string, string> = { projectId: 'project-1' 
   return { wrapper, router }
 }
 
+function field(wrapper: VueWrapper, label: string) {
+  const match = wrapper.findAll('.manual-form label.field').find((item) => item.find('span').text() === label)
+  if (!match) throw new Error(`field ${label} not found`)
+  return match.get('input, textarea')
+}
+
 describe('WorkEnvironmentsView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     projectsState.selectedProjectId = project.id
-    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue(problem(404, 'LW_LLM_POLICY_NOT_FOUND') as never)
+    vi.mocked(getProjectAgentCapability).mockResolvedValue({ data: { status: 'unconfigured', reasonCode: 'LW_AGENT_MODEL_NOT_CONFIGURED' }, error: undefined } as never)
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [workSummary], nextCursor: null }, error: undefined } as never)
-    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [containerRelease, vmRelease, withdrawnRelease], nextCursor: null }, error: undefined } as never)
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [containerRelease, vmRelease, withdrawnRelease, experimentRelease], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined } as never)
+    vi.mocked(listProjectTemplateImages).mockResolvedValue({ data: { entries: [containerImage, vmImage, disabledImage] }, error: undefined } as never)
   })
 
-  it('creates Work without a model: Agent is off with a reason, templates stay selectable', async () => {
+  it('lists only Work templates with name, description, capabilities and source; Agent is off with a reason', async () => {
     const { wrapper } = await mountAt()
     const note = wrapper.get('[data-testid="agent-availability"]')
-    expect(note.text()).toContain('未配置模型')
+    expect(note.attributes('data-agent-state')).toBe('unconfigured')
+    expect(note.text()).toContain('Agent 已关闭：项目还没有配置模型')
     expect(note.text()).toContain('手工创建和连接 Work 不受影响')
+    expect(getProjectAgentCapability).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
 
     const cards = wrapper.findAll('[role="radio"]')
-    expect(cards.map((card) => card.text())).toEqual([
-      expect.stringContaining('容器模板 v3'),
-      expect.stringContaining('虚拟机模板 v1'),
-    ])
-    expect(wrapper.text()).toContain('容器镜像 labs/python')
-    expect(wrapper.text()).toContain('sha256:0123456789ab')
-    expect(wrapper.text()).toContain('虚拟机磁盘 · qcow2 · 40 GiB')
+    expect(cards.map((card) => card.attributes('data-release-id'))).toEqual(['release-container', 'release-vm'])
+    const container = wrapper.get('[data-release-id="release-container"]')
+    expect(container.text()).toContain('Python 分析 v3')
+    expect(container.text()).toContain('容器 · 手工发布')
+    expect(container.text()).toContain('预装 Python 3.12 与 JupyterLab。')
+    expect(container.findAll('[data-capability]').map((chip) => chip.text())).toEqual(['浏览器终端', '文件', 'Web 应用', 'Agent（项目当前不可用）'])
+    expect(container.text()).toContain('容器镜像 labs/python · sha256:0123456789ab')
+    const vm = wrapper.get('[data-release-id="release-vm"]')
+    expect(vm.text()).toContain('虚拟机 · Agent 生成并审核')
+    expect(vm.text()).toContain('虚拟机磁盘 · qcow2 · 40 GiB')
+    // Withdrawn releases and course experiments never create Work.
     expect(wrapper.find('[data-release-id="release-old"]').exists()).toBe(false)
+    expect(wrapper.find('[data-release-id="release-experiment"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('已有 Work 不会被自动替换')
     wrapper.unmount()
   })
@@ -176,19 +229,21 @@ describe('WorkEnvironmentsView', () => {
     wrapper.unmount()
   })
 
-  it('explains the next step honestly when there is no template and no model', async () => {
-    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [withdrawnRelease], nextCursor: null }, error: undefined } as never)
+  it('points to manual publication when there is no Work template and no model, and opens the form', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [withdrawnRelease, experimentRelease], nextCursor: null }, error: undefined } as never)
     const { wrapper } = await mountAt()
     const empty = wrapper.get('[data-testid="templates-empty"]')
     expect(empty.text()).toContain('当前项目还没有可用的 Work 模板')
-    expect(empty.text()).toContain('只能通过 Agent 生成')
-    expect(empty.text()).toContain('手工模板需要后端支持')
+    expect(empty.text()).toContain('从平台镜像直接发布模板，不需要模型')
     expect(empty.find('a[href*="/researcher/software"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="manual-section"]').attributes('open')).toBeDefined()
+    // Only active pinned images are offered.
+    expect(wrapper.findAll('[data-image-id]').map((item) => item.attributes('data-image-id'))).toEqual([containerImage.catalogId, vmImage.catalogId])
     wrapper.unmount()
   })
 
-  it('offers Agent template generation only when a model is available', async () => {
-    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: { binding: { model: 'claude-sonnet' } }, error: undefined } as never)
+  it('offers Agent template generation only when a model is configured', async () => {
+    vi.mocked(getProjectAgentCapability).mockResolvedValue({ data: { status: 'configured', model: 'claude-sonnet' }, error: undefined } as never)
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     const { wrapper } = await mountAt()
     expect(wrapper.get('[data-testid="agent-availability"]').text()).toContain('claude-sonnet')
@@ -196,13 +251,135 @@ describe('WorkEnvironmentsView', () => {
     wrapper.unmount()
   })
 
-  it('does not treat an unreadable AI setting as "no model"', async () => {
-    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue(problem(503, 'LW_CONTROL_UNAVAILABLE') as never)
+  it('says why a configured model binding is unusable without blocking Work', async () => {
+    vi.mocked(getProjectAgentCapability).mockResolvedValue({ data: { status: 'unavailable', reasonCode: 'LW_AGENT_MODEL_BINDING_UNAVAILABLE' }, error: undefined } as never)
     const { wrapper } = await mountAt()
     const note = wrapper.get('[data-testid="agent-availability"]').text()
-    expect(note).toContain('暂时无法确认 Agent 是否可用')
-    expect(note).toContain('LW_CONTROL_UNAVAILABLE')
-    expect(note).not.toContain('未配置模型')
+    expect(note).toContain('项目配置的模型在当前平台部署中不可用')
+    expect(wrapper.findAll('[role="radio"]')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('does not treat an unreadable Agent configuration as "no model"', async () => {
+    vi.mocked(getProjectAgentCapability).mockResolvedValue({
+      data: undefined,
+      error: { status: 503, diagnosticCode: 'LW_AGENT_CONFIGURATION_UNREADABLE', detail: 'config unreadable', requestId: 'req-agent', retryable: true },
+    } as never)
+    const { wrapper } = await mountAt()
+    const note = wrapper.get('[data-testid="agent-availability"]')
+    expect(note.attributes('data-agent-state')).toBe('unreadable')
+    expect(note.text()).toContain('暂时无法确认 Agent 是否可用：平台无法读取项目的 Agent 配置。')
+    expect(note.text()).toContain('读取失败不代表项目没有模型')
+    expect(note.text()).toContain('LW_AGENT_CONFIGURATION_UNREADABLE')
+    expect(note.text()).toContain('req-agent')
+    expect(note.text()).not.toContain('Agent 已关闭')
+    // Templates stay selectable; the Agent chip is shown as unavailable.
+    expect(wrapper.findAll('[role="radio"]')).toHaveLength(2)
+    expect(wrapper.get('[data-release-id="release-container"] [data-capability="agent"]').text()).toContain('项目当前不可用')
+    wrapper.unmount()
+  })
+
+  it('publishes a reviewed manual container template once per reviewed content and reloads the template list', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
+    vi.mocked(createEnvironmentTemplateRelease)
+      .mockResolvedValueOnce({ data: undefined, error: { status: 503, diagnosticCode: 'LW_CONTROL_UNAVAILABLE', detail: 'control down', requestId: 'req-publish', retryable: true } } as never)
+      .mockResolvedValueOnce({ data: { operationId: 'op-1', statusUrl: '/api/v1/operations/op-1' }, error: undefined } as never)
+    const { wrapper } = await mountAt()
+    const publish = () => wrapper.get('[data-testid="manual-publish"]')
+    expect((publish().element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.get('[data-testid="manual-problem"]').text()).toContain('请选择一个平台镜像')
+
+    await wrapper.get(`[data-image-id="${containerImage.catalogId}"]`).trigger('click')
+    await field(wrapper, '模板名称').setValue('Python 分析')
+    await field(wrapper, '模板系列标识').setValue('python-analysis')
+    await field(wrapper, '说明（用途、预装软件）').setValue('预装 Python 3.12。')
+    await field(wrapper, '运行位置（provider binding）').setValue('kubernetes-work')
+    await field(wrapper, '安全配置（security profile）').setValue('restricted-v1')
+    await field(wrapper, '审核说明').setValue('已核对镜像与端口。')
+    expect(wrapper.get('[data-testid="manual-problem"]').text()).toContain('请先确认')
+    await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+    expect(wrapper.find('[data-testid="manual-problem"]').exists()).toBe(false)
+
+    await wrapper.get('.manual-form').trigger('submit')
+    await flushPromises()
+    expect(createEnvironmentTemplateRelease).toHaveBeenCalledTimes(1)
+    const first = vi.mocked(createEnvironmentTemplateRelease).mock.calls[0][0]
+    expect(first.path).toEqual({ projectId: 'project-1' })
+    expect(first.body).toMatchObject({
+      projectId: 'project-1',
+      runtimeKind: 'container',
+      manual: {
+        platformImageId: containerImage.catalogId,
+        platformImageGeneration: 2,
+        templateFamilyId: 'python-analysis',
+        description: '预装 Python 3.12。',
+        reason: '已核对镜像与端口。',
+        confirmed: true,
+        spec: {
+          class: 'work',
+          name: 'Python 分析',
+          entries: [{ name: 'app', protocol: 'http', servicePort: 8080 }],
+          network: { mode: 'deny_all' },
+          security: { rootFilesystemPolicy: 'read_only_required', securityProfileBinding: 'restricted-v1', userPolicy: 'non_root_required' },
+          runtime: { kind: 'container', provider_binding: 'kubernetes-work', service_port: 8080, terminal: { executable: '/bin/bash', args: [], workingDirectory: '/workspace' } },
+          retention: { class: 'run_evidence', disposition: 'delete', policyRevision: 1 },
+        },
+      },
+    })
+    expect(first.body).not.toHaveProperty('candidateId')
+    expect(first.body.manual?.spec.runtime).not.toHaveProperty('build_context')
+    const banner = wrapper.get('[data-testid="manual-publisher"] .diagnostic-banner')
+    expect(banner.text()).toContain('req-publish')
+    const releaseReads = vi.mocked(listEnvironmentTemplateReleases).mock.calls.length
+
+    // Retrying the same reviewed content reuses its Idempotency-Key and retention identity.
+    await banner.findAll('button').find((button) => button.text() === '重试')!.trigger('click')
+    await flushPromises()
+    const second = vi.mocked(createEnvironmentTemplateRelease).mock.calls[1][0]
+    expect(second.headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key'])
+    expect(second.body.manual?.spec.retention.policyId).toBe(first.body.manual?.spec.retention.policyId)
+    expect(wrapper.get('[data-testid="manual-accepted"]').text()).toContain('发布已受理')
+    expect(vi.mocked(listEnvironmentTemplateReleases).mock.calls.length).toBeGreaterThan(releaseReads)
+    wrapper.unmount()
+  })
+
+  it('pins a VM template to the reviewed catalog disk with SSH on port 22', async () => {
+    vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: { operationId: 'op-1', statusUrl: '/x' }, error: undefined } as never)
+    const { wrapper } = await mountAt()
+    await wrapper.get('[data-testid="manual-section"] > summary').trigger('click')
+    wrapper.get<HTMLDetailsElement>('[data-testid="manual-section"]').element.open = true
+    await wrapper.get('[data-testid="manual-section"]').trigger('toggle')
+    await flushPromises()
+    await wrapper.get(`[data-image-id="${vmImage.catalogId}"]`).trigger('click')
+    await field(wrapper, '模板名称').setValue('Ubuntu 桌面')
+    await field(wrapper, '模板系列标识').setValue('ubuntu-desktop')
+    await field(wrapper, '运行位置（provider binding）').setValue('kubevirt-primary-v1')
+    await field(wrapper, '安全配置（security profile）').setValue('kubevirt-restricted-v1')
+    await field(wrapper, '审核说明').setValue('已核对磁盘。')
+    await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+    expect(wrapper.get('[data-testid="manual-problem"]').text()).toContain('磁盘存储类')
+    await field(wrapper, '磁盘存储类（storage class）').setValue('vm-rwo-primary-v1')
+    await wrapper.get('.manual-form').trigger('submit')
+    await flushPromises()
+    expect(vi.mocked(createEnvironmentTemplateRelease).mock.calls[0][0].body).toMatchObject({
+      runtimeKind: 'virtual_machine',
+      manual: {
+        platformImageId: vmImage.catalogId,
+        platformImageGeneration: 1,
+        spec: {
+          network: { mode: 'deny_all' },
+          entries: [{ name: 'ssh', protocol: 'ssh', servicePort: 22 }],
+          security: { rootFilesystemPolicy: 'mutable_required' },
+          runtime: {
+            kind: 'virtual_machine',
+            provider_binding: 'kubevirt-primary-v1',
+            storage_class_binding: 'vm-rwo-primary-v1',
+            ssh_port: 22,
+            base_disk: { binding: 'ubuntu-24.04-vm-v1', capacityBytes: 10 * 1024 ** 3, sourceRegistryDigest: vmImage.resolvedDigest },
+          },
+        },
+      },
+    })
     wrapper.unmount()
   })
 
@@ -210,7 +387,8 @@ describe('WorkEnvironmentsView', () => {
     const { wrapper } = await mountAt({ projectId: 'project-1', environmentId: 'env-work-1' })
     expect(wrapper.find('[data-testid="environment-detail"]').exists()).toBe(true)
     expect(listEnvironmentTemplateReleases).not.toHaveBeenCalled()
-    expect(getActiveProjectLlmPolicy).not.toHaveBeenCalled()
+    expect(getProjectAgentCapability).not.toHaveBeenCalled()
+    expect(listProjectTemplateImages).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

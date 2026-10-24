@@ -183,8 +183,9 @@ describe('ResourceRequestView', () => {
 
     expect(wrapper.text()).toContain('CPU（m）')
     expect(wrapper.text()).toContain('1000m = 1 核心')
-    expect(wrapper.text()).toContain('当前项目没有可用的已发布模板')
+    expect(wrapper.text()).toContain('当前项目没有可用的已发布 Work 模板')
     expect(wrapper.find('a[href^="/researcher/software"]').exists()).toBe(true)
+    expect(wrapper.find('a[href^="/researcher/environments"]').text()).toBe('发布手工 Work 模板')
     expect(wrapper.find('a[href^="/teacher/materials"]').exists()).toBe(false)
   })
 

@@ -56,8 +56,31 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '没有找到这个账号。请确认用户名完整且正确。'
     case 'LW_ACCESS_DIRECTORY_USER_DISABLED':
       return '该账号已停用，不能加入项目。'
+    // Work template, lease and Agent configuration codes (#202).
+    case 'LW_AGENT_CONFIGURATION_UNREADABLE':
+      return '平台无法读取项目的 Agent 配置。'
+    case 'LW_RUNTIME_LEASE_NOT_ACTIVE':
+      return '这个 Work 的资源使用授权已到期、被回收或尚未生效，不能继续启动、重启、恢复或升级。'
+    case 'LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID':
+      return '平台暂时无法核验这个 Work 的资源使用授权，本次操作没有执行。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM':
+      return '虚拟机 Work 不支持在原 Work 内升级模板：需要导出/导入流程，当前不可用。'
     default:
       return message
+  }
+}
+
+/** Next step tied to a specific diagnostic code; it takes precedence over the HTTP-status fallback. */
+function codeNextStep(code: string): string | undefined {
+  switch (code) {
+    case 'LW_RUNTIME_LEASE_NOT_ACTIVE':
+      return '请提交新的资源申请；申请审批通过后，平台会创建一个新的 Work。'
+    case 'LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID':
+      return '请稍后重试；多次失败请把下方诊断信息发给管理员。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM':
+      return '如需使用新版本，请用新版本模板新建 Work，再自行把需要的数据迁移过去。'
+    default:
+      return undefined
   }
 }
 
@@ -96,13 +119,15 @@ type DiagnosticProblem = Pick<Partial<ProblemDetails>, 'requestId' | 'status' | 
 
 export function makeDiagnostic(code: string, message: string, retryable = false, problem?: DiagnosticProblem): DiagnosticViewModel {
   const diagnostic: DiagnosticViewModel = { code, message: readableDiagnosticMessage(code, message), retryable }
+  const specificNextStep = codeNextStep(code)
+  if (specificNextStep) diagnostic.nextStep = specificNextStep
   if (!problem) return diagnostic
   const requestId = typeof problem.requestId === 'string' && problem.requestId ? problem.requestId : headerRequestId(problem)
   if (requestId) diagnostic.requestId = requestId
   if (typeof problem.traceId === 'string' && problem.traceId) diagnostic.traceId = problem.traceId
   if (typeof problem.status === 'number') {
     diagnostic.status = problem.status
-    const nextStep = diagnosticNextStep(problem.status, retryable)
+    const nextStep = specificNextStep ?? diagnosticNextStep(problem.status, retryable)
     if (nextStep) diagnostic.nextStep = nextStep
   }
   return diagnostic

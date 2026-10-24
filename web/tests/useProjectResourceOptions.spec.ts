@@ -168,4 +168,27 @@ describe('useProjectResourceOptions environments', () => {
     expect(state.environments.kind).toBe('error')
     scope.stop()
   })
+
+  it('offers only Work releases that are not withdrawn, titled by the template name', async () => {
+    mocks.listEnvironments.mockResolvedValue(environmentPage([]))
+    const base = { runtimeKind: 'container', publishedAt: '2026-09-12T10:30:00.000Z', name: 'Python 分析' }
+    mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({
+      items: [
+        { ...base, id: 'release-work', version: 2, purpose: 'work' },
+        { ...base, id: 'release-withdrawn', version: 1, purpose: 'work', withdrawal: { reasonCode: 'TEACHER_WITHDRAWN' } },
+        { ...base, id: 'release-experiment', version: 3, purpose: 'experiment' },
+      ],
+    })
+    mocks.apiGet.mockResolvedValue({ data: [], error: undefined })
+
+    const scope = effectScope()
+    let state!: ReturnType<typeof useProjectResourceOptions>
+    scope.run(() => { state = useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>(null)) })
+
+    await vi.waitFor(() => expect(state.releases.kind).toBe('success'))
+    const releases = state.releases.kind === 'success' ? state.releases.data : []
+    expect(releases.map((release) => release.id)).toEqual(['release-work'])
+    expect(releases[0].label).toContain('Python 分析 v2')
+    scope.stop()
+  })
 })

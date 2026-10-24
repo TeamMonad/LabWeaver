@@ -7,7 +7,7 @@ import { apiClient } from '@/api/client'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { fetchEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { formatTimestamp } from '@/utils/format'
-import { workTemplateTitle } from '@/utils/workTemplate'
+import { isWorkTemplate, workTemplateTitle } from '@/utils/workTemplate'
 import {
   fetchProjectWorkEnvironments,
   ProjectWorkEnvironmentPaginationError,
@@ -201,7 +201,8 @@ export function useProjectResourceOptions(
     if (releaseResult.error) {
       releases.value = { kind: 'error', diagnostic: diagnostic(releaseResult.error, 'PROJECT_RELEASES_LOAD_FAILED', '加载已发布版本失败') }
     } else {
-      const items = releaseResult.items.filter((item) => !item.withdrawal)
+      // Only Work releases create Work; course experiments are started from their course.
+      const items = releaseResult.items.filter(isWorkTemplate)
       releases.value = stateFromItems(
         items.map((item) => ({
           id: item.id,

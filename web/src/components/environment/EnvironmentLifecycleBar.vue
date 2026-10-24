@@ -92,6 +92,14 @@
         severity="error"
         @retry="retryLifecycle"
       />
+      <RouterLink
+        v-if="lifecycleDiagnostic.code === 'LW_RUNTIME_LEASE_NOT_ACTIVE' && env.instance.kind === 'success' && env.instance.data.class === 'work'"
+        class="outlined-button small lease-request-link"
+        data-testid="lease-new-request-link"
+        :to="{ path: '/researcher/resources', query: { projectId: env.instance.data.projectId, releaseId: env.instance.data.releaseId, releaseVersion: String(env.instance.data.releaseVersion) } }"
+      >
+        提交新的资源申请
+      </RouterLink>
     </div>
 
     <ConfirmDialog
@@ -118,6 +126,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import { deleteDialogCopy } from '@/utils/environmentLifecycle'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -163,6 +172,11 @@ const deleteCopy = computed(() => deleteDialogCopy(deleteEnvironment.value))
 
 .lifecycle-result {
   margin-top: var(--space-4);
+}
+
+.lease-request-link {
+  display: inline-flex;
+  margin-top: var(--space-2);
 }
 
 .lifecycle-action-hint {

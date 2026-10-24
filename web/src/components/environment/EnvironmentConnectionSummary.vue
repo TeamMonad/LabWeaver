@@ -42,6 +42,32 @@
       {{ readiness.detail }}
       <span v-if="autoChecking"> 页面每隔几秒自动重新检查。</span>
     </p>
+    <p
+      v-if="instance.connection.reasonCode && readiness.kind !== 'ready' && readiness.kind !== 'needs-grant'"
+      class="connection-summary__hint"
+      data-testid="connection-reason"
+    >
+      平台诊断码：<code>{{ instance.connection.reasonCode }}</code>
+      <template v-if="instance.connection.observedAt"> · 检查于 {{ formatTimestamp(instance.connection.observedAt) }}</template>
+    </p>
+    <div
+      v-if="instance.connection.guestInstructions.length > 0"
+      class="connection-summary__guest"
+      data-testid="guest-instructions"
+    >
+      <strong>登录环境内系统</strong>
+      <p class="connection-summary__hint">
+        平台账号只用于签发访问授权，不会自动登录环境内的操作系统。请按以下说明操作：
+      </p>
+      <ol>
+        <li
+          v-for="(instruction, index) in instance.connection.guestInstructions"
+          :key="index"
+        >
+          {{ instruction }}
+        </li>
+      </ol>
+    </div>
     <div
       v-if="(readiness.kind === 'needs-grant' || readiness.kind === 'needs-regrant') && !grantBlockReason"
       class="connection-summary__actions"
@@ -103,15 +129,16 @@ import { computed } from 'vue'
 import type {
   AccessGrantSchema,
   ConsoleCapabilityAvailabilitySchema,
+  EnvironmentDetailSchema,
   EnvironmentEndpointSchema,
-  EnvironmentInstanceSchema,
 } from '@/generated/contracts'
 import type { AsyncState } from '@/types/async'
 import { connectionMethods, connectionReadiness } from '@/utils/environmentConnection'
+import { formatTimestamp } from '@/utils/format'
 import { environmentStateLabel } from '@/utils/stateLabels'
 
 const props = defineProps<{
-  instance: EnvironmentInstanceSchema
+  instance: EnvironmentDetailSchema
   endpoints: AsyncState<EnvironmentEndpointSchema[]>
   grant: AsyncState<AccessGrantSchema>
   /** Browser console kinds the current access grant permits; read only while a grant is usable. */
@@ -128,7 +155,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{ 'open-console': [kind: 'xterm' | 'novnc']; recheck: []; 'issue-grant': [] }>()
 
-const readiness = computed(() => connectionReadiness(props.instance, props.endpoints, props.grant, props.instanceBlockReason, props.now))
+const readiness = computed(() => connectionReadiness(props.instance, props.grant, props.instanceBlockReason, props.now))
 const consoleKinds = computed(() => readiness.value.kind === 'ready' && props.consoleCapability.kind === 'success'
   ? props.consoleCapability.data.kinds
   : [])
@@ -159,4 +186,6 @@ const consoleHint = computed(() => {
 .connection-method { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); padding: var(--space-2) 0; border-top: 1px solid var(--md-sys-color-outline-variant); }
 .connection-method__text { display: grid; gap: 2px; min-width: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .connection-summary__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.connection-summary__guest { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-small); }
+.connection-summary__guest ol { margin: 0; padding-inline-start: var(--space-5); overflow-wrap: anywhere; }
 </style>
