@@ -117,9 +117,7 @@ function readableDiagnosticMessage(code: string, message: string): string {
     case 'LW_AUTH_CSRF_REJECTED':
       return '登录会话已在其他页面变化或安全校验已失效，这次操作没有执行。'
     case 'LW_SDK_SESSION_CHANGED':
-      return '登录账号已变化，这次操作属于之前的账号，结果已丢弃。'
-    case 'LW_SDK_SESSION_UNCONFIRMED':
-      return '暂时无法确认当前登录账号，这次操作没有发送。'
+      return '登录账号已变化，这次操作属于之前的账号，没有执行或结果已丢弃。'
     default:
       return message
   }
@@ -156,9 +154,7 @@ function codeNextStep(code: string): string | undefined {
       return '请先刷新账目确认这笔操作是否已经生效，不要换一笔新操作重复提交。'
     case 'LW_AUTH_CSRF_REJECTED':
     case 'LW_SDK_SESSION_CHANGED':
-      return '平台已重新确认当前登录账号。请核对页面上的账号和内容，再手动重新提交；平台不会自动重试。'
-    case 'LW_SDK_SESSION_UNCONFIRMED':
-      return '请检查网络后重试；仍失败请刷新页面或重新登录。'
+      return '平台会重新确认当前登录账号。请核对页面上的账号和内容，再手动重新提交；平台不会自动重试。'
     default:
       return undefined
   }

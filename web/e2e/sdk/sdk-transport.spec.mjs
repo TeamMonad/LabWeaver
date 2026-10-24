@@ -124,7 +124,11 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ csrfToken: 'synchronizer-token', expiresAt: '2099-01-01T00:00:00.000Z' }),
+      body: JSON.stringify({
+        csrfToken: 'synchronizer-token',
+        actorId: '01900000-0000-7000-8000-0000000000aa',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      }),
     })
   })
   await page.route('**/api/v1/environments**', async (route) => {

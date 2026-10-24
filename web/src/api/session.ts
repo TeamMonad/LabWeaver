@@ -4,19 +4,23 @@ import { readonly, ref } from 'vue'
  * Which browser session API calls belong to.
  *
  * The BFF session cookie is HttpOnly and shared by every tab, so another tab
- * can sign out or sign in as someone else without this one noticing. useAuth
- * advances the epoch when the signed-in actor changes or the session is
- * confirmed ended; the API transport discards the result of any request
- * started under an older epoch, and the AppShell re-creates the routed page so
- * no form or list of the previous actor survives.
+ * can sign out or sign in as someone else without this one noticing. The epoch
+ * advances when the signed-in actor changes or the session is confirmed ended;
+ * the API transport discards the result of any request started under an older
+ * epoch, streams opened in it stop, and the AppShell re-creates the routed page
+ * so no form or list of the previous actor survives.
  *
- * A CSRF or session rejection means the cookie may already belong to someone
- * else. Until useAuth has read the session again, requests wait instead of
- * reaching the server with a token issued for the new cookie. The rejected
- * request itself is never replayed: the user decides whether to submit again.
+ * Writes are bound to their actor by the server: a CSRF token is valid only
+ * for the session that issued it, and the transport sends a write only with a
+ * token issued to the actor the request started with. A CSRF or session
+ * rejection retires cached tokens and reads the actor again; the rejected
+ * request itself is never replayed, the user decides whether to submit again.
  */
 const epoch = ref(0)
 let epochEnded = new AbortController()
+// The actor the current epoch belongs to: undefined until an identity is first
+// known, null after a confirmed sign-out.
+let epochActor: string | null | undefined
 
 export const sessionEpoch = readonly(epoch)
 
@@ -31,50 +35,43 @@ export function sessionEpochSignal(): AbortSignal {
   return epochEnded.signal
 }
 
-let rejections = 0
-let confirmedRejections = 0
-let confirmSession: (() => Promise<void>) | null = null
-let confirming: Promise<boolean> | null = null
+/**
+ * Records who the browser session belongs to: an actor id, or null once the
+ * session is confirmed ended. Another actor, or a sign-out after an actor was
+ * known, ends the epoch; the first identity of the page does not.
+ */
+export function recordSessionActor(actorId: string | null): void {
+  const ended = actorId === null ? Boolean(epochActor) : epochActor !== undefined && epochActor !== actorId
+  if (ended) advanceSessionEpoch()
+  epochActor = actorId
+}
+/** The actor the current epoch belongs to, when it is known. */
+export function sessionActor(): string | undefined {
+  return epochActor ?? undefined
+}
 
-/** Installs how the current actor is read again; a rejected promise leaves the session unconfirmed. */
+let rejections = 0
+let confirmSession: (() => Promise<void>) | null = null
+let confirming: Promise<void> | null = null
+
+/** Installs how the current actor is read again. */
 export function registerSessionConfirmation(confirm: () => Promise<void>): void {
   confirmSession = confirm
 }
 
-/** The server rejected the session or its CSRF token: cached tokens are stale and the actor must be read again. */
+/** The server rejected the session or its CSRF token: cached tokens are stale and the actor is read again. */
 export function reportSessionRejected(): void {
   rejections += 1
-  if (confirmSession) void confirmCurrentSession(confirmSession)
-}
-
-/** Changes whenever a cached CSRF token may belong to another session. */
-export function sessionCredentialVersion(): string {
-  return `${epoch.value}:${rejections}`
-}
-
-function confirmCurrentSession(confirm: () => Promise<void>): Promise<boolean> {
-  if (confirming) return confirming
-  // A rejection reported while this read is in flight may come from a newer
-  // cookie, so this read only confirms the rejections that preceded it.
-  const covered = rejections
-  confirming = confirm()
-    .then(
-      () => {
-        confirmedRejections = Math.max(confirmedRejections, covered)
-        return true
-      },
-      () => false,
-    )
+  if (!confirmSession || confirming) return
+  confirming = confirmSession()
+    // A failed read keeps the current identity; the next rejection reads again.
+    .catch(() => undefined)
     .finally(() => {
       confirming = null
     })
-  return confirming
 }
 
-/** Resolves false when the actor could not be read again; the caller must not send its request. */
-export async function awaitConfirmedSession(): Promise<boolean> {
-  while (confirmSession && confirmedRejections < rejections) {
-    if (!(await confirmCurrentSession(confirmSession))) return false
-  }
-  return true
+/** Changes whenever a cached CSRF token may no longer match the session cookie. */
+export function sessionCredentialVersion(): string {
+  return `${epoch.value}:${rejections}`
 }

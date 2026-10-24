@@ -227,30 +227,22 @@ describe('BFF session epoch (#198)', () => {
     expect(sessionEpoch.value).toBe(1)
   })
 
-  it('re-reads the actor when the transport reports a CSRF rejection and only then lets requests through', async () => {
-    let answerReread!: (response: Response) => void
+  it('re-reads the actor when the transport reports a CSRF rejection and ends the epoch for another actor', async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(sessionOf(actorA))
-      .mockReturnValueOnce(new Promise<Response>((resolve) => { answerReread = resolve }))
+      .mockResolvedValueOnce(sessionOf(actorB))
     vi.stubGlobal('fetch', fetch)
     const { useAuth } = await import('@/composables/useAuth')
     const session = await import('@/api/session')
     const auth = useAuth()
     await auth.loadUser()
+    expect(session.sessionActor()).toBe(actorA)
 
     session.reportSessionRejected()
-    let released = false
-    const gate = session.awaitConfirmedSession().then((confirmed) => {
-      released = true
-      return confirmed
-    })
-    await Promise.resolve()
-    expect(fetch).toHaveBeenLastCalledWith('/api/v1/auth/session', expect.objectContaining({ credentials: 'include' }))
-    expect(released).toBe(false)
+    await vi.waitFor(() => expect(auth.user.value?.profile).toMatchObject({ actor_id: actorB }))
 
-    answerReread(sessionOf(actorB))
-    expect(await gate).toBe(true)
-    expect(auth.user.value?.profile).toMatchObject({ actor_id: actorB })
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/auth/session', expect.objectContaining({ credentials: 'include' }))
+    expect(session.sessionActor()).toBe(actorB)
     expect(session.sessionEpoch.value).toBe(1)
   })
 })

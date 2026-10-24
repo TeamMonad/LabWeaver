@@ -2,7 +2,7 @@ import { ref, computed, watch } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
-import { advanceSessionEpoch, registerSessionConfirmation } from '@/api/session'
+import { recordSessionActor, registerSessionConfirmation } from '@/api/session'
 import { actorIdFromProfile } from '@/utils/navigation'
 import { syncTrackedSubmissionOwner } from '@/utils/trackedSubmissions'
 import { syncPendingCommandOwner } from '@/utils/pendingCommands'
@@ -29,11 +29,6 @@ const user = ref<CurrentUser | null>(null)
 const isLoading = ref(false)
 const error = ref<Error | null>(null)
 
-// The actor the current session epoch belongs to: undefined until an identity
-// is first known, null after a confirmed sign-out. An identity that is only
-// temporarily unknown (network error, 503) keeps the epoch.
-let epochActor: string | null | undefined
-
 // Browser-local data belongs to one actor: signing in as someone else, signing
 // out or losing the session discards what the previous actor left behind. The
 // initial unauthenticated state (before the session is read) is not a sign-out.
@@ -46,16 +41,15 @@ watch(() => actorIdFromProfile(user.value?.profile), (actorId, previous) => {
   if (!actorId) return
   // Another actor now owns this browser session (for example after a sign-in
   // in another tab): retire the previous actor's pages and in-flight requests.
-  if (epochActor !== undefined && epochActor !== actorId) advanceSessionEpoch()
-  epochActor = actorId
+  // An identity that is only temporarily unknown (network error, 503) keeps the epoch.
+  recordSessionActor(actorId)
 }, { flush: 'sync' })
 
 /** The session is known to have ended: the server said so or the user signed out. */
 function confirmSignedOut() {
   user.value = null
   syncPendingCommandOwner(null)
-  if (epochActor) advanceSessionEpoch()
-  epochActor = null
+  recordSessionActor(null)
 }
 type TopLevelNavigate = (url: string) => void
 

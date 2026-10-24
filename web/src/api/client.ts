@@ -6,16 +6,15 @@ import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 import type { ServerSentEventsOptions } from '@/generated/contracts/core/serverSentEvents.gen'
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
-import {
-  awaitConfirmedSession,
-  reportSessionRejected,
-  sessionCredentialVersion,
-  sessionEpoch,
-  sessionEpochSignal,
-} from './session'
+import { reportSessionRejected, sessionActor, sessionCredentialVersion, sessionEpoch, sessionEpochSignal } from './session'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
-export type CsrfTokenProvider = () => Promise<string | undefined>
+/** A CSRF token and the actor of the BFF session that issued it. */
+export interface CsrfToken {
+  token: string
+  actorId: string
+}
+export type CsrfTokenProvider = () => Promise<CsrfToken | undefined>
 
 export type LabWeaverApiAuthentication =
   | { mode: 'bearer'; accessToken: AccessTokenProvider }
@@ -35,7 +34,6 @@ export type LabWeaverClientDiagnostic =
   | 'LW_SDK_REQUEST_TIMEOUT'
   | 'LW_SDK_TRANSPORT_FAILED'
   | 'LW_SDK_SESSION_CHANGED'
-  | 'LW_SDK_SESSION_UNCONFIRMED'
 
 export class LabWeaverApiError extends Error {
   readonly diagnosticCode: LabWeaverClientDiagnostic | string
@@ -88,15 +86,16 @@ function isUnsafeMethod(method: string | undefined): boolean {
 }
 
 function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfTokenProvider {
-  // A token belongs to one session: another actor, a confirmed sign-out or any
-  // CSRF/session rejection changes the credential version and retires it.
-  let cached: { token: string; expiresAt: number; version: string } | undefined
-  let inFlight: { token: Promise<string>; version: string } | undefined
+  // A token is kept with the actor of the session that issued it. An epoch
+  // change or any CSRF/session rejection changes the credential version and
+  // retires it, so the next write asks the BFF which session the cookie holds.
+  let cached: { csrf: CsrfToken; expiresAt: number; version: string } | undefined
+  let inFlight: { csrf: Promise<CsrfToken>; version: string } | undefined
   return async () => {
     const version = sessionCredentialVersion()
-    if (cached?.version === version && cached.expiresAt - Date.now() > 30_000) return cached.token
-    if (inFlight?.version === version) return inFlight.token
-    const token = axios
+    if (cached?.version === version && cached.expiresAt - Date.now() > 30_000) return cached.csrf
+    if (inFlight?.version === version) return inFlight.csrf
+    const csrf = axios
       .get('/api/v1/auth/csrf', {
         baseURL: baseUrl,
         timeout,
@@ -106,18 +105,23 @@ function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfToken
       .then((response) => {
         const body = response.data as Record<string, unknown>
         const expiresAt = typeof body.expiresAt === 'string' ? Date.parse(body.expiresAt) : Number.NaN
-        if (typeof body.csrfToken !== 'string' || !body.csrfToken || !Number.isFinite(expiresAt)) {
+        if (
+          typeof body.csrfToken !== 'string' || !body.csrfToken ||
+          typeof body.actorId !== 'string' || !body.actorId ||
+          !Number.isFinite(expiresAt)
+        ) {
           throw new LabWeaverApiError('LW_SDK_PROBLEM_INVALID', 'The BFF returned an invalid CSRF response.')
         }
+        const issued = { token: body.csrfToken, actorId: body.actorId }
         // A token issued while the session changed is not kept for later writes.
-        if (sessionCredentialVersion() === version) cached = { token: body.csrfToken, expiresAt, version }
-        return body.csrfToken
+        if (sessionCredentialVersion() === version) cached = { csrf: issued, expiresAt, version }
+        return issued
       })
       .finally(() => {
-        if (inFlight?.token === token) inFlight = undefined
+        if (inFlight?.csrf === csrf) inFlight = undefined
       })
-    inFlight = { token, version }
-    return token
+    inFlight = { csrf, version }
+    return csrf
   }
 }
 
@@ -159,39 +163,32 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
 
   instance.interceptors.request.use(async (config) => {
     requestEpochs.set(config, sessionEpoch.value)
-    // Credentials are fetched asynchronously, and a concurrent request may report
-    // a rejection meanwhile: the cookie may then already belong to another actor.
-    // The credential version is taken before the gate, so a rejection reported
-    // while this request resumes is never mistaken for a confirmed one. Any
-    // change sends the request through the gate again with fresh credentials;
-    // it has never reached the server, so this is not a replay.
-    for (;;) {
-      const credentialVersion = sessionCredentialVersion()
-      if (!(await awaitConfirmedSession())) {
-        throw new LabWeaverApiError(
-          'LW_SDK_SESSION_UNCONFIRMED',
-          'The signed-in session could not be confirmed; the request was not sent.',
-        )
+    const actor = sessionActor()
+    if (authentication.mode === 'bearer') {
+      const token = await authentication.accessToken()
+      if (!token) {
+        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+      } else {
+        config.headers.Authorization = `Bearer ${token}`
       }
-      // The actor changed while this request waited: a form of the previous actor is never sent as the new one.
-      if (startedInEarlierSession(config)) throw sessionChanged()
-      if (sessionCredentialVersion() !== credentialVersion) continue
-      if (authentication.mode === 'bearer') {
-        const token = await authentication.accessToken()
-        if (!token) {
-          throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
-        } else {
-          config.headers.Authorization = `Bearer ${token}`
-        }
-      } else if (isUnsafeMethod(config.method)) {
-        const token = await csrfToken?.()
-        if (!token) {
-          throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
-        }
-        config.headers['X-CSRF-Token'] = token
+    } else if (isUnsafeMethod(config.method)) {
+      const csrf = await csrfToken?.()
+      if (!csrf) {
+        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
       }
-      if (sessionCredentialVersion() === credentialVersion) return config
+      // The BFF accepts a token only with the session that issued it, so a
+      // write carrying a token of its own actor can never be accepted for
+      // another one, whenever it is dispatched. A token of another actor means
+      // the cookie changed hands: this write belongs to the previous actor.
+      if (actor !== undefined && csrf.actorId !== actor) {
+        reportSessionRejected()
+        throw sessionChanged()
+      }
+      config.headers['X-CSRF-Token'] = csrf.token
     }
+    // Reading the bearer of another actor advances the epoch.
+    if (startedInEarlierSession(config)) throw sessionChanged()
+    return config
   })
 }
 
