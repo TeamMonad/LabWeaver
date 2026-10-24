@@ -1,5 +1,7 @@
 #![allow(dead_code, clippy::panic)]
 
+pub mod manual_release;
+
 use std::{error::Error, path::Path, str::FromStr};
 
 use async_trait::async_trait;

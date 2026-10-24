@@ -15,6 +15,7 @@ Environment 唯一写入环境 Namespace、Quota、PVC、容器和 VM。Resource
 已有 Work 的 `start`、`restart`、`retry`、`recover`、`reset` 重新校验原租约的当前 Resource
 授权和容量绑定。原租约有效时直接操作；失效、撤销或释放后明确拒绝，不能靠旧的 Environment
 快照恢复运行。首次申请之外不强制重新人工审批；是否需要新申请取决于 Resource 当前授权。
+HTTP 与 JetStream 生命周期入口对 Work Restart 使用同一当前租约验证；过期或撤销的授权不进入命令事务，重复事件沿原 Inbox/幂等账本处理，不产生第二个操作。
 费用估算复用已生成的 `estimateProjectResourceCost`，输入 `resources`、`computeFrom/computeUntil` 与 `storageFrom/storageUntil`，返回 `ResourceCostEstimate` 的固定费率明细和 `total`；不由 Environment 或浏览器另建计价逻辑。该接口不依赖模型，也不授予容量或资金权限，见[计算与存储估价](project-credits.md#计算与存储估价)。
 
 
@@ -29,6 +30,7 @@ provider、端口和入口必须与原批准配置一致，否则以
 
 服务端先验证兼容性，再校验当前 Resource 租约和撤销旧连接。接受事务只改变期望 release，
 复用原 Restart、Reconciler、代次、Outbox 与操作查询，不新建资源申请或第二套升级状态机。
+升级沿用 `environment_restarted` 撤销原因，不引入对端不支持的新 reason。必须收到 Access 对同一实例/版本的确认后才进入升级事务；撤销未确认时返回明确失败，原 release、操作和 PVC 绑定不变。
 `getEnvironmentOperation` 和历史列表中的 `templateUpgrade` 保存源/目标 release 及
 `dataPolicy: preserve_workspace`；状态与错误直接来自同一 operation。`releaseId/releaseVersion`
 此时是已确认的期望目标，不能独立于 `state` 当作升级完成。Deployment 的新副本、就绪副本和

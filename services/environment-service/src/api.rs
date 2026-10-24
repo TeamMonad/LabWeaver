@@ -1259,7 +1259,7 @@ async fn upgrade_environment_template(
     let authorization = verify_work_lease(&state, &instance, accepted_at).await?;
     let revocation = state
         .access_revoker
-        .revoke(&instance, "environment_template_upgraded")
+        .revoke(&instance, "environment_restarted")
         .await?;
     let command = EnvironmentLifecycleCommand {
         environment_id,

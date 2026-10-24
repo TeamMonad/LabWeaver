@@ -2112,6 +2112,12 @@ fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
 
 fn environment_management_errors(operation_id: &str) -> Option<Value> {
     let errors = match operation_id {
+        "getProjectAgentCapability" => vec![
+            "LW_CONTRACT_DOCUMENT_INVALID",
+            "LW_ACCESS_DENIED",
+            "LW_AUTH_SCOPE_DENIED",
+            "LW_AGENT_CONFIGURATION_UNREADABLE",
+        ],
         "listEnvironments" | "listEnvironmentOperations" => vec![
             "LW_CONTRACT_DOCUMENT_INVALID",
             "LW_HTTP_UNAUTHENTICATED",

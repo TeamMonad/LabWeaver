@@ -17,6 +17,10 @@ use tokio::{
 
 use environment_service::with_service_auth;
 
+mod support;
+#[path = "cases/template_upgrade_http.rs"]
+mod template_upgrade_http;
+
 const AUDIENCE: &str = "labweaver-environment";
 const CLIENT_ID: &str = "access-gateway";
 const REQUIRED_PERMISSION: &str = "environment.read";

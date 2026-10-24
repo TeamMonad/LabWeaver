@@ -7595,8 +7595,8 @@
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_AGENT_CONFIGURATION_UNREADABLE"
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-object-action": "browse",

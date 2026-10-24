@@ -226,3 +226,36 @@ fn generated_openapi_closes_inventory_operation_and_grant_discovery_gaps()
     }
     Ok(())
 }
+
+#[test]
+fn agent_capability_read_failures_are_distinct_from_unconfigured_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let generated = contracts::schema::generate_all()?;
+    let artifact = generated
+        .iter()
+        .find(|item| item.relative_path.ends_with("labweaver-public.v1.json"))
+        .ok_or("Public OpenAPI artifact missing")?;
+    let openapi: Value = serde_json::from_slice(&artifact.bytes)?;
+    let operation = &openapi["paths"]["/api/v1/projects/{projectId}/agent-capability"]["get"];
+    let errors = operation["x-labweaver-errors"]
+        .as_array()
+        .ok_or("capability errors missing")?;
+    assert!(
+        errors
+            .iter()
+            .any(|code| code == "LW_AGENT_CONFIGURATION_UNREADABLE")
+    );
+    assert!(operation["responses"].get("503").is_some());
+    assert!(
+        !errors
+            .iter()
+            .any(|code| code == "LW_AGENT_MODEL_NOT_CONFIGURED")
+    );
+    let unconfigured = contracts::http::ProjectAgentCapability::Unconfigured {
+        reason_code: "LW_AGENT_MODEL_NOT_CONFIGURED".to_owned(),
+    };
+    let view = serde_json::to_value(unconfigured)?;
+    assert_eq!(view["status"], "unconfigured");
+    assert_eq!(view["reasonCode"], "LW_AGENT_MODEL_NOT_CONFIGURED");
+    Ok(())
+}

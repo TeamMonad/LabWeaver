@@ -826,6 +826,7 @@ async fn resolve_lease_authorization(
     } else if matches!(
         command.kind,
         EnvironmentOperationKind::Start
+            | EnvironmentOperationKind::Restart
             | EnvironmentOperationKind::Retry
             | EnvironmentOperationKind::Recover
             | EnvironmentOperationKind::Reset
