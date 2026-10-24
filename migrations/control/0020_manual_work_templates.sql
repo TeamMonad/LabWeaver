@@ -2,14 +2,14 @@
 ALTER TABLE control.environment_template_releases
     ALTER COLUMN environment_candidate_id DROP NOT NULL,
     ALTER COLUMN candidate_revision DROP NOT NULL,
-    ADD CONSTRAINT environment_template_release_source_check CHECK (
+    ADD CONSTRAINT environment_template_release_source_check CHECK ((
         (environment_candidate_id IS NOT NULL AND candidate_revision IS NOT NULL
          AND COALESCE(contract->'manualApproval','null'::jsonb)='null'::jsonb)
         OR
         (environment_candidate_id IS NULL AND candidate_revision IS NULL
          AND jsonb_typeof(contract->'manualApproval')='object'
          AND contract->'manualApproval'->'spec'->>'class'='work')
-    );
+    ) IS TRUE);
 
 CREATE OR REPLACE VIEW control.runtime_authorization_configurations AS
     SELECT r.release_id,r.version AS release_version,r.project_id,r.course_id,

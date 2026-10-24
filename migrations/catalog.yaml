@@ -66,7 +66,7 @@ domains:
         sha256: 9d8a06ba7f3baf03b41b1317688b423c68cdf5a9362b0a8405258024fdf918d3
       - id: 20
         file: control/0020_manual_work_templates.sql
-        sha256: 12e3cca0ad24c15532e09c6acdad93f5fbb6a794e1d0bd9be4bb3101849a713c
+        sha256: 984124941db34315b203bce850f32e2e77a5614da905c14749180add5d3e110e
   - name: access
     migrations:
       - id: 1

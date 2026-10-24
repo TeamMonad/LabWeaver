@@ -230,6 +230,17 @@ async fn assert_publication_facts(
     fixture: &ManualPublication,
     release: &EnvironmentTemplateRelease,
 ) -> TestResult {
+    let invalid = sqlx::query("INSERT INTO control.environment_template_releases (release_id,project_id,course_id,version,spec_sha256,contract,published_at) VALUES($1,$2,NULL,99,$3,'{}'::jsonb,$4)")
+        .bind(ReleaseId::new().as_uuid()).bind(fixture.project.id.as_uuid())
+        .bind(Sha256Digest::of_bytes(b"no-release-evidence").to_string()).bind(fixture.now.get())
+        .execute(pool).await.err().ok_or("missing release evidence was accepted")?;
+    assert_eq!(
+        invalid
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
     let facts:(i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM control.candidates),(SELECT count(*) FROM control.agent_run_projections),(SELECT count(*) FROM control.project_llm_policies),(SELECT count(*) FROM control.outbox_events WHERE subject=$1)")
         .bind(contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED).fetch_one(pool).await?;
     assert_eq!(
