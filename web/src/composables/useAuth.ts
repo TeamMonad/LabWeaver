@@ -2,6 +2,7 @@ import { ref, computed, watch } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
+import { advanceSessionEpoch, registerSessionConfirmation } from '@/api/session'
 import { actorIdFromProfile } from '@/utils/navigation'
 import { syncTrackedSubmissionOwner } from '@/utils/trackedSubmissions'
 import { syncPendingCommandOwner } from '@/utils/pendingCommands'
@@ -28,6 +29,11 @@ const user = ref<CurrentUser | null>(null)
 const isLoading = ref(false)
 const error = ref<Error | null>(null)
 
+// The actor the current session epoch belongs to: undefined until an identity
+// is first known, null after a confirmed sign-out. An identity that is only
+// temporarily unknown (network error, 503) keeps the epoch.
+let epochActor: string | null | undefined
+
 // Browser-local data belongs to one actor: signing in as someone else, signing
 // out or losing the session discards what the previous actor left behind. The
 // initial unauthenticated state (before the session is read) is not a sign-out.
@@ -37,12 +43,19 @@ watch(() => actorIdFromProfile(user.value?.profile), (actorId, previous) => {
   // unknown (network error, 503): they are dropped for another actor here and
   // on a confirmed sign-out in `confirmSignedOut`.
   if (actorId) syncPendingCommandOwner(actorId)
+  if (!actorId) return
+  // Another actor now owns this browser session (for example after a sign-in
+  // in another tab): retire the previous actor's pages and in-flight requests.
+  if (epochActor !== undefined && epochActor !== actorId) advanceSessionEpoch()
+  epochActor = actorId
 }, { flush: 'sync' })
 
 /** The session is known to have ended: the server said so or the user signed out. */
 function confirmSignedOut() {
   user.value = null
   syncPendingCommandOwner(null)
+  if (epochActor) advanceSessionEpoch()
+  epochActor = null
 }
 type TopLevelNavigate = (url: string) => void
 
@@ -71,18 +84,42 @@ function bffUser(session: AuthSession): BffUser {
   }
 }
 
-async function loadBffSession(): Promise<void> {
+/** The current BFF actor, or null when the server says the session has ended. */
+async function readBffSession(): Promise<BffUser | null> {
   const response = await fetch('/api/v1/auth/session', {
     credentials: 'include',
     headers: { Accept: 'application/json, application/problem+json' },
   })
-  if (response.status === 401) {
-    confirmSignedOut()
-    return
-  }
+  if (response.status === 401) return null
   if (!response.ok) throw new Error(`BFF session lookup failed with HTTP ${response.status}`)
-  user.value = bffUser(await response.json() as AuthSession)
+  return bffUser(await response.json() as AuthSession)
 }
+
+let latestSessionLoad: Promise<void> | undefined
+
+/**
+ * Read the BFF session; only the most recently started read decides the actor.
+ * A read started before another tab switched the cookie must not overwrite a
+ * newer answer, so a superseded read settles with the newest one instead.
+ */
+function loadBffSession(): Promise<void> {
+  const load: Promise<void> = readBffSession().then(
+    (next) => {
+      if (latestSessionLoad !== load) return latestSessionLoad
+      if (next) user.value = next
+      else confirmSignedOut()
+    },
+    (error: unknown) => {
+      if (latestSessionLoad !== load) return latestSessionLoad
+      throw error
+    },
+  )
+  latestSessionLoad = load
+  return load
+}
+
+// A CSRF or session rejection re-reads the actor before any further request is sent.
+if (API_AUTH_MODE === 'bff') registerSessionConfirmation(loadBffSession)
 
 /** Returns the current non-expired OIDC bearer for bearer-mode deployments. */
 export async function getOidcAccessToken(): Promise<string | undefined> {

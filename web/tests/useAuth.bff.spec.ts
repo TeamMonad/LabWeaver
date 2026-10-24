@@ -158,3 +158,99 @@ describe('BFF browser session', () => {
     expect(auth.error.value?.message).toBe('登录已失效，请重新登录')
   })
 })
+
+function sessionOf(actorId: string) {
+  return new Response(JSON.stringify({
+    actor: { actorId, roles: ['student'], expiresAt: '2099-01-01T00:00:00.000Z' },
+    authorizationRevision: 1,
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    scopes: [{ kind: 'global' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+}
+
+const actorA = '01900000-0000-7000-8000-00000000000a'
+const actorB = '01900000-0000-7000-8000-00000000000b'
+
+describe('BFF session epoch (#198)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.stubEnv('VITE_API_AUTH_MODE', 'bff')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+  })
+
+  it('advances only when another actor signs in or the session is confirmed ended', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockResolvedValueOnce(sessionOf(actorB))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ diagnosticCode: 'LW_AUTH_SESSION_REJECTED' }), { status: 401 }))
+    vi.stubGlobal('fetch', fetch)
+    const { useAuth } = await import('@/composables/useAuth')
+    const { sessionEpoch } = await import('@/api/session')
+    const auth = useAuth()
+    const epochs: number[] = []
+    for (let read = 0; read < 6; read += 1) {
+      await auth.loadUser()
+      epochs.push(sessionEpoch.value)
+    }
+
+    // First sign-in, same actor again, temporarily unknown, same actor, actor B, signed out.
+    expect(epochs).toEqual([0, 0, 0, 0, 1, 2])
+    expect(auth.user.value).toBeNull()
+  })
+
+  it('does not let a session read that started earlier overwrite the newer actor', async () => {
+    let answerEarlierRead!: (response: Response) => void
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockReturnValueOnce(new Promise<Response>((resolve) => { answerEarlierRead = resolve }))
+      .mockResolvedValueOnce(sessionOf(actorB))
+    vi.stubGlobal('fetch', fetch)
+    const { useAuth } = await import('@/composables/useAuth')
+    const { sessionEpoch } = await import('@/api/session')
+    const auth = useAuth()
+    await auth.loadUser()
+
+    const earlier = auth.loadUser()
+    await auth.loadUser()
+    expect(auth.user.value?.profile).toMatchObject({ actor_id: actorB })
+    answerEarlierRead(sessionOf(actorA))
+    await earlier
+
+    expect(auth.user.value?.profile).toMatchObject({ actor_id: actorB })
+    expect(sessionEpoch.value).toBe(1)
+  })
+
+  it('re-reads the actor when the transport reports a CSRF rejection and only then lets requests through', async () => {
+    let answerReread!: (response: Response) => void
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockReturnValueOnce(new Promise<Response>((resolve) => { answerReread = resolve }))
+    vi.stubGlobal('fetch', fetch)
+    const { useAuth } = await import('@/composables/useAuth')
+    const session = await import('@/api/session')
+    const auth = useAuth()
+    await auth.loadUser()
+
+    session.reportSessionRejected()
+    let released = false
+    const gate = session.awaitConfirmedSession().then((confirmed) => {
+      released = true
+      return confirmed
+    })
+    await Promise.resolve()
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/auth/session', expect.objectContaining({ credentials: 'include' }))
+    expect(released).toBe(false)
+
+    answerReread(sessionOf(actorB))
+    expect(await gate).toBe(true)
+    expect(auth.user.value?.profile).toMatchObject({ actor_id: actorB })
+    expect(session.sessionEpoch.value).toBe(1)
+  })
+})

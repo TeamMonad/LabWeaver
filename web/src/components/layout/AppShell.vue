@@ -44,8 +44,9 @@
         :state="context.state.value"
       />
       <RouterView v-else v-slot="{ Component }">
-        <!-- Re-create project pages when the project changes so no view keeps
-             the previous project's results while new requests are in flight. -->
+        <!-- Re-create the page when the project or the signed-in session changes
+             so no view keeps the previous project's results or the previous
+             actor's forms while new requests are in flight. -->
         <component :is="Component" :key="viewKey" />
       </RouterView>
     </main>
@@ -60,6 +61,7 @@ import NavigationDrawer from './NavigationDrawer.vue'
 import ProjectContextRecovery from './ProjectContextRecovery.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { useProjectContextSync } from '@/composables/useProjectContext'
+import { sessionEpoch } from '@/api/session'
 import { useThemeStore } from '@/stores/theme'
 
 const themeStore = useThemeStore()
@@ -70,7 +72,7 @@ const drawerRail = ref(false)
 const context = useProjectContextSync()
 const viewKey = computed(() => {
   const state = context.state.value
-  return state.kind === 'ready' ? `project:${state.project.id}` : 'global'
+  return `${sessionEpoch.value}:${state.kind === 'ready' ? `project:${state.project.id}` : 'global'}`
 })
 
 function handleToggleDrawer() {

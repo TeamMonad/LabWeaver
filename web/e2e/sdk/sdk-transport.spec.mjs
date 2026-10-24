@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 const courseId = '01900000-0000-7000-8000-000000000001'
+const projectId = '01900000-0000-7000-8000-000000000010'
 const environmentId = '01900000-0000-7000-8000-000000000002'
 const operationId = '01900000-0000-7000-8000-000000000003'
 const largeStreamSequence = '9007199254740993'
@@ -102,7 +103,7 @@ test('strictly decodes RFC 9457 and preserves stable diagnostics', async ({ page
     } catch (caught) {
       const problem = api.decodeProblemDetails(caught)
       return {
-        diagnosticCode: caught.diagnosticCode,
+        diagnosticCode: problem?.diagnosticCode,
         status: problem?.status,
         requestId: problem?.requestId,
       }
@@ -172,9 +173,13 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
 
 test('preserves a stream cursor above Number.MAX_SAFE_INTEGER in SSE resume and events', async ({ page }) => {
   const requests = []
-  await page.route('**/api/v1/events**', async (route) => {
+  await page.route(`**/api/v1/projects/${projectId}/events**`, async (route) => {
     const request = route.request()
-    requests.push({ url: request.url(), lastEventId: request.headers()['last-event-id'] })
+    requests.push({
+      url: request.url(),
+      lastEventId: request.headers()['last-event-id'],
+      authorization: request.headers().authorization,
+    })
     await route.fulfill({
       status: 200,
       contentType: 'text/event-stream',
@@ -182,26 +187,55 @@ test('preserves a stream cursor above Number.MAX_SAFE_INTEGER in SSE resume and 
     })
   })
 
-  const result = await page.evaluate(async ({ courseId, largeStreamSequence }) => {
+  const result = await page.evaluate(async ({ projectId, largeStreamSequence }) => {
     const api = await import('/src/api/client.ts')
     const sdk = await import('/src/generated/contracts/index.ts')
     const client = api.createLabWeaverApiClient({
       baseUrl: window.location.origin,
       authentication: { mode: 'bearer', accessToken: async () => 'browser-conformance-token' },
     })
-    const events = await sdk.streamCourseEvents({
+    const events = await sdk.streamProjectEvents({
       client,
+      path: { projectId },
       headers: { 'Last-Event-ID': largeStreamSequence },
-      query: { courseId, after: largeStreamSequence },
+      query: { after: largeStreamSequence },
     })
     const first = await events.stream.next()
     return first.value.streamSequence
-  }, { courseId, largeStreamSequence })
+  }, { projectId, largeStreamSequence })
 
   expect(result).toBe(largeStreamSequence)
   expect(requests).toHaveLength(1)
+  expect(requests[0].authorization).toBe('Bearer browser-conformance-token')
   expect(requests[0].lastEventId).toBe(largeStreamSequence)
+  expect(new URL(requests[0].url).pathname).toBe(`/api/v1/projects/${projectId}/events`)
   expect(new URL(requests[0].url).searchParams.get('after')).toBe(largeStreamSequence)
+})
+
+test('SSE rejects a missing bearer before any network request', async ({ page }) => {
+  let networkRequests = 0
+  await page.route(`**/api/v1/projects/${projectId}/events**`, async (route) => {
+    networkRequests += 1
+    await route.abort()
+  })
+
+  const result = await page.evaluate(async ({ projectId }) => {
+    const api = await import('/src/api/client.ts')
+    const sdk = await import('/src/generated/contracts/index.ts')
+    const client = api.createLabWeaverApiClient({
+      baseUrl: window.location.origin,
+      authentication: { mode: 'bearer', accessToken: async () => undefined },
+    })
+    try {
+      await sdk.streamProjectEvents({ client, path: { projectId }, query: { after: '0' } })
+      return { name: null, diagnosticCode: null }
+    } catch (error) {
+      return { name: error.name, diagnosticCode: error.diagnosticCode }
+    }
+  }, { projectId })
+
+  expect(result).toEqual({ name: 'LabWeaverApiError', diagnosticCode: 'LW_SDK_AUTH_TOKEN_UNAVAILABLE' })
+  expect(networkRequests).toBe(0)
 })
 
 test('fails closed without a bearer and distinguishes cancellation', async ({ page }) => {

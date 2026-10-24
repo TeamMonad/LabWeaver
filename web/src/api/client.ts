@@ -4,7 +4,9 @@ import { getOidcAccessToken } from '@/composables/useAuth'
 import type { ProblemDetails } from '@/generated/contracts'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
+import type { Auth } from '@/generated/contracts/core/auth.gen'
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
+import { awaitConfirmedSession, reportSessionRejected, sessionCredentialVersion, sessionEpoch } from './session'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
 export type CsrfTokenProvider = () => Promise<string | undefined>
@@ -26,6 +28,8 @@ export type LabWeaverClientDiagnostic =
   | 'LW_SDK_REQUEST_CANCELLED'
   | 'LW_SDK_REQUEST_TIMEOUT'
   | 'LW_SDK_TRANSPORT_FAILED'
+  | 'LW_SDK_SESSION_CHANGED'
+  | 'LW_SDK_SESSION_UNCONFIRMED'
 
 export class LabWeaverApiError extends Error {
   readonly diagnosticCode: LabWeaverClientDiagnostic | string
@@ -78,12 +82,15 @@ function isUnsafeMethod(method: string | undefined): boolean {
 }
 
 function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfTokenProvider {
-  let cached: { token: string; expiresAt: number } | undefined
-  let inFlight: Promise<string | undefined> | undefined
+  // A token belongs to one session: another actor, a confirmed sign-out or any
+  // CSRF/session rejection changes the credential version and retires it.
+  let cached: { token: string; expiresAt: number; version: string } | undefined
+  let inFlight: { token: Promise<string>; version: string } | undefined
   return async () => {
-    if (cached && cached.expiresAt - Date.now() > 30_000) return cached.token
-    if (inFlight) return inFlight
-    inFlight = axios
+    const version = sessionCredentialVersion()
+    if (cached?.version === version && cached.expiresAt - Date.now() > 30_000) return cached.token
+    if (inFlight?.version === version) return inFlight.token
+    const token = axios
       .get('/api/v1/auth/csrf', {
         baseURL: baseUrl,
         timeout,
@@ -96,14 +103,39 @@ function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfToken
         if (typeof body.csrfToken !== 'string' || !body.csrfToken || !Number.isFinite(expiresAt)) {
           throw new LabWeaverApiError('LW_SDK_PROBLEM_INVALID', 'The BFF returned an invalid CSRF response.')
         }
-        cached = { token: body.csrfToken, expiresAt }
-        return cached.token
+        // A token issued while the session changed is not kept for later writes.
+        if (sessionCredentialVersion() === version) cached = { token: body.csrfToken, expiresAt, version }
+        return body.csrfToken
       })
       .finally(() => {
-        inFlight = undefined
+        if (inFlight?.token === token) inFlight = undefined
       })
-    return inFlight
+    inFlight = { token, version }
+    return token
   }
+}
+
+/** The BFF no longer accepts this tab's session cookie or the CSRF token issued for it. */
+function isSessionRejection(error: AxiosError): boolean {
+  const status = error.response?.status
+  if (status === 401) return true
+  const problem = error.response?.data
+  return status === 403 && isProblemDetails(problem) && problem.diagnosticCode === 'LW_AUTH_CSRF_REJECTED'
+}
+
+/** The session epoch each request started in, keyed by its Axios config. */
+const requestEpochs = new WeakMap<object, number>()
+
+function startedInEarlierSession(config: object | undefined): boolean {
+  const started = config ? requestEpochs.get(config) : undefined
+  return started !== undefined && started !== sessionEpoch.value
+}
+
+function sessionChanged(): LabWeaverApiError {
+  return new LabWeaverApiError(
+    'LW_SDK_SESSION_CHANGED',
+    'The signed-in session changed; the result of a request started by the previous session was discarded.',
+  )
 }
 
 /** Strictly decodes the RFC 9457 extension shared by all generated SDK calls. */
@@ -120,6 +152,13 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
       : undefined
 
   instance.interceptors.request.use(async (config) => {
+    requestEpochs.set(config, sessionEpoch.value)
+    if (!(await awaitConfirmedSession())) {
+      throw new LabWeaverApiError(
+        'LW_SDK_SESSION_UNCONFIRMED',
+        'The signed-in session could not be confirmed; the request was not sent.',
+      )
+    }
     if (authentication.mode === 'bearer') {
       const token = await authentication.accessToken()
       if (!token) {
@@ -134,18 +173,27 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
       }
       config.headers['X-CSRF-Token'] = token
     }
+    // The actor changed while this request waited: a form of the previous actor is never sent as the new one.
+    if (startedInEarlierSession(config)) throw sessionChanged()
     return config
   })
 }
 
-function attachResponseInterceptor(instance: AxiosInstance): void {
+/**
+ * `sessionRejected` runs in BFF mode when the server refuses the session or its
+ * CSRF token. The failed request is not replayed; its caller shows the error and
+ * the user decides whether to submit again once the actor has been read again.
+ */
+function attachResponseInterceptor(instance: AxiosInstance, sessionRejected?: () => void): void {
   instance.interceptors.response.use(
-    (response) => response,
+    (response) => (startedInEarlierSession(response.config) ? Promise.reject(sessionChanged()) : response),
     (error: unknown) => {
       if (error instanceof LabWeaverApiError) return Promise.reject(error)
       if (!axios.isAxiosError(error)) {
         return Promise.reject(new LabWeaverApiError('LW_SDK_TRANSPORT_FAILED', 'The API transport failed.'))
       }
+      if (startedInEarlierSession(error.config)) return Promise.reject(sessionChanged())
+      if (sessionRejected && isSessionRejection(error)) sessionRejected()
       if (axios.isCancel(error) || error.code === AxiosError.ERR_CANCELED) {
         return Promise.reject(new LabWeaverApiError('LW_SDK_REQUEST_CANCELLED', 'The API request was cancelled.'))
       }
@@ -180,14 +228,43 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
     headers: { Accept: 'application/json, application/problem+json' },
   })
 
-  attachAuthInterceptor(instance, options.authentication)
-  attachResponseInterceptor(instance)
+  const { authentication } = options
+  attachAuthInterceptor(instance, authentication)
+  attachResponseInterceptor(instance, authentication.mode === 'bff' ? reportSessionRejected : undefined)
 
-  return createClient({
+  // REST receives its bearer from the Axios interceptor; no client-level `auth`
+  // is configured, so no generated security scheme receives a credential it
+  // does not use (a cookie scheme would otherwise get a handwritten Cookie header).
+  const client = createClient({
     axios: instance,
     baseURL: baseUrl,
     timeout,
   })
+  if (authentication.mode === 'bearer') requireStreamBearer(client, authentication.accessToken)
+  return client
+}
+
+type StreamOptions = Parameters<Client['sse']['get']>[0]
+
+/**
+ * Generated SSE opens streams with fetch, outside the Axios interceptors that
+ * fail closed for REST. Resolve the bearer once before opening and reject
+ * without sending any request when there is none.
+ */
+function requireStreamBearer(client: Client, accessToken: AccessTokenProvider): void {
+  const sse = client.sse as Record<keyof Client['sse'], (options: StreamOptions) => Promise<unknown>>
+  for (const method of Object.keys(sse) as (keyof Client['sse'])[]) {
+    const open = sse[method]
+    sse[method] = async (options) => {
+      const token = await accessToken()
+      if (!token) {
+        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+      }
+      // Only HTTP bearer schemes receive the token; the browser sends the BFF cookie itself.
+      const auth = (scheme: Auth) => (scheme.type === 'http' && scheme.scheme === 'bearer' ? token : undefined)
+      return open({ ...options, auth })
+    }
+  }
 }
 
 export const apiClient = createLabWeaverApiClient({
@@ -215,7 +292,7 @@ attachAuthInterceptor(
     ? { mode: 'bff' }
     : { mode: 'bearer', accessToken: getOidcAccessToken },
 )
-attachResponseInterceptor(sdkTransport)
+attachResponseInterceptor(sdkTransport, API_AUTH_MODE === 'bff' ? reportSessionRejected : undefined)
 
 /** Initialize the generated SDK client transport before the Vue app mounts. */
 export async function initializeSdkClient(): Promise<void> {
@@ -223,14 +300,9 @@ export async function initializeSdkClient(): Promise<void> {
   defaultSdkClient.setConfig({
     axios: sdkTransport,
     baseURL: '',
-    auth:
-      API_AUTH_MODE === 'bearer'
-        ? async () => {
-            return getOidcAccessToken()
-          }
-        : // BFF mode relies on the session cookie; same-origin fetch sends it.
-          undefined,
   })
+  // BFF streams carry the session cookie, which same-origin fetch sends itself.
+  if (API_AUTH_MODE === 'bearer') requireStreamBearer(defaultSdkClient, getOidcAccessToken)
 }
 
 /** Health checks are intentionally outside the authenticated Public API contract. */

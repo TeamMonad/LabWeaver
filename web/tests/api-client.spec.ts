@@ -123,3 +123,256 @@ describe('x-request-id fallback', () => {
     expect(makeDiagnostic('LW_ACCESS_FORBIDDEN', 'forbidden', false, { status: 403 }).requestId).toBeUndefined()
   })
 })
+
+const future = () => new Date(Date.now() + 120_000).toISOString()
+
+const csrfRejected = {
+  type: 'https://labweaver.dev/problems/access',
+  title: 'Access request blocked',
+  status: 403,
+  detail: 'The request was rejected by an access boundary.',
+  instance: 'urn:labweaver:request:csrf-1',
+  diagnosticCode: 'LW_AUTH_CSRF_REJECTED',
+  requestId: 'csrf-1',
+  retryable: false,
+}
+
+/** `Promise.withResolvers` is outside the project's ES2020 lib, so the executor form captures the resolver. */
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((settle) => { resolve = settle })
+  return { promise, resolve }
+}
+
+/**
+ * Session state is module-level: every test starts from a fresh epoch and no
+ * confirmation. Static imports would keep the first module instances, so the
+ * modules are imported again after `vi.resetModules()`.
+ */
+async function freshTransport() {
+  vi.resetModules()
+  const session = await import('@/api/session')
+  const client = await import('@/api/client')
+  const { default: freshAxios } = await import('axios')
+  return { session, client, axios: freshAxios }
+}
+
+describe('browser session changes (#198)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('does not replay a CSRF-rejected write, re-reads the actor first and lets the user resubmit with a new token', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    const csrfGet = vi.spyOn(transportAxios, 'get')
+      .mockResolvedValueOnce({ data: { csrfToken: 'token-old-session', expiresAt: future() } } as never)
+      .mockResolvedValueOnce({ data: { csrfToken: 'token-current-session', expiresAt: future() } } as never)
+    const reread = deferred()
+    const confirm = vi.fn(() => reread.promise)
+    session.registerSessionConfirmation(confirm)
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const sent: { token: unknown; body: unknown }[] = []
+    api.instance.defaults.adapter = vi.fn(async (config) => {
+      sent.push({ token: config.headers['X-CSRF-Token'], body: JSON.parse(String(config.data)) })
+      if (sent.length === 1) {
+        const response = { data: csrfRejected, status: 403, statusText: 'Forbidden', headers: new AxiosHeaders(), config }
+        throw new AxiosError('Request failed with status code 403', AxiosError.ERR_BAD_REQUEST, config, null, response as never)
+      }
+      return { data: { ok: true }, status: 201, statusText: 'Created', headers: {}, config }
+    })
+
+    const failed = await api.post({ url: '/api/v1/projects', body: { name: '第一次提交' } })
+
+    expect(failed.error).toMatchObject({ diagnosticCode: 'LW_AUTH_CSRF_REJECTED' })
+    const diagnostic = diagnosticFromError(failed.error, 'PROJECT_CREATE_FAILED', '创建项目失败')
+    expect(diagnostic.message).toBe('登录会话已在其他页面变化或安全校验已失效，这次操作没有执行。')
+    expect(diagnostic.nextStep).toContain('手动重新提交')
+    expect(diagnostic.nextStep).toContain('不会自动重试')
+    expect(diagnostic.requestId).toBe('csrf-1')
+    expect(sent).toHaveLength(1)
+    expect(confirm).toHaveBeenCalledOnce()
+
+    // The user submits again while the actor is still being read: nothing is sent yet.
+    const resubmitted = api.post({ url: '/api/v1/projects', body: { name: '手动重新提交' } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(sent).toHaveLength(1)
+
+    reread.resolve()
+    expect((await resubmitted).error).toBeUndefined()
+    expect(sent).toEqual([
+      { token: 'token-old-session', body: { name: '第一次提交' } },
+      { token: 'token-current-session', body: { name: '手动重新提交' } },
+    ])
+    expect(csrfGet).toHaveBeenCalledTimes(2)
+  })
+
+  it('never sends a waiting write once the re-read finds another actor', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    vi.spyOn(transportAxios, 'get').mockResolvedValue({ data: { csrfToken: 'token', expiresAt: future() } } as never)
+    const reread = deferred()
+    session.registerSessionConfirmation(async () => {
+      await reread.promise
+      // useAuth found actor B and advanced the epoch.
+      session.advanceSessionEpoch()
+    })
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const adapter = installSuccessfulAdapter(api)
+
+    session.reportSessionRejected()
+    const staleForm = api.post({ url: '/api/v1/users/me/ssh-keys', body: { publicKey: 'A 的公钥' } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    reread.resolve()
+
+    const result = await staleForm
+    expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+    expect(result.data).toBeUndefined()
+    expect(adapter).not.toHaveBeenCalled()
+  })
+
+  it('does not send while the actor cannot be read and reads it again on the next request', async () => {
+    const { session, client } = await freshTransport()
+    let failRead!: (error: Error) => void
+    const confirm = vi.fn()
+      .mockReturnValueOnce(new Promise<void>((_, fail) => { failRead = fail }))
+      .mockResolvedValueOnce(undefined)
+    session.registerSessionConfirmation(confirm)
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bearer', accessToken: async () => 'token' } })
+    const adapter = installSuccessfulAdapter(api)
+
+    session.reportSessionRejected()
+    const waiting = api.get({ url: '/api/v1/projects' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    failRead(new Error('BFF session lookup failed with HTTP 503'))
+    expect(await waiting).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_UNCONFIRMED' })
+    expect(adapter).not.toHaveBeenCalled()
+
+    expect((await api.get({ url: '/api/v1/projects' })).error).toBeUndefined()
+    expect(confirm).toHaveBeenCalledTimes(2)
+    expect(adapter).toHaveBeenCalledOnce()
+  })
+
+  it('discards a response the previous actor requested once the session epoch advances', async () => {
+    const { session, client } = await freshTransport()
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bearer', accessToken: async () => 'token' } })
+    const response = deferred()
+    const adapter = vi.fn(async (config) => {
+      await response.promise
+      return { data: [{ id: 'project-of-a' }], status: 200, statusText: 'OK', headers: {}, config }
+    })
+    api.instance.defaults.adapter = adapter
+
+    const listed = api.get({ url: '/api/v1/projects' })
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledOnce())
+    session.advanceSessionEpoch()
+    response.resolve()
+
+    const result = await listed
+    expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+    expect(result.data).toBeUndefined()
+  })
+
+  it('discards an error the previous actor received instead of reporting it for the new session', async () => {
+    const { session, client } = await freshTransport()
+    const confirm = vi.fn(async () => undefined)
+    session.registerSessionConfirmation(confirm)
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const response = deferred()
+    api.instance.defaults.adapter = vi.fn(async (config) => {
+      await response.promise
+      const body = { data: { diagnosticCode: 'LW_AUTH_SESSION_REJECTED' }, status: 401, statusText: 'Unauthorized', headers: new AxiosHeaders(), config }
+      throw new AxiosError('Request failed with status code 401', AxiosError.ERR_BAD_REQUEST, config, null, body as never)
+    })
+
+    const listed = api.get({ url: '/api/v1/projects' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    session.advanceSessionEpoch()
+    response.resolve()
+
+    expect(await listed).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+    expect(confirm).not.toHaveBeenCalled()
+  })
+
+  it('re-reads the actor when the BFF answers 401 for the current session', async () => {
+    const { session, client } = await freshTransport()
+    const confirm = vi.fn(async () => undefined)
+    session.registerSessionConfirmation(confirm)
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    api.instance.defaults.adapter = vi.fn(async (config) => {
+      const body = { data: { diagnosticCode: 'LW_AUTH_SESSION_REJECTED' }, status: 401, statusText: 'Unauthorized', headers: new AxiosHeaders(), config }
+      throw new AxiosError('Request failed with status code 401', AxiosError.ERR_BAD_REQUEST, config, null, body as never)
+    })
+
+    await api.get({ url: '/api/v1/projects' })
+
+    expect(confirm).toHaveBeenCalledOnce()
+  })
+})
+
+describe('generated SSE authentication (#198)', () => {
+  const eventsUrl = '/api/v1/projects/01900000-0000-7000-8000-000000000010/events'
+  const security = [
+    { key: 'oidc', scheme: 'bearer', type: 'http' },
+    { in: 'cookie', name: '__Host-labweaver_session', type: 'apiKey' },
+  ] as const
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('rejects an independent client stream before any request when no bearer is available', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const client = makeClient('https://api.example.test', { mode: 'bearer', accessToken: async () => undefined })
+
+    await expect(client.sse.get({ url: eventsUrl, security: [...security] })).rejects.toMatchObject({
+      name: 'LabWeaverApiError',
+      diagnosticCode: 'LW_SDK_AUTH_TOKEN_UNAVAILABLE',
+    })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('sends the bearer only to the HTTP bearer scheme, never as a handwritten session cookie', async () => {
+    const fetch = vi.fn(async (_request: Request) => new Response('data: {"streamSequence":"1"}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }))
+    vi.stubGlobal('fetch', fetch)
+    const accessToken = vi.fn(async () => 'stream-bearer')
+    const client = makeClient('https://api.example.test', { mode: 'bearer', accessToken })
+
+    const events = await client.sse.get({ url: eventsUrl, security: [...security] })
+    const first = await events.stream.next()
+
+    expect(first.value).toEqual({ streamSequence: '1' })
+    expect(accessToken).toHaveBeenCalledOnce()
+    const request = fetch.mock.calls[0][0]
+    expect(request.headers.get('authorization')).toBe('Bearer stream-bearer')
+    expect(request.headers.get('cookie')).toBeNull()
+  })
+
+  it('does not give the bearer to a cookie scheme on REST calls either', async () => {
+    const client = makeClient('/', { mode: 'bearer', accessToken: async () => 'rest-bearer' })
+    const adapter = installSuccessfulAdapter(client)
+
+    await client.get({ url: '/api/v1/platform/configuration', security: [...security] })
+
+    const headers = adapter.mock.calls[0][0].headers
+    expect(headers.Authorization).toBe('Bearer rest-bearer')
+    expect(headers.Cookie).toBeUndefined()
+  })
+
+  it('rejects a default SDK client stream before any request when the OIDC session has no bearer', async () => {
+    const { client } = await freshTransport()
+    const { getOidcAccessToken } = await import('@/composables/useAuth')
+    vi.mocked(getOidcAccessToken).mockResolvedValueOnce(undefined)
+    const { client: defaultClient } = await import('@/generated/contracts/client.gen')
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    await client.initializeSdkClient()
+
+    await expect(defaultClient.sse.get({ url: eventsUrl, security: [...security] })).rejects.toMatchObject({
+      diagnosticCode: 'LW_SDK_AUTH_TOKEN_UNAVAILABLE',
+    })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+})
