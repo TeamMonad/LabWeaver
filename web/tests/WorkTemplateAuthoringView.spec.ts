@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import WorkTemplateAuthoringView from '@/views/researcher/WorkTemplateAuthoringView.vue'
 import {
   appendProjectEnvironmentCandidateDecision,
@@ -12,12 +12,18 @@ import {
   withdrawEnvironmentTemplateRelease,
 } from '@/generated/contracts'
 
+const packageFiles = [
+  { path: 'README.md', sha256: 'a'.repeat(64), object: { artifactId: 'artifact-readme', mediaType: 'text/markdown', objectVersion: 'v1', sizeBytes: 128, storeBinding: 'materials' } },
+  { path: 'src/app.py', sha256: 'b'.repeat(64), object: { artifactId: 'artifact-app', mediaType: 'text/x-python', objectVersion: 'v1', sizeBytes: 256, storeBinding: 'materials' } },
+  { path: 'secrets/notes.txt', sha256: 'c'.repeat(64), object: { artifactId: 'artifact-notes', mediaType: 'text/plain', objectVersion: 'v1', sizeBytes: 16, storeBinding: 'materials' } },
+]
+
 const packageData = {
   id: 'package-1',
   projectId: 'project-1',
   courseId: 'course-1',
   revision: 4,
-  files: [],
+  files: packageFiles,
   retention: {},
   completedAt: '2026-09-08T00:00:00.000Z',
 }
@@ -202,17 +208,70 @@ describe('WorkTemplateAuthoringView', () => {
     vi.mocked(withdrawEnvironmentTemplateRelease).mockResolvedValue({ data: undefined as never, error: undefined as never })
   })
 
+  async function selectPath(wrapper: VueWrapper, path: string) {
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="model-input-picker"]').exists()).toBe(true))
+    const option = wrapper.findAll('[data-testid="model-input-path-option"]').find((input) => (input.element as HTMLInputElement).value === path)
+    if (!option) throw new Error(`missing option ${path}`)
+    await option.setValue(true)
+  }
+
   async function mountView() {
     const wrapper = mount(WorkTemplateAuthoringView, {
       props: { projectId: 'project-1', courseId: 'course-1' },
       global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
     })
-    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
+    await selectPath(wrapper, 'src/app.py')
+    await selectPath(wrapper, 'README.md')
     await vi.waitFor(() => expect((runButton.element as HTMLButtonElement).disabled).toBe(false))
     await runButton.trigger('click')
     await vi.waitFor(() => expect(getProjectEnvironmentCandidate).toHaveBeenCalledWith({ path: { projectId: 'project-1', candidateId: 'candidate-1' } }))
     return wrapper
   }
+
+  it('keeps the Work template start disabled until a file is selected', async () => {
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="model-input-picker"]').exists()).toBe(true))
+    await vi.waitFor(() => expect(getActiveProjectLlmPolicy).toHaveBeenCalled())
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
+
+    expect(wrapper.findAll('[data-testid="model-input-path-option"]').every((input) => !(input.element as HTMLInputElement).checked)).toBe(true)
+    expect((runButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.get('[data-testid="model-input-summary"]').text()).toContain('尚未勾选文件')
+    await runButton.trigger('click')
+    expect(createProjectAgentRun).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['LW_MODEL_INPUT_SELECTION_REQUIRED', 400, '没有收到有效的文件选择'],
+    ['LW_MODEL_INPUT_AUTHORIZATION_DENIED', 403, '当前会话或账号权限不允许把所选内容交给模型'],
+  ])('shows the Chinese reason, %s and its request id when the start is rejected', async (code, status, reason) => {
+    vi.mocked(createProjectAgentRun).mockResolvedValue({
+      data: undefined as never,
+      error: { type: 'about:blank', title: 'Rejected', status, detail: 'rejected by Control', diagnosticCode: code, retryable: false, requestId: `req-${status}` } as never,
+    })
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+    await selectPath(wrapper, 'README.md')
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
+    await vi.waitFor(() => expect((runButton.element as HTMLButtonElement).disabled).toBe(false))
+    await runButton.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.find('.diagnostic-banner .diagnostic-code').exists()).toBe(true))
+    const banner = wrapper.get('.diagnostic-banner')
+    expect(banner.classes()).toContain('diagnostic-banner--error')
+    expect(banner.get('.diagnostic-message').text()).toContain(reason)
+    expect(banner.get('.diagnostic-code').text()).toBe(code)
+    expect(banner.get('.diagnostic-request-id').text()).toBe(`req-${status}`)
+    expect(banner.html().indexOf(reason)).toBeLessThan(banner.html().indexOf(code))
+    wrapper.unmount()
+  })
 
   it('starts a Work AgentRun without an existing environment id', async () => {
     const wrapper = await mountView()
@@ -225,6 +284,7 @@ describe('WorkTemplateAuthoringView', () => {
         environmentClass: 'work',
       }),
     }))
+    expect(createProjectAgentRun.mock.calls[0][0].body.selectedPaths).toEqual(['README.md', 'src/app.py'])
     expect(createProjectAgentRun.mock.calls[0][0].body).not.toHaveProperty('environmentId')
     wrapper.unmount()
   })
@@ -232,7 +292,7 @@ describe('WorkTemplateAuthoringView', () => {
   it('prevents a second start for the same archived package', async () => {
     const wrapper = await mountView()
 
-    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
     expect((runButton.element as HTMLButtonElement).disabled).toBe(true)
     expect(createProjectAgentRun).toHaveBeenCalledTimes(1)
     wrapper.unmount()
@@ -274,7 +334,8 @@ describe('WorkTemplateAuthoringView', () => {
       props: { projectId: 'project-1', courseId: 'course-1' },
       global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
     })
-    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    const runButton = wrapper.get('[data-testid="work-template-start-run"]')
+    await selectPath(wrapper, 'README.md')
     await vi.waitFor(() => expect((runButton.element as HTMLButtonElement).disabled).toBe(false))
     await runButton.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('资源申请未及时获批，请查看申请状态或联系资源管理员；确认失败后可重试原任务。'))

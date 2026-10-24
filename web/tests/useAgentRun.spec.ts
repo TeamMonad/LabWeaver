@@ -106,6 +106,7 @@ describe('useProjectAgentRun', () => {
       policyId: 'policy-1',
       policyRevision: 1,
       environmentClass: 'experiment',
+      selectedPaths: ['lab.md'],
     })).resolves.toBe(true)
 
     expect(agent.run.kind).toBe('success')
@@ -113,7 +114,7 @@ describe('useProjectAgentRun', () => {
     expect(agent.outcome?.message).not.toContain('run-1')
     expect(createProjectAgentRun).toHaveBeenCalledWith(expect.objectContaining({
       path: { projectId: 'project-1' },
-      body: expect.objectContaining({ projectId: 'project-1' }),
+      body: expect.objectContaining({ projectId: 'project-1', selectedPaths: ['lab.md'] }),
     }))
 
     await vi.advanceTimersByTimeAsync(3000)
@@ -139,6 +140,7 @@ describe('useProjectAgentRun', () => {
       policyId: 'policy-1',
       policyRevision: 1,
       environmentClass: 'experiment' as const,
+      selectedPaths: ['lab.md'],
     }
     vi.mocked(createProjectAgentRun)
       .mockResolvedValueOnce({ data: undefined as never, error: { response: { data: { diagnosticCode: 'START_FAILED', detail: 'retry me', retryable: true } } } as never })
@@ -159,12 +161,13 @@ describe('useProjectAgentRun', () => {
     const agent = useProjectAgentRun(projectId)
     vi.mocked(createProjectAgentRun).mockResolvedValue({ data: makeRun('running'), error: undefined as never })
 
-    await agent.start({ packageId: 'pkg-1', packageRevision: 1, policyId: 'policy-1', policyRevision: 1, environmentClass: 'experiment' })
-    await agent.start({ packageId: 'pkg-2', packageRevision: 1, policyId: 'policy-1', policyRevision: 1, environmentClass: 'experiment' })
+    await agent.start({ packageId: 'pkg-1', packageRevision: 1, policyId: 'policy-1', policyRevision: 1, environmentClass: 'experiment', selectedPaths: ['lab.md'] })
+    await agent.start({ packageId: 'pkg-2', packageRevision: 1, policyId: 'policy-1', policyRevision: 1, environmentClass: 'experiment', selectedPaths: ['lab.md'] })
+    await agent.start({ packageId: 'pkg-2', packageRevision: 1, policyId: 'policy-1', policyRevision: 1, environmentClass: 'experiment', selectedPaths: ['lab.md', 'tests/check.py'] })
 
     const keys = vi.mocked(createProjectAgentRun).mock.calls.map((call) => call[0].headers?.['Idempotency-Key'])
     expect(keys[1]).not.toBe(keys[0])
-    expect(createProjectAgentRun).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.objectContaining({ packageId: 'pkg-2' }) }))
+    expect(createProjectAgentRun).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.objectContaining({ packageId: 'pkg-2', selectedPaths: ['lab.md', 'tests/check.py'] }) }))
   })
 
   it('ignores a load response that belongs to a previous project', async () => {

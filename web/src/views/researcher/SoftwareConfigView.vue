@@ -81,7 +81,7 @@
       :next-step="agent.outcome.nextStep"
       :message="agent.outcome.message"
       :retryable="agent.outcome.retryable"
-      :severity="agent.outcome.code.includes('FAILED') ? 'error' : 'info'"
+      :severity="agent.outcome.code.endsWith('_ACCEPTED') ? 'info' : 'error'"
       @retry="reloadPolicy"
     />
 
@@ -185,6 +185,13 @@
               <code>版本 {{ selectedEnvironment.revision }}</code>
             </details>
           </div>
+          <ModelInputPathPicker
+            v-if="uploadedPackage"
+            v-model="modelInputChecked"
+            :files="uploadedPackage.files"
+            :disabled="agent.acting !== null"
+          />
+          <p v-else class="section-note" role="status">上传或恢复材料包后，在这里勾选要交给模型的文件。</p>
           <label class="authorization-field">
             <input v-model="impactAcknowledged" type="checkbox" />
             <span>我确认 Agent 可能修改该 Work 的配置；如涉及重启或超出预授权范围，服务端会要求明确确认。</span>
@@ -226,6 +233,9 @@
                   <li v-for="attempt in track.attempts" :key="attempt.number">
                     <span>尝试 {{ attempt.number }}</span>
                     <span>{{ trackStateLabel(attempt.state) }}</span>
+                    <span v-if="attempt.diagnosticCode && attemptReason(attempt.diagnosticCode).message" class="attempt-reason" role="status">
+                      {{ attemptReason(attempt.diagnosticCode).message }} {{ attemptReason(attempt.diagnosticCode).nextStep }}
+                    </span>
                     <details v-if="attempt.diagnosticCode" class="advanced-details">
                       <summary>查看诊断</summary>
                       <code>{{ attempt.diagnosticCode }}</code>
@@ -320,12 +330,14 @@ import { computed, inject, ref, watch } from 'vue'
 import { RouterLink, routeLocationKey, routerKey } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import UploadRecoveryStatus from '@/components/common/UploadRecoveryStatus.vue'
 import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import WorkTemplateAuthoringView from '@/views/researcher/WorkTemplateAuthoringView.vue'
 import { approveProjectWorkConfigurationRun, getActiveProjectLlmPolicy, getProjectWorkConfigurationPlan } from '@/generated/contracts'
 import type { AgentRunHistoryItem, AgentRunSchema, ProblemPackageSchema, ProjectLlmEgressPolicySchema, WorkConfigurationPlanViewSchema } from '@/generated/contracts'
+import { useModelInputSelection } from '@/composables/useModelInputSelection'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
@@ -391,6 +403,7 @@ const uploadedPackage = computed<ProblemPackageSchema | null>(() => packageUploa
 const packageDone = computed(() => uploadedPackage.value !== null)
 const packageId = computed(() => uploadedPackage.value?.id ?? '')
 const packageRevision = computed(() => uploadedPackage.value?.revision ?? 0)
+const { checked: modelInputChecked, selectedPaths: modelInputPaths } = useModelInputSelection(uploadedPackage)
 let packageRestoreKey: string | null = null
 const canUploadPackage = computed(() => {
   const ready = ['ready', 'error', 'needs-files', 'cancelled'].includes(packageUpload.state.kind)
@@ -422,7 +435,7 @@ const existingRunForCurrentInputs = computed(() => {
     && current.purpose.environmentId === selectedEnvironment.value.id
     && current.purpose.environmentRevision === selectedEnvironment.value.revision
 })
-const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success' && agent.run.kind !== 'loading' && !existingRunForCurrentInputs.value))
+const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && modelInputPaths.value.length > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success' && agent.run.kind !== 'loading' && !existingRunForCurrentInputs.value))
 const canApprovePlan = computed(() => {
   if (plan.value.kind !== 'success' || agent.run.kind !== 'success' || agent.run.data.state !== 'awaiting_approval') return false
   if (!approvalReason.value.trim() || !approvalExpiresAt.value) return false
@@ -672,7 +685,8 @@ async function reloadPolicy() {
 async function startRun() {
   if (!canStart.value || policy.value.kind !== 'success') return
   const environment = selectedEnvironment.value
-  if (!environment) return
+  const selectedPaths = modelInputPaths.value
+  if (!environment || selectedPaths.length === 0) return
   const started = await agent.startWorkConfiguration({
     environmentId: environment.id,
     environmentRevision: environment.revision,
@@ -680,6 +694,7 @@ async function startRun() {
     packageRevision: packageRevision.value,
     policyId: policy.value.data.id,
     policyRevision: policy.value.data.revision,
+    selectedPaths,
     ...(selectedProject.value?.courseId ? { courseId: selectedProject.value.courseId } : {}),
   })
   if (started && agent.run.kind === 'success' && agent.run.data.purpose.kind === 'work_configuration') {
@@ -820,6 +835,11 @@ function trackStateLabel(state: string) {
   return ({ pending: '等待处理', requested: '已提交', running: '运行中', succeeded: '已完成', failed: '失败', cancelled: '已取消', skipped: '已跳过' } as Record<string, string>)[state] ?? state
 }
 
+/** Chinese reason and next step shown before a known attempt code. */
+function attemptReason(code: string): DiagnosticViewModel {
+  return makeDiagnostic(code, '')
+}
+
 </script>
 
 <style scoped>
@@ -880,5 +900,6 @@ function trackStateLabel(state: string) {
 .plan-code pre { max-height: 320px; overflow: auto; margin: 0; padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-small); white-space: pre-wrap; overflow-wrap: anywhere; }
 .restart-warning { margin: var(--space-4) 0; padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); font: var(--md-sys-body-medium); }
 .approval-form { display: grid; gap: var(--space-4); margin-top: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--md-sys-color-outline-variant); }
+.attempt-reason { display: block; margin-bottom: 4px; color: var(--md-sys-color-on-surface); font: var(--md-sys-body-small); }
 @media (max-width: 820px) { .config-layout { grid-template-columns: 1fr; } .project-strip { align-items: stretch; flex-direction: column; } .project-strip label { max-width: none; } .project-summary { padding-bottom: 0; } }
 </style>

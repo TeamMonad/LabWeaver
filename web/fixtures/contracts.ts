@@ -1,5 +1,5 @@
 import { activeScene, fixtureProjectId } from './scenes'
-import { agentRunHistory, authoringPublicationStatus, authoringReleases, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
+import { agentRunHistory, authoringPublicationStatus, authoringReleases, authoringRubricRules, authoringScene, environmentCandidateView, evaluationCandidateView, reviewPackage, reviewRun, reviewRunId } from './authoring'
 import type {
   AvailableObjectActionsSchema,
   ObjectAction,
@@ -679,6 +679,11 @@ export async function getProjectAuthoringApproval(options?: FixtureOptions) {
 export async function completeProjectAuthoringApproval() { return unsupportedResponse('提交实验包批准') }
 export async function getProjectCandidateBuild() { return unsupportedResponse('读取候选构建任务') }
 export async function cancelProjectCandidateBuild() { return unsupportedResponse('取消候选构建任务') }
+export async function getProjectRubricModelInputRules(_options?: FixtureOptions) {
+  const rules = authoringRubricRules()
+  return rules ? fixtureResponse(rules) : unsupportedResponse('读取评分规则的模型使用设置')
+}
+export async function maintainProjectRubricModelInputRule(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('修改评分规则的模型使用设置') }
 
 export async function getProject(options?: FixtureOptions): Promise<FixtureResult<ProjectSchema>> {
   const projectId = options?.path?.projectId

@@ -28,6 +28,15 @@ export type ProjectAgentRunPurposeExpectation =
   | { kind: 'authoring'; environmentClass?: 'experiment' | 'work' }
   | { kind: 'work_configuration'; environmentId?: string }
 
+/**
+ * The generated request keeps `selectedPaths` optional, but Control rejects a
+ * missing or empty selection (#216). Every UI start therefore passes the
+ * user's exact, non-empty file choice.
+ */
+type ExplicitModelInput = { selectedPaths: string[] }
+type StartAgentRunInput = Omit<CreateAgentRunRequestSchema, 'projectId' | 'selectedPaths'> & ExplicitModelInput
+type StartWorkConfigurationRunInput = Omit<CreateWorkConfigurationRunRequestSchema, 'projectId' | 'selectedPaths'> & ExplicitModelInput
+
 function purposeDiagnostic(
   data: AgentRunSchema,
   expectedPurpose: ProjectAgentRunPurposeExpectation | undefined,
@@ -117,7 +126,7 @@ export function useProjectAgentRun(
     return true
   }
 
-  async function start(input: Omit<CreateAgentRunRequestSchema, 'projectId'>): Promise<boolean> {
+  async function start(input: StartAgentRunInput): Promise<boolean> {
     return startRequest('agent', input, async (id, key) => {
       const result = await createProjectAgentRun({
         path: { projectId: id },
@@ -130,7 +139,7 @@ export function useProjectAgentRun(
     }, 'PROJECT_RUN_START_FAILED', '启动生成任务失败')
   }
 
-  async function startWorkConfiguration(input: Omit<CreateWorkConfigurationRunRequestSchema, 'projectId'>): Promise<boolean> {
+  async function startWorkConfiguration(input: StartWorkConfigurationRunInput): Promise<boolean> {
     return startRequest('work_configuration', input, async (id, key) => {
       const result = await createProjectWorkConfigurationRun({
         path: { projectId: id },

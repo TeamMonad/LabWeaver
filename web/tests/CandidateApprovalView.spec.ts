@@ -4,6 +4,8 @@ import { reactive } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import CandidateApprovalView from '@/views/teacher/CandidateApprovalView.vue'
 import {
+  getActiveProjectLlmPolicy,
+  getProjectRubricModelInputRules,
   completeProjectAuthoringApproval,
   getProjectAgentRun,
   getProjectAuthoringApproval,
@@ -27,6 +29,9 @@ vi.mock('@/generated/contracts', () => ({
   completeProjectAuthoringApproval: vi.fn(),
   getProjectCandidateBuild: vi.fn(),
   cancelProjectCandidateBuild: vi.fn(),
+  getActiveProjectLlmPolicy: vi.fn(),
+  getProjectRubricModelInputRules: vi.fn(),
+  maintainProjectRubricModelInputRule: vi.fn(),
 }))
 
 const PROJECT = reviewRun.projectId
@@ -188,6 +193,25 @@ describe('CandidateApprovalView (审核与发布)', () => {
     const queue = wrapper.get('[data-testid="review-queue"]')
     expect(queue.get('[data-group="released"]').text()).toContain('已发布版本 1')
     expect(queue.find('[data-group="review"]').exists()).toBe(false)
+  })
+
+  it('offers rubric model-input settings only for a ready publication with an exact Evaluation release revision', async () => {
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: undefined, error: { diagnosticCode: 'LW_POLICY_NOT_FOUND', detail: 'missing', status: 404 } } as never)
+    vi.mocked(getProjectRubricModelInputRules).mockResolvedValue(ok({ projectId: PROJECT, courseId: 'course-physics-2026', policyId: 'policy-1', policyRevision: 2, rules: [] }))
+    serveApprovals({ [RELEASE_APPROVAL_ID]: { approval: approvalRecord({ id: RELEASE_APPROVAL_ID }), status: 'ready', evaluationReleaseId: 'release-optics-eval' } })
+    const withoutRevision = await mountAt({ projectId: PROJECT, runId: reviewRun.id, approvalId: RELEASE_APPROVAL_ID })
+    expect(withoutRevision.wrapper.get('[data-testid="publication-status"]').attributes('data-status')).toBe('ready')
+    expect(withoutRevision.wrapper.find('[data-testid="rubric-model-input-rules"]').exists()).toBe(false)
+    expect(getProjectRubricModelInputRules).not.toHaveBeenCalled()
+    withoutRevision.wrapper.unmount()
+
+    serveApprovals({ [RELEASE_APPROVAL_ID]: { approval: approvalRecord({ id: RELEASE_APPROVAL_ID }), status: 'ready', evaluationReleaseId: 'release-optics-eval', evaluationReleaseRevision: 1 } })
+    const { wrapper } = await mountAt({ projectId: PROJECT, runId: reviewRun.id, approvalId: RELEASE_APPROVAL_ID })
+    const panel = wrapper.get('[data-testid="rubric-model-input-rules"]')
+    expect(getProjectRubricModelInputRules).toHaveBeenCalledWith({ path: { projectId: PROJECT } })
+    expect(panel.get('.rubric-path').text()).toBe('rubrics/report-review.md')
+    expect(panel.get('[data-testid="rubric-rule-status"]').text()).toBe('隐藏：不会交给模型。')
+    wrapper.unmount()
   })
 
   it('does not auto-open a run with a release, even one for an older candidate revision', async () => {

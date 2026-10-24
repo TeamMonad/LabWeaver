@@ -113,14 +113,21 @@
       <div class="section-heading section-heading--compact">
         <div>
           <h4 id="run-heading">生成可重复使用的 Work 模板</h4>
-          <p>材料包就绪后启动生成；完成后检查候选运行环境，再提交审核。</p>
+          <p>材料包就绪后，先勾选要交给模型的文件，再启动生成；完成后检查候选运行环境，再提交审核。</p>
         </div>
         <button v-if="agent.run.kind === 'success'" type="button" class="icon-button" aria-label="刷新生成任务" @click="agent.load(agent.run.data.id)">
           <SvgIcon name="refresh" size="sm" aria-hidden="true" />
         </button>
       </div>
 
-      <button type="button" class="filled-button" :disabled="!canStartRun" @click="startRun">
+      <ModelInputPathPicker
+        v-if="uploadedPackage && !agentRunForCurrentPackage"
+        v-model="modelInputChecked"
+        :files="uploadedPackage.files"
+        :disabled="agent.acting !== null"
+      />
+
+      <button type="button" class="filled-button" data-testid="work-template-start-run" :disabled="!canStartRun" @click="startRun">
         {{ agent.acting === 'start' ? '提交中…' : '启动 Work 模板生成' }}
       </button>
 
@@ -189,15 +196,14 @@
 
       <DiagnosticBanner
         v-if="agent.outcome"
+        :code="agent.outcome.code"
+        :request-id="agent.outcome.requestId"
+        :next-step="agent.outcome.nextStep"
         :message="runDiagnosticMessage(agent.outcome.code, agent.outcome.message)"
         :retryable="agent.outcome.retryable"
-        :severity="agent.outcome.code.includes('FAILED') ? 'error' : 'info'"
+        :severity="agent.outcome.code.endsWith('_ACCEPTED') ? 'info' : 'error'"
         @retry="reloadRun"
       />
-      <details v-if="agent.outcome" class="technical-details technical-diagnostic-details">
-        <summary>查看诊断代码</summary>
-        <code>{{ agent.outcome.code }}</code>
-      </details>
     </section>
 
     <section v-if="environmentCandidate.kind !== 'idle'" class="template-card md-card" aria-labelledby="candidate-heading" data-testid="work-template-candidate">
@@ -354,6 +360,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import ModelInputPathPicker from '@/components/common/ModelInputPathPicker.vue'
 import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
@@ -370,6 +377,7 @@ import type {
 } from '@/generated/contracts'
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
 import { withdrawEnvironmentTemplateReleaseByUi } from '@/composables/useEnvironmentTemplateReleases'
+import { useModelInputSelection } from '@/composables/useModelInputSelection'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
@@ -427,6 +435,7 @@ let releaseRequestKey: string | null = null
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed<ProblemPackageSchema | null>(() => upload.state.kind === 'done' ? upload.state.package : null)
+const { checked: modelInputChecked, selectedPaths: modelInputPaths } = useModelInputSelection(uploadedPackage)
 const candidateId = computed(() => {
   if (agent.run.kind !== 'success') return null
   return agent.run.data.tracks.find((track) => track.kind === 'environment')?.candidateId ?? null
@@ -443,6 +452,7 @@ const agentRunForCurrentPackage = computed(() => (
 const canStartRun = computed(() => Boolean(
   packageDone.value
   && uploadedPackage.value
+  && modelInputPaths.value.length > 0
   && policy.state.kind === 'success'
   && agent.run.kind !== 'loading'
   && !agentRunForCurrentPackage.value
@@ -716,7 +726,8 @@ async function startRun() {
   const pkg = uploadedPackage.value
   const policyData = policy.state.kind === 'success' ? policy.state.data : null
   const projectId = props.projectId
-  if (!projectId || !pkg || !policyData || agent.acting) return
+  const selectedPaths = modelInputPaths.value
+  if (!projectId || !pkg || !policyData || agent.acting || selectedPaths.length === 0) return
   const started = await agent.start({
     ...(props.courseId ? { courseId: props.courseId } : {}),
     packageId: pkg.id,
@@ -724,6 +735,7 @@ async function startRun() {
     policyId: policyData.id,
     policyRevision: policyData.revision,
     environmentClass: 'work',
+    selectedPaths,
   })
   if (started && agent.run.kind === 'success') {
     loadedRouteRunId = agent.run.data.id
@@ -924,7 +936,7 @@ function runDiagnosticMessage(code: string, fallback: string): string {
     case 'LW_CANDIDATE_NOT_FOUND':
       return '候选可能仍在服务端同步，请点击重试继续查看。'
     default:
-      return fallback
+      return makeDiagnostic(code, fallback).message
   }
 }
 
@@ -935,7 +947,10 @@ function trackDiagnosticMessage(track: AgentRunSchema['tracks'][number]): string
 
 function trackNextStep(track: AgentRunSchema['tracks'][number], data: AgentRunSchema): string | null {
   const attempt = latestTrackAttempt(track)
-  if (trackDiagnosticCode(track) === 'LW_TASK_RESOURCE_APPROVAL_TIMEOUT') return '确认资源申请失败后可重试原任务；临时资源回收不等于整体生成成功。'
+  const code = trackDiagnosticCode(track)
+  if (code === 'LW_TASK_RESOURCE_APPROVAL_TIMEOUT') return '确认资源申请失败后可重试原任务；临时资源回收不等于整体生成成功。'
+  const codeNextStep = code ? makeDiagnostic(code, '').nextStep : undefined
+  if (codeNextStep) return codeNextStep
   if (trackCanRetry(data, track.kind)) return `确认失败原因后，可重试${trackLabel(track.kind)}。`
   if (attempt?.state === 'awaiting_approval') return '请查看资源申请状态，批准后任务会继续。'
   if (attempt?.state === 'pending' || attempt?.state === 'running' || attempt?.state === 'repairing') return '页面会自动刷新，完成前无需重复提交。'
@@ -1024,7 +1039,6 @@ onUnmounted(() => {
 .track-status { color: var(--md-sys-color-primary); font: var(--md-sys-label-large); }
 .run-track-diagnostic, .run-track-next-step { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .run-track-diagnostic { color: var(--md-sys-color-error); }
-.technical-diagnostic-details code { overflow-wrap: anywhere; }
 .drop-zone { display: grid; justify-items: center; gap: var(--space-3); padding: var(--space-8) var(--space-5); border: 2px dashed var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-large); background: var(--md-sys-color-surface-container-low); text-align: center; }
 .drop-zone--active { border-color: var(--md-sys-color-primary); background: var(--md-sys-color-primary-container); }
 .drop-zone p { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }

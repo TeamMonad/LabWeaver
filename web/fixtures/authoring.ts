@@ -7,6 +7,7 @@ import type {
   EnvironmentTemplateReleaseViewSchema,
   EvaluationCandidateViewSchema,
   ProblemPackageSchema,
+  ProjectRubricModelInputRulesSchema,
 } from '../src/generated/contracts/types.gen'
 
 /** Authoring review fixtures: one experiment run ready for review and older history. */
@@ -112,7 +113,7 @@ export const evaluationCandidateView = {
           { id: 'files', role: 'gate', failurePolicy: 'stop', runner: { kind: 'file_assertion', requiredFiles: ['analysis.ipynb', 'results/fringe.csv'] }, checker: { kind: 'exit_code', expected: 0 } },
           { id: 'fringe-spacing', role: 'score', failurePolicy: 'continue', score: { max: 60 }, runner: { kind: 'program', input: 'results/fringe.csv', phase: 'test', limits: { memoryBytes: 512 * 1024 * 1024, outputBytes: 65536, wallTimeSeconds: 30 }, toolchainProfile: 'python-3.12', testGroups: [{ name: '条纹间距', maxPoints: 40, source: 'hidden/tests/spacing.py' }, { name: '误差分析', maxPoints: 20, source: 'hidden/tests/error.py' }] }, checker: { kind: 'token' } },
           { id: 'report', role: 'score', failurePolicy: 'continue', score: { max: 40 }, runner: { kind: 'file_assertion', requiredFiles: ['report.md'] }, checker: { kind: 'exit_code', expected: 0 } },
-          { id: 'review', role: 'advisory', failurePolicy: 'continue_advisory', runner: { kind: 'llm_review', include: ['report.md'], outputMode: 'goal_assessment' } },
+          { id: 'review', role: 'advisory', failurePolicy: 'continue_advisory', runner: { kind: 'llm_review', include: ['report.md'], outputMode: 'goal_assessment', rubric: 'evaluator://rubrics/report-review.md' } },
         ],
         aggregation: { kind: 'deterministic_sum', maxScore: 100, gates: [{ step: 'files', requiredStatus: 'passed' }] },
         review: { forceManualWhen: [], teacherApprovalRequiredForRelease: true },
@@ -137,6 +138,7 @@ export const reviewPackage = {
     { path: 'handout/interference.pdf', object: { artifactId: 'a2', mediaType: 'application/pdf', objectVersion: 'v1', sha256: 'sha256:02', sizeBytes: 1_240_000 } },
     { path: 'data/raw_fringes.csv', object: { artifactId: 'a3', mediaType: 'text/csv', objectVersion: 'v1', sha256: 'sha256:03', sizeBytes: 86_000 } },
     { path: 'hidden/tests/spacing.py', object: { artifactId: 'a4', mediaType: 'text/x-python', objectVersion: 'v1', sha256: 'sha256:04', sizeBytes: 3100 } },
+    { path: 'rubrics/report-review.md', sha256: '5'.repeat(64), object: { artifactId: 'a5', mediaType: 'text/markdown', objectVersion: 'v1', sizeBytes: 1800, storeBinding: 'materials' } },
   ],
 } as unknown as ProblemPackageSchema
 
@@ -191,10 +193,18 @@ const reviewRunPublication = {
   status: 'ready',
   environmentReleaseId: 'release-optics-env',
   evaluationReleaseId: 'release-optics-eval',
+  evaluationReleaseRevision: 1,
   revision: 2,
   updatedAt: '2026-10-11T04:05:00.000Z',
 } as unknown as AuthoringApprovalPublicationStatusSchema
 
 export function authoringPublicationStatus(approvalId: string | undefined): AuthoringApprovalPublicationStatusSchema | null {
   return activeScene.value.id === 'teacher-review-published' && approvalId === reviewRunPublication.approval.id ? reviewRunPublication : null
+}
+
+/** The published scene starts with no stored rubric rule, so the rubric stays hidden from the model. */
+export function authoringRubricRules(): ProjectRubricModelInputRulesSchema | null {
+  return activeScene.value.id === 'teacher-review-published'
+    ? { projectId: fixtureProjectId, courseId: 'course-physics-2026', policyId: 'policy-optics', policyRevision: 2, rules: [] }
+    : null
 }
