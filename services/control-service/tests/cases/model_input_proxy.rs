@@ -394,6 +394,30 @@ async fn sandbox_tools_and_each_model_request_recheck_original_authority()
             .status(),
         StatusCode::FORBIDDEN
     );
+    let escaped_capability = format!("\\u{:04x}{}", capability.as_bytes()[0], &capability[1..]);
+    for body in [
+        format!(
+            r#"{{"model":"fixture-provider-v1","messages":[{{"role":"user","content":"{escaped_capability}"}}]}}"#
+        ),
+        format!(
+            r#"{{"model":"fixture-provider-v1","messages":[],"metadata":{{"{escaped_capability}":"must-not-leave"}}}}"#
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/internal/v1/model-input-attempts/{task}/v1/messages"
+                    ))
+                    .header("authorization", format!("Bearer {capability}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
     assert_eq!(
         send_tool(&app, TaskRunId::new(), &capability)
             .await?
