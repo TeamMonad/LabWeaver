@@ -6021,11 +6021,11 @@ async fn seed_runtime_projection(
         project_id: request.project_id,
         course_id: request.course_id,
         version: release_version,
-        candidate_id,
-        agent_run_id: run_id,
-        candidate_revision,
+        candidate_id: Some(candidate_id),
+        agent_run_id: Some(run_id),
+        candidate_revision: Some(candidate_revision),
         runtime_kind: RuntimeKind::Container,
-        approval: CandidateApproval {
+        approval: Some(CandidateApproval {
             id: ApprovalId::new(),
             candidate_id,
             candidate_revision,
@@ -6035,7 +6035,8 @@ async fn seed_runtime_projection(
             decision: CandidateDecision::Approved,
             reason: "fixture".into(),
             decided_at: now,
-        },
+        }),
+        manual_approval: None,
         artifact: ImageArtifact::Container {
             id: ImageArtifactId::new(),
             build_request_id: BuildRequestId::new(),

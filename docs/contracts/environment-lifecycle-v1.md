@@ -15,7 +15,7 @@ Environment 唯一写入环境 Namespace、Quota、PVC、容器和 VM。Resource
 已有 Work 的 `start`、`restart`、`retry`、`recover`、`reset` 重新校验原租约的当前 Resource
 授权和容量绑定。原租约有效时直接操作；失效、撤销或释放后明确拒绝，不能靠旧的 Environment
 快照恢复运行。首次申请之外不强制重新人工审批；是否需要新申请取决于 Resource 当前授权。
-费用估算不由 Environment 推算，定价/估价依赖 Resource 的 #210 接口。
+费用估算复用已生成的 `estimateProjectResourceCost`，输入 `resources`、`computeFrom/computeUntil` 与 `storageFrom/storageUntil`，返回 `ResourceCostEstimate` 的固定费率明细和 `total`；不由 Environment 或浏览器另建计价逻辑。该接口不依赖模型，也不授予容量或资金权限，见[计算与存储估价](project-credits.md#计算与存储估价)。
 
 
 ### 显式升级 Work 模板
