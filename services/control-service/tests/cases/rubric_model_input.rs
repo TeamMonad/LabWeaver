@@ -683,7 +683,7 @@ async fn assert_shared_frozen_inputs(
         ImageArtifact::Container {
             build_request_id, ..
         } => Some(*build_request_id),
-        ImageArtifact::VirtualMachine { .. } => None,
+        ImageArtifact::VirtualMachine { .. } | ImageArtifact::CatalogContainer { .. } => None,
     };
     let mut facts = serde_json::json!({
         "frozenSubmissionId":frozen_id,"projectId":release.project_id,"courseId":release.course_id,"ownerActorId":teacher.actor_id,
