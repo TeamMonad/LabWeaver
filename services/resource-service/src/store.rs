@@ -5179,7 +5179,15 @@ async fn finish_transaction<T>(
             Ok(value)
         }
         Err(error) => {
-            transaction.rollback().await?;
+            if let Err(rollback_error) = transaction.rollback().await {
+                let safe_detail = safe_sqlstate_detail(&rollback_error);
+                tracing::warn!(
+                    event = "resource.transaction.rollback_failed",
+                    error_kind = "database",
+                    failure_stage = "transaction.rollback",
+                    safe_detail = safe_detail.as_str(),
+                );
+            }
             Err(error)
         }
     }
@@ -6717,5 +6725,101 @@ mod tests {
         assert!(!is_retryable_database_sqlstate(Some("40001")));
         assert!(!is_retryable_database_sqlstate(Some("23505")));
         assert!(!is_retryable_database_sqlstate(None));
+    }
+
+    #[tokio::test]
+    async fn rollback_failure_preserves_business_diagnostic_and_releases_locks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{body::to_bytes, http::StatusCode, response::IntoResponse};
+        use sqlx::postgres::PgPoolOptions;
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+        use testcontainers_modules::postgres::Postgres;
+
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        );
+        let observer = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await?;
+        let writer = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        sqlx::raw_sql(
+            "CREATE TABLE public.rollback_error_probe (marker integer PRIMARY KEY);
+             INSERT INTO public.rollback_error_probe VALUES (1);",
+        )
+        .execute(&observer)
+        .await?;
+        for (error, diagnostic, status) in [
+            (
+                super::ResourceStoreError::CapacityClaimStateConflict,
+                "LW_RESOURCE_CAPACITY_CLAIM_STATE_CONFLICT",
+                StatusCode::CONFLICT,
+            ),
+            (
+                super::ResourceStoreError::ScopeConflict,
+                "LW_RESOURCE_SCOPE_CONFLICT",
+                StatusCode::CONFLICT,
+            ),
+            (
+                super::ResourceStoreError::Credits(crate::credits::CreditError::Denied),
+                "LW_CREDITS_SCOPE_DENIED",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                super::ResourceStoreError::Credits(crate::credits::CreditError::Insufficient),
+                "LW_CREDITS_INSUFFICIENT",
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let mut transaction = writer.begin().await?;
+            let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *transaction)
+                .await?;
+            sqlx::query("SELECT marker FROM public.rollback_error_probe FOR UPDATE")
+                .fetch_one(&mut *transaction)
+                .await?;
+            let locked = sqlx::query_scalar::<_, i32>(
+                "SELECT marker FROM public.rollback_error_probe FOR UPDATE NOWAIT",
+            )
+            .fetch_one(&observer)
+            .await
+            .expect_err("the real transaction must own the row lock before injection");
+            assert_eq!(
+                locked
+                    .as_database_error()
+                    .and_then(sqlx::error::DatabaseError::code)
+                    .as_deref(),
+                Some("55P03")
+            );
+            // The timeout overload waits for backend termination, not just signal delivery.
+            // The ensuing real ROLLBACK cannot succeed on this terminated connection.
+            let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1,5000)")
+                .bind(backend)
+                .fetch_one(&observer)
+                .await?;
+            assert!(terminated);
+            let returned = super::finish_transaction::<()>(transaction, Err(error))
+                .await
+                .expect_err("rollback failure must not turn rejection into success");
+            assert_eq!(returned.to_string(), diagnostic);
+            let response = crate::api::ResourceApiError::Store(returned).into_response();
+            assert_eq!(response.status(), status);
+            let body = to_bytes(response.into_body(), 4096).await?;
+            let problem: contracts::ProblemDetails = serde_json::from_slice(&body)?;
+            assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
+            assert!(!problem.retryable);
+            let claimable: Option<i32> = sqlx::query_scalar(
+                "SELECT marker FROM public.rollback_error_probe FOR UPDATE SKIP LOCKED",
+            )
+            .fetch_optional(&observer)
+            .await?;
+            assert_eq!(claimable, Some(1));
+        }
+        Ok(())
     }
 }
