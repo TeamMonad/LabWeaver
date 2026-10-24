@@ -13,8 +13,12 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use contracts::http::TaskResourceStatus;
-use contracts::resource::{CapacityClaimState, ResourceLeaseState};
+use contracts::http::{CreateResourceRateRequest, TaskResourceStatus};
+use contracts::resource::credits::CreditAdminOperation;
+use contracts::resource::{
+    CapacityClaimState, FixedDecimal, Money, ResourceBillingUnit, ResourceLeaseState,
+};
+use contracts::{ActorId, PlatformRole, ProjectId, UtcTimestamp};
 use futures_util::StreamExt;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -23,6 +27,7 @@ use hyper_util::{
 };
 use persistence_sqlx::{Domain, InboxDecision, InboxStore, Sha256Digest};
 use reqwest::Url;
+use resource_service::credits::PgCreditStore;
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use task_execution::resource::{
     ResourceClient, ResourceClientConfiguration, TaskResourceError, TaskResourceLifecycle,
@@ -100,6 +105,53 @@ async fn inject_fault(State(faults): State<Faults>, request: Request, next: Next
     response
 }
 
+async fn seed_task_credits(
+    pool: &sqlx::PgPool,
+    store: &PgResourceStore,
+    project_id: ProjectId,
+) -> TestResult {
+    let now = store.current_time().await?;
+    for unit in [
+        ResourceBillingUnit::CpuMillicoreSecond,
+        ResourceBillingUnit::MemoryByteSecond,
+        ResourceBillingUnit::StorageByteSecond,
+    ] {
+        store
+            .create_rate(
+                &format!("task-fixture-rate-{unit:?}"),
+                &CreateResourceRateRequest {
+                    builder_binding: None,
+                    model_binding: None,
+                    max_preauthorization: None,
+                    unit,
+                    unit_quantity: 1,
+                    gpu_class: None,
+                    gpu_mode: None,
+                    unit_price: Money {
+                        currency: "CREDITS".into(),
+                        amount: FixedDecimal::parse("1.000000")?,
+                    },
+                    effective_from: now,
+                    effective_until: None,
+                },
+            )
+            .await?;
+    }
+    PgCreditStore::new(pool.clone())
+        .admin(
+            "task-fixture-grant",
+            ActorId::new(),
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Grant {
+                project_id,
+                amount: FixedDecimal::parse("999999999999999.000000")?,
+                reason: "task lifecycle fixture funding".into(),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 struct Fixture {
     _postgres: testcontainers::ContainerAsync<Postgres>,
     _authority: ResourceAuthAuthority,
@@ -125,6 +177,8 @@ impl Fixture {
     async fn start_for_client(task_client_id: &str) -> TestResult<Self> {
         let (postgres, pool) = migrated_pool().await?;
         let store = PgResourceStore::new(pool.clone());
+        let project_id = ProjectId::new();
+        seed_task_credits(&pool, &store, project_id).await?;
         let authority = spawn_resource_auth_authority_for_client(
             resource_signing_material("task-lifecycle")?,
             task_client_id,
@@ -220,7 +274,7 @@ impl Fixture {
         let lifecycle = TaskResourceLifecycle::new(
             client,
             task_run_id,
-            ProjectId::new(),
+            project_id,
             None,
             ActorId::new(),
             format!("evaluation-{task_run_id}"),
@@ -432,7 +486,7 @@ async fn approve(
         },
         lease_id: LeaseId::new(),
     };
-    Ok(store
+    store
         .approve(
             &format!("approve-{}", request.id),
             request.id,
@@ -444,7 +498,8 @@ async fn approve(
             },
             "trace-task-test",
         )
-        .await?)
+        .await?;
+    Ok(store.load(request.id).await?)
 }
 
 #[tokio::test]
@@ -500,6 +555,44 @@ async fn cancellation_during_claim_settles_and_releases_the_committed_claim() ->
         .lifecycle
         .cancel("cancel replay after claim cleanup")
         .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_task_approval_releases_claim_without_funding_or_revival() -> TestResult {
+    let fixture = Fixture::start().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    approve(&fixture.faults.store, &request).await?;
+    let claimed = fixture.wait_for_claim().await?;
+    sqlx::query("UPDATE resource.resource_approvals SET created_at=clock_timestamp()-interval '1 hour',valid_until=clock_timestamp()-interval '1 minute' WHERE approval_id=$1")
+        .bind(claimed.claim.approval_id.as_uuid()).execute(&fixture.pool).await?;
+    let outcome = fixture
+        .lifecycle
+        .acknowledge(&claimed, "labweaver-evaluation")
+        .await;
+    assert!(matches!(
+        outcome,
+        Err(TaskResourceError::ResourceApprovalExpired)
+    ));
+    let stopped = fixture.lifecycle.load_status().await?;
+    assert_eq!(stopped.claim.state, CapacityClaimState::Released);
+    assert_eq!(stopped.lease.state, ResourceLeaseState::Revoked);
+    assert_eq!(
+        stopped.request.diagnostic_code.as_deref(),
+        Some("LW_RESOURCE_APPROVAL_EXPIRED")
+    );
+    assert!(
+        fixture
+            .lifecycle
+            .acknowledge(&claimed, "labweaver-evaluation")
+            .await
+            .is_err()
+    );
+    let account = PgCreditStore::new(fixture.pool.clone())
+        .account(request.project_id)
+        .await?;
+    assert_eq!(account.reserved, FixedDecimal::parse("0.000000")?);
+    assert_eq!(account.spent, FixedDecimal::parse("0.000000")?);
     Ok(())
 }
 
@@ -972,6 +1065,136 @@ async fn cancellation_after_approval_and_committed_ack_converges_with_retry() ->
             .claim_task_resource(fixture.task_run_id, "trace-stale-claim")
             .await
             .is_err()
+    );
+    Ok(())
+}
+
+async fn active_task_for_renewal() -> TestResult<(Fixture, TaskResourceStatus)> {
+    let fixture = Fixture::start().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    approve(&fixture.faults.store, &request).await?;
+    let claimed = fixture.wait_for_claim().await?;
+    let active = fixture
+        .lifecycle
+        .acknowledge(&claimed, "labweaver-evaluation")
+        .await?;
+    Ok((fixture, active))
+}
+
+#[tokio::test]
+async fn one_shot_task_renewal_cannot_spend_beyond_an_exhausted_account() -> TestResult {
+    let (fixture, active) = active_task_for_renewal().await?;
+    let credits = PgCreditStore::new(fixture.pool.clone());
+    let account = credits.account(active.project_id).await?;
+    credits
+        .admin(
+            "exhaust-task-available",
+            ActorId::new(),
+            &[PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Adjust {
+                project_id: active.project_id,
+                amount: FixedDecimal::from_scaled(-account.available.scaled())?,
+                reason: "isolate insufficient renewal funds".into(),
+            },
+        )
+        .await?;
+    let before = credits.account(active.project_id).await?;
+    assert_eq!(before.available, FixedDecimal::parse("0.000000")?);
+    let expiry = active.lease.expires_at.ok_or("expiry")?;
+    let error = fixture
+        .faults
+        .store
+        .renew_lease(
+            "unsupported-task-renewal",
+            active.lease.id,
+            active.lease.revision,
+            UtcTimestamp::from_utc(expiry.get() + time::Duration::minutes(1))?,
+            "task-renew",
+        )
+        .await
+        .expect_err("one-shot Task cannot renew");
+    assert!(matches!(error, ResourceStoreError::TaskRenewalUnsupported));
+    assert_eq!(credits.account(active.project_id).await?, before);
+    assert_eq!(
+        fixture.faults.store.load_lease(active.lease.id).await?,
+        active.lease
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_shot_task_renewal_replay_never_mutates_lease_hold_or_events() -> TestResult {
+    let (fixture, active) = active_task_for_renewal().await?;
+    let before = fixture.event_count().await?;
+    let credits = PgCreditStore::new(fixture.pool.clone());
+    let account = credits.account(active.project_id).await?;
+    let body = contracts::http::RenewResourceLease {
+        expected_revision: active.lease.revision,
+        duration_seconds: 600,
+        reason: "one-shot retry".into(),
+    };
+    for _ in 0..2 {
+        let error = fixture
+            .faults
+            .store
+            .renew_lease_for_duration(
+                "same-task-renew-key",
+                active.lease.id,
+                &body,
+                "task-renew-replay",
+            )
+            .await
+            .expect_err("replay remains rejected");
+        assert!(matches!(error, ResourceStoreError::TaskRenewalUnsupported));
+    }
+    assert_eq!(credits.account(active.project_id).await?, account);
+    assert_eq!(fixture.event_count().await?, before);
+    assert_eq!(
+        fixture.faults.store.load_lease(active.lease.id).await?,
+        active.lease
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_shot_task_renewal_cannot_extend_the_paid_snapshot_window() -> TestResult {
+    let (fixture, active) = active_task_for_renewal().await?;
+    let before: serde_json::Value = sqlx::query_scalar(
+        "SELECT snapshot FROM resource.credit_cost_snapshots WHERE request_id=$1",
+    )
+    .bind(active.request.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        before["estimate"]["input"]["computeUntil"],
+        serde_json::to_value(active.lease.expires_at.ok_or("expiry")?)?
+    );
+    let error = fixture
+        .faults
+        .store
+        .renew_lease_for_duration(
+            "task-paid-window",
+            active.lease.id,
+            &contracts::http::RenewResourceLease {
+                expected_revision: active.lease.revision,
+                duration_seconds: 900,
+                reason: "cannot enlarge original approval".into(),
+            },
+            "task-renew-window",
+        )
+        .await
+        .expect_err("one-shot paid window is fixed");
+    assert!(matches!(error, ResourceStoreError::TaskRenewalUnsupported));
+    let after: serde_json::Value = sqlx::query_scalar(
+        "SELECT snapshot FROM resource.credit_cost_snapshots WHERE request_id=$1",
+    )
+    .bind(active.request.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(after, before);
+    assert_eq!(
+        fixture.faults.store.load_lease(active.lease.id).await?,
+        active.lease
     );
     Ok(())
 }

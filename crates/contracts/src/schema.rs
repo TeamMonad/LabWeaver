@@ -380,6 +380,74 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::credits::CreditAdminOperation
     );
     document!(
+        "schemas/contracts/v1/build-cost-estimate-request.schema.json",
+        crate::resource::build_costing::BuildCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-estimate.schema.json",
+        crate::resource::build_costing::BuildCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/environment-credit-grant.schema.json",
+        crate::resource::environment_funding::EnvironmentCreditGrant
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-record.schema.json",
+        crate::resource::build_costing::BuildCostRecord
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-reconciliation.schema.json",
+        crate::resource::build_costing::BuildCostReconciliation
+    );
+    document!(
+        "schemas/contracts/v1/build-usage-measurement.schema.json",
+        crate::resource::build_costing::BuildUsageMeasurement
+    );
+    document!(
+        "schemas/contracts/v1/build-cost-admission-request.schema.json",
+        crate::resource::build_costing::BuildCostAdmissionRequest
+    );
+    document!(
+        "schemas/contracts/v1/observe-build-cost-request.schema.json",
+        crate::resource::build_costing::ObserveBuildCostRequest
+    );
+    document!(
+        "schemas/contracts/v1/model-cost-admission-request.schema.json",
+        crate::resource::model_costing::ModelCostAdmissionRequest
+    );
+    document!(
+        "schemas/contracts/v1/model-cost-admission.schema.json",
+        crate::resource::model_costing::ModelCostAdmission
+    );
+    document!(
+        "schemas/contracts/v1/model-cost-settlement-request.schema.json",
+        crate::resource::model_costing::ModelCostSettlementRequest
+    );
+    document!(
+        "schemas/contracts/v1/model-usage-measurement.schema.json",
+        crate::resource::model_costing::ModelUsageMeasurement
+    );
+    document!(
+        "schemas/contracts/v1/model-cost-observation.schema.json",
+        crate::resource::model_costing::ModelCostObservation
+    );
+    document!(
+        "schemas/contracts/v1/resource-cost-estimate-request.schema.json",
+        crate::resource::costing::ResourceCostEstimateRequest
+    );
+    document!(
+        "schemas/contracts/v1/resource-cost-estimate.schema.json",
+        crate::resource::costing::ResourceCostEstimate
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold-request.schema.json",
+        crate::resource::costing::EstimatedCreditHoldRequest
+    );
+    document!(
+        "schemas/contracts/v1/estimated-credit-hold.schema.json",
+        crate::resource::costing::EstimatedCreditHold
+    );
+    document!(
         "schemas/contracts/v1/credit-hold-request.schema.json",
         crate::resource::credits::CreditHoldRequest
     );
@@ -1449,6 +1517,20 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ]);
         }
         parameters.extend(environment_management_parameters(operation.operation_id));
+        if operation.operation_id == "getBuildCost" {
+            parameters.push(json!({"name":"leaseToken","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if matches!(
+            operation.operation_id,
+            "getBuildCost" | "getProjectBuildCost"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "attempt" {
+                    parameter["schema"] =
+                        json!({"type":"integer","minimum":1,"maximum":2_147_483_647});
+                }
+            }
+        }
         if operation.operation_id == "streamProjectEvents" {
             let stream_cursor_schema = json!({
                 "type":"string",
@@ -1506,6 +1588,33 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             ,"x-labweaver-problem-content-type":"application/problem+json"
             ,"x-labweaver-errors":["LW_CONTRACT_DOCUMENT_INVALID","LW_ACCESS_DENIED","LW_IDEMPOTENCY_CONFLICT","LW_REVISION_CONFLICT"]
         });
+        if operation.operation_id == "renewResourceLease" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED",
+                "LW_RESOURCE_REVISION_CONFLICT",
+                "LW_CREDITS_INSUFFICIENT",
+                "LW_RESOURCE_ESTIMATE_CHANGED",
+                "LW_RESOURCE_SCOPE_CONFLICT",
+                "LW_IDEMPOTENCY_CONFLICT"
+            ]);
+        }
+        if matches!(operation.operation_id, "admitModelCost" | "settleModelCost") {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CREDITS_INSUFFICIENT",
+                "LW_CREDITS_SCOPE_DENIED",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_CREDITS_CONFLICT",
+                "LW_RESOURCE_SCOPE_CONFLICT",
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+                "LW_RESOURCE_RATE_CURRENCY_CONFLICT",
+                "LW_RESOURCE_RATE_SETTLED_CONFLICT",
+                "LW_RESOURCE_REQUEST_INVALID",
+                "LW_IDEMPOTENCY_CONFLICT"
+            ]);
+            operation_json["description"] = json!(
+                "Agent-only model accounting. Admission atomically reserves the configured maximum and starts the finite Unknown reconciliation deadline; callId and Idempotency-Key bind an immutable input. Settlement is idempotent by callId/eventId, stores complete or partial token observations and price details, and only complete terminal Known usage finalizes the hold."
+            );
+        }
         if matches!(
             operation.operation_id,
             "getPlatformConfiguration"
@@ -2110,6 +2219,13 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
         "createCreditAdminOperation" => "credit-admin-operation",
         "createCreditHold" => "credit-hold-request",
+        "estimateProjectResourceCost" => "resource-cost-estimate-request",
+        "estimateProjectBuildCost" => "build-cost-estimate-request",
+        "admitBuildCost" => "build-cost-admission-request",
+        "observeBuildCost" => "observe-build-cost-request",
+        "admitModelCost" => "model-cost-admission-request",
+        "settleModelCost" => "model-cost-settlement-request",
+        "createEstimatedCreditHold" => "estimated-credit-hold-request",
         "resolveCreditHold" => "credit-hold-resolution-request",
         "createResourceRate" => "http/create-resource-rate-request",
         "endResourceRate" => "http/end-resource-rate-request",
@@ -2284,11 +2400,22 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
         "listProjectCreditHolds" => contract_ref("credit-hold-page"),
         "getProjectCredits" => contract_ref("credit-account"),
+        "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
+        "getEnvironmentCreditGrant" => contract_ref("environment-credit-grant"),
+        "claimBuildCostReconciliations" => {
+            json!({"type":"array","items":contract_ref("build-cost-reconciliation")})
+        }
+        "estimateProjectBuildCost" => contract_ref("build-cost-estimate"),
+        "getProjectBuildCost" | "getBuildCost" | "admitBuildCost" | "observeBuildCost" => {
+            contract_ref("build-cost-record")
+        }
+        "admitModelCost" => contract_ref("model-cost-admission"),
+        "createEstimatedCreditHold" => contract_ref("estimated-credit-hold"),
         "listProjectCreditLedger" => contract_ref("credit-ledger-page"),
         "createCreditAdminOperation" => {
             json!({"type":"array","items":contract_ref("credit-ledger-entry")})
         }
-        "createCreditHold" | "resolveCreditHold" => contract_ref("credit-hold"),
+        "settleModelCost" | "createCreditHold" | "resolveCreditHold" => contract_ref("credit-hold"),
         "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
             contract_ref("resource-budget")
         }

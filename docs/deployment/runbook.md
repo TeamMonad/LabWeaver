@@ -41,7 +41,12 @@ export ANSIBLE_VAULT_PASSWORD_FILE="$PWD/deploy/ansible/inventories/v1/.vault-pa
 
 公网域名由 `deploy/ansible/roles/public_ingress` 的 `public_ingress_routes` 管理。Web、Keycloak、Harbor 和 OpenSSH Gateway 使用各自声明的 HTTPS/SSH 入口；用户从 HTTPS 首页开始，登录回调必须返回同一公共入口。浏览器验收保持证书校验开启，不使用内部端口、HTTP 绕过或 `LABWEAVER_IGNORE_HTTPS_ERRORS=1`。
 
-Agent 的模型输入在 platform bundle 的 `agent-service-config/anthropic-base-url` 和 `anthropic-model` 中配置。当前候选部署固定使用集群内 Ollama Service 直连和 `qwen3.6:35b`，不经过旧代理，也不回退云模型。修改模型时重新渲染 bundle 并按第 4 节部署，不能只改 Pod 环境变量。
+Agent 的 model gateway 监听内部 `agent-service:9460`。Provider URL、upstream key 和 HMAC
+signing key 只放在 `agent-service-secrets` 的 `model-gateway-upstream-url`、
+`model-gateway-upstream-key`、`model-gateway-signing-key` 文件；bundle 不再包含直连
+`anthropic-base-url` 或 `anthropic-auth-token`。Worker 每个 run/attempt 使用短期 scoped key
+访问 gateway，沙箱 NetworkPolicy 仅允许 gateway 和对象存储。修改模型或 provider 时重新渲染
+bundle 并按第 4 节部署，不能只改 Pod 环境变量。
 
 ### 1.4 身份与内部服务鉴权检查
 

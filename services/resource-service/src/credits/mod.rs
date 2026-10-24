@@ -182,65 +182,9 @@ impl PgCreditStore {
         input: &CreditHoldRequest,
     ) -> Result<CreditHold, CreditError> {
         positive(&input.amount)?;
-        if owner.is_empty()
-            || input.business_key.trim().is_empty()
-            || input.business_key.len() > 128
-        {
-            return Err(CreditError::Invalid);
-        }
         let mut tx = self.pool.begin().await?;
-        if let Some(replay) = reserve(&mut tx, "credits_hold", key, &(owner, input)).await? {
-            return Ok(serde_json::from_value(replay)?);
-        }
-        let scope=sqlx::query("SELECT project_id,state FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE").bind(input.request_id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(CreditError::NotFound)?;
-        let project: Uuid = scope.try_get("project_id")?;
-        let request_state: String = scope.try_get("state")?;
-        if !matches!(
-            request_state.as_str(),
-            "reviewing" | "allocating" | "active"
-        ) {
-            return Err(CreditError::Conflict);
-        }
-        if project != input.project_id.as_uuid() {
-            return Err(CreditError::Denied);
-        }
-        lock_account(&mut tx, input.project_id).await?;
-        if let Some(row)=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id=$1 AND business_key=$2").bind(input.request_id.as_uuid()).bind(&input.business_key).fetch_optional(&mut *tx).await? {
-            let existing=decode_hold(&row)?;
-            if existing.owner_client_id!=owner || existing.project_id!=input.project_id || existing.amount!=input.amount { return Err(CreditError::Conflict); }
-            complete(&mut tx,"credits_hold",key,&existing).await?;tx.commit().await?;return Ok(existing);
-        }
-        let hold = CreditHold {
-            id: Uuid::now_v7(),
-            project_id: input.project_id,
-            request_id: input.request_id,
-            business_key: input.business_key.clone(),
-            owner_client_id: owner.into(),
-            amount: input.amount.clone(),
-            remaining: input.amount.clone(),
-            state: CreditHoldState::Pending,
-            measurement_unknown: false,
-            reason: None,
-            created_at: now(&mut tx).await?,
-        };
-        sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6::text::numeric,$6::text::numeric,'pending',$7)").bind(hold.id).bind(project).bind(input.request_id.as_uuid()).bind(&input.business_key).bind(owner).bind(input.amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut *tx).await?;
-        let mut e = entry(
-            Uuid::now_v7(),
-            Some(input.project_id),
-            0,
-            input.amount.scaled(),
-            0,
-            0,
-            "hold",
-            hold.created_at,
-        )?;
-        e.hold_id = Some(hold.id);
-        e.reason = "preauthorized upper bound".into();
-        e.owner_client_id = Some(owner.into());
-        apply(&mut tx, &e).await?;
-        complete(&mut tx, "credits_hold", key, &hold).await?;
+        let hold = hold_in_transaction(&mut tx, key, owner, input).await?;
         tx.commit().await?;
-        tracing::info!(event="resource.credits.hold_committed",hold_id=%hold.id,project_id=%hold.project_id,owner_client_id=owner);
         Ok(hold)
     }
 
@@ -318,7 +262,7 @@ fn state_name(state: CreditHoldState) -> &'static str {
         CreditHoldState::Released => "released",
     }
 }
-fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
+pub(crate) fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
     let state: String = row.try_get("state")?;
     Ok(CreditHold {
         id: row.try_get("hold_id")?,
@@ -328,9 +272,25 @@ fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
             .parse()
             .map_err(|_| CreditError::Invalid)?,
         request_id: row
-            .try_get::<Uuid, _>("request_id")?
-            .to_string()
-            .parse()
+            .try_get::<Option<Uuid>, _>("request_id")?
+            .map(|id| id.to_string().parse())
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
+        build_request_id: row
+            .try_get::<Option<Uuid>, _>("build_request_id")?
+            .map(|id| id.to_string().parse())
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
+        model_call_id: row.try_get("model_call_id")?,
+        model_rate_snapshot: row
+            .try_get::<Option<serde_json::Value>, _>("model_rate_snapshot")?
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
+        build_attempt: row
+            .try_get::<Option<i32>, _>("build_attempt")?
+            .map(u32::try_from)
+            .transpose()
             .map_err(|_| CreditError::Invalid)?,
         business_key: row.try_get("business_key")?,
         owner_client_id: row.try_get("owner_client_id")?,
@@ -345,6 +305,9 @@ fn decode_hold(row: &sqlx::postgres::PgRow) -> Result<CreditHold, CreditError> {
         },
         reason: row.try_get("reason")?,
         measurement_unknown: row.try_get("measurement_unknown")?,
+        unknown_since: optional_time(row, "unknown_since")?,
+        reconciliation_due_at: optional_time(row, "reconciliation_due_at")?,
+        expired_unknown_at: optional_time(row, "expired_unknown_at")?,
         created_at: UtcTimestamp::from_utc(row.try_get("created_at")?)
             .map_err(|_| CreditError::Invalid)?,
     })
@@ -428,7 +391,7 @@ async fn apply(tx: &mut Tx<'_>, e: &CreditLedgerEntry) -> Result<(), CreditError
         .await?;
     Ok(())
 }
-async fn reserve<T: Serialize>(
+pub(crate) async fn reserve<T: Serialize>(
     tx: &mut Tx<'_>,
     operation: &str,
     key: &str,
@@ -442,7 +405,7 @@ async fn reserve<T: Serialize>(
         _ => Err(CreditError::Conflict),
     }
 }
-async fn complete<T: Serialize>(
+pub(crate) async fn complete<T: Serialize>(
     tx: &mut Tx<'_>,
     operation: &str,
     key: &str,
@@ -606,7 +569,7 @@ async fn reverse_entries(
     Ok(reversed)
 }
 
-async fn resolve_in_transaction(
+pub(crate) async fn resolve_in_transaction(
     tx: &mut Tx<'_>,
     owner: &str,
     hold_id: Uuid,
@@ -631,6 +594,24 @@ async fn resolve_in_transaction(
     if hold.owner_client_id != owner {
         return Err(CreditError::Denied);
     }
+    if matches!(input, CreditHoldResolutionRequest::Settle { .. }) {
+        let current = now(tx).await?;
+        expire_hold(tx, &mut hold, current).await?;
+    }
+    if matches!(input, CreditHoldResolutionRequest::Unknown { .. }) && hold.unknown_since.is_none()
+    {
+        let first = now(tx).await?;
+        hold.unknown_since = Some(first);
+        hold.reconciliation_due_at = Some(
+            UtcTimestamp::from_utc(
+                first.get()
+                    + time::Duration::seconds(i64::from(
+                        contracts::resource::costing::UNKNOWN_USAGE_RECONCILIATION_SECONDS,
+                    )),
+            )
+            .map_err(|_| CreditError::Invalid)?,
+        );
+    }
     if charge.is_none()
         && hold.business_key == "metered-usage"
         && matches!(input, CreditHoldResolutionRequest::Settle { .. })
@@ -649,30 +630,51 @@ async fn resolve_in_transaction(
             return Ok(hold);
         }
     }
-    let (debit, released, absorbed, kind, reason) = hold_movement(&mut hold, input)?;
+    apply_resolution(tx, &mut hold, input, charge, source_event_id).await?;
+    Ok(hold)
+}
+
+async fn apply_resolution(
+    tx: &mut Tx<'_>,
+    hold: &mut CreditHold,
+    input: &CreditHoldResolutionRequest,
+    charge: Option<&ResourceCharge>,
+    source_event_id: Option<EventId>,
+) -> Result<(), CreditError> {
+    let (debit, released, absorbed, kind, reason) = hold_movement(hold, input)?;
     hold.reason = Some(reason.clone());
-    sqlx::query("UPDATE resource.credit_holds SET remaining=$2::text::numeric,state=$3,reason=$4,measurement_unknown=$5 WHERE hold_id=$1").bind(hold.id).bind(hold.remaining.scaled().to_string()).bind(state_name(hold.state)).bind(&reason).bind(hold.measurement_unknown).execute(&mut **tx).await?;
+    sqlx::query("UPDATE resource.credit_holds SET remaining=$2::text::numeric,state=$3,reason=$4,measurement_unknown=$5,unknown_since=$6,reconciliation_due_at=$7,expired_unknown_at=$8 WHERE hold_id=$1")
+        .bind(hold.id)
+        .bind(hold.remaining.scaled().to_string())
+        .bind(state_name(hold.state))
+        .bind(&reason)
+        .bind(hold.measurement_unknown)
+        .bind(hold.unknown_since.map(UtcTimestamp::get))
+        .bind(hold.reconciliation_due_at.map(UtcTimestamp::get))
+        .bind(hold.expired_unknown_at.map(UtcTimestamp::get))
+        .execute(&mut **tx)
+        .await?;
     let op = Uuid::now_v7();
-    let now = now(tx).await?;
-    let mut e = entry(
+    let current = now(tx).await?;
+    let mut ledger_entry = entry(
         op,
-        Some(project_id),
+        Some(hold.project_id),
         -debit,
         -released,
         debit,
         absorbed,
         kind,
-        now,
+        current,
     )?;
-    e.hold_id = Some(hold.id);
+    ledger_entry.hold_id = Some(hold.id);
     if let CreditHoldResolutionRequest::Settle { event_id, .. } = input {
-        e.source_event_id = Some(*event_id);
+        ledger_entry.source_event_id = Some(*event_id);
     }
-    e.source_event_id = source_event_id.or(e.source_event_id);
+    ledger_entry.source_event_id = source_event_id.or(ledger_entry.source_event_id);
     if let Some(charge) = charge {
-        e.charge_id = Some(charge.id);
-        e.usage_record_id = Some(charge.usage_record_id);
-        e.rate_snapshots = charge
+        ledger_entry.charge_id = Some(charge.id);
+        ledger_entry.usage_record_id = Some(charge.usage_record_id);
+        ledger_entry.rate_snapshots = charge
             .lines
             .iter()
             .map(|line| CreditRateSnapshot {
@@ -681,23 +683,22 @@ async fn resolve_in_transaction(
             })
             .collect();
     }
-    e.reason = reason.clone();
-    e.owner_client_id = Some(owner.into());
-    apply(tx, &e).await?;
+    ledger_entry.reason = reason.clone();
+    ledger_entry.owner_client_id = Some(hold.owner_client_id.clone());
+    apply(tx, &ledger_entry).await?;
     if debit > 0 {
-        let mut counterpart = entry(op, None, debit, 0, 0, 0, kind, now)?;
+        let mut counterpart = entry(op, None, debit, 0, 0, 0, kind, current)?;
         counterpart.hold_id = Some(hold.id);
-        counterpart.source_event_id = e.source_event_id;
-        counterpart.charge_id = e.charge_id;
-        counterpart.usage_record_id = e.usage_record_id;
-        counterpart.rate_snapshots = e.rate_snapshots.clone();
+        counterpart.source_event_id = ledger_entry.source_event_id;
+        counterpart.charge_id = ledger_entry.charge_id;
+        counterpart.usage_record_id = ledger_entry.usage_record_id;
+        counterpart.rate_snapshots = ledger_entry.rate_snapshots.clone();
         counterpart.reason = reason;
-        counterpart.owner_client_id = Some(owner.into());
+        counterpart.owner_client_id = Some(hold.owner_client_id.clone());
         apply(tx, &counterpart).await?;
     }
-    Ok(hold)
+    Ok(())
 }
-
 fn hold_movement(
     hold: &mut CreditHold,
     input: &CreditHoldResolutionRequest,
@@ -856,4 +857,393 @@ pub(crate) async fn observe_unknown_usage(
     )
     .await?;
     Ok(())
+}
+
+/// Shared atomic entry used by Resource-priced holds.
+pub(crate) async fn hold_in_transaction(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    input: &CreditHoldRequest,
+) -> Result<CreditHold, CreditError> {
+    if input.amount.scaled() < 0 || input.amount.scaled().unsigned_abs() >= 10_u128.pow(38) {
+        return Err(CreditError::Invalid);
+    }
+    if owner.is_empty() || input.business_key.trim().is_empty() || input.business_key.len() > 128 {
+        return Err(CreditError::Invalid);
+    }
+    if let Some(replay) = reserve(tx, "credits_hold", key, &(owner, input)).await? {
+        return Ok(serde_json::from_value(replay)?);
+    }
+    let scope = sqlx::query(
+        "SELECT project_id,state FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE",
+    )
+    .bind(input.request_id.as_uuid())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(CreditError::NotFound)?;
+    let project: Uuid = scope.try_get("project_id")?;
+    let request_state: String = scope.try_get("state")?;
+    if !matches!(
+        request_state.as_str(),
+        "reviewing" | "allocating" | "active"
+    ) {
+        return Err(CreditError::Conflict);
+    }
+    if project != input.project_id.as_uuid() {
+        return Err(CreditError::Denied);
+    }
+    stage_target_hold(
+        tx,
+        key,
+        owner,
+        input.project_id,
+        Some(input.request_id),
+        None,
+        None,
+        None,
+        &input.business_key,
+        &input.amount,
+    )
+    .await
+}
+
+/// Only the Resource build admission owner calls this after locking the real Agent command.
+pub(crate) async fn build_hold_in_transaction(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    project: ProjectId,
+    build: contracts::BuildRequestId,
+    attempt: u32,
+    amount: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    stage_target_hold(
+        tx,
+        key,
+        owner,
+        project,
+        None,
+        Some(build),
+        Some(attempt),
+        None,
+        "build-metered",
+        amount,
+    )
+    .await
+}
+
+pub(crate) async fn model_hold_in_transaction(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    project: ProjectId,
+    call_id: uuid::Uuid,
+    amount: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    stage_target_hold(
+        tx,
+        key,
+        owner,
+        project,
+        None,
+        None,
+        None,
+        Some(call_id),
+        &format!("llm-usage:{call_id}"),
+        amount,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn stage_target_hold(
+    tx: &mut Tx<'_>,
+    key: &str,
+    owner: &str,
+    project: ProjectId,
+    request: Option<contracts::ResourceRequestId>,
+    build: Option<contracts::BuildRequestId>,
+    attempt: Option<u32>,
+    model_call: Option<uuid::Uuid>,
+    business: &str,
+    amount: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    if owner.is_empty() || amount.scaled() < 0 || amount.scaled().unsigned_abs() >= 10_u128.pow(38)
+    {
+        return Err(CreditError::Invalid);
+    }
+    lock_account(tx, project).await?;
+    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE request_id IS NOT DISTINCT FROM $1 AND build_request_id IS NOT DISTINCT FROM $2 AND build_attempt IS NOT DISTINCT FROM $3 AND model_call_id IS NOT DISTINCT FROM $4 AND business_key=$5")
+      .bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(model_call).bind(business).fetch_optional(&mut **tx).await?;
+    if let Some(row) = row {
+        let existing = decode_hold(&row)?;
+        if existing.owner_client_id != owner
+            || existing.project_id != project
+            || existing.amount != *amount
+        {
+            return Err(CreditError::Conflict);
+        }
+        if request.is_some() {
+            complete(tx, "credits_hold", key, &existing).await?;
+        }
+        return Ok(existing);
+    }
+    let hold = CreditHold {
+        id: Uuid::now_v7(),
+        project_id: project,
+        request_id: request,
+        build_request_id: build,
+        business_key: business.into(),
+        model_call_id: model_call,
+        model_rate_snapshot: None,
+        build_attempt: attempt
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| CreditError::Invalid)?,
+        owner_client_id: owner.into(),
+        amount: amount.clone(),
+        remaining: amount.clone(),
+        state: CreditHoldState::Pending,
+        measurement_unknown: false,
+        reason: None,
+        created_at: now(tx).await?,
+        unknown_since: None,
+        reconciliation_due_at: None,
+        expired_unknown_at: None,
+    };
+    sqlx::query("INSERT INTO resource.credit_holds(hold_id,project_id,request_id,build_request_id,build_attempt,model_call_id,model_rate_snapshot,business_key,owner_client_id,amount,remaining,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::text::numeric,$10::text::numeric,'pending',$11)")
+      .bind(hold.id).bind(project.as_uuid()).bind(request.map(contracts::ResourceRequestId::as_uuid)).bind(build.map(contracts::BuildRequestId::as_uuid)).bind(attempt.map(i32::try_from).transpose().map_err(|_|CreditError::Invalid)?).bind(hold.model_call_id).bind(hold.model_rate_snapshot.as_ref().map(serde_json::to_value).transpose()?).bind(business).bind(owner).bind(amount.scaled().to_string()).bind(hold.created_at.get()).execute(&mut **tx).await?;
+    let mut e = entry(
+        Uuid::now_v7(),
+        Some(project),
+        0,
+        amount.scaled(),
+        0,
+        0,
+        "hold",
+        hold.created_at,
+    )?;
+    e.hold_id = Some(hold.id);
+    e.reason = "preauthorized upper bound".into();
+    e.owner_client_id = Some(owner.into());
+    apply(tx, &e).await?;
+    if request.is_some() {
+        complete(tx, "credits_hold", key, &hold).await?;
+    }
+    Ok(hold)
+}
+
+/// Execution cannot reuse a released, spent or uncertain preauthorization snapshot.
+pub(crate) async fn require_funded_in_transaction(
+    tx: &mut Tx<'_>,
+    owner: &str,
+    id: Uuid,
+    amount: &FixedDecimal,
+) -> Result<(), CreditError> {
+    let project: Uuid =
+        sqlx::query_scalar("SELECT project_id FROM resource.credit_holds WHERE hold_id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    lock_account(
+        tx,
+        project
+            .to_string()
+            .parse()
+            .map_err(|_| CreditError::Invalid)?,
+    )
+    .await?;
+    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE hold_id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
+    let hold = decode_hold(&row)?;
+    if hold.owner_client_id != owner {
+        return Err(CreditError::Denied);
+    }
+    if hold.state != CreditHoldState::Pending
+        || hold.measurement_unknown
+        || hold.remaining.scaled() < amount.scaled()
+    {
+        return Err(CreditError::Insufficient);
+    }
+    Ok(())
+}
+
+fn optional_time(
+    row: &sqlx::postgres::PgRow,
+    name: &str,
+) -> Result<Option<UtcTimestamp>, CreditError> {
+    row.try_get::<Option<time::OffsetDateTime>, _>(name)?
+        .map(UtcTimestamp::from_utc)
+        .transpose()
+        .map_err(|_| CreditError::Invalid)
+}
+
+async fn expire_hold(
+    tx: &mut Tx<'_>,
+    hold: &mut CreditHold,
+    cutoff: UtcTimestamp,
+) -> Result<bool, CreditError> {
+    if !hold.measurement_unknown
+        || hold.expired_unknown_at.is_some()
+        || hold.reconciliation_due_at.is_none_or(|due| due > cutoff)
+    {
+        return Ok(false);
+    }
+    hold.expired_unknown_at = Some(cutoff);
+    if matches!(
+        hold.state,
+        CreditHoldState::Pending | CreditHoldState::Unknown
+    ) {
+        apply_resolution(
+            tx,
+            hold,
+            &CreditHoldResolutionRequest::Release {
+                reason:
+                    "one-hour unknown reconciliation deadline reached; late cost is platform cost"
+                        .into(),
+            },
+            None,
+            None,
+        )
+        .await?;
+    } else {
+        sqlx::query("UPDATE resource.credit_holds SET expired_unknown_at=$2 WHERE hold_id=$1 AND expired_unknown_at IS NULL").bind(hold.id).bind(cutoff.get()).execute(&mut **tx).await?;
+    }
+    Ok(true)
+}
+impl PgCreditStore {
+    /// The maintenance loop uses the `PostgreSQL` clock as its observation cutoff.
+    pub async fn expire_unknown_once(&self) -> Result<u64, CreditError> {
+        let mut tx = self.pool.begin().await?;
+        let cutoff = now(&mut tx).await?;
+        tx.commit().await?;
+        self.expire_unknown_at(cutoff).await
+    }
+    /// Applies one bounded batch at a trusted maintenance clock observation.
+    pub async fn expire_unknown_at(&self, cutoff: UtcTimestamp) -> Result<u64, CreditError> {
+        let candidates=sqlx::query("SELECT hold_id FROM resource.credit_holds WHERE measurement_unknown AND expired_unknown_at IS NULL AND reconciliation_due_at<=$1 ORDER BY project_id,hold_id LIMIT 100").bind(cutoff.get()).fetch_all(&self.pool).await?;
+        let mut expired = 0;
+        for candidate in candidates {
+            let id: Uuid = candidate.try_get("hold_id")?;
+            let mut tx = self.pool.begin().await?;
+            let project: Uuid =
+                sqlx::query_scalar("SELECT project_id FROM resource.credit_holds WHERE hold_id=$1")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            lock_account(
+                &mut tx,
+                project
+                    .to_string()
+                    .parse()
+                    .map_err(|_| CreditError::Invalid)?,
+            )
+            .await?;
+            let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE hold_id=$1 FOR UPDATE").bind(id).fetch_one(&mut *tx).await?;
+            let mut hold = decode_hold(&row)?;
+            if expire_hold(&mut tx, &mut hold, cutoff).await? {
+                expired += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok(expired)
+    }
+}
+
+/// A replayed handoff retains the identity that funded the original request.
+pub(crate) async fn check_request_hold_owner(
+    tx: &mut Tx<'_>,
+    request: contracts::ResourceRequestId,
+    owner: &str,
+    require_paid: bool,
+) -> Result<(), CreditError> {
+    let existing:Option<String>=sqlx::query_scalar("SELECT owner_client_id FROM resource.credit_holds WHERE request_id=$1 AND business_key='metered-usage'").bind(request.as_uuid()).fetch_optional(&mut **tx).await?;
+    match existing {
+        Some(existing) if existing != owner => Err(CreditError::Denied),
+        None if require_paid => Err(CreditError::Insufficient),
+        _ => Ok(()),
+    }
+}
+
+/// Funds the cumulative approved intervals, reusing any original excess preauthorization.
+/// The native lease revision and immutable window identity fence replays before this entry.
+pub(crate) async fn extend_environment_hold(
+    tx: &mut Tx<'_>,
+    owner: &str,
+    id: Uuid,
+    required_total: &FixedDecimal,
+) -> Result<CreditHold, CreditError> {
+    if required_total.scaled() < 0 || required_total.scaled().unsigned_abs() >= 10_u128.pow(38) {
+        return Err(CreditError::Invalid);
+    }
+    let project: Uuid =
+        sqlx::query_scalar("SELECT project_id FROM resource.credit_holds WHERE hold_id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    let project_id = project
+        .to_string()
+        .parse()
+        .map_err(|_| CreditError::Invalid)?;
+    lock_account(tx, project_id).await?;
+    let row=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE hold_id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
+    let mut hold = decode_hold(&row)?;
+    if hold.owner_client_id != owner {
+        return Err(CreditError::Denied);
+    }
+    if hold.state != CreditHoldState::Pending
+        || hold.measurement_unknown
+        || hold.expired_unknown_at.is_some()
+    {
+        return Err(CreditError::Insufficient);
+    }
+    let amount = decimal(
+        required_total
+            .scaled()
+            .saturating_sub(hold.amount.scaled())
+            .max(0),
+    )?;
+    let available: String = sqlx::query_scalar(
+        "SELECT (balance-reserved)::text FROM resource.credit_accounts WHERE project_id=$1",
+    )
+    .bind(project)
+    .fetch_one(&mut **tx)
+    .await?;
+    if available
+        .parse::<i128>()
+        .map_err(|_| CreditError::Invalid)?
+        < amount.scaled()
+    {
+        return Err(CreditError::Insufficient);
+    }
+    hold.amount = decimal(
+        hold.amount
+            .scaled()
+            .checked_add(amount.scaled())
+            .ok_or(CreditError::Invalid)?,
+    )?;
+    hold.remaining = decimal(
+        hold.remaining
+            .scaled()
+            .checked_add(amount.scaled())
+            .ok_or(CreditError::Invalid)?,
+    )?;
+    sqlx::query("UPDATE resource.credit_holds SET amount=$2::text::numeric,remaining=$3::text::numeric WHERE hold_id=$1").bind(id).bind(hold.amount.scaled().to_string()).bind(hold.remaining.scaled().to_string()).execute(&mut **tx).await?;
+    if amount.scaled() > 0 {
+        let mut movement = entry(
+            Uuid::now_v7(),
+            Some(project_id),
+            0,
+            amount.scaled(),
+            0,
+            0,
+            "hold",
+            now(tx).await?,
+        )?;
+        movement.hold_id = Some(id);
+        movement.owner_client_id = Some(owner.into());
+        movement.reason = "approved Environment additional interval".into();
+        apply(tx, &movement).await?;
+    }
+    Ok(hold)
 }

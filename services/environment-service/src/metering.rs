@@ -356,21 +356,15 @@ pub(crate) async fn record_transition(
         && let Some(started_at) = state.compute_started_at.take()
         && occurred_at > started_at
     {
-        let request = usage_request(
+        enqueue_known_interval(
+            transaction,
+            updated.id,
             &state,
             ResourceUsageKind::Compute,
             started_at,
             occurred_at,
-            UsageMeasurement::Known {
-                quantities: quantities(
-                    &state.approved_resources,
-                    state.gpu_allocation.as_ref(),
-                    started_at,
-                    occurred_at,
-                )?,
-            },
-        )?;
-        enqueue_delivery(transaction, updated.id, request, occurred_at).await?;
+        )
+        .await?;
     }
     if previous.observed_state != ObservedEnvironmentState::Stopped
         && updated.observed_state == ObservedEnvironmentState::Stopped
@@ -410,21 +404,15 @@ pub(crate) async fn record_transition(
         if let Some(started_at) = state.compute_started_at.take()
             && occurred_at > started_at
         {
-            let request = usage_request(
+            enqueue_known_interval(
+                transaction,
+                updated.id,
                 &state,
                 ResourceUsageKind::Compute,
                 started_at,
                 occurred_at,
-                UsageMeasurement::Known {
-                    quantities: quantities(
-                        &state.approved_resources,
-                        state.gpu_allocation.as_ref(),
-                        started_at,
-                        occurred_at,
-                    )?,
-                },
-            )?;
-            enqueue_delivery(transaction, updated.id, request, occurred_at).await?;
+            )
+            .await?;
         }
         if let Some((measured_from, measured_until)) =
             compute_unknown_until(&mut state, occurred_at)
@@ -442,28 +430,27 @@ pub(crate) async fn record_transition(
         if let Some(started_at) = state.storage_started_at.take()
             && occurred_at > started_at
         {
-            let measurement = if state.storage_known {
-                UsageMeasurement::Known {
-                    quantities: storage_quantities(
-                        &state.approved_resources,
-                        started_at,
-                        occurred_at,
-                    )?,
-                }
+            if state.storage_known {
+                enqueue_known_interval(
+                    transaction,
+                    updated.id,
+                    &state,
+                    ResourceUsageKind::Storage,
+                    started_at,
+                    occurred_at,
+                )
+                .await?;
             } else {
-                UsageMeasurement::Unknown {
-                    reason: "environment deletion followed an uncertain storage interval"
-                        .to_owned(),
-                }
-            };
-            let request = usage_request(
-                &state,
-                ResourceUsageKind::Storage,
-                started_at,
-                occurred_at,
-                measurement,
-            )?;
-            enqueue_delivery(transaction, updated.id, request, occurred_at).await?;
+                enqueue_storage_unknown(
+                    transaction,
+                    updated.id,
+                    &state,
+                    started_at,
+                    occurred_at,
+                    "environment deletion followed an uncertain storage interval",
+                )
+                .await?;
+            }
         }
         state.storage_known = false;
     } else if cleanup_failed {
@@ -750,11 +737,83 @@ fn elapsed_milliseconds(
     Ok(milliseconds)
 }
 
+// The wire contract represents exact millisecond numerators as u64. Split only when a full
+// interval would overflow, preserving every millisecond instead of saturating or truncating it.
+fn known_interval_end(
+    state: &MeteringState,
+    kind: ResourceUsageKind,
+    from: UtcTimestamp,
+    until: UtcTimestamp,
+) -> Result<UtcTimestamp, EnvironmentStoreError> {
+    let max_quantity = if kind == ResourceUsageKind::Storage {
+        state.approved_resources.storage_bytes
+    } else {
+        u64::from(state.approved_resources.cpu_millicores)
+            .max(state.approved_resources.memory_bytes)
+            .max(
+                state
+                    .gpu_allocation
+                    .as_ref()
+                    .map_or(0, |gpu| u64::from(gpu.count)),
+            )
+    }
+    .max(1);
+    let limit = u128::from(u64::MAX / max_quantity);
+    let elapsed = elapsed_milliseconds(from, until)?;
+    let milliseconds = elapsed.min(limit);
+    if milliseconds == 0 {
+        return Err(EnvironmentStoreError::NumericOverflow("usage quantity"));
+    }
+    if milliseconds == elapsed {
+        return Ok(until);
+    }
+    UtcTimestamp::from_utc(
+        from.get()
+            + time::Duration::milliseconds(
+                i64::try_from(milliseconds)
+                    .map_err(|_| EnvironmentStoreError::NumericOverflow("usage interval"))?,
+            ),
+    )
+    .map_err(|_| EnvironmentStoreError::MeteringInvalid)
+}
+
+async fn enqueue_known_interval(
+    transaction: &mut Transaction<'_, Postgres>,
+    environment_id: contracts::EnvironmentId,
+    state: &MeteringState,
+    kind: ResourceUsageKind,
+    mut from: UtcTimestamp,
+    until: UtcTimestamp,
+) -> Result<(), EnvironmentStoreError> {
+    while from < until {
+        let end = known_interval_end(state, kind, from, until)?;
+        let quantities = if kind == ResourceUsageKind::Storage {
+            storage_quantities(&state.approved_resources, from, end)?
+        } else {
+            quantities(
+                &state.approved_resources,
+                state.gpu_allocation.as_ref(),
+                from,
+                end,
+            )?
+        };
+        let request = usage_request(
+            state,
+            kind,
+            from,
+            end,
+            UsageMeasurement::Known { quantities },
+        )?;
+        enqueue_delivery(transaction, environment_id, request, until).await?;
+        from = end;
+    }
+    Ok(())
+}
+
 fn multiply_milliseconds(value: u64, milliseconds: u128) -> Result<u64, EnvironmentStoreError> {
     let quantity = u128::from(value)
         .checked_mul(milliseconds)
-        .ok_or(EnvironmentStoreError::NumericOverflow("usage quantity"))?
-        / 1_000;
+        .ok_or(EnvironmentStoreError::NumericOverflow("usage quantity"))?;
     u64::try_from(quantity).map_err(|_| EnvironmentStoreError::NumericOverflow("usage quantity"))
 }
 
@@ -766,6 +825,7 @@ fn quantities(
 ) -> Result<ResourceUsageQuantities, EnvironmentStoreError> {
     let milliseconds = elapsed_milliseconds(measured_from, measured_until)?;
     Ok(ResourceUsageQuantities {
+        quantity_divisor: 1000,
         cpu_millicore_seconds: multiply_milliseconds(
             resources.cpu_millicores.into(),
             milliseconds,
@@ -786,6 +846,7 @@ fn storage_quantities(
 ) -> Result<ResourceUsageQuantities, EnvironmentStoreError> {
     let milliseconds = elapsed_milliseconds(measured_from, measured_until)?;
     Ok(ResourceUsageQuantities {
+        quantity_divisor: 1000,
         cpu_millicore_seconds: 0,
         memory_byte_seconds: 0,
         storage_byte_seconds: multiply_milliseconds(resources.storage_bytes, milliseconds)?,
@@ -1388,10 +1449,13 @@ impl ResourceUsageClientError {
 mod tests {
     use super::{
         MeteringState, ResourceUsageClientError, compute_unknown_boundary,
-        compute_unknown_recovery_boundary, compute_unknown_until, quantities, storage_quantities,
-        storage_ready_boundary, storage_unknown_segment,
+        compute_unknown_recovery_boundary, compute_unknown_until, elapsed_milliseconds,
+        known_interval_end, quantities, storage_quantities, storage_ready_boundary,
+        storage_unknown_segment,
     };
-    use contracts::resource::{GpuAllocation, GpuAllocationMode, WorkloadResources};
+    use contracts::resource::{
+        GpuAllocation, GpuAllocationMode, ResourceUsageKind, WorkloadResources,
+    };
     use contracts::{
         ActorId, EnvironmentId, GpuCatalogEntryId, LeaseId, ProjectId, ResourceRequestId, Revision,
     };
@@ -1633,7 +1697,7 @@ mod tests {
         assert!(state.storage_known);
 
         let storage = storage_quantities(&state.approved_resources, ready, deletion)?;
-        assert_eq!(storage.storage_byte_seconds, 20);
+        assert_eq!(storage.storage_byte_seconds, 20_000);
         Ok(())
     }
 
@@ -1661,16 +1725,57 @@ mod tests {
             timestamp_millis(0),
             timestamp_millis(1_200),
         )?;
-        assert_eq!(known.cpu_millicore_seconds, 600);
-        assert_eq!(known.memory_byte_seconds, 2_400);
-        assert_eq!(known.gpu_unit_seconds, 2);
+        assert_eq!(known.cpu_millicore_seconds, 600_000);
+        assert_eq!(known.memory_byte_seconds, 2_400_000);
+        assert_eq!(known.gpu_unit_seconds, 2_400);
 
         let subsecond = storage_quantities(
             &state.approved_resources,
             timestamp_millis(0),
             timestamp_millis(400),
         )?;
-        assert_eq!(subsecond.storage_byte_seconds, 2_800);
+        assert_eq!(subsecond.storage_byte_seconds, 2_800_000);
+        Ok(())
+    }
+
+    #[test]
+    fn long_intervals_split_without_losing_fractional_milliseconds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = state();
+        state.approved_resources.memory_bytes = 8 * 1024 * 1024 * 1024;
+        state.approved_resources.storage_bytes = 32 * 1024 * 1024 * 1024;
+        let start = timestamp_millis(0);
+        let until = timestamp_millis(400 * 86_400_000 + 137);
+        for kind in [ResourceUsageKind::Compute, ResourceUsageKind::Storage] {
+            let mut cursor = start;
+            let mut total = 0_u128;
+            let quantity = if kind == ResourceUsageKind::Storage {
+                state.approved_resources.storage_bytes
+            } else {
+                state.approved_resources.memory_bytes
+            };
+            while cursor < until {
+                let end = known_interval_end(&state, kind, cursor, until)?;
+                assert!(end > cursor);
+                let measured = if kind == ResourceUsageKind::Storage {
+                    storage_quantities(&state.approved_resources, cursor, end)?
+                } else {
+                    quantities(&state.approved_resources, None, cursor, end)?
+                };
+                assert_eq!(measured.quantity_divisor, 1000);
+                total += u128::from(if kind == ResourceUsageKind::Storage {
+                    measured.storage_byte_seconds
+                } else {
+                    measured.memory_byte_seconds
+                });
+                cursor = end;
+            }
+            assert_eq!(cursor, until);
+            assert_eq!(
+                total,
+                u128::from(quantity) * elapsed_milliseconds(start, until)?
+            );
+        }
         Ok(())
     }
 }

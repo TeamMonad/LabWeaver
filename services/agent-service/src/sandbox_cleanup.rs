@@ -873,6 +873,7 @@ mod tests {
             request_timeout_milliseconds: 5000,
             object_store_ca_file: None,
             worker_environment: std::collections::BTreeMap::new(),
+            model_gateway: None,
         }
     }
 

@@ -1,10 +1,32 @@
 {
   "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
     "CreditHold": {
       "additionalProperties": false,
       "properties": {
         "amount": {
           "$ref": "#/$defs/FixedDecimal"
+        },
+        "buildAttempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "businessKey": {
           "type": "string"
@@ -12,12 +34,38 @@
         "createdAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
+        "expiredUnknownAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "id": {
           "format": "uuid",
           "type": "string"
         },
         "measurementUnknown": {
           "type": "boolean"
+        },
+        "modelCallId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelRateSnapshot": {
+          "items": {
+            "$ref": "#/$defs/ModelRateSnapshot"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "ownerClientId": {
           "type": "string"
@@ -31,20 +79,46 @@
             "null"
           ]
         },
+        "reconciliationDueAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "remaining": {
           "$ref": "#/$defs/FixedDecimal"
         },
         "requestId": {
-          "$ref": "#/$defs/ResourceRequestId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "state": {
           "$ref": "#/$defs/CreditHoldState"
+        },
+        "unknownSince": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "id",
         "projectId",
-        "requestId",
         "businessKey",
         "ownerClientId",
         "amount",
@@ -70,13 +144,58 @@
       "pattern": "^-?(0|[1-9][0-9]*)[.][0-9]{6}$",
       "type": "string"
     },
+    "ModelRateSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "unit": {
+          "$ref": "#/$defs/ResourceBillingUnit"
+        }
+      },
+      "required": [
+        "unit",
+        "rateId",
+        "rateRevision"
+      ],
+      "type": "object"
+    },
     "ProjectId": {
       "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RateId": {
+      "description": "Strongly typed UUIDv7 identifier for `RateId`.",
+      "type": "string"
+    },
+    "ResourceBillingUnit": {
+      "description": "Resource dimension used by a versioned rate card.",
+      "enum": [
+        "cpu_millicore_second",
+        "memory_byte_second",
+        "storage_byte_second",
+        "gpu_unit_second",
+        "build_second",
+        "llm_input_token",
+        "llm_output_token",
+        "llm_cache_read_token",
+        "llm_cache_write_token"
+      ],
       "type": "string"
     },
     "ResourceRequestId": {
       "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
       "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",

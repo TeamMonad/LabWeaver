@@ -1,0 +1,476 @@
+{
+  "$defs": {
+    "BuildCostEstimate": {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/BuildCostEstimateRequest"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/ResourceChargeLine"
+          },
+          "type": "array"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "total": {
+          "$ref": "#/$defs/Money"
+        },
+        "until": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "projectId",
+        "input",
+        "until",
+        "lines",
+        "total"
+      ],
+      "type": "object"
+    },
+    "BuildCostEstimateRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "builderBinding": {
+          "type": "string"
+        },
+        "from": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "maxDurationMilliseconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "builderBinding",
+        "maxDurationMilliseconds",
+        "from"
+      ],
+      "type": "object"
+    },
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "BuildUsageMeasurement": {
+      "description": "A provider history observation. Missing bounds remain unknown.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "finishedAt": {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "historyRef": {
+              "type": "string"
+            },
+            "startedAt": {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "state": {
+              "const": "known",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "historyRef",
+            "startedAt",
+            "finishedAt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The fenced executor rejected the stage before calling BuildKit.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "not_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CreditHold": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "buildAttempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "businessKey": {
+          "type": "string"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "expiredUnknownAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "measurementUnknown": {
+          "type": "boolean"
+        },
+        "modelCallId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelRateSnapshot": {
+          "items": {
+            "$ref": "#/$defs/ModelRateSnapshot"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "ownerClientId": {
+          "type": "string"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reconciliationDueAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remaining": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/CreditHoldState"
+        },
+        "unknownSince": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "businessKey",
+        "ownerClientId",
+        "amount",
+        "remaining",
+        "state",
+        "measurementUnknown",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "CreditHoldState": {
+      "enum": [
+        "pending",
+        "unknown",
+        "settled",
+        "released"
+      ],
+      "type": "string"
+    },
+    "FixedDecimal": {
+      "description": "Canonical signed decimal with exactly six fractional digits.\n\nDecimal values cross the API as strings so JavaScript clients and SQL\ndrivers cannot round monetary values through binary floating point. The\ninternal scaled representation is available to Resource arithmetic without\nintroducing a database-specific decimal dependency into the contracts crate.",
+      "format": "fixed-decimal-6",
+      "pattern": "^-?(0|[1-9][0-9]*)[.][0-9]{6}$",
+      "type": "string"
+    },
+    "ModelRateSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "unit": {
+          "$ref": "#/$defs/ResourceBillingUnit"
+        }
+      },
+      "required": [
+        "unit",
+        "rateId",
+        "rateRevision"
+      ],
+      "type": "object"
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "A fixed-precision amount with an explicit ISO-4217-like currency code.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RateId": {
+      "description": "Strongly typed UUIDv7 identifier for `RateId`.",
+      "type": "string"
+    },
+    "ResourceBillingUnit": {
+      "description": "Resource dimension used by a versioned rate card.",
+      "enum": [
+        "cpu_millicore_second",
+        "memory_byte_second",
+        "storage_byte_second",
+        "gpu_unit_second",
+        "build_second",
+        "llm_input_token",
+        "llm_output_token",
+        "llm_cache_read_token",
+        "llm_cache_write_token"
+      ],
+      "type": "string"
+    },
+    "ResourceChargeLine": {
+      "additionalProperties": false,
+      "description": "One immutable line in a calculated charge.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/Money"
+        },
+        "quantity": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quantityDivisor": {
+          "default": 1,
+          "enum": [
+            1,
+            1000
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "unit": {
+          "$ref": "#/$defs/ResourceBillingUnit"
+        },
+        "unitPrice": {
+          "$ref": "#/$defs/Money"
+        },
+        "unitQuantity": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rateId",
+        "rateRevision",
+        "unit",
+        "quantity",
+        "unitQuantity",
+        "unitPrice",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "buildRequestId": {
+      "$ref": "#/$defs/BuildRequestId"
+    },
+    "chargedLines": {
+      "items": {
+        "$ref": "#/$defs/ResourceChargeLine"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "chargedTotal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Money"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "estimate": {
+      "$ref": "#/$defs/BuildCostEstimate"
+    },
+    "executionAuthorized": {
+      "type": "boolean"
+    },
+    "executionDeadline": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "firstUnknownObservation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildUsageMeasurement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hold": {
+      "$ref": "#/$defs/CreditHold"
+    },
+    "measurement": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildUsageMeasurement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stageRequestId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "buildRequestId",
+    "attempt",
+    "executionAuthorized",
+    "estimate",
+    "hold"
+  ],
+  "title": "BuildCostRecord",
+  "type": "object"
+}

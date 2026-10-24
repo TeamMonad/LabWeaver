@@ -46,10 +46,9 @@ git 依赖扩大了供应链风险：构建必须固定完整 commit，不得改
 
 离线或镜像站构建必须在进入 `--network=none` 的编译步骤前完成 SQLx git revision 的 `cargo fetch --locked`，并将同一 Cargo git 缓存挂载到编译步骤；构建环境还必须能访问 `github.com` 获取该仓库，或由维护者预先准备并复核完整缓存/ vendored 源码。只挂载 registry 缓存不足以构建 git 依赖。
 
-## Sprint5 成员真源切换
+Resource `0018_cost_estimates.sql` 保存预占的不可变估价快照，并为用量数值列声明quantity_divisor。它排在#200的Resource0015、#209的0016之后，0017预留给#278；独立分支保留尚未合入的来源，不重编号其他服务迁移。只在合成数据库验证，不执行生产迁移。
 
-#199 将成员事实移到 Control，并保留 Control `0017_object_authorization.sql`、`0018_membership_governance.sql` 和 `0019_runtime_authorization_reads.sql`。`0019` 提供现有运行策略、发布配置及完整批准的只读投影。组合 #197 的 `0014`、#203 的 `0015`/`0016` 后，按 catalog 的有序并集生成部署输入。Access 只获得 Control 成员表的读取权限。
+Resource `0019_unknown_usage_deadline.sql` 增加首次未知、1小时到期与处理时刻；只从既有不可变unknown条目的最早时刻恢复元数据，不改账户或原账目。到期资金释放由Resource账务事务执行并追加记录。测试仅运行隔离合成数据库，未在生产执行迁移。
 
-Access `0007` 在目录列创建后撤销 Control 的旧 actor 整表读取。它只授予 Control actor_id、username、display_name 和 disabled_at 四列。Resource 仅读取 actor_id、disabled_at 及当前会话安全投影。普通服务启动不得跳过这条迁移，也不得恢复更宽的账号读取。
-
-此次硬切修改旧成员建表身份，只适用于新建数据库。已记录旧校验值的数据库必须拒绝 catalog 不一致。应用启动不能自动清空或重新授权。生产切换另需明确窗口和维护者批准。授权语义见[对象动作与成员授权](../contracts/object-authorization.md)。
+Resource `0020_build_metering.sql` 增加构建专属计量和独立目标；Resource `0021_environment_funding.sql` 保存原环境租约的资金窗口。Agent `0022_resource_build_authority_read.sql` 只授予Resource读取构建权威的最小列，0021预留给#278。
+Resource `0022_model_token_rates.sql` 扩展四类 LLM token 费率、模型绑定和单次最大预占额。所有值必须由管理员费率版本显式配置；不创建默认价格、不从 USD 换算。

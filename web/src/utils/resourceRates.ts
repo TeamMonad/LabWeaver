@@ -1,11 +1,23 @@
 import type { ResourceBillingUnit, ResourceRateSchema } from '@/generated/contracts'
 
-export const rateDisplayUnits: Record<ResourceBillingUnit, { base: string; label: string; quantity: bigint }> = {
+/**
+ * Display metadata for billing units. Keys are derived from this object (includes
+ * `build_second`) so TypeScript stays green before the generated SDK lands the new unit.
+ * Existing four units keep the same base/label/quantity for Finance regressions.
+ */
+export const rateDisplayUnits = {
   cpu_millicore_second: { base: 'CPU millicore 秒', label: '核心小时', quantity: 1000n * 3600n },
   memory_byte_second: { base: '内存字节秒', label: 'GiB 小时', quantity: 1024n ** 3n * 3600n },
   storage_byte_second: { base: '存储字节秒', label: 'GiB 小时', quantity: 1024n ** 3n * 3600n },
   gpu_unit_second: { base: 'GPU 分配单位秒', label: 'GPU 分配单位秒', quantity: 1n },
-}
+  build_second: { base: '构建秒', label: '构建秒', quantity: 1n },
+  llm_input_token: { base: 'LLM 输入 token', label: 'LLM 输入 token', quantity: 1n },
+  llm_output_token: { base: 'LLM 输出 token', label: 'LLM 输出 token', quantity: 1n },
+  llm_cache_read_token: { base: 'LLM cache-read token', label: 'LLM cache-read token', quantity: 1n },
+  llm_cache_write_token: { base: 'LLM cache-write token', label: 'LLM cache-write token', quantity: 1n },
+} as const satisfies Record<string, { readonly base: string; readonly label: string; readonly quantity: bigint }>
+
+export type RateDisplayBillingUnit = keyof typeof rateDisplayUnits
 
 /** Pad, never round, a user-entered price into the contract's exact six decimals. */
 export function canonicalRateAmount(value: string): string | null {

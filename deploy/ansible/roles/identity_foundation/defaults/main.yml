@@ -116,6 +116,7 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
       - resource.task.release
       - resource.task.cancel
       - resource.usage.record
+      - resource.credits.hold
   - caller: labweaver-evaluation
     target: labweaver-agent
     roles: [agent.llm_review.create, agent.llm_review.read, agent.llm_review.cancel]

@@ -67,8 +67,58 @@ Experiment 与 Work 共享同一持久化生命周期计量实现。CPU、内存
 
 没有匹配费率时显示“未配置计价”，不显示免费。数值溢出、计量冲突或配置不完整时停止自动结算并返回诊断。管理员调整单独记录原因与关联费用，不覆盖原始用量或历史明细。
 
-页面按相同生效区间显示费率，多个同时生效的匹配项是配置冲突，不能选择最大 revision 掩盖重叠。费用配置错误与资源准入分别处理；缺少费率不增加申请禁令，资源仍由目录、容量和审批规则决定。
+页面按相同生效区间显示费率，多个同时生效的匹配项是配置冲突，不能选择最大 revision 掩盖重叠。费用配置错误与资源准入分别处理；仅计算费用的旧路径仍由目录、容量和审批规则决定；需要费用上限预占的消费入口还要求可计算的 CREDITS 费率和足够余额。
 
-预算只提供提醒，不作为账户准入。项目 Credits 只对显式 `metered-usage` 预占扣收，费用、账户与账目在同一事务提交。超过剩余预占的尾部成本由平台承担。没有绑定预占的路径仍只计算费用。完整估价、强制准入和续期由 #210 接入，平台不接真实支付。用户页面分别显示计算、存储与 GPU 费用，以及未计价和待核实项目，不能把部分已结算费用展示成完整账单。
+预算只提供提醒，不作为账户准入。项目 Credits 只对显式 `metered-usage` 预占扣收，费用、账户与账目在同一事务提交。超过剩余预占的尾部成本由平台承担。没有绑定预占的路径仍只计算费用。Resource 已提供真实费率估价和估价预占接口。全消费入口的强制准入和续期仍由 #210 接入，平台不接真实支付。用户页面分别显示计算、存储与 GPU 费用，以及未计价和待核实项目，不能把部分已结算费用展示成完整账单。
 
 账户字段、管理员双边操作、未知标记、真实 API 和恢复边界见 [项目 Credits](../contracts/project-credits.md)。发起停止不释放预占，确认实际回收后才释放未用金额。
+
+计量保存毫秒分子与显式quantityDivisor，费率继续声明每秒基础单位。估价、结算和费用契约校验共用精确整数舍入；计算与存储可以独立覆盖不同区间。接口及重放语义见 [项目 Credits](../contracts/project-credits.md#计算与存储估价)。
+
+长时间保留的大盘或大内存可能使“资源数量 × 毫秒”超出单条 `u64` 分子的容量。Environment 此时
+按可表示的最大时长拆成连续半开区间，每条仍使用 divisor=1000；所有区间覆盖完整边界、不重叠、
+不留缝，累计精确分子等于原资源量乘完整毫秒数，不用饱和、截断或伪造零值掩盖溢出。
+
+未知用量的剩余预占在首次未知事实1小时后释放，未知记录仍可查询。迟到结算直接按平台承担处理，已知结算事务同样检查期限，不能靠后台循环顺序决定谁付款。该资金动作不视为实际资源释放。
+
+Resource 内部分工保持具体函数和唯一真源：`pricing` 查询版本化费率并计算用量费用，`costing` 提供估价与价格同意，`admission` 在授权事务中预占上限，`credits` 保存账户、不可变账目和到期处理。Resource store 协调同一个 SQLx 事务，预占与执行授权一起提交，计算费用与扣收也一起提交；分文件不增加远端事务或第二套状态。
+
+Outbox 与账务维护使用独立循环，仍在同一个 Resource 进程。真实 PG/NATS 故障场景中，Broker 接收事件但不回 ACK 时，资金到期处理继续；未确认的 Outbox 事件仍保持未发布。没有新增 Billing 服务、消息框架或虚假发布成功。
+
+## 模型调用的计量
+
+Agent 的所有 Claude/Anthropic Messages 请求必须先经过 Agent model gateway。Worker 不接收提供商
+URL 或长期 API key；每个 run/attempt 取得限定 project、run、attempt 且短期过期的 HMAC capability。
+任意副本除验证签名和过期时间外，还从 Agent PostgreSQL 检查同一 run/attempt 的运行状态和租约；
+取消、完成或租约失效后不能继续调用。Gateway 转发前调用 Resource model admission，余额不足或
+缺少四类完整费率配置时返回 Anthropic error 和 `LW_MODEL_ADMISSION_REJECTED`，不接触上游。
+
+模型费率是四个独立的 CREDITS 单价：input、output、cache-read、cache-write，并各自使用配置的
+token 基数；cache read 和 cache write 不折算成 input，也不从 USD 推导。准入绑定单次最大预占和
+四类费率快照，新费率不会改写已接受调用。Resource 在准入的同一 SQLx 事务中写 Unknown 和首次
+核实期限；即使 admission 响应丢失、Agent 尚未发送任何观察就崩溃，也不会留下无期限 Pending。
+只有完整非流式终态，或具有最终 message_delta usage 和 message_stop 的 SSE 才能 Known 最终结算。
+message_start、部分 delta 后断流或客户端取消只保存 Unknown 与已观察的四类数量，不把未观察输出
+当作零。Resource 在账务事务中追加 `model_cost_observations`，保存 call/event/hold、四类数量、原费率
+和逐项金额、实际扣收额。首次未知一小时后释放剩余预占，迟到费用由平台承担。
+
+显式 `x-labweaver-call-id`（或 provider `idempotency-key`）在签名 project/run/attempt 范围内稳定。
+生产 CLI 无显式调用 ID 时使用 SDK 原生 `x-stainless-retry-count`：首次请求取得 capability 范围内的
+持久化序号，传输重试仅在原调用唯一可辨认时复用该序号；多个候选或缺 SDK 重试元数据直接拒绝，
+不按 body hash 合并不同调用。重复调用不重放上游；只能查询原 hold/观察。Capability 在实际执行前
+按剩余总期限签发（最大 24 小时），而不是固定五分钟；数据库 run/lease 检查仍可提前撤销。
+
+一次性 Task 的已预占窗口不可续期：native 和 HTTP renew 均返回 `LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED`，
+同键重放不改变 lease、hold 或覆盖窗口。需要更长执行必须重新申请并通过正常资金准入。
+
+## BuildKit 构建
+
+Dockerfile 构建在 BuildKit 调用前以真实 BuildRequest/attempt 预占最大构建时长。计价单位为 builder 专属 `build_second`；未执行的 CPU/内存上限不是用量。Resource 校验 Agent 的真实命令与租约，在自身事务内提交预占和执行 grant，Agent 再在本地事务核对取消与执行 fence。跨进程请求不被描述为一个远端原子事务。
+
+起止时间来自身份唯一匹配的 BuildKit history，仍使用统一版本分段、精确算术、未知期限和尾部平台承担。结果未知时只查询原操作；构建费用查询独立于会被清理或替换的工作流 fence。接口、精度和恢复边界见 [BuildKit 构建费用](../contracts/project-credits.md#buildkit-构建费用)。
+
+## 原 Environment lease 的资金事务
+
+Environment lease 激活与续期已经通过 Resource 的原 request、claim、approval 和同一 hold 提交资金覆盖。初次截止取原批准时长及 validUntil；续期累计报价先使用原额度，只追加不足部分。原 lease revision、幂等键和不可变报价窗口共同防止重复预占。覆盖到期而最终用量或释放尚未确认，资金进入首次一小时核实；未激活预占在原批准到期后结束冻结，实际容量回收仍由既有 owner 完成。
+
+ResourceEnvironmentHandoff 的用途取可信发布快照中的 class，资金查询只返回原授权与账户事实。Environment 的新 compute 入口由 #207 刷新该 grant 并核原 runtime receipt；Work/Experiment 接收与真实执行仍由同一 Environment 生命周期实现。已有教学 reservation 路径继续代表其原实现；新的 funded handoff 只消费原 claim/lease，不再次调用该独立 reservation。接口、锁顺序和剩余范围见 [项目 Credits](../contracts/project-credits.md#原-environment-lease-的资金覆盖)。

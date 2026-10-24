@@ -35,6 +35,7 @@ fn credits_reads_reject_other_projects_revocation_and_member_minting()
         "getProjectCredits",
         "listProjectCreditLedger",
         "listProjectCreditHolds",
+        "estimateProjectResourceCost",
     ] {
         let policy = contracts::operation_contract(id).ok_or("operation missing")?;
         let roles = policy.allowed_roles.iter().copied().collect();

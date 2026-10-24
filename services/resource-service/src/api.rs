@@ -37,7 +37,11 @@ use crate::ApprovalPolicy;
 use crate::runtime_authorization::RuntimeBindingError;
 use crate::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 
+mod build_costing;
+mod costing;
 mod credits;
+mod environment_funding;
+mod model_costing;
 
 const DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 mod runtime_authorization;
@@ -61,6 +65,7 @@ pub struct ResourceApiState {
     access_service_client_id: Option<String>,
     environment_service_client_id: Option<String>,
     task_service_client_ids: Option<BTreeSet<String>>,
+    build_service_client_id: Option<String>,
 }
 
 impl ResourceApiState {
@@ -72,7 +77,15 @@ impl ResourceApiState {
             access_service_client_id: None,
             environment_service_client_id: None,
             task_service_client_ids: None,
+            build_service_client_id: None,
         }
+    }
+
+    /// Restricts build funding and observations to the configured Agent client.
+    #[must_use]
+    pub fn with_build_service_client_id(mut self, client_id: Option<String>) -> Self {
+        self.build_service_client_id = client_id;
+        self
     }
 
     /// Installs the JWKS-backed verifier used only by internal service routes.
@@ -93,6 +106,7 @@ impl ResourceApiState {
     /// Restricts Environment-owned usage records to the configured Environment service account.
     #[must_use]
     pub fn with_environment_service_client_id(mut self, client_id: String) -> Self {
+        self.store = self.store.with_environment_credit_owner(client_id.clone());
         self.environment_service_client_id = Some(client_id);
         self
     }
@@ -104,6 +118,7 @@ impl ResourceApiState {
         self.task_service_client_ids = Some(client_ids);
         self
     }
+
     /// Installs the current and optional previous mounted Secrets used to authenticate cursors.
     #[must_use]
     pub fn with_cursor_signing_keys(mut self, current: Vec<u8>, previous: Option<Vec<u8>>) -> Self {
@@ -119,6 +134,8 @@ impl ResourceApiState {
 pub fn resource_api_router(state: ResourceApiState) -> Router {
     let public = Router::new()
         .merge(credits::public_routes())
+        .merge(costing::public_routes())
+        .merge(build_costing::public_routes())
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests", get(list_requests))
         .route(
@@ -185,6 +202,13 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .layer(Extension(state.access_service_client_id.clone()));
     let internal = Router::new()
         .merge(credits::internal_routes())
+        .merge(costing::internal_routes())
+        .merge(build_costing::internal_routes())
+        .merge(model_costing::internal_routes())
+        .route(
+            "/internal/v1/environment-credit-grants/{lease_id}",
+            get(environment_funding::record),
+        )
         .route("/internal/v1/task-resources", post(create_task_resource))
         .route(
             "/internal/v1/task-resources/{task_run_id}/request",
@@ -471,11 +495,8 @@ async fn approve_request(
     require_admin(&principal)?;
     let approver = principal.actor_id;
     let idempotency = required_header(&headers, "idempotency-key")?;
-    let request = state.store.load(request_id).await?;
-    if request.revision != input.expected_revision {
-        return Err(ResourceApiError::RevisionConflict);
-    }
     let now = state.store.current_time().await?;
+    let request = state.store.load(request_id).await?;
     let valid_until = UtcTimestamp::from_utc(
         now.get()
             + time::Duration::seconds(
@@ -523,7 +544,7 @@ async fn approve_request(
         claim,
         lease_id: LeaseId::new(),
     };
-    let next = state
+    let accepted = state
         .store
         .approve(
             &idempotency,
@@ -536,13 +557,11 @@ async fn approve_request(
             },
             context.trace_id(),
         )
-        .await?;
-    let accepted = ResourceOperationAccepted {
-        request_id: next.id,
-        lease_id: Some(allocation.lease_id),
-        revision: next.revision,
-        status_url: format!("/api/v1/resource-requests/{}", next.id),
-    };
+        .await
+        .map_err(|error| match error {
+            ResourceStoreError::RevisionConflict => ResourceApiError::RevisionConflict,
+            other => ResourceApiError::Store(other),
+        })?;
     Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
 }
 
@@ -721,23 +740,10 @@ async fn renew_lease(
     let request = state.store.load(lease.request_id).await?;
     scoped_or_admin(&principal, request.requester_id)?;
     let key = required_header(&headers, "idempotency-key")?;
-    let now = state.store.current_time().await?;
-    let expires = UtcTimestamp::from_utc(
-        now.get()
-            + time::Duration::seconds(
-                i64::try_from(input.duration_seconds).map_err(|_| ResourceApiError::Invalid)?,
-            ),
-    )
-    .map_err(|_| ResourceApiError::Invalid)?;
+    i64::try_from(input.duration_seconds).map_err(|_| ResourceApiError::Invalid)?;
     let lease = state
         .store
-        .renew_lease(
-            &key,
-            lease_id,
-            input.expected_revision,
-            expires,
-            context.trace_id(),
-        )
+        .renew_lease_for_duration(&key, lease_id, &input, context.trace_id())
         .await?;
     let revision = lease.revision;
     with_etag(Json(lease), revision)
@@ -879,7 +885,7 @@ async fn claim_task_resource(
 
 async fn acknowledge_task_resource(
     State(state): State<ResourceApiState>,
-    Extension(_identity): Extension<auth::ServiceIdentity>,
+    Extension(identity): Extension<auth::ServiceIdentity>,
     Extension(context): Extension<telemetry::RequestContext>,
     Path(task_run_id): Path<TaskRunId>,
     Json(input): Json<AcknowledgeTaskResourceRequest>,
@@ -887,11 +893,10 @@ async fn acknowledge_task_resource(
     Ok(Json(
         state
             .store
-            .acknowledge_task_resource(
+            .acknowledge_funded_task_resource(
                 task_run_id,
-                input.expected_claim_revision,
-                input.expected_lease_revision,
-                &input.execution_namespace,
+                &input,
+                &identity.client_id,
                 context.trace_id(),
             )
             .await?,
@@ -1401,7 +1406,25 @@ async fn internal_service_auth(
 }
 
 fn internal_route_permission(path: &str) -> Option<&'static str> {
-    if path == "/internal/v1/credits/holds" {
+    if path == "/internal/v1/credits/model/admit" {
+        return Some("resource.credits.hold");
+    }
+    if path.starts_with("/internal/v1/credits/model/") && path.ends_with("/settle") {
+        return Some("resource.usage.record");
+    }
+    if path.starts_with("/internal/v1/environment-credit-grants/") {
+        return Some("resource.environment.resolve");
+    }
+    if path == "/internal/v1/build-cost-admissions"
+        || path == "/internal/v1/build-cost-reconciliations"
+        || path.starts_with("/internal/v1/build-costs/")
+    {
+        return Some("resource.credits.hold");
+    }
+    if path == "/internal/v1/build-cost-observations" {
+        return Some("resource.usage.record");
+    }
+    if path == "/internal/v1/credits/holds" || path == "/internal/v1/credits/estimated-holds" {
         return Some("resource.credits.hold");
     }
     if path.starts_with("/internal/v1/credits/holds/") && path.ends_with("/resolve") {
@@ -1545,19 +1568,35 @@ pub enum ResourceApiError {
 }
 
 impl IntoResponse for ResourceApiError {
+    #[allow(clippy::too_many_lines)]
     fn into_response(self) -> Response {
         let diagnostic_code = resource_diagnostic_code(&self.to_string());
         let status = match &self {
             Self::Store(ResourceStoreError::RuntimeBinding(error)) => {
                 runtime_authorization::status(error)
             }
-            Self::ServiceConfiguration => StatusCode::SERVICE_UNAVAILABLE,
-            Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
+            Self::CallerDenied
+            | Self::IdentityInvalid
+            | Self::ScopeDenied
+            | Self::Store(ResourceStoreError::Credits(crate::credits::CreditError::Denied)) => {
+                StatusCode::FORBIDDEN
+            }
             Self::Invalid
             | Self::InvalidCursor
-            | Self::Store(ResourceStoreError::RateEndInvalid | ResourceStoreError::InvalidCursor) => {
-                StatusCode::BAD_REQUEST
-            }
+            | Self::Store(
+                ResourceStoreError::RateEndInvalid
+                | ResourceStoreError::InvalidCursor
+                | ResourceStoreError::Credits(
+                    crate::credits::CreditError::Invalid
+                    | crate::credits::CreditError::Precision(_),
+                ),
+            ) => StatusCode::BAD_REQUEST,
+            Self::ServiceConfiguration
+            | Self::Store(ResourceStoreError::Credits(
+                crate::credits::CreditError::Storage(_)
+                | crate::credits::CreditError::Persistence(_)
+                | crate::credits::CreditError::Wire(_),
+            )) => StatusCode::SERVICE_UNAVAILABLE,
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
             Self::Store(
                 ResourceStoreError::NotFound
@@ -1569,9 +1608,20 @@ impl IntoResponse for ResourceApiError {
         };
         let retryable = matches!(
             self,
-            Self::Store(ResourceStoreError::Persistence(_) | ResourceStoreError::Database(_)
-                | ResourceStoreError::RuntimeBinding(RuntimeBindingError::Unavailable
-                    | RuntimeBindingError::Authorization(contracts::runtime_authorization::RuntimeAuthorizationError::PolicyNotVerified)))
+            Self::Store(
+                ResourceStoreError::Persistence(_)
+                    | ResourceStoreError::Database(_)
+                    | ResourceStoreError::RuntimeBinding(
+                        RuntimeBindingError::Unavailable
+                            | RuntimeBindingError::Authorization(
+                                contracts::runtime_authorization::RuntimeAuthorizationError::PolicyNotVerified,
+                            ),
+                    )
+                    | ResourceStoreError::Credits(
+                        crate::credits::CreditError::Storage(_)
+                            | crate::credits::CreditError::Persistence(_),
+                    ),
+            )
         );
         let context = telemetry::current_request_context()
             .unwrap_or_else(telemetry::RequestContext::generate);

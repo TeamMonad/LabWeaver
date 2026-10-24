@@ -42,7 +42,12 @@
         "cpu_millicore_second",
         "memory_byte_second",
         "storage_byte_second",
-        "gpu_unit_second"
+        "gpu_unit_second",
+        "build_second",
+        "llm_input_token",
+        "llm_output_token",
+        "llm_cache_read_token",
+        "llm_cache_write_token"
       ],
       "type": "string"
     },
@@ -61,6 +66,12 @@
   "additionalProperties": false,
   "description": "Immutable versioned unit price. A later rate never mutates a prior charge.",
   "properties": {
+    "builderBinding": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "effectiveFrom": {
       "$ref": "#/$defs/UtcTimestamp"
     },
@@ -93,6 +104,24 @@
     "id": {
       "$ref": "#/$defs/RateId"
     },
+    "maxPreauthorization": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Maximum Credits that one model invocation may preauthorize."
+    },
+    "modelBinding": {
+      "description": "Exact model/provider identity for LLM token rates.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "revision": {
       "$ref": "#/$defs/Revision"
     },
@@ -103,7 +132,7 @@
       "$ref": "#/$defs/Money"
     },
     "unitQuantity": {
-      "description": "Number of base units represented by `unit_price`.",
+      "description": "Number of base usage units represented by `unit_price`.",
       "format": "uint64",
       "minimum": 0,
       "type": "integer"

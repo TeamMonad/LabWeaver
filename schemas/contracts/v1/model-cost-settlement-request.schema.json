@@ -1,0 +1,118 @@
+{
+  "$defs": {
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "ModelTokenQuantities": {
+      "additionalProperties": false,
+      "properties": {
+        "cacheReadTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cacheWriteTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheWriteTokens"
+      ],
+      "type": "object"
+    },
+    "ModelUsageMeasurement": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "quantities": {
+              "$ref": "#/$defs/ModelTokenQuantities"
+            },
+            "state": {
+              "const": "known",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "quantities"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observedQuantities": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelTokenQuantities"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "callId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "eventId": {
+      "$ref": "#/$defs/EventId"
+    },
+    "holdId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "measurement": {
+      "$ref": "#/$defs/ModelUsageMeasurement"
+    },
+    "modelBinding": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "holdId",
+    "eventId",
+    "modelBinding",
+    "callId",
+    "measurement"
+  ],
+  "title": "ModelCostSettlementRequest",
+  "type": "object"
+}

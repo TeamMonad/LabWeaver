@@ -31,16 +31,16 @@ worker_id: "agent-worker-01"
 dispatch_lease_seconds: 120
 track_lease_seconds: 120
 poll_interval_milliseconds: 500
-# The Anthropic-compatible endpoint binding uses only the three generic provider fields:
-# ANTHROPIC_BASE_URL and ANTHROPIC_MODEL are reviewed ConfigMap values, and
-# ANTHROPIC_AUTH_TOKEN is a Secret value. All three are read from mounted files and passed
-# into an env-cleared Claude Code process; none is inherited from the service environment.
-# Operator-specific variable names are not read, and there is no alias, ambient credential,
-# or alternate provider route.
+# The gateway is the sole provider egress. Its URL/key and HMAC key are mounted Secret files;
+# workers receive only the model name statically and get a scoped API key per attempt.
 worker_environment_files:
-  ANTHROPIC_BASE_URL: "/etc/labweaver/config/anthropic-base-url"
-  ANTHROPIC_AUTH_TOKEN: "/etc/labweaver/secrets/anthropic-auth-token"
   ANTHROPIC_MODEL: "/etc/labweaver/config/anthropic-model"
+model_gateway:
+  bind_addr: "0.0.0.0:9460"
+  public_base_url: "http://agent-service:9460/"
+  upstream_url_file: "/etc/labweaver/secrets/model-gateway-upstream-url"
+  upstream_key_file: "/etc/labweaver/secrets/model-gateway-upstream-key"
+  signing_key_file: "/etc/labweaver/secrets/model-gateway-signing-key"
 work_execution:
   environment_base_uri: "https://environment-service:9446/"
   environment_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
@@ -69,10 +69,10 @@ sandbox:
   memory_bytes: 2147483648
   workspace_bytes: 2147483648
   wall_time_seconds: 3600
-  # Reviewed attempt egress destinations as "<cidr>:<port>": the object store and
-  # the model endpoint. The attempt reaches nothing else; startup rejects a
-  # deployment that omits the configured object-store port.
-  allowed_egress: ["10.0.0.0/8:443"]
+  # Replace these example /32s with the object-store Service IP and Agent gateway Service IP.
+  # Never add the external provider URL/CIDR here; only the gateway owns that egress.
+  # The namespace policy also pins the gateway workload and port.
+  allowed_egress: ["10.96.0.10/32:443", "10.96.0.20/32:9460"]
   # Optional rootless BuildKit sidecar; deployment binds both keys together with
   # the reviewed buildkitd.toml ConfigMap so the attempt can build only against
   # Harbor. Leave unset to run attempts without an image-build capability.

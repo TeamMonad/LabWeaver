@@ -1897,11 +1897,8 @@ class LocalDevBundleTests(unittest.TestCase):
                 if document["kind"] == "ConfigMap"
                 and document["metadata"]["name"] == "agent-service-config"
             )
-            self.assertEqual(
-                agent_config["data"]["anthropic-base-url"],
-                "https://provider.example.test/anthropic\n",
-            )
             self.assertEqual(agent_config["data"]["anthropic-model"], "test-model\n")
+            self.assertNotIn("anthropic-base-url", agent_config["data"])
             agent_secret = next(
                 document
                 for document in platform_documents
@@ -1909,9 +1906,15 @@ class LocalDevBundleTests(unittest.TestCase):
                 and document["metadata"]["name"] == "agent-service-secrets"
             )
             self.assertEqual(
-                base64.b64decode(agent_secret["data"]["anthropic-auth-token"]),
+                base64.b64decode(agent_secret["data"]["model-gateway-upstream-url"]),
+                b"https://provider.example.test/anthropic",
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["model-gateway-upstream-key"]),
                 b"test-provider-token",
             )
+            signing_key = base64.b64decode(agent_secret["data"]["model-gateway-signing-key"]).decode("utf-8")
+            self.assertRegex(signing_key, r"^[0-9a-f]{64}$")
             self.assertNotIn("test-provider-token", bundle.read_text(encoding="utf-8"))
             control_values = yaml.safe_load(control_config["data"]["config.yaml"])
             self.assertEqual(
@@ -2200,6 +2203,10 @@ class LocalDevBundleTests(unittest.TestCase):
                 if document["kind"] == "Secret"
                 and document["metadata"]["name"] == "build-executor-secrets"
             )
+            agent_secret = next(document for document in documents if document["kind"] == "Secret" and document["metadata"]["name"] == "agent-service-secrets")
+            for startup_file in ("oidc-ca.pem", "mtls-ca.pem", "service-client-secret"):
+                self.assertIn(startup_file, build_secret["data"])
+                self.assertEqual(build_secret["data"][startup_file], agent_secret["data"][startup_file])
             self.assertEqual(
                 base64.b64decode(build_secret["data"]["harbor-ca.crt"]),
                 b"harbor-ca",

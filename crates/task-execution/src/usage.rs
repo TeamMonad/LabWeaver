@@ -52,6 +52,7 @@ pub fn usage_deliveries(
                 let milliseconds = usage_milliseconds(started, terminated)?;
                 let resources = &status.claim.workload_resources;
                 let quantities = ResourceUsageQuantities {
+                    quantity_divisor: 1000,
                     cpu_millicore_seconds: quantity_per_millisecond(
                         u64::from(resources.cpu_millicores),
                         milliseconds,
@@ -103,6 +104,7 @@ pub fn usage_deliveries(
         let storage_measurement = match measurement {
             UsageMeasurement::Known { .. } => UsageMeasurement::Known {
                 quantities: ResourceUsageQuantities {
+                    quantity_divisor: 1000,
                     cpu_millicore_seconds: 0,
                     memory_byte_seconds: 0,
                     storage_byte_seconds: quantity_per_millisecond(
@@ -148,8 +150,7 @@ fn quantity_per_millisecond(base: u64, milliseconds: u64) -> Result<u64, UsageDe
     u64::try_from(
         u128::from(base)
             .checked_mul(u128::from(milliseconds))
-            .ok_or(UsageDeliveryError::QuantityOverflow)?
-            / 1_000,
+            .ok_or(UsageDeliveryError::QuantityOverflow)?,
     )
     .map_err(|_| UsageDeliveryError::QuantityOverflow)
 }
@@ -187,12 +188,20 @@ mod tests {
         assert_eq!(milliseconds, 60_000);
         assert_eq!(
             quantity_per_millisecond(2_000, milliseconds).ok(),
-            Some(120_000)
+            Some(120_000_000)
         );
         assert_eq!(
             quantity_per_millisecond(1_073_741_824, milliseconds).ok(),
-            Some(64_424_509_440)
+            Some(64_424_509_440_000)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_short_single_unit_task_keeps_its_fractional_cost() -> Result<(), Box<dyn Error>> {
+        let numerator = quantity_per_millisecond(1, 400)?;
+        let charge = contracts::resource::rounded_scaled_amount(1_000_000, numerator, 1, 1000)?;
+        assert_eq!(charge, 400_000);
         Ok(())
     }
 

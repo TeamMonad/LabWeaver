@@ -38,7 +38,17 @@ pub struct CreditHold {
     #[schemars(with = "String", extend("format" = "uuid"))]
     pub id: Uuid,
     pub project_id: ProjectId,
-    pub request_id: ResourceRequestId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<ResourceRequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_request_id: Option<crate::BuildRequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>", extend("format" = "uuid"))]
+    pub model_call_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_rate_snapshot: Option<Vec<crate::resource::model_costing::ModelRateSnapshot>>,
     pub business_key: String,
     pub owner_client_id: String,
     pub amount: FixedDecimal,
@@ -47,6 +57,12 @@ pub struct CreditHold {
     pub measurement_unknown: bool,
     pub reason: Option<String>,
     pub created_at: UtcTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_since: Option<UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation_due_at: Option<UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expired_unknown_at: Option<UtcTimestamp>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

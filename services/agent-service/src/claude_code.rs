@@ -604,6 +604,14 @@ impl ClaudeCodeCommand {
         &self.env
     }
 
+    pub(crate) fn with_environment(
+        mut self,
+        values: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.env.extend(values);
+        self
+    }
+
     /// Returns the immutable stdin hash without exposing input bytes.
     #[must_use]
     pub const fn stdin_sha256(&self) -> Sha256Digest {
@@ -1365,11 +1373,8 @@ pub struct ClaudeCodeRuntime {
     version_check: Arc<OnceCell<Result<(), ClaudeCodeRuntimeError>>>,
     in_flight: Arc<Semaphore>,
     /// Container provider bindings the deployment actually registers.
-    ///
-    /// The model has no other way to learn them, and a candidate that names an
-    /// unregistered binding can never be provisioned, so the authoring prompt
-    /// states them explicitly.
     provider_bindings: Vec<String>,
+    process_environment: BTreeMap<String, String>,
 }
 
 /// Validated advisory review returned by one Claude Code invocation.
@@ -1443,7 +1448,15 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
+            process_environment: BTreeMap::new(),
         })
+    }
+
+    /// Supplies deployment-owned process protocol environment; callers own capability issuance.
+    #[must_use]
+    pub fn with_process_environment(mut self, environment: BTreeMap<String, String>) -> Self {
+        self.process_environment = environment;
+        self
     }
 
     /// Declares the container provider bindings this deployment registers.
@@ -1479,6 +1492,7 @@ impl ClaudeCodeRuntime {
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
+            process_environment: BTreeMap::new(),
         })
     }
 
@@ -1751,6 +1765,7 @@ impl ClaudeCodeRuntime {
                     &current_prompt,
                     authoring,
                 );
+                command = command.with_environment(self.process_environment.clone());
                 command.deadline = tokio::time::Instant::now() + remaining_time();
                 self.process
                     .execute(&invocation_scope, command, cancellation.clone())
@@ -2012,7 +2027,8 @@ impl ClaudeCodeRuntime {
                 input_sha256,
                 &prompt,
                 false,
-            );
+            )
+            .with_environment(self.process_environment.clone());
             let process_output = self
                 .process
                 .execute(&ExecutionScope::Advisory, command, cancellation.clone())

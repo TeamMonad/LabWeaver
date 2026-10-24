@@ -17,6 +17,7 @@ pub mod containerdisk;
 pub mod generated_artifacts;
 pub mod llm_review;
 pub mod messaging;
+pub mod model_gateway;
 pub mod oci_import;
 pub mod oci_registry;
 pub mod platform_image_import;

@@ -1,4 +1,5 @@
 //! Resource request, capacity claim, and Lease contracts.
+pub mod model_costing;
 
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -587,6 +588,11 @@ pub enum ResourceBillingUnit {
     MemoryByteSecond,
     StorageByteSecond,
     GpuUnitSecond,
+    BuildSecond,
+    LlmInputToken,
+    LlmOutputToken,
+    LlmCacheReadToken,
+    LlmCacheWriteToken,
 }
 
 /// Metering scope for one usage interval.
@@ -610,12 +616,20 @@ pub struct ResourceRate {
     pub id: RateId,
     pub revision: Revision,
     pub unit: ResourceBillingUnit,
-    /// Number of base units represented by `unit_price`.
+    /// Number of base usage units represented by `unit_price`.
     pub unit_quantity: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_class: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_mode: Option<GpuAllocationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_binding: Option<String>,
+    /// Exact model/provider identity for LLM token rates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding: Option<String>,
+    /// Maximum Credits that one model invocation may preauthorize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_preauthorization: Option<FixedDecimal>,
     pub unit_price: Money,
     pub effective_from: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -624,7 +638,27 @@ pub struct ResourceRate {
 
 impl ResourceRate {
     pub fn validate(&self) -> Result<(), ResourceError> {
-        if self.revision.get() == 0
+        let model_unit = matches!(
+            self.unit,
+            ResourceBillingUnit::LlmInputToken
+                | ResourceBillingUnit::LlmOutputToken
+                | ResourceBillingUnit::LlmCacheReadToken
+                | ResourceBillingUnit::LlmCacheWriteToken
+        );
+        if self.builder_binding.is_some() != (self.unit == ResourceBillingUnit::BuildSecond)
+            || self.builder_binding.as_ref().is_some_and(|b| {
+                b.trim().is_empty() || b.len() > 128 || b.bytes().any(|c| c.is_ascii_whitespace())
+            })
+            || self.model_binding.is_some() != model_unit
+            || self.model_binding.as_ref().is_some_and(|b| {
+                b.trim().is_empty() || b.len() > 256 || b.bytes().any(|c| c.is_ascii_whitespace())
+            })
+            || self.max_preauthorization.is_some() != model_unit
+            || self
+                .max_preauthorization
+                .as_ref()
+                .is_some_and(|amount| amount.scaled() <= 0)
+            || self.revision.get() == 0
             || self.unit_quantity == 0
             || self
                 .effective_until
@@ -643,6 +677,9 @@ impl ResourceRate {
             .validate()?;
         }
         self.unit_price.validate()?;
+        if model_unit && self.unit_price.currency != "CREDITS" {
+            return Err(ResourceError::InvalidRate);
+        }
         if self.unit_price.amount.scaled() < 0 {
             return Err(ResourceError::InvalidRate);
         }
@@ -654,6 +691,11 @@ impl ResourceRate {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceUsageQuantities {
+    /// Divide every quantity by this value to obtain the named base unit.
+    /// 1000 preserves millisecond observations without changing per-second prices.
+    #[serde(default = "whole_quantity")]
+    #[schemars(extend("enum" = [1, 1000]))]
+    pub quantity_divisor: u64,
     pub cpu_millicore_seconds: u64,
     pub memory_byte_seconds: u64,
     pub storage_byte_seconds: u64,
@@ -670,6 +712,11 @@ pub enum UsageMeasurement {
 
 impl UsageMeasurement {
     pub fn validate(&self) -> Result<(), ResourceError> {
+        if let Self::Known { quantities } = self
+            && !matches!(quantities.quantity_divisor, 1 | 1000)
+        {
+            return Err(ResourceError::InvalidUsage);
+        }
         if let Self::Unknown { reason } = self
             && (reason.trim().is_empty() || reason.len() > 500)
         {
@@ -770,6 +817,9 @@ impl ResourceUsageRecord {
         self.target.validate()?;
         self.measurement.validate()?;
         if let UsageMeasurement::Known { quantities } = &self.measurement {
+            if !matches!(quantities.quantity_divisor, 1 | 1000) {
+                return Err(ResourceError::InvalidUsage);
+            }
             let invalid_scope = match self.kind {
                 ResourceUsageKind::Compute => quantities.storage_byte_seconds != 0,
                 ResourceUsageKind::Storage => {
@@ -806,6 +856,9 @@ pub struct ResourceUsagePage {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceChargeLine {
+    #[serde(default = "whole_quantity")]
+    #[schemars(extend("enum" = [1, 1000]))]
+    pub quantity_divisor: u64,
     pub rate_id: RateId,
     pub rate_revision: Revision,
     pub unit: ResourceBillingUnit,
@@ -817,7 +870,10 @@ pub struct ResourceChargeLine {
 
 impl ResourceChargeLine {
     pub fn validate(&self) -> Result<(), ResourceError> {
-        if self.rate_revision.get() == 0 || self.unit_quantity == 0 {
+        if self.rate_revision.get() == 0
+            || self.unit_quantity == 0
+            || !matches!(self.quantity_divisor, 1 | 1000)
+        {
             return Err(ResourceError::InvalidCharge);
         }
         self.unit_price.validate()?;
@@ -829,6 +885,7 @@ impl ResourceChargeLine {
             self.unit_price.amount.scaled(),
             self.quantity,
             self.unit_quantity,
+            self.quantity_divisor,
         )?;
         if expected != self.amount.amount.scaled() {
             return Err(ResourceError::InvalidCharge);
@@ -838,15 +895,20 @@ impl ResourceChargeLine {
 }
 
 /// Computes a six-decimal amount with exact integer arithmetic and midpoint
-/// ties rounded to the nearest even result.  The Resource service uses the
-/// same formula through `rust_decimal`; keeping this checked contract rule
-/// makes malformed persisted charges fail closed during decoding.
-fn rounded_scaled_amount(
+/// ties rounded to the nearest even result. Estimates, settlement and persisted
+/// charge validation all call this formula. A quantity divisor preserves milliseconds.
+const fn whole_quantity() -> u64 {
+    1
+}
+
+/// Exact six-place price calculation shared by estimates and settlement.
+pub fn rounded_scaled_amount(
     unit_price_scaled: i128,
     quantity: u64,
     unit_quantity: u64,
+    quantity_divisor: u64,
 ) -> Result<i128, ResourceError> {
-    if unit_quantity == 0 {
+    if unit_quantity == 0 || !matches!(quantity_divisor, 1 | 1000) {
         return Err(ResourceError::InvalidCharge);
     }
     let product = unit_price_scaled
@@ -854,7 +916,7 @@ fn rounded_scaled_amount(
         .ok_or(ResourceError::InvalidCharge)?;
     let negative = product < 0;
     let magnitude = product.unsigned_abs();
-    let denominator = u128::from(unit_quantity);
+    let denominator = u128::from(unit_quantity) * u128::from(quantity_divisor);
     let quotient = magnitude / denominator;
     let remainder = magnitude % denominator;
     let twice_remainder = remainder
@@ -1008,6 +1070,22 @@ mod tests {
     use crate::Revision;
 
     #[test]
+    fn measurements_reject_noncanonical_divisors_before_arithmetic() {
+        for divisor in [0, 2, 999, 1001, u64::MAX] {
+            let measurement = super::UsageMeasurement::Known {
+                quantities: super::ResourceUsageQuantities {
+                    quantity_divisor: divisor,
+                    cpu_millicore_seconds: 1,
+                    memory_byte_seconds: 1,
+                    storage_byte_seconds: 0,
+                    gpu_unit_seconds: 0,
+                },
+            };
+            assert_eq!(measurement.validate(), Err(ResourceError::InvalidUsage));
+        }
+    }
+
+    #[test]
     fn resources_reject_zero_and_non_catalogued_gpu_syntax() {
         assert!(matches!(
             WorkloadResources {
@@ -1054,5 +1132,10 @@ mod tests {
         Ok(())
     }
 }
+pub mod costing;
 /// Project Credits account and immutable ledger contracts.
 pub mod credits;
+
+/// Builder-time estimates and immutable observations.
+pub mod build_costing;
+pub mod environment_funding;

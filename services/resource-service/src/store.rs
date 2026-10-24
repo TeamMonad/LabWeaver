@@ -16,16 +16,15 @@ use contracts::events::{
 };
 use contracts::http::{
     CreateResourceRateRequest, EndResourceRateRequest, IdempotencyKey, MAX_CURSOR_LENGTH,
-    MAX_PAGE_LIMIT, RecordResourceUsageRequest, ResourceRequestListQuery, ResourceRequestPage,
-    TaskResourceStatus, UpsertResourceBudgetRequest,
+    MAX_PAGE_LIMIT, RecordResourceUsageRequest, RenewResourceLease, ResourceOperationAccepted,
+    ResourceRequestListQuery, ResourceRequestPage, TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, FixedDecimal, GpuAllocation, GpuAllocationMode,
     GpuCatalogEntry, Money, ResourceApproval, ResourceBillingUnit, ResourceBudget, ResourceCharge,
-    ResourceChargeLine, ResourceLease, ResourceLeaseState, ResourceRate, ResourceRequest,
-    ResourceRequestState, ResourceTarget, ResourceUsageKind, ResourceUsageQuantities,
-    ResourceUsageRecord, ResourceUsageTarget, UsageMeasurement, UsageSettlementState,
-    WorkloadResources,
+    ResourceLease, ResourceLeaseState, ResourceRate, ResourceRequest, ResourceRequestState,
+    ResourceTarget, ResourceUsageKind, ResourceUsageQuantities, ResourceUsageRecord,
+    ResourceUsageTarget, UsageMeasurement, UsageSettlementState, WorkloadResources,
 };
 use contracts::{
     BudgetId, ChargeId, EventId, GpuCatalogEntryId, LeaseId, OperationId, ProjectId, RateId,
@@ -36,12 +35,11 @@ use persistence_sqlx::cursor_key_id;
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };
-use rust_decimal::{Decimal, RoundingStrategy};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use std::cmp::{max, min};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -226,6 +224,15 @@ pub struct PgResourceStore {
     pool: PgPool,
     cursor_signing_key_current: Arc<Vec<u8>>,
     cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
+    environment_credit_owner: Option<String>,
+}
+
+enum LeaseRenewalIntent<'a> {
+    Absolute {
+        expected_revision: Revision,
+        expires_at: UtcTimestamp,
+    },
+    Duration(&'a RenewResourceLease),
 }
 
 struct UsageAuthority<'a> {
@@ -383,6 +390,7 @@ impl PgResourceStore {
             pool,
             cursor_signing_key_current: Arc::new(b"labweaver-test-cursor-key".to_vec()),
             cursor_signing_key_previous: None,
+            environment_credit_owner: None,
         }
     }
 
@@ -391,6 +399,21 @@ impl PgResourceStore {
         self.cursor_signing_key_current = Arc::new(current);
         self.cursor_signing_key_previous = previous.map(Arc::new);
         self
+    }
+
+    /// Configures the actual Environment service identity that consumes the original funds.
+    #[must_use]
+    pub fn with_environment_credit_owner(mut self, owner: String) -> Self {
+        self.environment_credit_owner = Some(owner);
+        self
+    }
+    pub(crate) fn environment_credit_owner(&self) -> Result<&str, ResourceStoreError> {
+        self.environment_credit_owner
+            .as_deref()
+            .filter(|v| {
+                !v.is_empty() && v.len() <= 128 && !v.bytes().any(|c| c.is_ascii_whitespace())
+            })
+            .ok_or(ResourceStoreError::ScopeConflict)
     }
 
     pub(crate) fn pool(&self) -> PgPool {
@@ -1053,6 +1076,12 @@ impl PgResourceStore {
         observed_at: UtcTimestamp,
         authority: Option<&UsageAuthority<'_>>,
     ) -> Result<ResourceUsageRecord, ResourceStoreError> {
+        input.measurement.validate()?;
+        if input.measured_until <= input.measured_from || observed_at < input.measured_until {
+            return Err(ResourceStoreError::Contract(
+                contracts::resource::ResourceError::InvalidUsage,
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let (project_id, course_id, target) = match input.target.clone() {
             ResourceUsageTarget::ResourceRequest {
@@ -1285,9 +1314,9 @@ impl PgResourceStore {
              (usage_record_id,project_id,course_id,target_kind,environment_id,request_id,lease_id,source_event_id,kind,
               measured_from,measured_until,measurement_state,cpu_millicore_seconds,
               memory_byte_seconds,storage_byte_seconds,gpu_unit_seconds,unknown_reason,
-              settlement,observed_at,contract)
+              settlement,observed_at,contract,quantity_divisor)
               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::numeric,$14::numeric,
-                      $15::numeric,$16::numeric,$17,$18,$19,$20)",
+                      $15::numeric,$16::numeric,$17,$18,$19,$20,$21)",
         )
         .bind(usage.id.as_uuid())
         .bind(usage.project_id.as_uuid())
@@ -1309,6 +1338,7 @@ impl PgResourceStore {
         .bind(wire(usage.settlement)?)
         .bind(usage.observed_at.get())
         .bind(serde_json::to_value(&usage)?)
+        .bind(match &usage.measurement { UsageMeasurement::Known { quantities } => i32::try_from(quantities.quantity_divisor)?, UsageMeasurement::Unknown { .. } => 1 })
         .execute(&mut *transaction)
         .await?;
         crate::credits::observe_unknown_usage(&mut transaction, &usage).await?;
@@ -1455,7 +1485,8 @@ impl PgResourceStore {
             return Ok(None);
         }
 
-        let Some(mut charge) = calculate_charge(&mut transaction, &usage).await? else {
+        let Some(mut charge) = crate::pricing::calculate_charge(&mut transaction, &usage).await?
+        else {
             update_usage_settlement(&mut transaction, &usage, UsageSettlementState::Settled)
                 .await?;
             transaction.commit().await?;
@@ -1493,6 +1524,13 @@ impl PgResourceStore {
         input: &CreateResourceRateRequest,
     ) -> Result<ResourceRate, ResourceStoreError> {
         input.unit_price.validate()?;
+        if (input.unit == ResourceBillingUnit::BuildSecond) != input.builder_binding.is_some()
+            || input.builder_binding.as_ref().is_some_and(|b| {
+                b.trim().is_empty() || b.len() > 128 || b.bytes().any(|c| c.is_ascii_whitespace())
+            })
+        {
+            return Err(ResourceStoreError::RateDimensionInvalid);
+        }
         let gpu_unit = input.unit == ResourceBillingUnit::GpuUnitSecond;
         if gpu_unit != (input.gpu_class.is_some() && input.gpu_mode.is_some())
             || input.gpu_class.is_some() != input.gpu_mode.is_some()
@@ -1536,11 +1574,14 @@ impl PgResourceStore {
                     "SELECT COALESCE(MAX(revision),0)::bigint + 1
                      FROM resource.resource_rates
                      WHERE unit=$1 AND gpu_class IS NOT DISTINCT FROM $2
-                       AND gpu_mode IS NOT DISTINCT FROM $3",
+                       AND gpu_mode IS NOT DISTINCT FROM $3 AND builder_binding IS NOT DISTINCT FROM $4
+                       AND model_binding IS NOT DISTINCT FROM $5",
                 )
                 .bind(&unit)
                 .bind(input.gpu_class.as_deref())
                 .bind(gpu_mode.as_deref())
+                .bind(input.builder_binding.as_deref())
+                .bind(input.model_binding.as_deref())
                 .fetch_one(&mut *transaction)
                 .await?;
                 let revision = Revision::new(u64::try_from(revision_i64)?)?;
@@ -1553,6 +1594,8 @@ impl PgResourceStore {
                      WHERE unit=$1 AND gpu_class IS NOT DISTINCT FROM $2
                        AND gpu_mode IS NOT DISTINCT FROM $3
                        AND effective_from < $4 AND effective_until IS NULL
+                       AND builder_binding IS NOT DISTINCT FROM $5
+                       AND model_binding IS NOT DISTINCT FROM $6
                      ORDER BY effective_from DESC, revision DESC
                      LIMIT 1 FOR UPDATE",
                 )
@@ -1560,6 +1603,8 @@ impl PgResourceStore {
                 .bind(input.gpu_class.as_deref())
                 .bind(gpu_mode.as_deref())
                 .bind(input.effective_from.get())
+                .bind(input.builder_binding.as_deref())
+                .bind(input.model_binding.as_deref())
                 .fetch_optional(&mut *transaction)
                 .await?;
                 let previous_open = previous_open
@@ -1586,7 +1631,14 @@ impl PgResourceStore {
                     .bind(previous.id.to_string())
                     .fetch_one(&mut *transaction)
                     .await?;
-                    if settled_after_boundary {
+                    if settled_after_boundary
+                        || crate::build_costing::settled_after_boundary(
+                            &mut transaction,
+                            previous.id,
+                            input.effective_from,
+                        )
+                        .await?
+                    {
                         return Err(ResourceStoreError::RateSettledConflict);
                     }
                 }
@@ -1598,6 +1650,8 @@ impl PgResourceStore {
                             AND effective_from < COALESCE($5, 'infinity'::timestamptz)
                             AND COALESCE(effective_until, 'infinity'::timestamptz) > $4
                             AND ($6::uuid IS NULL OR rate_id <> $6)
+                            AND builder_binding IS NOT DISTINCT FROM $7
+                            AND model_binding IS NOT DISTINCT FROM $8
                       )",
                 )
                 .bind(&unit)
@@ -1606,6 +1660,8 @@ impl PgResourceStore {
                 .bind(input.effective_from.get())
                 .bind(input.effective_until.map(UtcTimestamp::get))
                 .bind(previous_open.as_ref().map(|rate| rate.id.as_uuid()))
+                .bind(input.builder_binding.as_deref())
+                .bind(input.model_binding.as_deref())
                 .fetch_one(&mut *transaction)
                 .await?;
                 if overlap {
@@ -1627,6 +1683,9 @@ impl PgResourceStore {
                     .await?;
                 }
                 let rate = ResourceRate {
+                    builder_binding: input.builder_binding.clone(),
+                    model_binding: input.model_binding.clone(),
+                    max_preauthorization: input.max_preauthorization.clone(),
                     id: RateId::new(),
                     revision,
                     unit: input.unit,
@@ -1640,8 +1699,8 @@ impl PgResourceStore {
                 rate.validate().map_err(ResourceStoreError::Contract)?;
                 sqlx::query(
                     "INSERT INTO resource.resource_rates
-                     (rate_id,revision,unit,unit_quantity,gpu_class,gpu_mode,currency,unit_price,effective_from,effective_until,contract)
-                     VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9,$10,$11)",
+                     (rate_id,revision,unit,unit_quantity,gpu_class,gpu_mode,currency,unit_price,effective_from,effective_until,contract,builder_binding,model_binding,max_preauthorization)
+                     VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
                 )
                 .bind(rate.id.as_uuid())
                 .bind(i64::try_from(rate.revision.get())?)
@@ -1654,6 +1713,9 @@ impl PgResourceStore {
                 .bind(rate.effective_from.get())
                 .bind(rate.effective_until.map(UtcTimestamp::get))
                 .bind(serde_json::to_value(&rate)?)
+                .bind(rate.builder_binding.as_deref())
+                .bind(rate.model_binding.as_deref())
+                .bind(rate.max_preauthorization.as_ref().map(FixedDecimal::as_str))
                 .execute(&mut *transaction)
                 .await?;
                 let value = serde_json::to_value(&rate)?;
@@ -1739,7 +1801,14 @@ impl PgResourceStore {
                 .bind(rate.id.to_string())
                 .fetch_one(&mut *transaction)
                 .await?;
-                if settled_after_boundary {
+                if settled_after_boundary
+                    || crate::build_costing::settled_after_boundary(
+                        &mut transaction,
+                        rate.id,
+                        input.effective_until,
+                    )
+                    .await?
+                {
                     return Err(ResourceStoreError::RateSettledConflict);
                 }
                 rate.effective_until = Some(input.effective_until);
@@ -2724,6 +2793,7 @@ impl PgResourceStore {
                     project_id,
                     course_id: original.course_id,
                     lines: vec![contracts::resource::ResourceChargeLine {
+                        quantity_divisor: 1,
                         rate_id: original_line.rate_id,
                         rate_revision: original_line.rate_revision,
                         unit: original_line.unit,
@@ -2837,7 +2907,7 @@ impl PgResourceStore {
         allocation: &PendingAllocation,
         policy: ApprovalPolicy,
         trace_id: &str,
-    ) -> Result<ResourceRequest, ResourceStoreError> {
+    ) -> Result<ResourceOperationAccepted, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
@@ -2888,12 +2958,23 @@ impl PgResourceStore {
         )
         .await?
         {
-            IdempotencyDecision::Replay(value) => decode_request(value)?,
+            IdempotencyDecision::Replay(value) => {
+                replay_approval_receipt(
+                    &mut transaction,
+                    value,
+                    request_id,
+                    approval.request_revision,
+                )
+                .await?
+            }
             IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
             IdempotencyDecision::InProgress => {
                 return Err(ResourceStoreError::IdempotencyInProgress);
             }
             IdempotencyDecision::Reserved => {
+                if request.revision != approval.request_revision {
+                    return Err(ResourceStoreError::RevisionConflict);
+                }
                 let now = database_now(&mut transaction).await?;
                 let next = ResourceLifecycle::accept_approval(&request, approval, policy, now)?;
                 if let Some(binding) = &approval.runtime_authorization {
@@ -2948,7 +3029,8 @@ impl PgResourceStore {
                 .await?;
                 enqueue_request_event(&mut transaction, &next, REQUEST_APPROVED_SUBJECT, trace_id)
                     .await?;
-                let value = serde_json::to_value(&next)?;
+                let accepted = approval_receipt(next.id, lease.id, next.revision);
+                let value = serde_json::to_value(&accepted)?;
                 IdempotencyStore::complete(
                     &mut transaction,
                     Domain::Resource,
@@ -2957,7 +3039,7 @@ impl PgResourceStore {
                     &value,
                 )
                 .await?;
-                next
+                accepted
             }
         };
         transaction.commit().await?;
@@ -3207,20 +3289,28 @@ impl PgResourceStore {
     /// database clock, advances the request and lease together, and only then records
     /// `HandedOff`. A stale Evaluation worker cannot acknowledge a newer reservation.
     #[allow(clippy::too_many_lines)]
-    pub async fn acknowledge_task_resource(
+    /// Production Task authorization and its priced upper bound commit atomically.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fencing, funding and execution authorization share one atomic transaction"
+    )]
+    pub async fn acknowledge_funded_task_resource(
         &self,
         task_run_id: TaskRunId,
-        expected_claim_revision: Revision,
-        expected_lease_revision: Revision,
-        execution_namespace: &str,
+        input: &contracts::http::AcknowledgeTaskResourceRequest,
+        owner: &str,
         trace_id: &str,
     ) -> Result<TaskResourceStatus, ResourceStoreError> {
+        let expected_claim_revision = input.expected_claim_revision;
+        let expected_lease_revision = input.expected_lease_revision;
+        let execution_namespace = input.execution_namespace.as_str();
         if !valid_namespace_name(execution_namespace) {
             return Err(ResourceStoreError::InvalidNamespace);
         }
         validate_trace(trace_id)?;
         self.expire_task_resource(task_run_id).await?;
         let mut transaction = self.pool.begin().await?;
+        crate::costing::rate_lock(&mut transaction).await?;
         let row = sqlx::query(
             "SELECT r.contract AS request_contract,c.contract AS claim_contract,
                     l.contract AS lease_contract,c.namespace_name AS execution_namespace,
@@ -3240,6 +3330,13 @@ impl PgResourceStore {
         let request = decode_request(row.try_get("request_contract")?)?;
         let claim = decode_claim(row.try_get("claim_contract")?)?;
         let lease = decode_lease(row.try_get("lease_contract")?)?;
+        crate::credits::check_request_hold_owner(
+            &mut transaction,
+            request.id,
+            owner,
+            request.state == ResourceRequestState::Active,
+        )
+        .await?;
         let current_namespace: Option<String> = row.try_get("execution_namespace")?;
         let approval_id: uuid::Uuid = row.try_get("approval_id")?;
         let approval_request_id: uuid::Uuid = row.try_get("approval_request_id")?;
@@ -3321,6 +3418,15 @@ impl PgResourceStore {
         let duration = approved_duration_seconds;
         let expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(duration))
             .map_err(|_| ResourceStoreError::CapacityReadbackInvalid)?;
+        crate::admission::fund_task_in_transaction(
+            &mut transaction,
+            &request,
+            &claim,
+            owner,
+            now,
+            expires_at,
+        )
+        .await?;
         let next_lease =
             ResourceLifecycle::activate_lease(&lease, expected_lease_revision, now, expires_at)?;
         let next_request = ResourceLifecycle::activate(&request, request.revision, now)?;
@@ -3507,21 +3613,68 @@ impl PgResourceStore {
         Ok(status)
     }
 
-    /// Applies an administrator renewal with an exact revision and idempotency fence.
+    /// Native callers supply an absolute deadline; the original identity remains unchanged.
     pub async fn renew_lease(
         &self,
         idempotency_key: &str,
         lease_id: LeaseId,
-        expected_revision: contracts::Revision,
+        expected_revision: Revision,
         expires_at: UtcTimestamp,
+        trace_id: &str,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        self.apply_lease_renewal(
+            idempotency_key,
+            lease_id,
+            LeaseRenewalIntent::Absolute {
+                expected_revision,
+                expires_at,
+            },
+            trace_id,
+        )
+        .await
+    }
+
+    /// HTTP retries bind the complete client body, and derive the deadline only on first reserve.
+    pub async fn renew_lease_for_duration(
+        &self,
+        idempotency_key: &str,
+        lease_id: LeaseId,
+        input: &RenewResourceLease,
+        trace_id: &str,
+    ) -> Result<ResourceLease, ResourceStoreError> {
+        self.apply_lease_renewal(
+            idempotency_key,
+            lease_id,
+            LeaseRenewalIntent::Duration(input),
+            trace_id,
+        )
+        .await
+    }
+
+    async fn apply_lease_renewal(
+        &self,
+        idempotency_key: &str,
+        lease_id: LeaseId,
+        intent: LeaseRenewalIntent<'_>,
         trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
+        crate::costing::rate_lock(&mut transaction).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
-        let hash = Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at))
-            .map_err(|_| ResourceStoreError::Wire)?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
+        if matches!(request.target, ResourceTarget::Task { .. }) {
+            return Err(ResourceStoreError::TaskRenewalUnsupported);
+        }
+        let hash = match &intent {
+            LeaseRenewalIntent::Absolute {
+                expected_revision,
+                expires_at,
+            } => Sha256Digest::of_canonical(&(lease_id, expected_revision, expires_at)),
+            LeaseRenewalIntent::Duration(input) => Sha256Digest::of_canonical(&(lease_id, input)),
+        }
+        .map_err(|_| ResourceStoreError::Wire)?;
         let result = match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Resource,
@@ -3538,15 +3691,36 @@ impl PgResourceStore {
             }
             IdempotencyDecision::Reserved => {
                 let now = database_now(&mut transaction).await?;
+                let (expected_revision, expires_at) = match intent {
+                    LeaseRenewalIntent::Absolute {
+                        expected_revision,
+                        expires_at,
+                    } => (expected_revision, expires_at),
+                    LeaseRenewalIntent::Duration(input) => {
+                        let duration = i64::try_from(input.duration_seconds)
+                            .map_err(|_| ResourceStoreError::NumericOverflow)?;
+                        let until = now
+                            .get()
+                            .checked_add(time::Duration::seconds(duration))
+                            .ok_or(ResourceStoreError::NumericOverflow)?;
+                        (input.expected_revision, UtcTimestamp::from_utc(until)?)
+                    }
+                };
                 let next =
                     ResourceLifecycle::renew_lease(&lease, expected_revision, expires_at, now)?;
-                let request = load_locked(&mut transaction, lease.request_id).await?;
-                if matches!(request.target, ResourceTarget::Task { .. })
-                    && (lease.expires_at.is_some_and(|expiry| expiry <= now)
-                        || request.diagnostic_code.as_deref()
-                            == Some("LW_RESOURCE_TASK_LEASE_EXPIRED"))
-                {
-                    return Err(ResourceStoreError::TaskLeaseExpired);
+                if matches!(request.target, ResourceTarget::Environment { .. }) {
+                    let from = lease.expires_at.ok_or(ResourceStoreError::ScopeConflict)?;
+                    crate::environment_funding::fund_window(
+                        &mut transaction,
+                        &request,
+                        &lease,
+                        next.revision,
+                        self.environment_credit_owner()?,
+                        from,
+                        expires_at,
+                        false,
+                    )
+                    .await?;
                 }
                 update_lease(&mut transaction, &lease, &next).await?;
                 enqueue_lease_event(
@@ -3662,11 +3836,45 @@ impl PgResourceStore {
         trace_id: &str,
     ) -> Result<ResourceLease, ResourceStoreError> {
         validate_trace(trace_id)?;
+        let owner = self.environment_credit_owner()?;
         let mut transaction = self.pool.begin().await?;
+        crate::costing::rate_lock(&mut transaction).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
+        if lease.state == ResourceLeaseState::Active
+            && lease.revision.get()
+                == expected_revision
+                    .get()
+                    .checked_add(1)
+                    .ok_or(ResourceStoreError::NumericOverflow)?
+            && lease.active_from == Some(active_from)
+            && lease.expires_at == Some(expires_at)
+            && request.state == ResourceRequestState::Active
+        {
+            let hold: uuid::Uuid = sqlx::query_scalar("SELECT hold_id FROM resource.environment_credit_windows WHERE lease_id=$1 AND lease_revision=$2").bind(lease.id.as_uuid()).bind(i64::try_from(lease.revision.get()).map_err(|_|ResourceStoreError::NumericOverflow)?).fetch_one(&mut *transaction).await?;
+            crate::credits::require_funded_in_transaction(
+                &mut transaction,
+                owner,
+                hold,
+                &contracts::resource::FixedDecimal::zero(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(lease);
+        }
         let next =
             ResourceLifecycle::activate_lease(&lease, expected_revision, active_from, expires_at)?;
+        crate::environment_funding::fund_window(
+            &mut transaction,
+            &request,
+            &lease,
+            next.revision,
+            owner,
+            active_from,
+            expires_at,
+            true,
+        )
+        .await?;
         let next_request = ResourceLifecycle::activate(&request, request.revision, active_from)?;
         update_lease(&mut transaction, &lease, &next).await?;
         update_request(&mut transaction, &request, &next_request).await?;
@@ -4707,232 +4915,7 @@ impl PgResourceStore {
     }
 }
 
-async fn calculate_charge(
-    transaction: &mut Transaction<'_, Postgres>,
-    usage: &ResourceUsageRecord,
-) -> Result<Option<ResourceCharge>, ResourceStoreError> {
-    let UsageMeasurement::Known { quantities } = &usage.measurement else {
-        return Ok(None);
-    };
-    let mut lines = Vec::new();
-    let mut currency: Option<String> = None;
-
-    if usage.kind == ResourceUsageKind::Compute {
-        if quantities.cpu_millicore_seconds > 0 {
-            append_rate_segments(
-                transaction,
-                usage,
-                ResourceBillingUnit::CpuMillicoreSecond,
-                quantities.cpu_millicore_seconds,
-                None,
-                None,
-                &mut lines,
-                &mut currency,
-            )
-            .await?;
-        }
-        if quantities.memory_byte_seconds > 0 {
-            append_rate_segments(
-                transaction,
-                usage,
-                ResourceBillingUnit::MemoryByteSecond,
-                quantities.memory_byte_seconds,
-                None,
-                None,
-                &mut lines,
-                &mut currency,
-            )
-            .await?;
-        }
-        if quantities.gpu_unit_seconds > 0 {
-            let allocation = load_usage_gpu_allocation(transaction, usage).await?;
-            append_rate_segments(
-                transaction,
-                usage,
-                ResourceBillingUnit::GpuUnitSecond,
-                quantities.gpu_unit_seconds,
-                Some(&allocation.class),
-                Some(allocation.mode),
-                &mut lines,
-                &mut currency,
-            )
-            .await?;
-        }
-    } else if quantities.storage_byte_seconds > 0 {
-        append_rate_segments(
-            transaction,
-            usage,
-            ResourceBillingUnit::StorageByteSecond,
-            quantities.storage_byte_seconds,
-            None,
-            None,
-            &mut lines,
-            &mut currency,
-        )
-        .await?;
-    }
-
-    if lines.is_empty() {
-        return Ok(None);
-    }
-    let currency = currency.ok_or(ResourceStoreError::RateCurrencyConflict)?;
-    let total_scaled = lines.iter().try_fold(0_i128, |total, line| {
-        total
-            .checked_add(line.amount.amount.scaled())
-            .ok_or(ResourceStoreError::NumericOverflow)
-    })?;
-    let total = Money {
-        currency,
-        amount: FixedDecimal::from_scaled(total_scaled)?,
-    };
-    Ok(Some(ResourceCharge {
-        id: ChargeId::new(),
-        usage_record_id: usage.id,
-        project_id: usage.project_id,
-        course_id: usage.course_id,
-        lines,
-        total,
-        settlement: UsageSettlementState::Settled,
-        // The settle transaction replaces this with the database timestamp.
-        created_at: usage.observed_at,
-        adjustment_of: None,
-        adjustment_reason: None,
-        adjusted_by: None,
-        diagnostic_code: None,
-    }))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn append_rate_segments(
-    transaction: &mut Transaction<'_, Postgres>,
-    usage: &ResourceUsageRecord,
-    unit: ResourceBillingUnit,
-    quantity: u64,
-    gpu_class: Option<&str>,
-    gpu_mode: Option<GpuAllocationMode>,
-    lines: &mut Vec<ResourceChargeLine>,
-    currency: &mut Option<String>,
-) -> Result<(), ResourceStoreError> {
-    let segments = select_rate_segments(transaction, unit, gpu_class, gpu_mode, usage).await?;
-    let total_millis =
-        (usage.measured_until.get() - usage.measured_from.get()).whole_milliseconds();
-    if total_millis <= 0 {
-        return Err(ResourceStoreError::NumericOverflow);
-    }
-    let total_millis =
-        u128::try_from(total_millis).map_err(|_| ResourceStoreError::NumericOverflow)?;
-    let mut allocated = 0_u64;
-    for (index, (rate, segment_millis)) in segments.iter().enumerate() {
-        let segment_quantity = if index + 1 == segments.len() {
-            quantity
-                .checked_sub(allocated)
-                .ok_or(ResourceStoreError::NumericOverflow)?
-        } else {
-            let product = u128::from(quantity)
-                .checked_mul(*segment_millis)
-                .ok_or(ResourceStoreError::NumericOverflow)?;
-            u64::try_from(product / total_millis)
-                .map_err(|_| ResourceStoreError::NumericOverflow)?
-        };
-        allocated = allocated
-            .checked_add(segment_quantity)
-            .ok_or(ResourceStoreError::NumericOverflow)?;
-        append_charge_line(unit, segment_quantity, rate, lines, currency)?;
-    }
-    if allocated != quantity {
-        return Err(ResourceStoreError::NumericOverflow);
-    }
-    Ok(())
-}
-
-fn append_charge_line(
-    unit: ResourceBillingUnit,
-    quantity: u64,
-    rate: &ResourceRate,
-    lines: &mut Vec<ResourceChargeLine>,
-    currency: &mut Option<String>,
-) -> Result<(), ResourceStoreError> {
-    if quantity == 0 {
-        return Ok(());
-    }
-    if let Some(expected) = currency.as_ref()
-        && expected != &rate.unit_price.currency
-    {
-        return Err(ResourceStoreError::RateCurrencyConflict);
-    }
-    *currency = Some(rate.unit_price.currency.clone());
-    let amount = multiply_money(&rate.unit_price, quantity, rate.unit_quantity)?;
-    lines.push(ResourceChargeLine {
-        rate_id: rate.id,
-        rate_revision: rate.revision,
-        unit,
-        quantity,
-        unit_quantity: rate.unit_quantity,
-        unit_price: rate.unit_price.clone(),
-        amount,
-    });
-    Ok(())
-}
-
-async fn select_rate_segments(
-    transaction: &mut Transaction<'_, Postgres>,
-    unit: ResourceBillingUnit,
-    gpu_class: Option<&str>,
-    gpu_mode: Option<GpuAllocationMode>,
-    usage: &ResourceUsageRecord,
-) -> Result<Vec<(ResourceRate, u128)>, ResourceStoreError> {
-    let unit = wire(unit)?;
-    let gpu_mode = gpu_mode.map(wire).transpose()?;
-    let rows = sqlx::query(
-        "SELECT contract FROM resource.resource_rates
-         WHERE unit=$1 AND gpu_class IS NOT DISTINCT FROM $2
-           AND gpu_mode IS NOT DISTINCT FROM $3
-           AND effective_from < $4
-           AND (effective_until IS NULL OR effective_until > $5)
-         ORDER BY effective_from ASC, revision ASC, rate_id ASC",
-    )
-    .bind(&unit)
-    .bind(gpu_class)
-    .bind(gpu_mode.as_deref())
-    .bind(usage.measured_until.get())
-    .bind(usage.measured_from.get())
-    .fetch_all(&mut **transaction)
-    .await?;
-    if rows.is_empty() {
-        return Err(ResourceStoreError::RateUnconfigured);
-    }
-    let from = usage.measured_from.get();
-    let until = usage.measured_until.get();
-    let mut cursor = from;
-    let mut segments = Vec::with_capacity(rows.len());
-    for row in rows {
-        let rate = decode_rate(row.try_get("contract")?)?;
-        let segment_from = max(from, rate.effective_from.get());
-        let segment_until = min(until, rate.effective_until.map_or(until, UtcTimestamp::get));
-        if segment_until <= segment_from {
-            continue;
-        }
-        if segment_from < cursor {
-            return Err(ResourceStoreError::RateOverlap);
-        }
-        if segment_from > cursor {
-            return Err(ResourceStoreError::RateUnconfigured);
-        }
-        let duration = (segment_until - segment_from).whole_milliseconds();
-        let duration = u128::try_from(duration).map_err(|_| ResourceStoreError::NumericOverflow)?;
-        if duration == 0 {
-            return Err(ResourceStoreError::NumericOverflow);
-        }
-        segments.push((rate, duration));
-        cursor = segment_until;
-    }
-    if cursor != until {
-        return Err(ResourceStoreError::RateUnconfigured);
-    }
-    Ok(segments)
-}
-
-async fn load_usage_gpu_allocation(
+pub(crate) async fn load_usage_gpu_allocation(
     transaction: &mut Transaction<'_, Postgres>,
     usage: &ResourceUsageRecord,
 ) -> Result<GpuAllocation, ResourceStoreError> {
@@ -4981,28 +4964,6 @@ async fn load_usage_gpu_allocation(
                 .ok_or(ResourceStoreError::GpuAllocationMissing)
         }
     }
-}
-
-fn multiply_money(
-    unit_price: &Money,
-    quantity: u64,
-    unit_quantity: u64,
-) -> Result<Money, ResourceStoreError> {
-    if unit_quantity == 0 {
-        return Err(ResourceStoreError::NumericOverflow);
-    }
-    let price = Decimal::from_str(unit_price.amount.as_str())
-        .map_err(|_| ResourceStoreError::NumericOverflow)?;
-    let amount = Decimal::from(quantity)
-        .checked_mul(price)
-        .ok_or(ResourceStoreError::NumericOverflow)?
-        .checked_div(Decimal::from(unit_quantity))
-        .ok_or(ResourceStoreError::NumericOverflow)?
-        .round_dp_with_strategy(6, RoundingStrategy::MidpointNearestEven);
-    Ok(Money {
-        currency: unit_price.currency.clone(),
-        amount: FixedDecimal::parse(&format!("{amount:.6}"))?,
-    })
 }
 
 async fn update_usage_settlement(
@@ -5682,6 +5643,53 @@ fn event_contract(subject: &str) -> Result<contracts::events::EventContract, Res
         .ok_or(ResourceStoreError::EventContractInvalid)
 }
 
+fn approval_receipt(
+    request_id: ResourceRequestId,
+    lease_id: LeaseId,
+    revision: Revision,
+) -> ResourceOperationAccepted {
+    ResourceOperationAccepted {
+        request_id,
+        lease_id: Some(lease_id),
+        revision,
+        status_url: format!("/api/v1/resource-requests/{request_id}"),
+    }
+}
+
+/// Reads the original completed format without rewriting historical idempotency results.
+async fn replay_approval_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    value: Value,
+    request_id: ResourceRequestId,
+    expected_revision: Revision,
+) -> Result<ResourceOperationAccepted, ResourceStoreError> {
+    if let Ok(receipt) = serde_json::from_value::<ResourceOperationAccepted>(value.clone()) {
+        return Ok(receipt);
+    }
+    let original = decode_request(value)?;
+    if original.id != request_id
+        || original.state != ResourceRequestState::Allocating
+        || original.revision.get()
+            != expected_revision
+                .get()
+                .checked_add(1)
+                .ok_or(ResourceStoreError::NumericOverflow)?
+    {
+        return Err(ResourceStoreError::AllocationMismatch);
+    }
+    // The persisted approval version selects the historical claim/lease; never use newest/current.
+    let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT l.lease_id FROM resource.resource_leases l JOIN resource.capacity_claims c ON c.claim_id=l.claim_id AND c.request_id=l.request_id JOIN resource.resource_approvals a ON a.approval_id=c.approval_id AND a.request_id=l.request_id WHERE l.request_id=$1 AND a.request_revision=$2 LIMIT 2")
+        .bind(original.id.as_uuid()).bind(i64::try_from(expected_revision.get()).map_err(|_|ResourceStoreError::NumericOverflow)?).fetch_all(&mut **tx).await?;
+    let [id] = ids.as_slice() else {
+        return Err(ResourceStoreError::AllocationMismatch);
+    };
+    let lease_id = id
+        .to_string()
+        .parse()
+        .map_err(|_| ResourceStoreError::Wire)?;
+    Ok(approval_receipt(original.id, lease_id, original.revision))
+}
+
 async fn database_now(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<UtcTimestamp, ResourceStoreError> {
@@ -5931,12 +5939,13 @@ async fn canonical_environment_measurement(
             u128::from(value)
                 .checked_mul(millis)
                 .ok_or(ResourceStoreError::NumericOverflow)?
-                / 1_000,
+                / (1000 / u128::from(quantities.quantity_divisor)),
         )
         .map_err(|_| ResourceStoreError::NumericOverflow)
     };
     let expected = match kind {
         ResourceUsageKind::Compute => ResourceUsageQuantities {
+            quantity_divisor: quantities.quantity_divisor,
             cpu_millicore_seconds: per_second(u64::from(resources.cpu_millicores))?,
             memory_byte_seconds: per_second(resources.memory_bytes)?,
             storage_byte_seconds: 0,
@@ -5948,6 +5957,7 @@ async fn canonical_environment_measurement(
             )?,
         },
         ResourceUsageKind::Storage => ResourceUsageQuantities {
+            quantity_divisor: quantities.quantity_divisor,
             cpu_millicore_seconds: 0,
             memory_byte_seconds: 0,
             storage_byte_seconds: per_second(resources.storage_bytes)?,
@@ -5961,7 +5971,7 @@ async fn canonical_environment_measurement(
         quantities: expected,
     })
 }
-fn decode_rate(value: Value) -> Result<ResourceRate, ResourceStoreError> {
+pub(crate) fn decode_rate(value: Value) -> Result<ResourceRate, ResourceStoreError> {
     let rate: ResourceRate = serde_json::from_value(value)?;
     rate.validate()?;
     Ok(rate)
@@ -6155,7 +6165,7 @@ fn inactive_lease_response(state: EnvironmentLeaseState) -> EnvironmentLeaseVeri
         authorization: None,
     }
 }
-fn wire<T: serde::Serialize>(value: T) -> Result<String, ResourceStoreError> {
+pub(crate) fn wire<T: serde::Serialize>(value: T) -> Result<String, ResourceStoreError> {
     serde_json::to_value(value)?
         .as_str()
         .map(ToOwned::to_owned)
@@ -6247,6 +6257,8 @@ fn safe_sqlstate_value(code: Option<&str>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceStoreError {
+    #[error("LW_RESOURCE_ESTIMATE_CHANGED")]
+    EstimateChanged,
     #[error(transparent)]
     Credits(#[from] crate::credits::CreditError),
     #[error(transparent)]
@@ -6351,6 +6363,8 @@ pub enum ResourceStoreError {
     TaskApprovalDeadlineMissing,
     #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
     TaskLeaseExpired,
+    #[error("LW_RESOURCE_TASK_RENEWAL_UNSUPPORTED")]
+    TaskRenewalUnsupported,
     #[error("LW_RESOURCE_WIRE_INVALID")]
     Wire,
     #[error("LW_RESOURCE_EVENT_CONTRACT_INVALID")]

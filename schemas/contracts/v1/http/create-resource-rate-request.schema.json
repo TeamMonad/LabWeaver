@@ -38,7 +38,12 @@
         "cpu_millicore_second",
         "memory_byte_second",
         "storage_byte_second",
-        "gpu_unit_second"
+        "gpu_unit_second",
+        "build_second",
+        "llm_input_token",
+        "llm_output_token",
+        "llm_cache_read_token",
+        "llm_cache_write_token"
       ],
       "type": "string"
     },
@@ -51,6 +56,12 @@
   "additionalProperties": false,
   "description": "Administrator-created immutable rate version.",
   "properties": {
+    "builderBinding": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "effectiveFrom": {
       "$ref": "#/$defs/UtcTimestamp"
     },
@@ -78,6 +89,22 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "maxPreauthorization": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "modelBinding": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "unit": {
