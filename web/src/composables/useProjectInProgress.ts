@@ -1,11 +1,20 @@
 import { onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
-import { listEnvironments, listProjectAgentRuns, listProjectResourceRequests } from '@/generated/contracts'
-import type { AgentRunHistoryItem, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
-import { diagnosticFromError, extractProblemDetails, type AsyncState } from '@/types/async'
+import { getProjectAgentTaskProgress, listEnvironments, listProjectAgentRuns, listProjectResourceRequests } from '@/generated/contracts'
+import type { AgentRunHistoryItem, AgentRunTaskProgress, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
+import { diagnosticFromError, extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { collectCursorPages } from '@/utils/cursorPagination'
 
 /** Section state; `hidden` means the server denied this read for the account, so the section is not shown. */
 export type InProgressSection<T> = AsyncState<T[]> | { kind: 'hidden' }
+
+/** Current attempt per track of one open run; an error affects only that run's row. */
+export type AgentRunProgressState =
+  | { kind: 'loading' }
+  | { kind: 'ready'; progress: AgentRunTaskProgress }
+  | { kind: 'error'; diagnostic: DiagnosticViewModel }
+
+/** At most this many task-progress reads are in flight at once, however many runs are open. */
+export const AGENT_PROGRESS_MAX_CONCURRENCY = 4
 
 const OPEN_AGENT_RUN_STATES = new Set<AgentRunHistoryItem['state']>(['requested', 'running', 'awaiting_approval', 'cancelling'])
 const OPEN_RESOURCE_REQUEST_STATES = new Set<ResourceRequestSchema['state']>(['reviewing', 'allocating', 'expiring'])
@@ -35,12 +44,16 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
   const environments = ref<InProgressSection<EnvironmentSummary>>({ kind: 'idle' })
   const agentRuns = ref<InProgressSection<AgentRunHistoryItem>>({ kind: 'idle' })
   const resourceRequests = ref<InProgressSection<ResourceRequestSchema>>({ kind: 'idle' })
+  /** Keyed by run id; only runs of `projectId` that are still open appear here. */
+  const agentProgress = ref<Record<string, AgentRunProgressState>>({})
   /** The server has more rows than the first page read here; the section says so instead of implying completeness. */
   const environmentsTruncated = ref(false)
   const agentRunsTruncated = ref(false)
   const loadedAt = ref<Date | null>(null)
   const loading = ref(false)
   let generation = 0
+  /** Project whose runs `agentProgress` describes; a different project starts from an empty map. */
+  let progressProjectId: string | null = null
 
   async function loadEnvironments(id: string, current: number) {
     environments.value = { kind: 'loading', message: '加载运行中的环境…' }
@@ -69,12 +82,64 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
       if (current !== generation) return
       const items = result.items.filter((item) => item.projectId === id && isOpenAgentRun(item))
       agentRuns.value = items.length ? { kind: 'success', data: items } : { kind: 'empty' }
+      await loadAgentProgress(id, items, current)
     } catch (error) {
       if (current !== generation) return
       agentRuns.value = denied(error)
         ? { kind: 'hidden' }
         : { kind: 'error', diagnostic: diagnosticFromError(error, 'HOME_AGENT_RUNS_LOAD_FAILED', '加载未完成的任务失败。') }
     }
+  }
+
+  function progressError(error: unknown): AgentRunProgressState {
+    return { kind: 'error', diagnostic: diagnosticFromError(error, 'HOME_AGENT_PROGRESS_LOAD_FAILED', '读取任务进度失败。') }
+  }
+
+  async function readAgentProgress(id: string, runId: string): Promise<AgentRunProgressState> {
+    try {
+      // Only the current attempt is shown here; history stays on the run's own page.
+      const result = await getProjectAgentTaskProgress({ path: { projectId: id, runId }, query: { page: 1, pageSize: 1 } })
+      if (!result.data) return progressError(result.error)
+      if (result.data.projectId !== id || result.data.runId !== runId) {
+        return {
+          kind: 'error',
+          diagnostic: makeDiagnostic('HOME_AGENT_PROGRESS_STALE_CONTEXT', '任务进度返回了其他项目或任务的数据，已停止显示。', true),
+        }
+      }
+      return { kind: 'ready', progress: result.data }
+    } catch (error) {
+      return progressError(error)
+    }
+  }
+
+  /**
+   * Reads the current attempt of each open run with bounded concurrency. Rows
+   * already read keep their last reading until the new one arrives; rows that
+   * closed are dropped. A failed read only marks that run.
+   */
+  async function loadAgentProgress(id: string, runs: AgentRunHistoryItem[], current: number) {
+    const previous = agentProgress.value
+    agentProgress.value = Object.fromEntries(runs.map((run) => [run.id, previous[run.id] ?? { kind: 'loading' } as const]))
+    const queue = runs.map((run) => run.id)
+    async function worker() {
+      for (let runId = queue.shift(); runId !== undefined && current === generation; runId = queue.shift()) {
+        const state = await readAgentProgress(id, runId)
+        if (current !== generation) return
+        agentProgress.value = { ...agentProgress.value, [runId]: state }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(AGENT_PROGRESS_MAX_CONCURRENCY, queue.length) }, () => worker()))
+  }
+
+  /** Re-reads one run after its row reported a failure; other rows are untouched. */
+  async function retryAgentProgress(runId: string) {
+    const id = projectId.value
+    if (!id || id !== progressProjectId || !(runId in agentProgress.value)) return
+    const current = generation
+    agentProgress.value = { ...agentProgress.value, [runId]: { kind: 'loading' } }
+    const state = await readAgentProgress(id, runId)
+    if (current !== generation || !(runId in agentProgress.value)) return
+    agentProgress.value = { ...agentProgress.value, [runId]: state }
   }
 
   async function loadResourceRequests(id: string, current: number) {
@@ -98,6 +163,10 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
   async function load() {
     const id = projectId.value
     const current = ++generation
+    if (id !== progressProjectId) {
+      agentProgress.value = {}
+      progressProjectId = id
+    }
     if (!id) {
       environments.value = { kind: 'idle' }
       agentRuns.value = { kind: 'idle' }
@@ -133,5 +202,16 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
   })
 
-  return reactive({ environments, agentRuns, resourceRequests, environmentsTruncated, agentRunsTruncated, loadedAt, loading, load })
+  return reactive({
+    environments,
+    agentRuns,
+    agentProgress,
+    resourceRequests,
+    environmentsTruncated,
+    agentRunsTruncated,
+    loadedAt,
+    loading,
+    load,
+    retryAgentProgress,
+  })
 }
