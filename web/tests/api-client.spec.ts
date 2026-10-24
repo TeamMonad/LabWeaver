@@ -1,6 +1,7 @@
 import axios, { AxiosError, AxiosHeaders } from 'axios'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createLabWeaverApiClient } from '@/api/client'
+import type * as SessionModule from '@/api/session'
 import { diagnosticFromError, extractProblemDetails, makeDiagnostic } from '@/types/async'
 
 vi.mock('@/config', () => ({
@@ -377,6 +378,93 @@ describe('browser session changes (#198)', () => {
       const result = await write
 
       expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+      expect(result.data).toBeUndefined()
+      expect(writes).toEqual([])
+    })
+  })
+
+  describe.each([
+    { rejection: '401', status: 401, data: { diagnosticCode: 'LW_AUTH_SESSION_REJECTED' } },
+    { rejection: 'CSRF 403', status: 403, data: csrfRejected },
+  ])('a $rejection reported after the session gate passed but before the write resumed', ({ status, data }) => {
+    afterEach(() => {
+      vi.doUnmock('@/api/session')
+    })
+
+    /**
+     * The gate has already decided "confirmed" for write W; before W's
+     * interceptor continues, a concurrent response is rejected. The hook runs
+     * exactly in that window: the gate's own result is settled, W has not resumed.
+     */
+    async function writeAfterGateWindow(confirm: () => Promise<void>) {
+      vi.resetModules()
+      let afterGate: (() => void) | undefined
+      // The gate is wrapped at module load, so the transport must be imported after this mock.
+      vi.doMock('@/api/session', async (importOriginal) => {
+        const actual = await importOriginal<typeof SessionModule>()
+        return {
+          ...actual,
+          awaitConfirmedSession: async () => {
+            const confirmed = await actual.awaitConfirmedSession()
+            const hook = afterGate
+            afterGate = undefined
+            hook?.()
+            return confirmed
+          },
+        }
+      })
+      const { session, client, axios: transportAxios } = await freshTransport()
+      const csrfGet = vi.spyOn(transportAxios, 'get')
+        .mockResolvedValue({ data: { csrfToken: 'token-confirmed-session', expiresAt: future() } } as never)
+      session.registerSessionConfirmation(confirm)
+      const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+      const writes: unknown[] = []
+      api.instance.defaults.adapter = vi.fn(async (config) => {
+        writes.push(config.headers['X-CSRF-Token'])
+        return { data: { ok: true }, status: 201, statusText: 'Created', headers: {}, config }
+      })
+      // Axios keeps registered interceptors in `handlers`, which its types do not
+      // expose; calling the real response interceptor reports the rejection
+      // synchronously inside the window.
+      const responseInterceptors = api.instance.interceptors.response as unknown as {
+        handlers: { rejected: (error: unknown) => Promise<unknown> }[]
+      }
+      const responseInterceptor = responseInterceptors.handlers[0]
+      afterGate = () => {
+        const response = { data, status, statusText: 'Rejected', headers: new AxiosHeaders(), config: {} }
+        const rejected = new AxiosError('Request failed', AxiosError.ERR_BAD_REQUEST, undefined, null, response as never)
+        void responseInterceptor.rejected(rejected).catch(() => undefined)
+      }
+
+      const write = api.post({ url: '/api/v1/users/me/ssh-keys', body: { publicKey: 'A 的公钥' } })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return { write, writes, csrfGet }
+    }
+
+    it('waits for the identity confirmation that the rejection started', async () => {
+      const reread = deferred()
+      const confirm = vi.fn(() => reread.promise)
+      const { write, writes, csrfGet } = await writeAfterGateWindow(confirm)
+
+      expect(confirm).toHaveBeenCalledOnce()
+      // No CSRF token is fetched for a session that is not confirmed yet.
+      expect(csrfGet).not.toHaveBeenCalled()
+      expect(writes).toEqual([])
+
+      reread.resolve()
+      expect((await write).error).toBeUndefined()
+      expect(writes).toEqual(['token-confirmed-session'])
+    })
+
+    it('does not send when that identity confirmation fails', async () => {
+      let failRead!: (error: Error) => void
+      const { write, writes } = await writeAfterGateWindow(() => new Promise<void>((_, fail) => { failRead = fail }))
+
+      expect(writes).toEqual([])
+      failRead(new Error('BFF session lookup failed with HTTP 503'))
+      const result = await write
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_UNCONFIRMED' })
       expect(result.data).toBeUndefined()
       expect(writes).toEqual([])
     })

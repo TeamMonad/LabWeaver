@@ -155,9 +155,12 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
     requestEpochs.set(config, sessionEpoch.value)
     // Credentials are fetched asynchronously, and a concurrent request may report
     // a rejection meanwhile: the cookie may then already belong to another actor.
-    // Such a request is only sent once the session is confirmed again with fresh
-    // credentials; it has never reached the server, so this is not a replay.
+    // The credential version is taken before the gate, so a rejection reported
+    // while this request resumes is never mistaken for a confirmed one. Any
+    // change sends the request through the gate again with fresh credentials;
+    // it has never reached the server, so this is not a replay.
     for (;;) {
+      const credentialVersion = sessionCredentialVersion()
       if (!(await awaitConfirmedSession())) {
         throw new LabWeaverApiError(
           'LW_SDK_SESSION_UNCONFIRMED',
@@ -166,7 +169,7 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
       }
       // The actor changed while this request waited: a form of the previous actor is never sent as the new one.
       if (startedInEarlierSession(config)) throw sessionChanged()
-      const credentialVersion = sessionCredentialVersion()
+      if (sessionCredentialVersion() !== credentialVersion) continue
       if (authentication.mode === 'bearer') {
         const token = await authentication.accessToken()
         if (!token) {
