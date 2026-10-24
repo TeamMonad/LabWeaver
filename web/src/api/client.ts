@@ -4,9 +4,15 @@ import { getOidcAccessToken } from '@/composables/useAuth'
 import type { ProblemDetails } from '@/generated/contracts'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
-import type { Auth } from '@/generated/contracts/core/auth.gen'
+import type { ServerSentEventsOptions } from '@/generated/contracts/core/serverSentEvents.gen'
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
-import { awaitConfirmedSession, reportSessionRejected, sessionCredentialVersion, sessionEpoch } from './session'
+import {
+  awaitConfirmedSession,
+  reportSessionRejected,
+  sessionCredentialVersion,
+  sessionEpoch,
+  sessionEpochSignal,
+} from './session'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
 export type CsrfTokenProvider = () => Promise<string | undefined>
@@ -250,29 +256,74 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
     baseURL: baseUrl,
     timeout,
   })
-  if (authentication.mode === 'bearer') requireStreamBearer(client, authentication.accessToken)
+  guardStreams(client, authentication.mode === 'bearer' ? authentication.accessToken : undefined)
   return client
 }
 
-type StreamOptions = Parameters<Client['sse']['get']>[0]
+/** Generated SSE passes these through to its fetch loop; the request options type does not list them. */
+type StreamOptions = Parameters<Client['sse']['get']>[0] & Pick<ServerSentEventsOptions, 'fetch' | 'sseSleepFn'>
 
 /**
- * Generated SSE opens streams with fetch, outside the Axios interceptors that
- * fail closed for REST. Resolve the bearer once before opening and reject
- * without sending any request when there is none.
+ * Generated SSE opens and reopens streams with fetch, outside the Axios
+ * interceptors. Every fetch of a stream (the first one, made on the first
+ * `next()`, and each reconnect) happens only in the session epoch the stream
+ * was opened in and, in bearer mode, with a current token read just before it.
+ * A stream whose epoch ended stops instead of reconnecting; the browser sends
+ * the BFF cookie itself.
  */
-function requireStreamBearer(client: Client, accessToken: AccessTokenProvider): void {
+function guardStreams(client: Client, accessToken?: AccessTokenProvider): void {
   const sse = client.sse as Record<keyof Client['sse'], (options: StreamOptions) => Promise<unknown>>
   for (const method of Object.keys(sse) as (keyof Client['sse'])[]) {
     const open = sse[method]
     sse[method] = async (options) => {
-      const token = await accessToken()
-      if (!token) {
-        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+      const epochEnded = sessionEpochSignal()
+      // Reading the bearer of another actor advances the epoch, so the check after it covers the token's actor.
+      const currentBearer = async () => {
+        const token = accessToken ? await accessToken() : undefined
+        if (accessToken && !token) {
+          throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+        }
+        if (epochEnded.aborted) throw sessionChanged()
+        return token
       }
-      // Only HTTP bearer schemes receive the token; the browser sends the BFF cookie itself.
-      const auth = (scheme: Auth) => (scheme.type === 'http' && scheme.scheme === 'bearer' ? token : undefined)
-      return open({ ...options, auth })
+      // Fails before the stream exists, so no request is ever made without a bearer.
+      let openingBearer = await currentBearer()
+
+      const stopped = new AbortController()
+      const stop = () => stopped.abort()
+      if (options.signal?.aborted) stop()
+      options.signal?.addEventListener?.('abort', stop)
+      epochEnded.addEventListener('abort', stop)
+      /** `Promise.withResolvers` is outside the project's ES2020 lib; the pause ends early once the stream stops. */
+      const pause = (ms: number) => new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, ms)
+        stopped.signal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      })
+
+      return open({
+        ...options,
+        signal: stopped.signal,
+        sseSleepFn: async (ms) => {
+          if (!stopped.signal.aborted) await (options.sseSleepFn ?? pause)(ms)
+        },
+        fetch: async (input, init) => {
+          try {
+            if (epochEnded.aborted) throw sessionChanged()
+            const bearer = openingBearer ?? (await currentBearer())
+            openingBearer = undefined
+            const request = new Request(input, init)
+            if (bearer) request.headers.set('Authorization', `Bearer ${bearer}`)
+            return await (options.fetch ?? globalThis.fetch)(request)
+          } catch (error) {
+            // The generated loop retries failed fetches until its signal aborts.
+            if (error instanceof LabWeaverApiError) stop()
+            throw error
+          }
+        },
+      })
     }
   }
 }
@@ -311,8 +362,7 @@ export async function initializeSdkClient(): Promise<void> {
     axios: sdkTransport,
     baseURL: '',
   })
-  // BFF streams carry the session cookie, which same-origin fetch sends itself.
-  if (API_AUTH_MODE === 'bearer') requireStreamBearer(defaultSdkClient, getOidcAccessToken)
+  guardStreams(defaultSdkClient, API_AUTH_MODE === 'bearer' ? getOidcAccessToken : undefined)
 }
 
 /** Health checks are intentionally outside the authenticated Public API contract. */

@@ -16,11 +16,19 @@ import { readonly, ref } from 'vue'
  * request itself is never replayed: the user decides whether to submit again.
  */
 const epoch = ref(0)
+let epochEnded = new AbortController()
 
 export const sessionEpoch = readonly(epoch)
 
 export function advanceSessionEpoch(): void {
   epoch.value += 1
+  epochEnded.abort()
+  epochEnded = new AbortController()
+}
+
+/** Aborts when the current session epoch ends, so long-lived work started in it can stop. */
+export function sessionEpochSignal(): AbortSignal {
+  return epochEnded.signal
 }
 
 let rejections = 0

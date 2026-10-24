@@ -538,4 +538,101 @@ describe('generated SSE authentication (#198)', () => {
     })
     expect(fetch).not.toHaveBeenCalled()
   })
+
+  describe('streams belong to the session epoch they were opened in', () => {
+    const eventStream = () => new Response('data: {"streamSequence":"1"}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+
+    it('does not open a stream when the epoch ends while its bearer is read', async () => {
+      const { session, client } = await freshTransport()
+      const fetch = vi.fn(async (_request: Request) => eventStream())
+      vi.stubGlobal('fetch', fetch)
+      let answerToken!: (token: string) => void
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: { mode: 'bearer', accessToken: () => new Promise((resolve) => { answerToken = resolve }) },
+      })
+
+      const opening = api.sse.get({ url: eventsUrl, security: [...security] })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      // getOidcAccessToken advances the epoch when the token it reads belongs to another actor.
+      session.advanceSessionEpoch()
+      answerToken('bearer-of-actor-b')
+
+      await expect(opening).rejects.toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+      expect(fetch).not.toHaveBeenCalled()
+    })
+
+    it('does not fetch on a first next() made after the epoch ended', async () => {
+      const { session, client } = await freshTransport()
+      const fetch = vi.fn(async (_request: Request) => eventStream())
+      vi.stubGlobal('fetch', fetch)
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: { mode: 'bearer', accessToken: async () => 'bearer-of-actor-a' },
+      })
+
+      const events = await api.sse.get({ url: eventsUrl, security: [...security] })
+      session.advanceSessionEpoch()
+
+      expect(await events.stream.next()).toEqual({ done: true, value: undefined })
+      expect(fetch).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { mode: 'bearer' as const },
+      { mode: 'bff' as const },
+    ])('stops instead of reconnecting once the epoch ends before a retry ($mode)', async ({ mode }) => {
+      const { session, client } = await freshTransport()
+      const fetch = vi.fn(async (_request: Request) => new Response('', { status: 503 }))
+      vi.stubGlobal('fetch', fetch)
+      const accessToken = vi.fn(async () => 'bearer-of-actor-a')
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: mode === 'bearer' ? { mode, accessToken } : { mode },
+      })
+      const sleeps: number[] = []
+
+      const events = await api.sse.get({
+        url: eventsUrl,
+        security: [...security],
+        // The generated client accepts its backoff hook through the request options.
+        ...{
+          sseSleepFn: async (ms: number) => {
+            sleeps.push(ms)
+            // Another actor signs in during the backoff before the reconnect.
+            session.advanceSessionEpoch()
+          },
+        },
+      })
+
+      expect(await events.stream.next()).toEqual({ done: true, value: undefined })
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(sleeps).toHaveLength(1)
+      if (mode === 'bearer') expect(accessToken).toHaveBeenCalledOnce()
+    })
+
+    it('reads a current bearer before each reconnect in the same epoch', async () => {
+      const { client } = await freshTransport()
+      const fetch = vi.fn()
+        .mockResolvedValueOnce(new Response('', { status: 503 }))
+        .mockResolvedValueOnce(eventStream())
+      vi.stubGlobal('fetch', fetch)
+      const accessToken = vi.fn()
+        .mockResolvedValueOnce('bearer-before-refresh')
+        .mockResolvedValueOnce('bearer-after-refresh')
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: { mode: 'bearer', accessToken },
+      })
+
+      const events = await api.sse.get({ url: eventsUrl, security: [...security], ...{ sseSleepFn: async () => undefined } })
+
+      expect((await events.stream.next()).value).toEqual({ streamSequence: '1' })
+      const authorizations = fetch.mock.calls.map(([request]) => (request as Request).headers.get('authorization'))
+      expect(authorizations).toEqual(['Bearer bearer-before-refresh', 'Bearer bearer-after-refresh'])
+    })
+  })
 })
