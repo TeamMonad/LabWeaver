@@ -223,4 +223,68 @@ describe('useProjectInProgress task progress', () => {
     await flushPromises()
     expect(phaseOf(inProgress.agentProgress['run-of-project-1'])).toBe('executing')
   })
+
+  it('drops an old response for a run that closed and reopened, although its read sequence restarted', async () => {
+    let openRunIds = ['run-x']
+    vi.mocked(listProjectAgentRuns).mockImplementation((async (options: ListOptions) => ok({
+      items: openRunIds.map((runId) => openRun(options.path.projectId, runId)),
+      nextCursor: null,
+    })) as never)
+    const { pending } = controlProgressReads()
+    const projectId = ref<string | null>('project-1')
+    scope = effectScope()
+    const inProgress = scope.run(() => useProjectInProgress(projectId))
+    if (!inProgress) throw new Error('composable did not start')
+    await flushPromises()
+    expect(pending).toHaveLength(1)
+
+    openRunIds = []
+    await inProgress.load()
+    expect(inProgress.agentProgress).toEqual({})
+
+    openRunIds = ['run-x']
+    const reopened = inProgress.load()
+    await flushPromises()
+    expect(pending).toHaveLength(2)
+    const [oldRead, newRead] = pending
+    if (!oldRead || !newRead) throw new Error('expected the closed run read and the reopened run read')
+
+    oldRead.settle(ok(progressFor(oldRead.options, 'queued')))
+    await flushPromises()
+    expect(phaseOf(inProgress.agentProgress['run-x'])).toBe('loading')
+
+    newRead.settle(ok(progressFor(newRead.options, 'executing')))
+    await reopened
+    await flushPromises()
+    expect(phaseOf(inProgress.agentProgress['run-x'])).toBe('executing')
+  })
+
+  it('drops an old response for a run after switching to another project and back', async () => {
+    const { pending } = controlProgressReads()
+    const projectId = ref<string | null>('project-1')
+    scope = effectScope()
+    const inProgress = scope.run(() => useProjectInProgress(projectId))
+    if (!inProgress) throw new Error('composable did not start')
+    await flushPromises()
+
+    projectId.value = 'project-2'
+    await nextTick()
+    await flushPromises()
+    projectId.value = 'project-1'
+    await nextTick()
+    await flushPromises()
+    expect(pending.map((read) => read.options.path.runId)).toEqual(['run-of-project-1', 'run-of-project-2', 'run-of-project-1'])
+    const [oldRead, otherProjectRead, newRead] = pending
+    if (!oldRead || !otherProjectRead || !newRead) throw new Error('expected three reads')
+
+    oldRead.settle(ok(progressFor(oldRead.options, 'queued')))
+    otherProjectRead.settle(ok(progressFor(otherProjectRead.options, 'queued')))
+    await flushPromises()
+    expect(Object.keys(inProgress.agentProgress)).toEqual(['run-of-project-1'])
+    expect(phaseOf(inProgress.agentProgress['run-of-project-1'])).toBe('loading')
+
+    newRead.settle(ok(progressFor(newRead.options, 'executing')))
+    await flushPromises()
+    expect(phaseOf(inProgress.agentProgress['run-of-project-1'])).toBe('executing')
+  })
 })

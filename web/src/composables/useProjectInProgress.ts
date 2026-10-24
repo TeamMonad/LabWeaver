@@ -158,12 +158,16 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
 
   /**
    * Reads the current attempt of each open run. Rows already read keep their
-   * last reading until the new one arrives; rows that closed are dropped. A
-   * failed read only marks that run.
+   * last reading until the new one arrives; rows that closed are dropped along
+   * with their read sequence. A failed read only marks that run.
    */
   async function loadAgentProgress(id: string, runs: AgentRunHistoryItem[], current: number) {
     const previous = agentProgress.value
     agentProgress.value = Object.fromEntries(runs.map((run) => [run.id, previous[run.id] ?? { kind: 'loading' } as const]))
+    // A pruned run's in-flight read is still rejected by its older generation.
+    for (const runId of progressReadSequence.keys()) {
+      if (!(runId in agentProgress.value)) progressReadSequence.delete(runId)
+    }
     await Promise.all(runs.map((run) => refreshRunProgress(id, run.id, current)))
   }
 
@@ -198,6 +202,8 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
     const current = ++generation
     if (id !== progressProjectId) {
       agentProgress.value = {}
+      // Sequences restart per project; reads from the previous project fail the generation check.
+      progressReadSequence.clear()
       progressProjectId = id
     }
     if (!id) {
