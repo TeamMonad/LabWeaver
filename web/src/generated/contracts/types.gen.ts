@@ -1453,7 +1453,7 @@ export type ConsoleCapabilityAvailabilitySchemaAccessGrantId = string;
 export type ConsoleKind = 'xterm' | 'novnc';
 
 /**
- * Resource-owned Lease identity that fences a Work console capability.
+ * Resource-owned Lease identity that fences a funded environment console capability.
  */
 export type ConsoleLeaseFence = {
     expiresAt: ConsoleCapabilityAvailabilitySchemaUtcTimestamp;
@@ -1534,7 +1534,7 @@ export type ConsoleCapabilityId = string;
 export type ConsoleCapabilitySchemaConsoleKind = 'xterm' | 'novnc';
 
 /**
- * Resource-owned Lease identity that fences a Work console capability.
+ * Resource-owned Lease identity that fences a funded environment console capability.
  */
 export type ConsoleCapabilitySchemaConsoleLeaseFence = {
     expiresAt: ConsoleCapabilitySchemaUtcTimestamp;
@@ -8812,7 +8812,7 @@ export type IssueConsoleCapabilityRequestSchema = {
 export type IssueConsoleCapabilityRequestSchemaConsoleKind = 'xterm' | 'novnc';
 
 /**
- * Resource-owned Lease identity that fences a Work console capability.
+ * Resource-owned Lease identity that fences a funded environment console capability.
  */
 export type IssueConsoleCapabilityRequestSchemaConsoleLeaseFence = {
     expiresAt: IssueConsoleCapabilityRequestSchemaUtcTimestamp;
