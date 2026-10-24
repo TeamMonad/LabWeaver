@@ -7,6 +7,9 @@
 
     <AsyncStateView :state="rules.state" empty-text="当前没有可维护的评分规则。" @retry="rules.load">
       <template #success>
+        <p v-if="editDeniedReason" class="rubric-note" role="status" data-testid="rubric-edit-denied">
+          {{ editDeniedReason }}
+        </p>
         <ul class="rubric-list">
           <li v-for="row in rows" :key="row.path" class="rubric-row" data-testid="rubric-rule-row">
             <div class="rubric-heading">
@@ -20,12 +23,12 @@
               <p class="rubric-status" :class="{ 'rubric-status--allowed': rowAllowsModel(row) }" role="status" data-testid="rubric-rule-status">
                 {{ rowStatus(row) }}
               </p>
-              <div class="rubric-actions">
+              <div v-if="canEdit" class="rubric-actions">
                 <button
                   v-if="rowVisibility(row) === 'hidden'"
                   type="button"
                   class="outlined-button"
-                  :disabled="rules.acting"
+                  :disabled="busy"
                   data-testid="rubric-set-public"
                   @click="submit(row, { kind: 'set_visibility', visibility: 'course_public' })"
                 >
@@ -35,9 +38,9 @@
                   v-else
                   type="button"
                   class="outlined-button"
-                  :disabled="rules.acting"
+                  :disabled="busy"
                   data-testid="rubric-set-hidden"
-                  @click="submit(row, { kind: 'set_visibility', visibility: 'hidden' })"
+                  @click="requestHidden(row)"
                 >
                   设为隐藏
                 </button>
@@ -45,19 +48,19 @@
                   v-if="rowVisibility(row) === 'course_public' && !rowAllowsModel(row)"
                   type="button"
                   class="filled-button"
-                  :disabled="rules.acting || !policyBinding"
+                  :disabled="busy || !syncedBinding"
                   data-testid="rubric-approve-model"
                   @click="approve(row)"
                 >
-                  批准交给模型 {{ policyBinding?.model ?? '' }}
+                  批准交给模型 {{ syncedBinding?.model ?? '' }}
                 </button>
                 <button
                   v-if="row.rule?.approval"
                   type="button"
                   class="text-button"
-                  :disabled="rules.acting"
+                  :disabled="busy"
                   data-testid="rubric-revoke-model"
-                  @click="submit(row, { kind: 'revoke_model_use' })"
+                  @click="pending = { row, action: { kind: 'revoke_model_use' } }"
                 >
                   撤回模型批准
                 </button>
@@ -65,8 +68,8 @@
             </template>
           </li>
         </ul>
-        <p v-if="rowsNeedPolicy && !policyBinding" class="rubric-note" role="status">
-          项目 AI 设置尚未读取成功，暂时不能批准交给模型。
+        <p v-if="canEdit && rowsNeedPolicy && !syncedBinding" class="rubric-note" role="status" data-testid="rubric-policy-unsynced">
+          正在核对项目 AI 设置与评分规则是否属于同一策略版本，核对完成前不能批准交给模型。
         </p>
       </template>
     </AsyncStateView>
@@ -76,14 +79,27 @@
       :diagnostic="rules.outcome"
       :severity="rules.outcome.code.endsWith('_ACCEPTED') ? 'info' : 'error'"
     />
+
+    <ConfirmDialog
+      :open="pending !== null"
+      :title="pending?.action.kind === 'revoke_model_use' ? '撤回模型批准？' : '设为隐藏并清除模型批准？'"
+      :description="pendingDescription"
+      :confirm-text="pending?.action.kind === 'revoke_model_use' ? '撤回批准' : '设为隐藏'"
+      cancel-text="取消"
+      severity="warning"
+      @cancel="pending = null"
+      @confirm="confirmPending"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, toRef } from 'vue'
+import { computed, ref, toRef, watch } from 'vue'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
+import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { useRubricModelInputRules } from '@/composables/useRubricModelInputRules'
 import type {
   MaintainRubricModelInputRuleRequestSchema,
@@ -103,6 +119,12 @@ interface RubricRow {
   rule: RubricModelInputRule | null
 }
 
+/** A destructive change waiting for the teacher's confirmation. */
+interface PendingChange {
+  row: RubricRow
+  action: RubricModelInputRuleAction
+}
+
 const props = defineProps<{
   projectId: string
   evaluationReleaseId: string
@@ -111,9 +133,45 @@ const props = defineProps<{
   advisorySteps: ReadonlyArray<{ id: string; rubric: string }>
 }>()
 
-const rules = useRubricModelInputRules(toRef(props, 'projectId'))
-const policy = useActiveProjectLlmPolicy(toRef(props, 'projectId'))
-const policyBinding = computed(() => (policy.state.kind === 'success' ? policy.state.data.binding : null))
+const projectIdRef = toRef(props, 'projectId')
+const rules = useRubricModelInputRules(projectIdRef)
+const policy = useActiveProjectLlmPolicy(projectIdRef)
+// Reading the rules needs Browse; every change needs Edit. Unknown, expired or unreadable permission offers no change.
+const permissions = useProjectAvailableActions(projectIdRef)
+const canEdit = computed(() => permissions.allows('edit'))
+const editDeniedReason = computed(() => permissions.denialReason('edit', '修改评分规则的模型使用设置'))
+const pending = ref<PendingChange | null>(null)
+const busy = computed(() => rules.acting || policy.state.kind === 'loading')
+
+/**
+ * The model an approval targets. It is only trusted when the AI settings and the rules were read from the
+ * same active policy version; otherwise another change may have replaced the model in between.
+ */
+const syncedBinding = computed(() => {
+  if (policy.state.kind !== 'success' || rules.state.kind !== 'success') return null
+  const active = policy.state.data
+  const current = rules.state.data
+  return active.id === current.policyId && active.revision === current.policyRevision ? active.binding : null
+})
+
+// The two reads can land on different policy versions (a save creates a new one; another tab may change the
+// model). Re-read whichever side is strictly older, once per distinct mismatch: if the re-read still disagrees,
+// approval stays closed instead of reading again in a loop. An equal revision with another id is never trusted.
+let reconciledMismatch: string | null = null
+watch(
+  () => (policy.state.kind === 'success' && rules.state.kind === 'success'
+    ? `${rules.state.data.policyRevision}:${policy.state.data.revision}`
+    : null),
+  (versions) => {
+    if (!versions || rules.acting || policy.state.kind !== 'success' || rules.state.kind !== 'success') return
+    const rulesRevision = rules.state.data.policyRevision
+    const policyRevision = policy.state.data.revision
+    if (rulesRevision === policyRevision || versions === reconciledMismatch) return
+    reconciledMismatch = versions
+    if (rulesRevision > policyRevision) void policy.load()
+    else void rules.load()
+  },
+)
 
 function sameIdentity(left: RubricIdentity, right: RubricIdentity): boolean {
   return left.packageId === right.packageId
@@ -156,6 +214,15 @@ const rows = computed<RubricRow[]>(() => {
 
 const rowsNeedPolicy = computed(() => rows.value.some((row) => rowVisibility(row) === 'course_public' && !rowAllowsModel(row)))
 
+const pendingDescription = computed(() => {
+  const change = pending.value
+  if (!change) return ''
+  const effect = '之后新开始的 AI 评语调用不会再读取这个评分规则，评语可能缺少评分依据；已经开始的调用不受影响。'
+  return change.action.kind === 'revoke_model_use'
+    ? `撤回 ${change.row.path} 交给模型的批准。${effect}`
+    : `把 ${change.row.path} 设为隐藏会同时清除已有的模型批准。${effect}需要恢复时，要重新设为公开并再次批准。`
+})
+
 /** A rubric without a stored rule is hidden on the server. */
 function rowVisibility(row: RubricRow): RubricModelInputVisibility {
   return row.rule?.visibility ?? 'hidden'
@@ -163,7 +230,7 @@ function rowVisibility(row: RubricRow): RubricModelInputVisibility {
 
 function rowAllowsModel(row: RubricRow): boolean {
   const approval = row.rule?.approval
-  const binding = policyBinding.value
+  const binding = syncedBinding.value
   return rowVisibility(row) === 'course_public'
     && Boolean(approval && binding && approval.model === binding.model && approval.runtimeBinding === binding.runtimeBinding)
 }
@@ -173,24 +240,41 @@ function rowStatus(row: RubricRow): string {
   const approval = row.rule?.approval
   if (!approval) return '课程内公开，尚未批准交给模型：不会交给模型。'
   if (rowAllowsModel(row)) return `课程内公开，已批准交给模型 ${approval.model}。`
-  if (!policyBinding.value) return `课程内公开，已批准交给模型 ${approval.model}；正在核对项目 AI 设置。`
-  return `已批准的模型 ${approval.model} 与当前项目 AI 设置的模型 ${policyBinding.value.model} 不同：不会交给模型。如需使用，请重新批准。`
+  const binding = syncedBinding.value
+  if (!binding) return `课程内公开，已批准交给模型 ${approval.model}；正在核对项目 AI 设置。`
+  return `已批准的模型 ${approval.model} 与当前项目 AI 设置的模型 ${binding.model} 不同：不会交给模型。如需使用，请重新批准。`
 }
 
-function submit(row: RubricRow, action: RubricModelInputRuleAction) {
-  if (!row.identity) return
-  void rules.maintain({
+async function submit(row: RubricRow, action: RubricModelInputRuleAction) {
+  if (!row.identity || !canEdit.value || busy.value) return
+  const result = await rules.maintain({
     action,
     evaluationReleaseId: props.evaluationReleaseId,
     evaluationReleaseRevision: props.evaluationReleaseRevision,
     rubric: row.identity,
   })
+  if (result === 'denied') void permissions.refresh()
+  // Another change moved the policy: the model an approval targets must be read again together with the rules.
+  if (result === 'conflict') await policy.load()
+}
+
+function requestHidden(row: RubricRow) {
+  const action: RubricModelInputRuleAction = { kind: 'set_visibility', visibility: 'hidden' }
+  if (row.rule?.approval) pending.value = { row, action }
+  else void submit(row, action)
+}
+
+function confirmPending() {
+  const change = pending.value
+  // Close first so a repeated confirm click cannot send a second request.
+  pending.value = null
+  if (change) void submit(change.row, change.action)
 }
 
 function approve(row: RubricRow) {
-  const binding = policyBinding.value
+  const binding = syncedBinding.value
   if (!binding) return
-  submit(row, { kind: 'approve_model_use', model: binding.model, runtimeBinding: binding.runtimeBinding })
+  void submit(row, { kind: 'approve_model_use', model: binding.model, runtimeBinding: binding.runtimeBinding })
 }
 </script>
 

@@ -77,8 +77,8 @@ test('teacher authors an independent project and publishes its complete experime
   try {
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await uploadPackageDirectoryByUi(page, packageDirectory, 'README.md')
-    initialRun = await startExperimentRunByUi(page, project.id)
+    const packageData = await uploadPackageDirectoryByUi(page, packageDirectory, 'README.md')
+    initialRun = await startExperimentRunByUi(page, project.id, packageData)
   } finally {
     await rm(packageDirectory, { recursive: true, force: true })
   }

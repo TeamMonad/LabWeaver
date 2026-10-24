@@ -5,6 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import CandidateApprovalView from '@/views/teacher/CandidateApprovalView.vue'
 import {
   getActiveProjectLlmPolicy,
+  getProjectAvailableActions,
   getProjectRubricModelInputRules,
   completeProjectAuthoringApproval,
   getProjectAgentRun,
@@ -30,6 +31,7 @@ vi.mock('@/generated/contracts', () => ({
   getProjectCandidateBuild: vi.fn(),
   cancelProjectCandidateBuild: vi.fn(),
   getActiveProjectLlmPolicy: vi.fn(),
+  getProjectAvailableActions: vi.fn(),
   getProjectRubricModelInputRules: vi.fn(),
   maintainProjectRubricModelInputRule: vi.fn(),
 }))
@@ -198,6 +200,7 @@ describe('CandidateApprovalView (审核与发布)', () => {
   it('offers rubric model-input settings only for a ready publication with an exact Evaluation release revision', async () => {
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: undefined, error: { diagnosticCode: 'LW_POLICY_NOT_FOUND', detail: 'missing', status: 404 } } as never)
     vi.mocked(getProjectRubricModelInputRules).mockResolvedValue(ok({ projectId: PROJECT, courseId: 'course-physics-2026', policyId: 'policy-1', policyRevision: 2, rules: [] }))
+    vi.mocked(getProjectAvailableActions).mockResolvedValue(ok({ projectId: PROJECT, actorId: 'teacher-1', membershipRevision: 1, validUntil: new Date(Date.now() + 3_600_000).toISOString(), actions: ['browse'] }))
     serveApprovals({ [RELEASE_APPROVAL_ID]: { approval: approvalRecord({ id: RELEASE_APPROVAL_ID }), status: 'ready', evaluationReleaseId: 'release-optics-eval' } })
     const withoutRevision = await mountAt({ projectId: PROJECT, runId: reviewRun.id, approvalId: RELEASE_APPROVAL_ID })
     expect(withoutRevision.wrapper.get('[data-testid="publication-status"]').attributes('data-status')).toBe('ready')
@@ -211,6 +214,9 @@ describe('CandidateApprovalView (审核与发布)', () => {
     expect(getProjectRubricModelInputRules).toHaveBeenCalledWith({ path: { projectId: PROJECT } })
     expect(panel.get('.rubric-path').text()).toBe('rubrics/report-review.md')
     expect(panel.get('[data-testid="rubric-rule-status"]').text()).toBe('隐藏：不会交给模型。')
+    // A teacher who can only browse sees the rules without any change entry.
+    expect(panel.find('[data-testid="rubric-set-public"]').exists()).toBe(false)
+    expect(panel.get('[data-testid="rubric-edit-denied"]').text()).toContain('不包含“编辑”')
     wrapper.unmount()
   })
 
