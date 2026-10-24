@@ -124,6 +124,17 @@ VM Start/Restart 同样一律重核，即使计划资源列表为空；非空 Ap
 不要求新的运行授权。Validate、Build、Configure 不属于这两个原生执行器协议，不能以这些动作提交计算请求。
 现有完整响应仍由原请求身份重放，fresh gate 失败不会把已完成效果再执行一次。
 
+NATS executor 的准入拒绝通过 `ProviderFailureCode::RuntimeAdmission` 携带现有 `DiagnosticCode`
+和重试属性；Provider 与 worker 不把它改写成通用 `LW_ENVIRONMENT_PROVIDER_REJECTED`。
+只传输经过格式/长度校验的机器码，不传输 Resource 原响应、凭据或数据库错误文本；
+非法诊断退为现有 `LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID`。
+例如原 lease 撤销保留 `LW_RUNTIME_LEASE_NOT_ACTIVE`，未知资金覆盖保留
+`LW_RUNTIME_FUNDING_INACTIVE`；暂时不可用沿现有 operation 截止与最大尝试次数重试，
+到达预算后以原诊断进入终态。
+
+这些检查补齐执行前重核，不与 Resource 撤权原子提交。重核完成到 Kubernetes 写入之间仍有窗口，
+不能把本切片视为消除了撤权竞态；跨服务撤权/实例 fencing 仍属于 #207 的后续验收。
+
 
 Public `CreateEnvironmentRequest` requires `resourceRequestId`; its approved target
 is resolved from the original request. Resource's normal approval → capacity claim →

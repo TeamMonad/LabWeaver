@@ -218,6 +218,16 @@ impl RuntimeAdmissionError {
             Self::Resource(error) => error.diagnostic_code(),
         }
     }
+    /// Transport only a validated machine code, never a Resource response body or database error.
+    pub(crate) fn provider_failure(&self) -> crate::ProviderFailure {
+        let code = contracts::DiagnosticCode::parse(self.diagnostic_code()).unwrap_or_else(|_| {
+            contracts::DiagnosticCode::registered("LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID")
+        });
+        crate::ProviderFailure {
+            code: crate::ProviderFailureCode::RuntimeAdmission(code),
+            retryable: self.retryable(),
+        }
+    }
     #[must_use]
     pub const fn retryable(&self) -> bool {
         match self {
@@ -425,6 +435,42 @@ mod tests {
             validate_credit_grant(&original, lease, lease.expires_at),
             Err(RuntimeAdmissionError::FundingInactive)
         ));
+        Ok(())
+    }
+    #[test]
+    fn executor_failure_round_trips_existing_codes_without_raw_error_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for code in [
+            "LW_RUNTIME_LEASE_NOT_ACTIVE",
+            "LW_RUNTIME_FUNDING_INACTIVE",
+            "LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID",
+        ] {
+            let failure =
+                RuntimeAdmissionError::Resource(crate::ResourceUsageClientError::Problem {
+                    diagnostic_code: code.into(),
+                    retryable: true,
+                })
+                .provider_failure();
+            let wire = serde_json::to_vec(&failure)?;
+            let received: crate::ProviderFailure = serde_json::from_slice(&wire)?;
+            assert_eq!(received.diagnostic_code(), code);
+            assert!(received.retryable);
+        }
+        let invalid = RuntimeAdmissionError::Resource(crate::ResourceUsageClientError::Problem {
+            diagnostic_code: "private database connection details".into(),
+            retryable: true,
+        })
+        .provider_failure();
+        assert_eq!(
+            invalid.diagnostic_code(),
+            "LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID"
+        );
+        assert!(
+            serde_json::from_str::<crate::ProviderFailure>(
+                r#"{"code":{"runtime_admission":"private details"},"retryable":true}"#,
+            )
+            .is_err()
+        );
         Ok(())
     }
 }

@@ -903,12 +903,9 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
     }
 }
 
-const fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFailure {
+fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFailure {
     match error {
-        ContainerExecutorFenceError::RuntimeAdmission(error) => ProviderFailure {
-            code: ProviderFailureCode::Rejected,
-            retryable: error.retryable(),
-        },
+        ContainerExecutorFenceError::RuntimeAdmission(error) => error.provider_failure(),
         ContainerExecutorFenceError::InProgress
         | ContainerExecutorFenceError::Database(_)
         | ContainerExecutorFenceError::Transport => ProviderFailure {

@@ -100,6 +100,7 @@ pub(super) async fn exercise(
     pool: &PgPool,
     resource: &PgResourceStore,
     original: &CurrentEnvironmentAuthorization,
+    executor_failure: Option<super::ExecutorFailure>,
 ) -> Result {
     use environment_service::ContainerReleaseResolver as _;
     let releases = PgReleaseProjectionStore::new(pool.clone());
@@ -472,6 +473,7 @@ pub(super) async fn exercise(
         access_token: authority.access_token.clone(),
         usage_identity: authority.usage_identity.clone(),
         revocations,
+        executor_failure,
     };
     Box::pin(exercise_execution(
         pool, resource, &store, &admission, &instance, &grant, &http,
@@ -742,6 +744,7 @@ struct LifecycleHttp {
     access_token: String,
     usage_identity: auth::ServiceIdentity,
     revocations: Arc<std::sync::atomic::AtomicUsize>,
+    executor_failure: Option<super::ExecutorFailure>,
 }
 
 impl LifecycleHttp {
@@ -1054,6 +1057,12 @@ async fn exercise_execution(
             .state,
         contracts::resource::credits::CreditHoldState::Pending
     );
+    if let Some(fault) = http.executor_failure {
+        return Box::pin(executor_gate::exercise_transport(
+            pool, resource, admission, &stopped, http, fault,
+        ))
+        .await;
+    }
     http.command(&stopped, "start").await?;
     assert!(matches!(
         run_due(&worker, store, "native-restart").await?,

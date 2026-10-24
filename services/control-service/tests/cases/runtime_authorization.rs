@@ -35,6 +35,13 @@ mod funded_handoff;
 #[path = "runtime_authorization_lease.rs"]
 mod lease_cases;
 
+#[derive(Clone, Copy)]
+pub(super) enum ExecutorFailure {
+    Lease,
+    Funding,
+    ResourceUnavailable,
+}
+
 async fn progress(
     pool: &PgPool,
     state: PlatformConfigurationStatus,
@@ -198,6 +205,7 @@ pub(super) async fn assert_bindings_after_publication(
     candidate: &EnvironmentCandidate,
     release: &EnvironmentTemplateRelease,
     now: UtcTimestamp,
+    executor_failure: Option<ExecutorFailure>,
 ) -> TestResult {
     let work = candidate.spec.class == contracts::authoring::EnvironmentClass::Work;
     if !work {
@@ -420,6 +428,7 @@ pub(super) async fn assert_bindings_after_publication(
         &store,
         &resource_approval,
         &allocation,
+        executor_failure,
     ))
     .await?;
     Ok(())

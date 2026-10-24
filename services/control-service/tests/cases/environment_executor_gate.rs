@@ -19,6 +19,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[path = "environment_executor_transport.rs"]
+mod transport;
+pub(super) use transport::exercise as exercise_transport;
+
 pub(super) async fn exercise(
     pool: &PgPool,
     resource: &resource_service::store::PgResourceStore,
