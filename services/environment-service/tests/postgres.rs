@@ -1587,13 +1587,13 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
     assert_eq!(stopped_operation.snapshot.state, OperationState::Succeeded);
 
     store
-        .accept_command(
+        .accept_api_command(
             "restart-key-after-lease-refresh",
             &LifecycleCommand {
                 environment_id: work.id,
                 kind: EnvironmentOperationKind::Restart,
                 expected_revision: stopped_refreshed.revision,
-                actor_id: ActorId::new(),
+                actor_id: work.owner_id,
                 trace_id: "trace-restart-after-lease-refresh".to_owned(),
                 accepted_at: timestamp("2026-07-14T00:03:00.000Z"),
                 deadline_at: timestamp("2026-07-14T00:08:00.000Z"),
@@ -1602,6 +1602,10 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
                 max_attempts: 3,
                 reset_target: None,
             },
+            None,
+            stopped_refreshed.operation.lease_authorization.clone(),
+            work.project_id,
+            work.course_id,
         )
         .await?;
     let restarting = store.load(work.id).await?;

@@ -87,16 +87,17 @@ pub fn plan_command_authorized(
     {
         return Err(LifecycleError::CommandInvalid);
     }
-    if matches!(
+    if (matches!(
         command.kind,
         EnvironmentOperationKind::Start
-            | EnvironmentOperationKind::Restart
             | EnvironmentOperationKind::Retry
             | EnvironmentOperationKind::Recover
             | EnvironmentOperationKind::Reset
-    ) && current
-        .eligibility_expires_at
-        .is_some_and(|deadline| deadline <= authority_now)
+    ) || (current.class == contracts::authoring::EnvironmentClass::Work
+        && command.kind == EnvironmentOperationKind::Restart))
+        && current
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= authority_now)
     {
         return Err(LifecycleError::EligibilityExpired);
     }
