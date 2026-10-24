@@ -245,12 +245,12 @@
             v-for="pending in credits.pendingOperations"
             :key="pending.scope"
           >
-            <span>{{ pendingSummary(pending.input) }}</span>
+            <span>{{ pendingSummary(pending.input) }}<template v-if="!pending.persisted">（浏览器未能保存重试记录，刷新后无法安全重试）</template></span>
             <button
               type="button"
               class="text-button"
-              :disabled="credits.acting !== null"
-              @click="credits.retryPending(pending.scope)"
+              :disabled="busy"
+              @click="retryPending(pending.scope)"
             >
               重新提交
             </button>
@@ -327,7 +327,7 @@
         <button
           type="submit"
           class="filled-button"
-          :disabled="!canSubmitAdmin || credits.acting !== null || !projectId"
+          :disabled="!canSubmitAdmin || busy || !projectId"
         >
           {{ adminAction === 'reverse' ? '继续冲正' : adminAction === 'transfer' ? '继续转移' : isDestructive ? '继续调减' : `提交${creditActionLabel(adminAction)}` }}
         </button>
@@ -387,6 +387,14 @@ const entryId = ref('')
 const confirmation = ref<{ title: string; description: string; confirmText: string; input: CreditAdminFormInput } | null>(null)
 /** The last submitted operation, kept so "重试" replays the same body and Idempotency-Key. */
 const lastSubmitted = ref<CreditAdminFormInput | null>(null)
+/**
+ * Held from sending until the accepted draft is cleared, so a second click
+ * cannot resend the same draft between the answer and the cleanup.
+ */
+const submitting = ref(false)
+const busy = computed(() => submitting.value || credits.acting !== null)
+/** Bumped on project change; an older submission's cleanup must not touch this project's form. */
+let formContext = 0
 
 const destinationOptions = computed(() => projects.projects.kind === 'success'
   ? projects.projects.data.filter((project) => project.id !== props.projectId)
@@ -405,6 +413,8 @@ const canSubmitAdmin = computed(() => {
 })
 
 watch(() => props.projectId, () => {
+  formContext += 1
+  submitting.value = false
   confirmation.value = null
   lastSubmitted.value = null
   destinationProjectId.value = ''
@@ -447,7 +457,7 @@ function prepareReverse(id: string) {
 }
 
 function requestAdmin() {
-  if (!canSubmitAdmin.value) return
+  if (!canSubmitAdmin.value || busy.value) return
   const input: CreditAdminFormInput = {
     action: adminAction.value,
     amount: canonicalAmount.value ?? '',
@@ -491,14 +501,32 @@ async function confirmAdmin() {
 }
 
 async function execute(input: CreditAdminFormInput) {
+  if (submitting.value) return
+  const context = formContext
+  submitting.value = true
   lastSubmitted.value = input
-  const result = await credits.submitAdminOperation(input)
-  // 'stale': the project or actor changed while this answer was in flight; this draft belongs to another context.
-  if (result !== 'accepted') return
-  lastSubmitted.value = null
-  adminReason.value = ''
-  adminAmount.value = ''
-  if (input.action === 'reverse') entryId.value = ''
+  try {
+    const result = await credits.submitAdminOperation(input)
+    // 'stale': the project or actor changed while this answer was in flight; this draft belongs to another context.
+    if (result !== 'accepted' || context !== formContext) return
+    lastSubmitted.value = null
+    adminReason.value = ''
+    adminAmount.value = ''
+    if (input.action === 'reverse') entryId.value = ''
+  } finally {
+    if (context === formContext) submitting.value = false
+  }
+}
+
+async function retryPending(scope: string) {
+  if (submitting.value) return
+  const context = formContext
+  submitting.value = true
+  try {
+    await credits.retryPending(scope)
+  } finally {
+    if (context === formContext) submitting.value = false
+  }
 }
 
 async function submitAdmin() {

@@ -245,6 +245,69 @@ describe('useProjectCredits', () => {
     expect(credits.pendingOperations.value).toHaveLength(1)
   })
 
+  it('keeps the key of a scope-denied answer, because authorization runs before the idempotency lookup', async () => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation)
+      .mockResolvedValueOnce({
+        data: undefined,
+        error: { type: 'about:blank', title: 'Forbidden', status: 403, detail: 'denied', diagnosticCode: 'LW_CREDITS_SCOPE_DENIED', requestId: 'req-403', retryable: false },
+      } as never)
+      .mockImplementation(accepted)
+    const { credits } = setup()
+    await flushPromises()
+    expect(await credits.submitAdminOperation(grant)).toBe('failed')
+    expect(credits.pendingOperations.value).toHaveLength(1)
+    expect(await credits.submitAdminOperation(grant)).toBe('accepted')
+    expect(keyOf(1)).toBe(keyOf(0))
+  })
+
+  it.each([
+    ['session storage is unavailable', () => vi.spyOn(window, 'sessionStorage', 'get').mockImplementation(() => { throw new DOMException('denied', 'SecurityError') })],
+    ['the storage quota is exhausted', () => vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })],
+  ])('reuses the original key in this page and says a refresh is unsafe when %s', async (_label, breakStorage) => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementationOnce(lostResponse).mockImplementation(accepted)
+    const broken = breakStorage()
+    try {
+      const { credits } = setup()
+      await flushPromises()
+      expect(await credits.submitAdminOperation(grant)).toBe('failed')
+      expect(credits.outcome.value?.diagnostic.nextStep).toContain('刷新或关闭页面后无法安全重试')
+      expect(credits.pendingOperations.value).toEqual([expect.objectContaining({ persisted: false })])
+
+      // Another panel instance in the same page still sees and reuses the key.
+      const other = setup()
+      await flushPromises()
+      expect(other.credits.pendingOperations.value).toHaveLength(1)
+      expect(await other.credits.retryPending(other.credits.pendingOperations.value[0]!.scope)).toBe('accepted')
+      expect(keyOf(1)).toBe(keyOf(0))
+      expect(other.credits.pendingOperations.value).toEqual([])
+    } finally {
+      broken.mockRestore()
+    }
+  })
+
+  it('keeps the submit lock until the refreshed account is shown', async () => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementation(accepted)
+    const { credits } = setup()
+    await flushPromises()
+    let releaseRefresh!: () => void
+    vi.mocked(getProjectCredits).mockImplementationOnce(() => new Promise<void>((resolve) => { releaseRefresh = resolve })
+      .then(() => ({ data: account, error: undefined })) as never)
+
+    const first = credits.submitAdminOperation(grant)
+    await flushPromises()
+    expect(createCreditAdminOperation).toHaveBeenCalledTimes(1)
+    expect(credits.acting.value).toBe('grant')
+    expect(await credits.submitAdminOperation(grant)).toBe('failed')
+    expect(createCreditAdminOperation).toHaveBeenCalledTimes(1)
+
+    releaseRefresh()
+    expect(await first).toBe('accepted')
+    expect(credits.acting.value).toBeNull()
+  })
+
   it.each([
     ['succeeds', accepted],
     ['fails', lostResponse],

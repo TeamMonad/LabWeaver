@@ -13,7 +13,7 @@ import {
 } from '@/generated/contracts'
 import { diagnosticFromError, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey } from '@/utils/format'
-import { clearPendingCommand, listPendingCommands, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
+import { clearPendingCommand, listPendingCommands, readPendingCommand, writePendingCommand, type PendingCommand } from '@/utils/pendingCommands'
 
 const fixedDecimalPattern = /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/
 
@@ -121,17 +121,33 @@ export function creditLedgerKindLabel(kind: string): string {
   return creditLedgerKindLabels[kind] ?? kind
 }
 
-/** Answers that prove the server did not apply the command; any other failure may have been applied. */
-const NOT_APPLIED_CODES = ['LW_CREDITS_INVALID', 'LW_CREDITS_PRECISION', 'LW_CREDITS_INSUFFICIENT', 'LW_CREDITS_SCOPE_DENIED', 'LW_CREDITS_NOT_FOUND']
+/**
+ * Answers that prove the server did not apply the command; any other failure may have been applied.
+ * LW_CREDITS_SCOPE_DENIED is not one of them: authorization runs before the idempotency lookup, so a
+ * denied replay says nothing about whether the original request was booked.
+ */
+const NOT_APPLIED_CODES = ['LW_CREDITS_INVALID', 'LW_CREDITS_PRECISION', 'LW_CREDITS_INSUFFICIENT', 'LW_CREDITS_NOT_FOUND']
 
 const PENDING_SCOPE_PREFIX = 'credits-admin:'
+
+/**
+ * Same-page fallback for unconfirmed commands, keyed by actor + scope. Session
+ * storage can refuse a write (disabled, quota exhausted); the original key
+ * must still be reused for every retry until this page is closed.
+ */
+const unpersistedCommands = new Map<string, PendingCommand<CreditAdminFormInput>>()
+const memoryKey = (actor: string, scope: string) => `${actor}\u0000${scope}`
 
 export interface PendingCreditOperation {
   scope: string
   input: CreditAdminFormInput
+  /** False when the browser could not store the retry record: it is lost on refresh. */
+  persisted: boolean
 }
 
 export type CreditAdminSubmitResult = 'accepted' | 'failed' | 'stale'
+
+const NOT_PERSISTED_NEXT_STEP = '浏览器无法保存这笔操作的重试记录：在本页点击“重新提交”仍会沿用原请求，但刷新或关闭页面后无法安全重试，请先在账目中确认是否已入账。'
 
 /**
  * Project Credits account, ledger and holds, plus platform-admin writes.
@@ -171,9 +187,26 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
   function refreshPending() {
     const id = projectId.value
     const actor = actorId.value
-    pendingOperations.value = id && actor
-      ? listPendingCommands<CreditAdminFormInput>(actor, `${PENDING_SCOPE_PREFIX}${id}:`).map(({ scope, command }) => ({ scope, input: command.data }))
-      : []
+    if (!id || !actor) {
+      pendingOperations.value = []
+      return
+    }
+    const prefix = `${PENDING_SCOPE_PREFIX}${id}:`
+    const stored = listPendingCommands<CreditAdminFormInput>(actor, prefix)
+    const storedScopes = new Set(stored.map(({ scope }) => scope))
+    const unpersisted = [...unpersistedCommands.entries()]
+      .filter(([key]) => key.startsWith(memoryKey(actor, prefix)))
+      .map(([key, command]) => ({ scope: key.slice(actor.length + 1), command }))
+      .filter(({ scope }) => !storedScopes.has(scope))
+    pendingOperations.value = [
+      ...stored.map(({ scope, command }) => ({ scope, input: command.data, persisted: true })),
+      ...unpersisted.map(({ scope, command }) => ({ scope, input: command.data, persisted: false })),
+    ]
+  }
+
+  function forgetCommand(actor: string, scope: string, key: string) {
+    clearPendingCommand(actor, scope, key)
+    if (unpersistedCommands.get(memoryKey(actor, scope))?.idempotencyKey === key) unpersistedCommands.delete(memoryKey(actor, scope))
   }
 
   async function loadLedgerPage(id: string, page: number, generation: number) {
@@ -335,10 +368,14 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
     }
 
     const scope = `${PENDING_SCOPE_PREFIX}${id}:${JSON.stringify(body)}`
-    const stored = readPendingCommand<CreditAdminFormInput>(actor, scope)
-    const command = stored ?? { fingerprint: scope, idempotencyKey: idempotencyKey(), data: { ...input, reason } }
+    const command = readPendingCommand<CreditAdminFormInput>(actor, scope)
+      ?? unpersistedCommands.get(memoryKey(actor, scope))
+      ?? { fingerprint: scope, idempotencyKey: idempotencyKey(), data: { ...input, reason } }
     // Recorded before sending: a response lost after this point is replayed, never re-minted.
-    writePendingCommand(actor, scope, command)
+    // The memory copy keeps the key when storage refuses the write.
+    const persisted = writePendingCommand(actor, scope, command)
+    if (persisted) unpersistedCommands.delete(memoryKey(actor, scope))
+    else unpersistedCommands.set(memoryKey(actor, scope), command)
     const requestContext = context
     const isCurrent = () => !disposed && requestContext === context
     acting.value = input.action
@@ -351,22 +388,25 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
         body,
       })
       if (result.error) throw result.error
-      clearPendingCommand(actor, scope, command.idempotencyKey)
+      forgetCommand(actor, scope, command.idempotencyKey)
       next = {
         kind: 'success',
         diagnostic: makeDiagnostic('CREDITS_ADMIN_OPERATION_SUCCEEDED', `${creditActionLabel(input.action)}已入账，账户和账目已刷新。`, false),
       }
     } catch (error) {
       const diagnostic = diagnosticFromError(error, 'CREDITS_ADMIN_OPERATION_FAILED', `${creditActionLabel(input.action)}的结果尚未确认。重新提交同一操作不会重复入账。`)
-      if (NOT_APPLIED_CODES.includes(diagnostic.code)) clearPendingCommand(actor, scope, command.idempotencyKey)
+      if (NOT_APPLIED_CODES.includes(diagnostic.code)) forgetCommand(actor, scope, command.idempotencyKey)
+      else if (!persisted) diagnostic.nextStep = NOT_PERSISTED_NEXT_STEP
       next = { kind: 'error', diagnostic }
     }
     if (!isCurrent()) return 'stale'
-    acting.value = null
     refreshPending()
+    // The submit lock stays until the account and ledger show the booked
+    // result, so the same draft cannot be sent again under a fresh key.
     if (next.kind === 'success') await load({ clearOutcome: false })
     if (!isCurrent()) return 'stale'
     outcome.value = next
+    acting.value = null
     return next.kind === 'success' ? 'accepted' : 'failed'
   }
 

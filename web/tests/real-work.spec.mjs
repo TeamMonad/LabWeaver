@@ -24,6 +24,7 @@ import {
   cleanupWorkResources,
   DEFAULT_RATE_INPUTS,
   ensureRateByUi,
+  fundAndPublishRealWork,
   realWorkConfig,
   realWorkGpuConfig,
   realWorkVmConfig,
@@ -632,6 +633,64 @@ describe('Work acceptance demonstration rates', () => {
   it('rejects an end time without a complete GPU trial configuration', () => {
     process.env.LABWEAVER_E2E_WORK_GPU_RATE_EFFECTIVE_UNTIL = '2026-10-04T07:00:00Z'
     expect(() => realWorkGpuConfig()).toThrow('LABWEAVER_E2E_WORK_GPU_EFFECTIVE_UNTIL_WITHOUT_RATE')
+  })
+})
+
+describe('Work acceptance funding order', () => {
+  const gpu = { class: 'nvidia-a100', mode: 'exclusive' }
+
+  function fundingHarness({ creditsFailure = null } = {}) {
+    const calls = []
+    const steps = {
+      ensureRates: vi.fn(async () => {
+        calls.push('rates')
+        return [
+          { id: 'rate-cpu', unit: 'cpu_millicore_second', unitPrice: { currency: 'CREDITS', amount: '1.000000' } },
+          { id: 'rate-gpu', unit: 'gpu_unit_second', gpuClass: gpu.class, gpuMode: gpu.mode, unitPrice: { currency: 'CREDITS', amount: '0.000100' } },
+        ]
+      }),
+      configureBudget: vi.fn(async () => { calls.push('budget') }),
+      ensureCredits: vi.fn(async () => {
+        calls.push('credits')
+        if (creditsFailure) throw creditsFailure
+      }),
+    }
+    const adminRequest = {
+      get: vi.fn(async () => {
+        calls.push('baseline-charges')
+        return { ok: () => true, status: () => 200, text: async () => JSON.stringify([{ id: 'charge-old' }]) }
+      }),
+    }
+    const publish = vi.fn(async () => {
+      calls.push('publish')
+      return { release: { id: 'release-1' } }
+    })
+    return { adminRequest, calls, publish, steps }
+  }
+
+  it('prepares rates, budget and Credits before publishing the template', async () => {
+    const { adminRequest, calls, publish, steps } = fundingHarness()
+
+    const result = await fundAndPublishRealWork({
+      adminRequest, baseURL: 'https://lab.test', browser: {}, configureBudget: true, gpu, projectId: 'project-1', publish,
+    }, steps)
+
+    expect(calls).toEqual(['rates', 'baseline-charges', 'budget', 'credits', 'publish'])
+    expect(result.gpuRate?.id).toBe('rate-gpu')
+    expect([...result.baselineChargeIds]).toEqual(['charge-old'])
+    expect(result.published.release.id).toBe('release-1')
+  })
+
+  it('keeps a preserved project budget and never publishes when Credits cannot be prepared', async () => {
+    const { adminRequest, calls, publish, steps } = fundingHarness({ creditsFailure: new Error('REAL_WORK_CREDITS_GRANT_FAILED') })
+
+    await expect(fundAndPublishRealWork({
+      adminRequest, baseURL: 'https://lab.test', browser: {}, configureBudget: false, gpu: null, projectId: 'project-1', publish,
+    }, steps)).rejects.toThrow('REAL_WORK_CREDITS_GRANT_FAILED')
+
+    expect(calls).toEqual(['rates', 'baseline-charges', 'credits'])
+    expect(steps.configureBudget).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
   })
 })
 

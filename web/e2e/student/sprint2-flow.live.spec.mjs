@@ -16,11 +16,9 @@ import {
 import {
   assertRealWorkGpuContainerCandidate,
   assertRealWorkVmCandidate,
-  configureRealWorkBudgetByUi,
   cleanupWorkResources,
   createRealWorkPackage,
-  ensureRealWorkCreditsByUi,
-  ensureRealWorkRates,
+  fundAndPublishRealWork,
   inspectRealWorkFinanceByUi,
   realWorkConfig,
   realWorkGpuConfig,
@@ -793,7 +791,6 @@ test('student provisions a Work environment, configures it, and releases its cap
   let vmSshSession = null
   let adminContext = null
   let adminPage = null
-  let workRates = null
   let gpuRate = null
   let baselineChargeIds = new Set()
   let existingResourceBudget = null
@@ -806,40 +803,31 @@ test('student provisions a Work environment, configures it, and releases its cap
     if (PRESERVE_EXISTING_PROJECT) {
       existingResourceBudget = await readExistingProjectResourceBudget(adminPage.request, project.id)
     }
-    const { packageData, release } = resumed
-      ? { packageData: resumed.packageData, release: resumed.release }
-      : await publishWorkTemplate(page, project, packageCopy, { adminPage, studentActorId })
+    const publish = () => (resumed
+      ? Promise.resolve({ packageData: resumed.packageData, release: resumed.release })
+      : publishWorkTemplate(page, project, packageCopy, { adminPage, studentActorId }))
+    let published
+    if (REAL_WORK_MODE) {
+      // Rates, budget and Credits come first: template generation is already metered.
+      const funding = await fundAndPublishRealWork({
+        adminRequest: adminPage.request,
+        baseURL,
+        browser,
+        configureBudget: !PRESERVE_EXISTING_PROJECT,
+        gpu: REAL_WORK_GPU,
+        projectId: project.id,
+        publish,
+      })
+      ;({ gpuRate, baselineChargeIds, published } = funding)
+    } else {
+      published = await publish()
+    }
+    const { packageData, release } = published
     if (resumed && REAL_WORK_GPU && !REAL_WORK_VM) {
       assertRealWorkGpuContainerCandidate(resumed.candidateView, WORK_PROVIDER_BINDING, REAL_WORK_GPU)
     }
     const expectedSeedMarker = packageCopy?.seedMarker ?? resumed?.seedMarker
     const expectedPersistenceMarker = packageCopy?.persistenceMarker ?? resumed?.persistenceMarker
-
-    if (REAL_WORK_MODE) {
-      workRates = await ensureRealWorkRates(browser, baseURL, { gpu: REAL_WORK_GPU })
-      if (REAL_WORK_GPU) {
-        const matchingGpuRates = workRates.filter((rate) => (
-          rate.unit === 'gpu_unit_second'
-          && rate.gpuClass === REAL_WORK_GPU.class
-          && rate.gpuMode === REAL_WORK_GPU.mode
-        ))
-        if (matchingGpuRates.length !== 1) {
-          throw new Error(`REAL_WORK_GPU_RATE_READBACK_AMBIGUOUS:${REAL_WORK_GPU.class}:${REAL_WORK_GPU.mode}`)
-        }
-        [gpuRate] = matchingGpuRates
-      }
-      const baselineCharges = await expectJson(
-        await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(project.id)}/charges`),
-        'REAL_WORK_BASELINE_CHARGES_READ_FAILED',
-      )
-      if (!Array.isArray(baselineCharges)) throw new Error('REAL_WORK_BASELINE_CHARGES_INVALID')
-      baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
-      if (!PRESERVE_EXISTING_PROJECT) {
-        await configureRealWorkBudgetByUi(browser, baseURL, project.id)
-      }
-      // Resource funds the approved request from project Credits before the environment starts.
-      await ensureRealWorkCreditsByUi(browser, baseURL, project.id)
-    }
 
     // Work is created by hand from the Work page: pick the published template
     // card, then continue to the resource request with that exact version.

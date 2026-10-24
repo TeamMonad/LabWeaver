@@ -1537,6 +1537,49 @@ export async function ensureRealWorkCreditsByUi(browser, baseURL, projectId) {
   }
 }
 
+const REAL_WORK_FUNDING_STEPS = {
+  ensureRates: ensureRealWorkRates,
+  configureBudget: configureRealWorkBudgetByUi,
+  ensureCredits: ensureRealWorkCreditsByUi,
+}
+
+// Publishing a template already starts metered work (template build), so rates,
+// budget and project Credits must be in place before `publish` runs. Existing
+// operator rates are only read back (ensureRealWorkRates never replaces them).
+export async function fundAndPublishRealWork({
+  adminRequest,
+  baseURL,
+  browser,
+  configureBudget,
+  gpu = null,
+  projectId,
+  publish,
+}, steps = REAL_WORK_FUNDING_STEPS) {
+  const workRates = await steps.ensureRates(browser, baseURL, { gpu })
+  let gpuRate = null
+  if (gpu) {
+    const matchingGpuRates = workRates.filter((rate) => (
+      rate.unit === 'gpu_unit_second'
+      && rate.gpuClass === gpu.class
+      && rate.gpuMode === gpu.mode
+    ))
+    if (matchingGpuRates.length !== 1) {
+      throw new Error(`REAL_WORK_GPU_RATE_READBACK_AMBIGUOUS:${gpu.class}:${gpu.mode}`)
+    }
+    [gpuRate] = matchingGpuRates
+  }
+  const baselineCharges = await expectJson(
+    await adminRequest.get(`/api/v1/projects/${encodeURIComponent(projectId)}/charges`),
+    'REAL_WORK_BASELINE_CHARGES_READ_FAILED',
+  )
+  if (!Array.isArray(baselineCharges)) throw new Error('REAL_WORK_BASELINE_CHARGES_INVALID')
+  const baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
+  if (configureBudget) await steps.configureBudget(browser, baseURL, projectId)
+  await steps.ensureCredits(browser, baseURL, projectId)
+  const published = await publish()
+  return { baselineChargeIds, gpuRate, published, workRates }
+}
+
 export function assertRealWorkCharges(charges, gpu = null) {
   if (!Array.isArray(charges)) throw new Error('REAL_WORK_CHARGES_RESPONSE_INVALID')
   const positiveSettled = charges.filter((charge) => charge.settlement === 'settled' && Number(charge.total?.amount) > 0)

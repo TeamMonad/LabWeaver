@@ -42,11 +42,16 @@ export function readPendingCommand<T>(actorId: string, scope: string): PendingCo
   }
 }
 
-export function writePendingCommand<T>(actorId: string, scope: string, command: PendingCommand<T>) {
+/** Returns false when the command could not be persisted (storage disabled or quota exhausted). */
+export function writePendingCommand<T>(actorId: string, scope: string, command: PendingCommand<T>): boolean {
   try {
-    store()?.setItem(entryKey(actorId, scope), JSON.stringify(command))
+    const storage = store()
+    if (!storage) return false
+    storage.setItem(entryKey(actorId, scope), JSON.stringify(command))
+    return true
   } catch {
     // Storage unavailable (private mode, quota): the command still runs once in memory.
+    return false
   }
 }
 

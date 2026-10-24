@@ -174,6 +174,29 @@ describe('ProjectCreditsPanel', () => {
     expect(wrapper.get('[data-testid="credits-read-only-note"]').exists()).toBe(true)
   })
 
+  it('sends one POST when the draft is submitted again while the accepted result is still refreshing', async () => {
+    const wrapper = await mountPanel()
+    let releaseRefresh!: () => void
+    vi.mocked(getProjectCredits).mockImplementationOnce(() => new Promise<void>((resolve) => { releaseRefresh = resolve })
+      .then(() => ({ data: account, error: undefined })) as never)
+    const form = wrapper.get('[data-testid="credits-admin-form"]')
+    await form.get('input[aria-label="Credits 金额"]').setValue('6')
+    await form.get('textarea[aria-label="操作原因"]').setValue('补发')
+    await form.trigger('submit')
+    await flushPromises()
+
+    expect(form.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    await form.trigger('submit')
+    await form.trigger('submit')
+    await flushPromises()
+    expect(createCreditAdminOperation).toHaveBeenCalledTimes(1)
+
+    releaseRefresh()
+    await flushPromises()
+    expect((form.get('input[aria-label="Credits 金额"]').element as HTMLInputElement).value).toBe('')
+    expect(createCreditAdminOperation).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     ['succeeds', { data: [], error: undefined }],
     ['fails', { data: undefined, error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: 'db', diagnosticCode: 'LW_CREDITS_STORAGE', requestId: 'req-late', retryable: true } }],
