@@ -308,12 +308,17 @@ describe('RubricModelInputRulesPanel', () => {
   })
 
   it('recovers after a failed automatic re-read: manual recheck aligns the versions and approves the right model', async () => {
-    vi.mocked(getProjectRubricModelInputRules).mockResolvedValue({ data: rulesView([rule()], 4) as never, error: undefined as never })
+    const controlDetail = 'The request was rejected by a fail-closed control-plane boundary.'
+    // `Promise.withResolvers` is outside the project's ES2020 lib, so the executor form captures the resolver.
+    let resolveRecheck!: (value: unknown) => void
+    vi.mocked(getProjectRubricModelInputRules)
+      .mockResolvedValueOnce({ data: rulesView([rule()], 4) as never, error: undefined as never })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRecheck = resolve }) as never)
     vi.mocked(getActiveProjectLlmPolicy)
       .mockResolvedValueOnce(policyWith(3, 'model-a'))
       .mockResolvedValueOnce({
         data: undefined,
-        error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: 'control unavailable', diagnosticCode: 'LW_SERVICE_UNAVAILABLE', retryable: true, requestId: 'req-503' },
+        error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: controlDetail, diagnosticCode: 'LW_SERVICE_UNAVAILABLE', retryable: true, requestId: 'req-503' },
       } as never)
       .mockResolvedValueOnce(policyWith(4, 'model-b'))
     vi.mocked(maintainProjectRubricModelInputRule).mockResolvedValue({
@@ -325,12 +330,23 @@ describe('RubricModelInputRulesPanel', () => {
 
     expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(2)
     const problem = wrapper.get('[data-testid="rubric-policy-problem"]')
-    expect(problem.get('.diagnostic-message').text()).toBe('control unavailable')
+    // The reason shown first is the page's own Chinese summary, not the service's generic English detail.
+    expect(problem.get('.diagnostic-message').text()).toBe('暂时无法读取项目 AI 设置，尚不能核对批准的目标模型。')
+    expect(problem.get('.diagnostic-message').text()).not.toContain(controlDetail)
     expect(problem.get('.diagnostic-code').text()).toBe('LW_SERVICE_UNAVAILABLE')
     expect(problem.get('.diagnostic-request-id').text()).toBe('req-503')
+    expect(problem.get('[data-testid="rubric-policy-detail"] code').text()).toBe(controlDetail)
+    expect(problem.text().indexOf('暂时无法读取')).toBeLessThan(problem.text().indexOf('LW_SERVICE_UNAVAILABLE'))
     expect(wrapper.get('[data-testid="rubric-approve-model"]').attributes('disabled')).toBeDefined()
 
-    await wrapper.get('[data-testid="rubric-policy-recheck"]').trigger('click')
+    // Single flight: a second click while the recheck is running starts nothing new, and approval stays unavailable.
+    const recheck = wrapper.get('[data-testid="rubric-policy-recheck"]')
+    await recheck.trigger('click')
+    expect(wrapper.find('[data-testid="rubric-approve-model"]').exists()).toBe(false)
+    await recheck.trigger('click')
+    expect(getProjectRubricModelInputRules).toHaveBeenCalledTimes(2)
+    expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(3)
+    resolveRecheck({ data: rulesView([rule()], 4), error: undefined })
     await flushPromises()
     expect(getProjectRubricModelInputRules).toHaveBeenCalledTimes(2)
     expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(3)

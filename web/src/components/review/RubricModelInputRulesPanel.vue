@@ -81,8 +81,18 @@
               :retryable="false"
               severity="warning"
             />
-            <button type="button" class="outlined-button" data-testid="rubric-policy-recheck" @click="recheckPolicy">
-              重新核对
+            <details v-if="policySync.kind === 'failed' && policySync.detail" class="rubric-technical-detail" data-testid="rubric-policy-detail">
+              <summary>技术详情</summary>
+              <code>{{ policySync.detail }}</code>
+            </details>
+            <button
+              type="button"
+              class="outlined-button"
+              data-testid="rubric-policy-recheck"
+              :disabled="rechecking"
+              @click="recheckPolicy"
+            >
+              {{ rechecking ? '正在重新核对…' : '重新核对' }}
             </button>
           </div>
         </template>
@@ -145,7 +155,9 @@ interface PendingChange {
 type PolicySync =
   | { kind: 'synced' }
   | { kind: 'checking' }
-  | { kind: 'failed' | 'mismatch'; diagnostic: DiagnosticViewModel }
+  | { kind: 'mismatch'; diagnostic: DiagnosticViewModel }
+  /** `detail` keeps the service's own wording for the technical details; it is never the primary reason. */
+  | { kind: 'failed'; diagnostic: DiagnosticViewModel; detail: string | null }
 
 const props = defineProps<{
   projectId: string
@@ -197,12 +209,21 @@ watch(versionKey, (versions) => {
 const policySync = computed<PolicySync>(() => {
   if (syncedBinding.value) return { kind: 'synced' }
   const state = policy.state
-  // Every failed read carries a diagnostic (reason first, then code and requestId).
-  if ('diagnostic' in state) return { kind: 'failed', diagnostic: state.diagnostic }
+  // The service's detail can be generic or English; the reason shown first only states what the page knows.
+  if ('diagnostic' in state) {
+    const upstream = state.diagnostic
+    const diagnostic: DiagnosticViewModel = {
+      ...upstream,
+      message: '暂时无法读取项目 AI 设置，尚不能核对批准的目标模型。',
+      nextStep: '请点击“重新核对”；多次失败请把下方诊断信息发给管理员。',
+    }
+    return { kind: 'failed', diagnostic, detail: upstream.message || null }
+  }
   if (state.kind === 'empty') {
     return {
       kind: 'failed',
       diagnostic: makeDiagnostic('LW_POLICY_NOT_FOUND', '项目当前没有已激活的 AI 设置，不能批准交给模型。', false),
+      detail: null,
     }
   }
   if (state.kind !== 'success' || rules.state.kind !== 'success' || versionKey.value !== reconciledMismatch.value) return { kind: 'checking' }
@@ -215,10 +236,18 @@ const policySync = computed<PolicySync>(() => {
   return { kind: 'mismatch', diagnostic }
 })
 
-/** Manual recovery: read both sides again; approval stays closed until they agree. */
+const rechecking = ref(false)
+
+/** Manual recovery: read both sides again; approval stays closed until they agree. One recheck at a time. */
 async function recheckPolicy() {
+  if (rechecking.value) return
+  rechecking.value = true
   reconciledMismatch.value = null
-  await Promise.all([rules.load(), policy.load()])
+  try {
+    await Promise.all([rules.load(), policy.load()])
+  } finally {
+    rechecking.value = false
+  }
 }
 
 function sameIdentity(left: RubricIdentity, right: RubricIdentity): boolean {
@@ -389,6 +418,15 @@ function approve(row: RubricRow) {
 
 .rubric-status--blocked {
   color: var(--md-sys-color-error);
+}
+
+.rubric-technical-detail {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.rubric-technical-detail code {
+  overflow-wrap: anywhere;
 }
 
 .rubric-policy-problem {
