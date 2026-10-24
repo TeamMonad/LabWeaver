@@ -114,10 +114,13 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { upgradeEnvironmentTemplate } from '@/generated/contracts'
 import type { EnvironmentDetailSchema, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import { useAuth } from '@/composables/useAuth'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 import { diagnosticFromError, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 import { isTerminalEnvironment } from '@/utils/environmentLifecycle'
+import { actorIdFromProfile } from '@/utils/navigation'
+import { clearPendingCommand, commandOutcomeIsFinal, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 import { environmentOperationStateLabel } from '@/utils/stateLabels'
 import { newerWorkReleases, workTemplateTitle } from '@/utils/workTemplate'
 
@@ -130,9 +133,10 @@ import { newerWorkReleases, workTemplateTitle } from '@/utils/workTemplate'
 const props = defineProps<{ data: EnvironmentDetailSchema }>()
 
 const { releases, operations, env, permissions, hasActiveLifecycleOperation } = useEnvironmentEntryContext()
+const auth = useAuth()
+const actorId = computed(() => actorIdFromProfile(auth.user.value?.profile) ?? null)
 
 type Release = EnvironmentTemplateReleaseViewSchema
-const STORAGE_PREFIX = 'labweaver.work-template-upgrade.'
 
 const pendingTarget = ref<Release | null>(null)
 const submitting = ref(false)
@@ -158,18 +162,13 @@ const releaseProblem = computed(() => {
 const candidates = computed(() => currentRelease.value ? newerWorkReleases(releaseRows.value, currentRelease.value) : [])
 
 /**
- * The instance's current operation is re-read while it runs, so it is the live
- * source. Otherwise the newest operation in the history is shown only when it
- * is itself an upgrade, so a later restart or stop hides an old upgrade result.
+ * Only the instance's current operation describes the upgrade: it is re-read
+ * while it runs and cannot be overtaken by an older history read. Earlier
+ * upgrades stay in the operation timeline.
  */
 const upgradeOperation = computed(() => {
   const current = props.data.operation
-  if (current.templateUpgrade) return { state: current.state, templateUpgrade: current.templateUpgrade, diagnosticCode: current.diagnosticCode }
-  const items = operations.operations.kind === 'success' ? operations.operations.data : []
-  const newest = items
-    .filter((operation) => operation.environmentId === props.data.id)
-    .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0]
-  return newest?.templateUpgrade ? newest : null
+  return current.templateUpgrade ? { state: current.state, templateUpgrade: current.templateUpgrade, diagnosticCode: current.diagnosticCode } : null
 })
 const upgradeActive = computed(() => {
   const state = upgradeOperation.value?.state
@@ -194,6 +193,7 @@ const upgradeBlockReason = computed(() => {
   if (denied) return denied
   if (isTerminalEnvironment(props.data) || props.data.desiredState === 'deleted') return '这个 Work 正在删除或已删除，不能升级模板。'
   if (hasActiveLifecycleOperation(props.data)) return '当前有操作正在进行，完成后才能升级模板。'
+  if (!actorId.value) return '正在确认登录身份，确认后才能升级模板。'
   return null
 })
 const canUpgrade = computed(() => !submitting.value && upgradeBlockReason.value === null)
@@ -212,24 +212,26 @@ const newRequestLink = computed(() => ({
 }))
 
 /**
- * One Idempotency-Key per (environment, revision, target), kept in session
- * storage: a retry or a page refresh before the server answered replays the
- * same command instead of submitting a second upgrade.
+ * One Idempotency-Key per (actor, environment, revision, target), kept as a
+ * pending command in session storage: a retry or a page refresh before the
+ * server answered replays the same command instead of submitting a second
+ * upgrade. Another actor signing in on this browser never sees it.
  */
-function upgradeKey(releaseId: string, version: number): { storageKey: string; key: string } {
-  const storageKey = `${STORAGE_PREFIX}${props.data.id}:${props.data.revision}:${releaseId}:${version}`
-  const stored = typeof sessionStorage === 'undefined' ? null : sessionStorage.getItem(storageKey)
-  const key = stored ?? idempotencyKey()
-  if (!stored && typeof sessionStorage !== 'undefined') sessionStorage.setItem(storageKey, key)
-  return { storageKey, key }
+function upgradeCommand(actor: string, releaseId: string, version: number) {
+  const scope = `work-template-upgrade:${props.data.id}:${props.data.revision}:${releaseId}:${version}`
+  const stored = readPendingCommand<null>(actor, scope)
+  const command = stored?.fingerprint === scope ? stored : { fingerprint: scope, idempotencyKey: idempotencyKey(), data: null }
+  writePendingCommand(actor, scope, command)
+  return { scope, key: command.idempotencyKey }
 }
 
 async function submitUpgrade(releaseId: string, version: number) {
-  if (!canUpgrade.value) return
+  const actor = actorId.value
+  if (!canUpgrade.value || !actor) return
   submitting.value = true
   upgradeDiagnostic.value = null
   lastTarget.value = { releaseId, version }
-  const { storageKey, key } = upgradeKey(releaseId, version)
+  const { scope, key } = upgradeCommand(actor, releaseId, version)
   try {
     const result = await upgradeEnvironmentTemplate({
       path: { environmentId: props.data.id },
@@ -238,10 +240,11 @@ async function submitUpgrade(releaseId: string, version: number) {
     })
     if (result.error) {
       upgradeDiagnostic.value = diagnosticFromError(result.error, 'WORK_TEMPLATE_UPGRADE_FAILED', '模板升级没有被受理。')
+      if (commandOutcomeIsFinal(upgradeDiagnostic.value.status)) clearPendingCommand(actor, scope)
       if (upgradeDiagnostic.value.status === 403) void permissions.refresh()
       return
     }
-    if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(storageKey)
+    clearPendingCommand(actor, scope)
     lastTarget.value = null
     await Promise.all([env.load(), operations.load()])
   } catch (error) {

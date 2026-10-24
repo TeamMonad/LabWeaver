@@ -8,6 +8,7 @@ import type {
 } from '@/generated/contracts'
 import { diagnosticFromError, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, newUuidV7 } from '@/utils/format'
+import { clearPendingCommand, commandOutcomeIsFinal, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 
 export type TemplateImage = PlatformImageCatalogSchemaPlatformImageEntry
 
@@ -181,18 +182,54 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
   }
 }
 
+/** Request body for a draft, with the retention identity left out so equal content fingerprints equally. */
+function publicationBody(projectId: string, courseId: string | null, draft: ManualWorkTemplateDraft, image: TemplateImage, policyId: string): CreateEnvironmentTemplateReleaseRequestSchema {
+  return {
+    projectId,
+    ...(courseId ? { courseId } : {}),
+    runtimeKind: image.kind,
+    manual: {
+      platformImageId: image.catalogId,
+      platformImageGeneration: image.repinGeneration,
+      templateFamilyId: draft.templateFamilyId.trim(),
+      description: draft.description.trim(),
+      reason: draft.reason.trim(),
+      spec: manualTemplateSpec(draft, image, policyId),
+      confirmed: true,
+    },
+  }
+}
+
+/** What a pending manual publication keeps besides its key: the reviewed draft and its retention identity. */
+interface PendingPublication {
+  policyId: string
+  draft: ManualWorkTemplateDraft
+}
+
 /**
  * Manual Work template publication: the project's pinned platform images and
- * one reviewed, confirmed publication command. A repeated submit of the same
- * reviewed content reuses its Idempotency-Key and retention identity, so a
- * timeout followed by a retry replays one publication instead of creating two.
+ * one reviewed, confirmed publication command.
+ *
+ * A command without a definite outcome is kept in session storage for the
+ * signed-in actor and project, keyed by its canonical content. A retry, a page
+ * refresh or reopening the form with the same content replays it with the same
+ * Idempotency-Key and retention identity, so a lost response never publishes a
+ * second version; changed content is a new command. The entry is removed once
+ * the server accepts the command or answers with a definite client error.
  */
-export function useManualWorkTemplatePublication(projectId: Ref<string | null | undefined>, courseId: Ref<string | null | undefined>) {
+export function useManualWorkTemplatePublication(
+  projectId: Ref<string | null | undefined>,
+  courseId: Ref<string | null | undefined>,
+  actorId: Ref<string | null | undefined>,
+) {
   const images = ref<AsyncState<TemplateImage[]>>({ kind: 'idle' })
   const publishing = ref(false)
   const outcome = ref<{ kind: 'accepted' } | { kind: 'failed'; diagnostic: DiagnosticViewModel } | null>(null)
-  let pending: { fingerprint: string; key: string; policyId: string } | null = null
+  /** The reviewed draft of a publication whose outcome is still unknown, restored after a refresh. */
+  const pendingDraft = ref<ManualWorkTemplateDraft | null>(null)
   let generation = 0
+
+  const scope = (id: string) => `manual-work-template:${id}`
 
   async function loadImages() {
     const id = projectId.value
@@ -214,33 +251,33 @@ export function useManualWorkTemplatePublication(projectId: Ref<string | null | 
 
   async function publish(draft: ManualWorkTemplateDraft): Promise<boolean> {
     const id = projectId.value
+    const actor = actorId.value
     const image = images.value.kind === 'success' ? images.value.data.find((entry) => entry.catalogId === draft.imageId) ?? null : null
-    if (!id || publishing.value || !image || manualDraftProblem(draft, image)) return false
-    const fingerprint = JSON.stringify([id, courseId.value ?? null, image.catalogId, image.repinGeneration, { ...draft, confirmed: true }])
-    if (!pending || pending.fingerprint !== fingerprint) pending = { fingerprint, key: idempotencyKey(), policyId: newUuidV7() }
-    const body: CreateEnvironmentTemplateReleaseRequestSchema = {
-      projectId: id,
-      ...(courseId.value ? { courseId: courseId.value } : {}),
-      runtimeKind: image.kind,
-      manual: {
-        platformImageId: image.catalogId,
-        platformImageGeneration: image.repinGeneration,
-        templateFamilyId: draft.templateFamilyId.trim(),
-        description: draft.description.trim(),
-        reason: draft.reason.trim(),
-        spec: manualTemplateSpec(draft, image, pending.policyId),
-        confirmed: true,
-      },
-    }
+    if (!id || !actor || publishing.value || !image || manualDraftProblem(draft, image)) return false
+    const course = courseId.value ?? null
+    const fingerprint = JSON.stringify(publicationBody(id, course, draft, image, ''))
+    const stored = readPendingCommand<PendingPublication>(actor, scope(id))
+    const command = stored?.fingerprint === fingerprint && typeof stored.data?.policyId === 'string'
+      ? stored
+      : { fingerprint, idempotencyKey: idempotencyKey(), data: { policyId: newUuidV7(), draft: { ...draft } } }
+    // Recorded before sending: a response lost after this point is replayed, never re-minted.
+    writePendingCommand(actor, scope(id), command)
     publishing.value = true
     outcome.value = null
     try {
-      const result = await createEnvironmentTemplateRelease({ path: { projectId: id }, headers: { 'Idempotency-Key': pending.key }, body })
+      const result = await createEnvironmentTemplateRelease({
+        path: { projectId: id },
+        headers: { 'Idempotency-Key': command.idempotencyKey },
+        body: publicationBody(id, course, draft, image, command.data.policyId),
+      })
       if (result.error || !result.data) {
-        outcome.value = { kind: 'failed', diagnostic: diagnosticFromError(result.error, 'MANUAL_TEMPLATE_PUBLISH_FAILED', '发布 Work 模板失败。') }
+        const diagnostic = diagnosticFromError(result.error, 'MANUAL_TEMPLATE_PUBLISH_FAILED', '发布 Work 模板失败。')
+        if (commandOutcomeIsFinal(diagnostic.status)) clearPendingCommand(actor, scope(id))
+        outcome.value = { kind: 'failed', diagnostic }
         return false
       }
-      pending = null
+      clearPendingCommand(actor, scope(id))
+      pendingDraft.value = null
       outcome.value = { kind: 'accepted' }
       return true
     } catch (error) {
@@ -251,11 +288,11 @@ export function useManualWorkTemplatePublication(projectId: Ref<string | null | 
     }
   }
 
-  watch(projectId, () => {
-    pending = null
+  watch([projectId, actorId], ([id, actor]) => {
     outcome.value = null
-    void loadImages()
+    pendingDraft.value = id && actor ? readPendingCommand<PendingPublication>(actor, scope(id))?.data?.draft ?? null : null
   }, { immediate: true })
+  watch(projectId, () => { void loadImages() }, { immediate: true })
 
-  return reactive({ images, publishing, outcome, loadImages, publish })
+  return reactive({ images, publishing, outcome, pendingDraft, loadImages, publish })
 }

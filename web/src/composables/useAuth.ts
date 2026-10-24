@@ -4,6 +4,7 @@ import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/cont
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
 import { actorIdFromProfile } from '@/utils/navigation'
 import { syncTrackedSubmissionOwner } from '@/utils/trackedSubmissions'
+import { syncPendingCommandOwner } from '@/utils/pendingCommands'
 
 interface BffUser {
   expired: boolean
@@ -31,7 +32,10 @@ const error = ref<Error | null>(null)
 // out or losing the session discards what the previous actor left behind. The
 // initial unauthenticated state (before the session is read) is not a sign-out.
 watch(() => actorIdFromProfile(user.value?.profile), (actorId, previous) => {
-  if (actorId || previous) syncTrackedSubmissionOwner(actorId)
+  if (actorId || previous) {
+    syncTrackedSubmissionOwner(actorId)
+    syncPendingCommandOwner(actorId)
+  }
 }, { flush: 'sync' })
 type TopLevelNavigate = (url: string) => void
 

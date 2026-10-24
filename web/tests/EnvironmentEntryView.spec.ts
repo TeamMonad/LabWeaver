@@ -2197,6 +2197,83 @@ describe('EnvironmentEntryView', () => {
       expect(wrapper.get('[data-testid="upgrade-target-note"]').exists()).toBe(true)
     })
 
+    const upgradeRecord = (source: number, target: number) => ({
+      sourceReleaseId: `release-work-${source}`, sourceReleaseVersion: source, targetReleaseId: `release-work-${target}`, targetReleaseVersion: target, dataPolicy: 'preserve_workspace',
+    })
+
+    it('ignores an upgrade that is only in the history while the current operation is an ordinary one', async () => {
+      mockWork({ operation: { ...settledOperation, kind: 'restart' } })
+      vi.mocked(listEnvironmentOperations).mockResolvedValue({
+        data: { items: [mockOperation('failed', { kind: 'restart', acceptedAt: '2026-07-11T11:00:00.000Z', templateUpgrade: upgradeRecord(1, 2) })] },
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+      const panel = await vi.waitFor(() => wrapper.get('[data-testid="template-upgrade"]'))
+      await vi.waitFor(() => expect(listEnvironmentOperations).toHaveBeenCalled())
+      await flushPromises()
+      expect(panel.find('[data-testid="upgrade-status"]').exists()).toBe(false)
+      expect(panel.find('[data-testid="upgrade-target-note"]').exists()).toBe(false)
+      await vi.waitFor(() => expect(panel.find('[data-testid="upgrade-to-2"]').exists()).toBe(true))
+    })
+
+    it('follows the instance operation when the history answer is newer or arrives later', async () => {
+      mockWork({
+        releaseId: 'release-work-2',
+        releaseVersion: 2,
+        observedState: 'updating',
+        operation: { ...settledOperation, kind: 'restart', state: 'running', templateUpgrade: upgradeRecord(1, 2) },
+      })
+      let answerHistory: (value: unknown) => void = () => undefined
+      vi.mocked(listEnvironmentOperations).mockImplementation(() => new Promise((resolve) => { answerHistory = resolve }) as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+      const status = await vi.waitFor(() => wrapper.get('[data-testid="upgrade-status"]'))
+      expect(status.text()).toContain('模板升级 v1 → v2')
+
+      // A history answer with a later, different upgrade record must not replace the instance's current fact.
+      answerHistory({ data: { items: [mockOperation('succeeded', { kind: 'restart', acceptedAt: '2026-07-11T12:00:00.000Z', templateUpgrade: upgradeRecord(2, 3) })] }, error: undefined })
+      await flushPromises()
+      const after = wrapper.get('[data-testid="upgrade-status"]')
+      expect(after.attributes('data-state')).toBe('running')
+      expect(after.text()).toContain('模板升级 v1 → v2')
+      expect(after.text()).not.toContain('v3')
+    })
+
+    it('keeps upgrade request identities per user and drops them when another user signs in', async () => {
+      mockWork()
+      vi.mocked(upgradeEnvironmentTemplate).mockResolvedValue({ data: undefined, error: { status: 503, diagnosticCode: 'LW_ENVIRONMENT_LEASE_VERIFICATION_RESPONSE_INVALID', detail: 'invalid', retryable: true } } as never)
+      const first = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+      const panel = await vi.waitFor(() => first.wrapper.get('[data-testid="template-upgrade"]'))
+      await vi.waitFor(() => expect(panel.find('[data-testid="upgrade-to-2"]').exists()).toBe(true))
+      await panel.get('[data-testid="upgrade-to-2"]').trigger('click')
+      upgradeDialog(first.wrapper).vm.$emit('confirm')
+      await flushPromises()
+      expect(Object.keys(window.sessionStorage).some((key) => key.startsWith('labweaver.pending-command:student-1:work-template-upgrade:env-1:'))).toBe(true)
+      first.wrapper.unmount()
+
+      signIn('student-2')
+      expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:'))).toEqual([])
+      const second = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+      const secondPanel = await vi.waitFor(() => second.wrapper.get('[data-testid="template-upgrade"]'))
+      await vi.waitFor(() => expect(secondPanel.find('[data-testid="upgrade-to-2"]').exists()).toBe(true))
+      await secondPanel.get('[data-testid="upgrade-to-2"]').trigger('click')
+      upgradeDialog(second.wrapper).vm.$emit('confirm')
+      await flushPromises()
+      const [byFirst, bySecond] = vi.mocked(upgradeEnvironmentTemplate).mock.calls.map(([options]) => options.headers['Idempotency-Key'])
+      expect(bySecond).not.toBe(byFirst)
+    })
+
+    it('clears the upgrade identity once the server gives a definite refusal', async () => {
+      mockWork()
+      vi.mocked(upgradeEnvironmentTemplate).mockResolvedValue({ data: undefined, error: { status: 409, diagnosticCode: 'LW_RUNTIME_LEASE_NOT_ACTIVE', detail: 'lease', retryable: false } } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+      const panel = await vi.waitFor(() => wrapper.get('[data-testid="template-upgrade"]'))
+      await vi.waitFor(() => expect(panel.find('[data-testid="upgrade-to-2"]').exists()).toBe(true))
+      await panel.get('[data-testid="upgrade-to-2"]').trigger('click')
+      upgradeDialog(wrapper).vm.$emit('confirm')
+      await flushPromises()
+      expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:'))).toEqual([])
+    })
+
     it('never offers an in-place upgrade for VM Work and explains the alternative', async () => {
       mockWork({ runtimeKind: 'virtual_machine' })
       vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({

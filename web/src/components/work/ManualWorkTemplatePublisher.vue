@@ -2,11 +2,15 @@
   <section class="manual-publisher" aria-labelledby="manual-publisher-heading" data-testid="manual-publisher">
     <h3 id="manual-publisher-heading">发布手工 Work 模板</h3>
     <p class="hint">
-      从管理员登记的固定平台镜像直接发布 Work 模板，不需要模型或 Agent。只有项目所有者或管理者可以发布；平台会再次检查你的项目职责。
+      从管理员登记的固定平台镜像直接发布 Work 模板，不需要模型或 Agent。发布需要项目编辑职责，并且是项目所有者、平台管理员或有项目管理（管理成员）职责；平台会再次检查。
     </p>
 
-    <AsyncStateView :state="publication.images" empty-text="当前没有可用的平台镜像。请联系平台管理员导入并固定镜像。" @retry="publication.loadImages">
+    <p v-if="publishBlockReason" class="hint hint--blocked" role="note" data-testid="manual-permission-hint">{{ publishBlockReason }}</p>
+    <AsyncStateView v-else :state="publication.images" empty-text="当前没有可用的平台镜像。请联系平台管理员导入并固定镜像。" @retry="publication.loadImages">
       <template #success="{ data: images }">
+        <p v-if="restoredPending" class="hint hint--blocked" role="status" data-testid="manual-pending">
+          上次发布的结果尚未确认，已恢复同一发布内容。请重新确认后提交；内容不变时平台沿用同一请求，不会重复发布。
+        </p>
         <form class="manual-form" @submit.prevent="submit">
           <label v-if="manualReleases.length > 0" class="field">
             <span>以已有手工模板为起点（可选）</span>
@@ -126,6 +130,7 @@ import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import AppSelect from '@/components/form/AppSelect.vue'
 import type { EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
+import { useAuth } from '@/composables/useAuth'
 import {
   draftFromManualRelease,
   emptyManualDraft,
@@ -133,20 +138,44 @@ import {
   useManualWorkTemplatePublication,
   type TemplateImage,
 } from '@/composables/useManualWorkTemplatePublication'
+import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
+import { actorIdFromProfile, hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 import { shortDigest, workTemplateTitle } from '@/utils/workTemplate'
 
 const props = defineProps<{
   projectId: string
   courseId?: string | null
+  /** The project's owner, from the project read model. */
+  projectOwnerId?: string | null
   /** Releases already visible in this project; manual ones can seed a new version. */
   releases: EnvironmentTemplateReleaseViewSchema[]
 }>()
 const emit = defineEmits<{ published: [] }>()
 
 const GIB = 1024 ** 3
-const publication = useManualWorkTemplatePublication(toRef(props, 'projectId'), computed(() => props.courseId ?? null))
+const auth = useAuth()
+const actorId = computed(() => actorIdFromProfile(auth.user.value?.profile) ?? null)
+const publication = useManualWorkTemplatePublication(toRef(props, 'projectId'), computed(() => props.courseId ?? null), actorId)
+const permissions = useProjectAvailableActions(toRef(props, 'projectId'))
 const draft = reactive(emptyManualDraft())
 const baseReleaseKey = ref('')
+const restoredPending = ref(false)
+
+/**
+ * Control checks publication as the `edit` object action, and the publication
+ * itself additionally requires the project owner, a platform administrator or
+ * the member-management responsibility. The page only mirrors those facts;
+ * the server decides again on every request.
+ */
+const publishBlockReason = computed(() => {
+  const denied = permissions.denialReason('edit', '发布 Work 模板')
+  if (denied) return denied
+  if (!actorId.value) return '正在确认登录身份，确认后才能发布 Work 模板。'
+  const governs = props.projectOwnerId === actorId.value
+    || hasAnyRole(rolesFromProfile(auth.user.value?.profile), ['admin'])
+    || permissions.allows('manage_members')
+  return governs ? null : '发布 Work 模板需要项目所有者、平台管理员或项目管理（管理成员）职责。如需发布，请联系项目负责人。'
+})
 
 const manualReleases = computed(() => props.releases.filter((release) => release.manualApproval && !release.withdrawal))
 const selectedImage = computed<TemplateImage | null>(() => (
@@ -159,6 +188,12 @@ watch(() => props.projectId, () => {
   baseReleaseKey.value = ''
 })
 
+// A publication whose outcome is unknown comes back with its exact content; the reviewer confirms again.
+watch(() => publication.pendingDraft, (pending) => {
+  restoredPending.value = Boolean(pending)
+  if (pending) Object.assign(draft, { ...pending, confirmed: false })
+}, { immediate: true })
+
 watch(baseReleaseKey, (key) => {
   const release = manualReleases.value.find((item) => `${item.id}:${item.version}` === key)
   const images = publication.images.kind === 'success' ? publication.images.data : []
@@ -166,11 +201,16 @@ watch(baseReleaseKey, (key) => {
 })
 
 async function submit() {
+  if (publishBlockReason.value) return
   if (await publication.publish({ ...draft })) {
     Object.assign(draft, emptyManualDraft())
     baseReleaseKey.value = ''
+    restoredPending.value = false
     emit('published')
+    return
   }
+  // A refused publication may mean the actor's project responsibility changed.
+  if (publication.outcome?.kind === 'failed' && publication.outcome.diagnostic.status === 403) void permissions.refresh()
 }
 </script>
 

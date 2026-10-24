@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkEnvironmentsView from '@/views/researcher/WorkEnvironmentsView.vue'
+import { useAuth } from '@/composables/useAuth'
 import {
   createEnvironmentTemplateRelease,
   getProjectAgentCapability,
+  getProjectAvailableActions,
   listEnvironments,
   listEnvironmentTemplateReleases,
   listProjectResourceLeases,
@@ -16,6 +18,7 @@ import {
 vi.mock('@/generated/contracts', () => ({
   createEnvironmentTemplateRelease: vi.fn(),
   getProjectAgentCapability: vi.fn(),
+  getProjectAvailableActions: vi.fn(),
   listEnvironments: vi.fn(),
   listEnvironmentTemplateReleases: vi.fn(),
   listProjectResourceLeases: vi.fn(),
@@ -23,6 +26,14 @@ vi.mock('@/generated/contracts', () => ({
   listProjectTemplateImages: vi.fn(),
   withdrawEnvironmentTemplateRelease: vi.fn(),
 }))
+
+function signIn(actorId: string | null, roles: string[] = ['student']) {
+  useAuth().user.value = actorId ? { expired: false, profile: { actor_id: actorId, roles } } as never : null
+}
+
+function grantActions(actions: string[]) {
+  return { data: { projectId: 'project-1', actorId: 'actor', membershipRevision: 1, validUntil: '2099-01-01T00:00:00.000Z', actions }, error: undefined } as never
+}
 
 vi.mock('@/views/student/EnvironmentEntryView.vue', () => ({
   default: { name: 'EnvironmentEntryView', template: '<div data-testid="environment-detail" />' },
@@ -167,7 +178,10 @@ function field(wrapper: VueWrapper, label: string) {
 describe('WorkEnvironmentsView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    window.sessionStorage.clear()
+    signIn('owner-1')
     projectsState.selectedProjectId = project.id
+    vi.mocked(getProjectAvailableActions).mockResolvedValue(grantActions(['browse', 'edit', 'start', 'stop', 'grant_access']))
     vi.mocked(getProjectAgentCapability).mockResolvedValue({ data: { status: 'unconfigured', reasonCode: 'LW_AGENT_MODEL_NOT_CONFIGURED' }, error: undefined } as never)
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [workSummary], nextCursor: null }, error: undefined } as never)
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [containerRelease, vmRelease, withdrawnRelease, experimentRelease], nextCursor: null }, error: undefined } as never)
@@ -381,6 +395,165 @@ describe('WorkEnvironmentsView', () => {
       },
     })
     wrapper.unmount()
+  })
+
+  async function fillContainerDraft(wrapper: VueWrapper, name = 'Python 分析') {
+    await wrapper.get(`[data-image-id="${containerImage.catalogId}"]`).trigger('click')
+    await field(wrapper, '模板名称').setValue(name)
+    await field(wrapper, '模板系列标识').setValue('python-analysis')
+    await field(wrapper, '运行位置（provider binding）').setValue('kubernetes-work')
+    await field(wrapper, '安全配置（security profile）').setValue('restricted-v1')
+    await field(wrapper, '审核说明').setValue('已核对镜像与端口。')
+    await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+  }
+
+  async function mountEmpty() {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
+    return mountAt()
+  }
+
+  function publishKeys() {
+    return vi.mocked(createEnvironmentTemplateRelease).mock.calls.map(([options]) => options.headers['Idempotency-Key'])
+  }
+
+  describe('manual publication permissions', () => {
+    it('does not offer publication to a read-only member', async () => {
+      signIn('member-1')
+      vi.mocked(getProjectAvailableActions).mockResolvedValue(grantActions(['browse']))
+      const { wrapper } = await mountEmpty()
+      expect(wrapper.get('[data-testid="manual-permission-hint"]').text()).toContain('发布 Work 模板')
+      expect(wrapper.find('.manual-form').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('explains that an editor without owner, administrator or member management cannot publish', async () => {
+      signIn('editor-1')
+      vi.mocked(getProjectAvailableActions).mockResolvedValue(grantActions(['browse', 'edit', 'start', 'stop']))
+      const { wrapper } = await mountEmpty()
+      expect(wrapper.get('[data-testid="manual-permission-hint"]').text()).toContain('项目所有者、平台管理员或项目管理（管理成员）职责')
+      expect(wrapper.find('.manual-form').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it.each([
+      ['a manager with member management', 'manager-1', ['student'], ['browse', 'edit', 'manage_members']],
+      ['the project owner', 'owner-1', ['student'], ['browse', 'edit']],
+      ['a platform administrator', 'admin-1', ['admin'], ['browse', 'edit']],
+    ])('offers publication to %s', async (_label, actor, roles, actions) => {
+      signIn(actor, roles)
+      vi.mocked(getProjectAvailableActions).mockResolvedValue(grantActions(actions))
+      const { wrapper } = await mountEmpty()
+      expect(wrapper.find('[data-testid="manual-permission-hint"]').exists()).toBe(false)
+      expect(wrapper.find('.manual-form').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('blocks submission while the project actions are unknown', async () => {
+      vi.mocked(getProjectAvailableActions).mockResolvedValue({ data: undefined, error: { status: 503, diagnosticCode: 'LW_CONTROL_UNAVAILABLE', detail: 'down', retryable: true } } as never)
+      const { wrapper } = await mountEmpty()
+      expect(wrapper.find('[data-testid="manual-permission-hint"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="manual-publish"]').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('re-reads the project actions after a 403 and stops offering publication once revoked', async () => {
+      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: undefined, error: { status: 403, diagnosticCode: 'LW_PROJECT_GOVERNANCE_DENIED', detail: 'denied', retryable: false } } as never)
+      const { wrapper } = await mountEmpty()
+      await fillContainerDraft(wrapper)
+      vi.mocked(getProjectAvailableActions).mockResolvedValue(grantActions(['browse']))
+      const reads = vi.mocked(getProjectAvailableActions).mock.calls.length
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      expect(vi.mocked(getProjectAvailableActions).mock.calls.length).toBeGreaterThan(reads)
+      await vi.waitFor(() => expect(wrapper.find('[data-testid="manual-permission-hint"]').exists()).toBe(true))
+      // A definite refusal ends the command: nothing is left to replay.
+      expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:'))).toEqual([])
+      wrapper.unmount()
+    })
+  })
+
+  describe('manual publication replay', () => {
+    it('replays an unconfirmed publication after a refresh with the same key and restored content', async () => {
+      vi.mocked(createEnvironmentTemplateRelease).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const first = await mountEmpty()
+      await fillContainerDraft(first.wrapper)
+      await first.wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      first.wrapper.unmount()
+
+      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: { operationId: 'op-1', statusUrl: '/x' }, error: undefined } as never)
+      const second = await mountEmpty()
+      expect(second.wrapper.get('[data-testid="manual-pending"]').text()).toContain('上次发布的结果尚未确认')
+      expect((field(second.wrapper, '模板名称').element as HTMLInputElement).value).toBe('Python 分析')
+      // The reviewer confirms again before the replay.
+      expect((second.wrapper.get('[data-testid="manual-confirm"]').element as HTMLInputElement).checked).toBe(false)
+      await second.wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+      await second.wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      const [lost, replay] = vi.mocked(createEnvironmentTemplateRelease).mock.calls.map(([options]) => options)
+      expect(replay.headers['Idempotency-Key']).toBe(lost.headers['Idempotency-Key'])
+      expect(replay.body.manual?.spec.retention.policyId).toBe(lost.body.manual?.spec.retention.policyId)
+      expect(second.wrapper.find('[data-testid="manual-pending"]').exists()).toBe(false)
+      expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:'))).toEqual([])
+      second.wrapper.unmount()
+    })
+
+    it('keeps the command when the form is collapsed and reopened', async () => {
+      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: undefined, error: { status: 503, diagnosticCode: 'LW_CONTROL_UNAVAILABLE', detail: 'down', retryable: true } } as never)
+      const { wrapper } = await mountEmpty()
+      await fillContainerDraft(wrapper)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+
+      const section = wrapper.get<HTMLDetailsElement>('[data-testid="manual-section"]')
+      section.element.open = false
+      await section.trigger('toggle')
+      expect(wrapper.find('[data-testid="manual-publisher"]').exists()).toBe(false)
+      section.element.open = true
+      await section.trigger('toggle')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="manual-pending"]').exists()).toBe(true)
+      await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      const keys = publishKeys()
+      expect(keys).toHaveLength(2)
+      expect(keys[1]).toBe(keys[0])
+      wrapper.unmount()
+    })
+
+    it('gives changed content a new identity', async () => {
+      vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: undefined, error: { status: 503, diagnosticCode: 'LW_CONTROL_UNAVAILABLE', detail: 'down', retryable: true } } as never)
+      const { wrapper } = await mountEmpty()
+      await fillContainerDraft(wrapper)
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      await field(wrapper, '模板名称').setValue('Python 分析（第二版）')
+      await wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      const [first, second] = vi.mocked(createEnvironmentTemplateRelease).mock.calls.map(([options]) => options)
+      expect(second.headers['Idempotency-Key']).not.toBe(first.headers['Idempotency-Key'])
+      expect(second.body.manual?.spec.retention.policyId).not.toBe(first.body.manual?.spec.retention.policyId)
+      wrapper.unmount()
+    })
+
+    it('drops the previous actor\'s unconfirmed publication when another user signs in', async () => {
+      vi.mocked(createEnvironmentTemplateRelease).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const first = await mountEmpty()
+      await fillContainerDraft(first.wrapper)
+      await first.wrapper.get('.manual-form').trigger('submit')
+      await flushPromises()
+      first.wrapper.unmount()
+      expect(Object.keys(window.sessionStorage).some((key) => key.startsWith('labweaver.pending-command:owner-1:'))).toBe(true)
+
+      signIn('admin-2', ['admin'])
+      expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:'))).toEqual([])
+      const second = await mountEmpty()
+      expect(second.wrapper.find('[data-testid="manual-pending"]').exists()).toBe(false)
+      expect((field(second.wrapper, '模板名称').element as HTMLInputElement).value).toBe('')
+      second.wrapper.unmount()
+    })
   })
 
   it('opens the environment page and loads nothing for the launcher when an environment is chosen', async () => {

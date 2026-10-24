@@ -218,6 +218,7 @@
             v-if="manualOpen"
             :project-id="projectId"
             :course-id="project?.courseId ?? null"
+            :project-owner-id="project?.ownerActorId ?? null"
             :releases="releases.releases.kind === 'success' ? releases.releases.data : []"
             @published="releases.load"
           />
