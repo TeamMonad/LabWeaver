@@ -290,3 +290,6 @@ domains:
       - id: 22
         file: resource/0022_model_token_rates.sql
         sha256: ba54b5dcae8316fbccf3c7e6157414f2e67999bcf474c1a03bd169bf919a3b27
+      - id: 23
+        file: resource/0023_outbox_publication_claims.sql
+        sha256: 4c278cc0169006ca2e4125529abeb49d1e3ba2799f552c0f8f4da6fbaa3bbbcc

@@ -116,6 +116,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!("../../../migrations/resource/0020_build_metering.sql"),
         include_str!("../../../migrations/resource/0021_environment_funding.sql"),
         include_str!("../../../migrations/resource/0022_model_token_rates.sql"),
+        include_str!("../../../migrations/resource/0023_outbox_publication_claims.sql"),
     ] {
         sqlx::raw_sql(migration).execute(&pool).await?;
     }
@@ -4638,6 +4639,11 @@ async fn migrated_pool()
     .await?;
     sqlx::raw_sql(include_str!(
         "../../../migrations/resource/0022_model_token_rates.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0023_outbox_publication_claims.sql"
     ))
     .execute(&pool)
     .await?;
