@@ -5,6 +5,7 @@ import type {
   ObjectAction,
   AccessGrantSchema,
   AgentRunHistoryPageSchema,
+  AgentRunTaskProgressSchema,
   ConsoleCapabilityAvailabilitySchema,
   EnvironmentAccessGrantPageSchema,
   EnvironmentEndpointSchema,
@@ -634,6 +635,28 @@ export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<F
     ],
     nextCursor: null,
   })
+}
+
+/** Home scene: the authoring run waits for review; Work configuration retried once and waits for resource approval. */
+export async function getProjectAgentTaskProgress(options?: FixtureOptions): Promise<FixtureResult<AgentRunTaskProgressSchema>> {
+  const runId = options?.path?.runId
+  const base = { projectId: fixtureProjectId, page: 1, pageSize: 1, hasMore: false }
+  if (activeScene.value.id === 'home-in-progress' && options?.path?.projectId === fixtureProjectId) {
+    if (runId === 'agent-run-materials-04') {
+      return fixtureResponse({ ...base, runId, revision: 9, state: 'awaiting_approval', history: [], current: [
+        { track: 'environment', progress: { attempt: 1, executionGeneration: 1, taskRunId: 'task-run-env-1', phase: 'succeeded', nextSteps: [] } },
+        { track: 'evaluation', progress: { attempt: 1, executionGeneration: 1, taskRunId: 'task-run-eval-1', phase: 'awaiting_review', nextSteps: ['completeProjectAuthoringApproval'] } },
+      ] })
+    }
+    if (runId === 'agent-run-work-config-02') {
+      return fixtureResponse({ ...base, runId, revision: 4, state: 'running', hasMore: true, current: [
+        { track: 'work_configuration', progress: { attempt: 2, taskRunId: 'task-run-work-2', phase: 'waiting_resource_approval', resourceRequestId: 'resource-request-work-2', resourceState: 'reviewing', nextSteps: [] } },
+      ], history: [
+        { track: 'work_configuration', progress: { attempt: 1, executionGeneration: 1, taskRunId: 'task-run-work-1', phase: 'failed', diagnosticCode: 'LW_TASK_PLATFORM_FAILED', nextSteps: [] } },
+      ] })
+    }
+  }
+  return notFoundResponse('读取任务进度', runId)
 }
 
 export async function getProjectAgentRun(options?: FixtureOptions) {

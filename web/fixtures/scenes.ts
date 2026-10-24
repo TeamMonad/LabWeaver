@@ -18,7 +18,7 @@ const DEFAULT_PROJECT_ID = 'project-physics-lab'
 
 export const fixtureScenes: FixtureScene[] = [
   { id: 'home-teacher', label: '教师首页 · 无进行中事项', group: '角色首页与导航', role: 'teacher', path: '/', description: '当前项目没有运行中的环境或未完成任务；侧栏承担功能导航。' },
-  { id: 'home-in-progress', label: '首页 · 当前项目进行中', group: '角色首页与导航', role: 'teacher', path: '/', projectId: DEFAULT_PROJECT_ID, description: '运行中与失败的环境、等待审核的生成任务和待审批资源申请。' },
+  { id: 'home-in-progress', label: '首页 · 当前项目进行中', group: '角色首页与导航', role: 'teacher', path: '/', projectId: DEFAULT_PROJECT_ID, description: '运行中与失败的环境、按轨道显示当前尝试的生成任务（等待人工审核、第 2 次尝试等待资源审批）和待审批资源申请。' },
   { id: 'home-student', label: '学生首页 · 无进行中事项', group: '角色首页与导航', role: 'student', path: '/', description: '学生身份只看到有权读取的进行中事项。' },
   { id: 'home-admin', label: '管理员首页 · 无进行中事项', group: '角色首页与导航', role: 'admin', path: '/', description: '管理员身份的当前项目进行中视图。' },
   { id: 'project-link-unavailable', label: '项目链接 · 无法访问', group: '角色首页与导航', role: 'student', path: '/researcher/resources', projectId: 'project-not-accessible', description: '链接中的项目不在当前账号的项目列表中，显示恢复入口而不是上一个项目的数据。' },

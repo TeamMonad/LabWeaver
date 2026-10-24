@@ -1,8 +1,8 @@
 import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
-import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { DOMWrapper, enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import HomeView from '@/views/HomeView.vue'
-import { listEnvironments, listProjectAgentRuns, listProjectResourceRequests } from '@/generated/contracts'
+import { getProjectAgentTaskProgress, listEnvironments, listProjectAgentRuns, listProjectResourceRequests } from '@/generated/contracts'
 
 const authState = vi.hoisted(() => ({
   user: { value: null as { expired: boolean; profile: Record<string, unknown> } | null },
@@ -23,6 +23,7 @@ vi.mock('@/composables/useAuth', () => ({ useAuth: () => authState }))
 vi.mock('@/composables/useProjects', () => ({ useProjects: () => projectsState }))
 vi.mock('@/config', () => ({ OIDC_ENABLED: true, API_BASE_URL: '/api/v1', APP_TITLE: 'LabWeaver' }))
 vi.mock('@/generated/contracts', () => ({
+  getProjectAgentTaskProgress: vi.fn(),
   listEnvironments: vi.fn(),
   listProjectAgentRuns: vi.fn(),
   listProjectResourceRequests: vi.fn(),
@@ -43,6 +44,26 @@ function environment(id: string, observedState: string, extra: Record<string, un
 
 function run(id: string, state: string, purpose: Record<string, unknown>) {
   return { id, projectId: 'project-1', state, purpose, createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z' }
+}
+
+type ProgressOptions = { path: { projectId: string; runId: string } }
+
+const attempt = (phase: string, attemptNumber = 1) => ({ attempt: attemptNumber, phase, nextSteps: [] })
+
+/** A task-progress body for exactly the run that was asked for. */
+function progressFor(options: ProgressOptions, current: unknown[], history: unknown[] = []) {
+  return {
+    projectId: options.path.projectId, runId: options.path.runId, page: 1, pageSize: 1, hasMore: false,
+    revision: 3, state: 'running', current, history,
+  }
+}
+
+/** Visible text of each track chip: track name, phase, attempt. */
+function chipTexts(scope: DOMWrapper<Element>) {
+  return scope.findAll('.track-chip').map((chip) => chip.findAll('span')
+    .filter((part) => part.element.parentElement === chip.element)
+    .map((part) => part.text())
+    .join(' '))
 }
 
 enableAutoUnmount(afterEach)
@@ -71,6 +92,7 @@ describe('HomeView (current project in progress)', () => {
     vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [], nextCursor: null }))
     vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: [], nextCursor: null }))
     vi.mocked(listProjectResourceRequests).mockResolvedValue(ok({ items: [], nextCursor: null }))
+    vi.mocked(getProjectAgentTaskProgress).mockImplementation((async (options: ProgressOptions) => ok(progressFor(options, []))) as never)
   })
 
   it('is not a task catalog: it shows the current project and reads only that project', async () => {
@@ -120,6 +142,184 @@ describe('HomeView (current project in progress)', () => {
     expect(review?.attributes('href')).toBe('/teacher/approvals?projectId=project-1&runId=run-review')
     const config = section.findAll('a').find((link) => link.text() === '查看进度')
     expect(config?.attributes('href')).toBe('/researcher/software?projectId=project-1&runId=run-config')
+  })
+
+  it('shows the current phase and attempt of each track for open runs only, without history or percentages', async () => {
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({
+      items: [
+        run('run-review', 'awaiting_approval', { kind: 'authoring', environmentClass: 'experiment' }),
+        run('run-template', 'requested', { kind: 'authoring', environmentClass: 'work' }),
+        run('run-config', 'running', { kind: 'work_configuration' }),
+        run('run-done', 'succeeded', { kind: 'authoring', environmentClass: 'experiment' }),
+      ],
+      nextCursor: null,
+    }))
+    vi.mocked(getProjectAgentTaskProgress).mockImplementation((async (options: ProgressOptions) => {
+      switch (options.path.runId) {
+        case 'run-review':
+          return ok(progressFor(options, [
+            { track: 'evaluation', progress: attempt('awaiting_review') },
+            { track: 'environment', progress: attempt('succeeded') },
+          ]))
+        case 'run-template':
+          return ok(progressFor(options, [
+            { track: 'evaluation', progress: attempt('queued', 0) },
+            { track: 'environment', progress: attempt('preparing') },
+          ]))
+        default:
+          return ok(progressFor(
+            options,
+            [{ track: 'work_configuration', progress: attempt('executing', 2) }],
+            [{ track: 'work_configuration', progress: attempt('failed') }],
+          ))
+      }
+    }) as never)
+    const { wrapper } = await createWrapper()
+    const section = wrapper.get('[data-home-section="agent-runs"]')
+
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledTimes(3)
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-review' }, query: { page: 1, pageSize: 1 } })
+    expect(vi.mocked(getProjectAgentTaskProgress).mock.calls.map(([options]) => options.path.runId)).not.toContain('run-done')
+    expect(chipTexts(section.get('[data-run-id="run-review"]'))).toEqual(['环境 已完成 第 1 次尝试', '评测 等待人工审核 第 1 次尝试'])
+    // Evaluation reports attempt 0 before its step is claimed; no attempt count is invented.
+    expect(chipTexts(section.get('[data-run-id="run-template"]'))).toEqual(['环境 准备中 第 1 次尝试', '评测 排队中'])
+    expect(chipTexts(section.get('[data-run-id="run-config"]'))).toEqual(['Work 配置 执行中 第 2 次尝试'])
+    expect(section.text()).not.toContain('失败')
+    expect(section.text()).not.toContain('%')
+    expect(section.find('[role="progressbar"]').exists()).toBe(false)
+    // The tooltip explains the phase in Chinese; the colour category never leaks as a state string.
+    const pills = section.get('[data-run-id="run-review"]').findAll('.track-chip .gcp-status-pill')
+    expect(pills.map((pill) => pill.attributes('title'))).toEqual(['这次尝试已完成。', '这次尝试已执行完，等待人工审核后才会继续。'])
+    expect(section.findAll('.track-chip .gcp-status-pill').map((pill) => pill.attributes('title')).join(' ')).not.toMatch(/[a-z_]{4,}/)
+  })
+
+  it('says in Chinese what a person has to do for each waiting track and links a resource wait to the requests', async () => {
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({
+      items: [
+        run('run-review', 'awaiting_approval', { kind: 'authoring', environmentClass: 'experiment' }),
+        run('run-config', 'running', { kind: 'work_configuration' }),
+      ],
+      nextCursor: null,
+    }))
+    vi.mocked(getProjectAgentTaskProgress).mockImplementation((async (options: ProgressOptions) => ok(progressFor(
+      options,
+      options.path.runId === 'run-review'
+        ? [{ track: 'environment', progress: attempt('awaiting_review') }, { track: 'evaluation', progress: attempt('awaiting_review') }]
+        : [{ track: 'work_configuration', progress: attempt('waiting_resource_approval', 2) }],
+    ))) as never)
+    const { wrapper } = await createWrapper()
+    const section = wrapper.get('[data-home-section="agent-runs"]')
+
+    const review = section.get('[data-run-id="run-review"]')
+    expect(review.findAll('[data-run-attention]').map((hint) => hint.text())).toEqual([
+      '环境已执行完，等待人工审核后才会继续。',
+      '评测已执行完，等待人工审核后才会继续。',
+    ])
+    expect(review.classes()).toContain('item-row--attention')
+    expect(review.find('.track-resource-link').exists()).toBe(false)
+    expect(review.findAll('a').find((link) => link.text() === '去审核')?.attributes('href')).toBe('/teacher/approvals?projectId=project-1&runId=run-review')
+
+    const config = section.get('[data-run-id="run-config"]')
+    expect(config.get('[data-run-attention]').text()).toBe('Work 配置正在等待资源审批，批准后自动继续。')
+    expect(config.classes()).toContain('item-row--attention')
+    expect(config.get('.track-resource-link').attributes('href')).toBe('/researcher/resources?projectId=project-1')
+  })
+
+  it('shows a failed progress read only on that run, with a Chinese reason and request id, and retries just that run', async () => {
+    vi.mocked(listEnvironments).mockResolvedValue(ok({ items: [environment('env-ready', 'ready')], nextCursor: null }))
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({
+      items: [
+        run('run-broken', 'awaiting_approval', { kind: 'authoring', environmentClass: 'experiment' }),
+        run('run-config', 'running', { kind: 'work_configuration' }),
+      ],
+      nextCursor: null,
+    }))
+    vi.mocked(getProjectAgentTaskProgress).mockImplementation((async (options: ProgressOptions) => options.path.runId === 'run-broken'
+      ? problem(503, 'LW_AGENT_UNAVAILABLE', 'Agent 服务暂时不可用。')
+      : ok(progressFor(options, [{ track: 'work_configuration', progress: attempt('executing') }]))) as never)
+    const { wrapper } = await createWrapper()
+    const section = wrapper.get('[data-home-section="agent-runs"]')
+
+    const broken = section.get('[data-run-id="run-broken"]')
+    expect(broken.find('.track-chip').exists()).toBe(false)
+    expect(broken.get('.diagnostic-message').text()).toBe('Agent 服务暂时不可用。')
+    expect(broken.get('.diagnostic-code').text()).toBe('LW_AGENT_UNAVAILABLE')
+    expect(broken.get('.diagnostic-request-id').text()).toBe('req-503')
+    // The row stays usable: aggregate hint and the review link still work.
+    expect(broken.text()).toContain('等待人工审核。审核通过后才会继续。')
+    expect(broken.findAll('a').find((link) => link.text() === '去审核')).toBeTruthy()
+
+    const config = section.get('[data-run-id="run-config"]')
+    expect(chipTexts(config)).toEqual(['Work 配置 执行中 第 1 次尝试'])
+    expect(config.find('.diagnostic-banner').exists()).toBe(false)
+    expect(wrapper.get('[data-home-section="environments"]').text()).toContain('环境 env-ready')
+    expect(wrapper.findAll('.diagnostic-banner')).toHaveLength(1)
+
+    vi.mocked(getProjectAgentTaskProgress).mockClear()
+    vi.mocked(getProjectAgentTaskProgress).mockImplementation((async (options: ProgressOptions) => ok(progressFor(
+      options,
+      [{ track: 'evaluation', progress: attempt('awaiting_review') }],
+    ))) as never)
+    await broken.get('.diagnostic-retry').trigger('click')
+    await flushPromises()
+
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledTimes(1)
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-broken' }, query: { page: 1, pageSize: 1 } })
+    expect(chipTexts(section.get('[data-run-id="run-broken"]'))).toEqual(['评测 等待人工审核 第 1 次尝试'])
+    expect(wrapper.find('.diagnostic-banner').exists()).toBe(false)
+    expect(listProjectAgentRuns).toHaveBeenCalledTimes(1)
+  })
+
+  it('discards a progress response that belongs to another project or run', async () => {
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({
+      items: [
+        run('run-a', 'running', { kind: 'work_configuration' }),
+        run('run-b', 'running', { kind: 'work_configuration' }),
+      ],
+      nextCursor: null,
+    }))
+    const tracks = [{ track: 'work_configuration', progress: attempt('awaiting_review') }]
+    vi.mocked(getProjectAgentTaskProgress).mockImplementation((async (options: ProgressOptions) => ok(options.path.runId === 'run-a'
+      ? { ...progressFor(options, tracks), projectId: 'project-other' }
+      : { ...progressFor(options, tracks), runId: 'run-other' })) as never)
+    const { wrapper } = await createWrapper()
+    const section = wrapper.get('[data-home-section="agent-runs"]')
+
+    for (const runId of ['run-a', 'run-b']) {
+      const row = section.get(`[data-run-id="${runId}"]`)
+      expect(row.find('.track-chip').exists()).toBe(false)
+      expect(row.find('[data-run-attention]').exists()).toBe(false)
+      expect(row.get('.diagnostic-code').text()).toBe('HOME_AGENT_PROGRESS_STALE_CONTEXT')
+      expect(row.get('.diagnostic-message').text()).toContain('任务进度返回了其他项目或任务的数据')
+    }
+  })
+
+  it('reads progress for at most four runs at a time', async () => {
+    const ids = ['run-1', 'run-2', 'run-3', 'run-4', 'run-5', 'run-6']
+    vi.mocked(listProjectAgentRuns).mockResolvedValue(ok({ items: ids.map((id) => run(id, 'running', { kind: 'work_configuration' })), nextCursor: null }))
+    const pending: Array<() => void> = []
+    let inFlight = 0
+    let peak = 0
+    vi.mocked(getProjectAgentTaskProgress).mockImplementation(((options: ProgressOptions) => new Promise((resolve) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      pending.push(() => {
+        inFlight -= 1
+        resolve(ok(progressFor(options, [{ track: 'work_configuration', progress: attempt('executing') }])))
+      })
+    })) as never)
+    const { wrapper } = await createWrapper()
+    const section = wrapper.get('[data-home-section="agent-runs"]')
+
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledTimes(4)
+    expect(section.findAll('.track-loading')).toHaveLength(6)
+    while (pending.length) {
+      pending.shift()?.()
+      await flushPromises()
+    }
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledTimes(6)
+    expect(peak).toBe(4)
+    expect(section.findAll('.track-chip')).toHaveLength(6)
   })
 
   it('does not offer the teacher review link to an account without the teacher role', async () => {
