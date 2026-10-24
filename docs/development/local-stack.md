@@ -35,6 +35,8 @@ HTTPS 证书由本次运行的本地 CA 签发。命令不自动修改宿主机�
 
 本地入口用于业务开发和 CPU 容器流程。模型调用和镜像构建依赖必须明确配置，不能把未配置的外部能力视为成功。普通 `up` 会先安装锁定版本的 Harbor 图表、启动运行拥有的 Harbor 和 rootless BuildKit，再启用真实镜像构建执行器；本地 Registry 仍只分发平台镜像。`--external-fixtures` 才会关闭真实构建执行器并使用边界明确的构建夹具。默认不发起付费模型请求、真实扣款或远端部署。
 
+普通与 `--external-fixtures` 输入均复用加密 Bundle 的 Environment 执行器权威投影函数，生成运行目录下的 `environment-executor-values.yaml` 并作为 Helm values 加载。执行器使用 owner 的 Environment 服务身份、Resource URI/CA/audience/scopes/timeout 及只读凭据挂载；数据库与 NATS 的启动文件也指向同一 owner 投影，不另造默认批准或客户端身份。fixture 模式不会跳过真实 Resource 的运行授权与资金校验。
+
 普通 `up` 默认不启用沙箱内镜像构建；需要验证 authoring sandbox 的 rootless BuildKit sidecar 时显式加 `--authoring-buildkit-sidecar`。该开关把锁定的 rootless BuildKit 镜像和 `authoring-buildkit-config` ConfigMap（`buildkitd.toml` 与 Harbor CA）写入沙箱配置，只在真实 Harbor 与 BuildKit 就绪的普通 `up` 中可用，`--external-fixtures` 不支持。
 
 普通 `up` 在创建 Kind 资源前读取仓库根目录 `.env`（或 `--provider-env` 指定文件）中的

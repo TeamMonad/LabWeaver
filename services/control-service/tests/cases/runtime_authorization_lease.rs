@@ -23,6 +23,11 @@ pub(super) async fn assert_original_lease_chain(
         current_environment_authorization(pool, approval.request_id, None).await,
         Err(RuntimeBindingError::LeaseNotActive)
     ));
+    Box::pin(
+        super::funded_handoff::pending_attachment::assert_before_activation(pool, store, approval),
+    )
+    .await
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
     let provisioning = store
         .claim_next_capacity_shell()
         .await?

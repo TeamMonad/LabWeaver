@@ -101,7 +101,7 @@ nats:
   serverFile: /etc/labweaver/environment-authority/nats-server
 ```
 
-派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。这里交付的是同源输入绑定接口；当前 Bundle PR 不实现 `serverFile` 的 Environment 启动消费者。原非 Bundle YAML 仍支持单个 server 字符串。
+派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影；Environment 启动消费者读取 `serverFile`，原非 Bundle YAML 仍支持单个 `server` 字符串。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续读取各执行器已有 Secret。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致。工具不签发 NATS 用户、不扩大发布/订阅/响应权限。
 
 有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
 
@@ -111,7 +111,9 @@ nats:
 
 部署前确认 Resource 的 Environment client allowlist 与该共享身份一致，服务 JWT 具有现有 `resource.environment.resolve` 权限，HTTPS audience/CA 匹配。Environment 的生命周期交接继续由 Resource 使用 `resource.environment.manage` 调用；清理读回继续使用原 `environment.work.read` 边界。不要把业务服务替换为测试响应者。
 
-新建 Work/Experiment 先通过 Resource 完成批准、容量分配与原租约资金预占，再由 Resource 自动发送同一 `ResourceEnvironmentHandoff`。公开 `CreateEnvironmentRequest` 现在必须携带该真实申请的 `resourceRequestId`，只把浏览器幂等意图附着到原环境；不得使用旧 Experiment 独立 reservation 创建另一份环境。申请目标、owner、项目、课程、发布版本或原租约不符时拒绝。交接尚未落库时返回 `LW_ENVIRONMENT_ALLOCATION_PENDING`，重试保留同一请求与幂等键。
+Resource 的受限 ingress 对 `container-executor`、`kubevirt-executor` 仅开放 TCP 9448，供实时读取运行授权和 credit grant；不向它们开放健康端口或任意业务端口，JWT/client allowlist 保持原校验。现有 Cilium gateway/API 策略不包含 Resource 专属 ingress，Resource 的该入口由同一 Kubernetes NetworkPolicy 约束。
+
+新建 Work/Experiment 先通过 Resource 完成批准、容量分配与原租约资金预占，再由 Resource 自动发送同一 `ResourceEnvironmentHandoff`。公开 `CreateEnvironmentRequest` 必须携带该真实申请的 `resourceRequestId`，只把浏览器幂等意图附着到原环境。合法申请已批准但原 lease 尚在 Allocating，或激活后交接尚未落库时，返回 `409/LW_ENVIRONMENT_ALLOCATION_PENDING`；保留同一请求与幂等键等待重试，不重新申请或预占。只有 Resource 核对 owner/project/course/release、原 approval/claim/lease、当前审批有效期和运行策略后才判定为等待分配；撤销、过期及归属/目标错误不能当作 pending。
 
 Resource 维护循环同时有界检查 active handed-off 环境的清理读回。停止不释放原权利；仅 `Deleted` 且完整清理证据匹配最后确认的 lease fence，才对当前 request/claim/lease 做 CAS 并进入原释放流程。不要以删除请求、Pod 停止或不可读取状态强行退占。七天只读保留、恢复/导出与独立磁盘清除仍未提供。
 

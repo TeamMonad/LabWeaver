@@ -3071,6 +3071,53 @@ def _local_platform_manifest(
     return manifest
 
 
+def derive_local_executor_authority(root: Path, manifest: dict[str, Any], issuer: str) -> dict[str, Any]:
+    """Use the encrypted Bundle's projector over the local owner's actual inputs."""
+    from deployment_bundle import environment_executor_bindings
+
+    defaults = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.yaml").read_text())["workloads"]
+    local = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.local-kind.yaml").read_text())["workloads"]
+    application: dict[str, Any] = {"helmValues": {"workloads": {
+        name: {"enabled": configuration.get("enabled", defaults[name]["enabled"])}
+        for name, configuration in local.items()
+    }}}
+    files: dict[str, bytes] = {}
+    for group, directory in (("configMaps", "configmaps"), ("secrets", "secrets")):
+        application[group] = {}
+        for name, keys in manifest[group].items():
+            application[group][name] = {}
+            for key in keys:
+                reference = f"{directory}/{name}/{key}"
+                application[group][name][key] = reference
+                files[reference] = (root / reference).read_bytes()
+    owner_secret = defaults["environment-service"]["secret"]
+    inputs = {}
+    for name in ("environment-service", "container-executor", "kubevirt-executor"):
+        configuration = defaults[name]
+        env = dict(configuration.get("env", {}), **local.get(name, {}).get("env", {}))
+        env["LABWEAVER_SERVICE_OIDC_ISSUER"] = issuer
+        inputs[name] = {"env": env, "secretEnv": {
+            variable: {"secret": ref.get("secret", configuration["secret"]), "key": ref["key"]}
+            for variable, ref in configuration.get("secretEnv", {}).items()
+        }}
+        # The local generator writes these copies from the owner. The authoritative
+        # source for projected startup files is the owner, not a second secret.
+        if name != "environment-service" and configuration["secret"] in application["secrets"]:
+            for key in ("database-url", "postgres-ca.pem", "nats-ca.pem"):
+                application["secrets"][configuration["secret"]][key] = application["secrets"][owner_secret][key]
+    inputs, configs, authority = environment_executor_bindings({"application": application}, files, inputs)
+    for reference, content in configs.items():
+        write(root / reference, content)
+    return {
+        "environmentExecutorAuthority": authority,
+        "workloads": {
+            name: {"env": inputs[name]["env"]}
+            for name in ("container-executor", "kubevirt-executor")
+            if local.get(name, {}).get("enabled", defaults[name]["enabled"])
+        },
+    }
+
+
 def make_app_input(
     work: Path,
     foundation: Path,
@@ -3442,6 +3489,8 @@ def make_app_input(
         write(resource_root / "secrets/resource-service-secrets" / key, value)
     sys.path.insert(0,str(ROOT/"tools"))
     from render_platform_bundle import render_bundle
+    executor_values = derive_local_executor_authority(root, manifest, public_issuer)
+    write(work / "environment-executor-values.yaml", yaml.safe_dump(executor_values))
     payload=render_bundle(manifest_path,root)
     bundle=work/"platform-bundle.yaml"
     write(bundle,payload)
@@ -3462,6 +3511,7 @@ def deploy(kubeconfig: Path, images: dict[str,str], bundle: Path, resource_bundl
     args=["helm","upgrade","--install","labweaver-local","deploy/helm/labweaver",
           "--namespace",NAMESPACE,"--create-namespace","--kubeconfig",str(kubeconfig),
           "--values","deploy/helm/labweaver/values.local-kind.yaml",
+          "--values", str(bundle.parent / "environment-executor-values.yaml"),
           "--set-string",f"deploymentIdentity.configurationBundleSha256=sha256:{bundle_sha}",
           "--set-string",f"network.kubernetesApiCidrs[0]={local_kubernetes_api_endpoint(kubeconfig)}"]
     if real_build_provider is not None:

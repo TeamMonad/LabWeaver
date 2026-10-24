@@ -12,9 +12,8 @@ use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentRuntimeAuthorizationResolution,
     ResolveEnvironmentRuntimeAuthorizationRequest, ResourceEnvironmentHandoff,
 };
-use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleasePublished, SPEC_VERSION, subjects};
 use contracts::resource::environment_funding::EnvironmentCreditGrant;
-use contracts::{EventId, Revision, Sequence, UtcTimestamp};
+use contracts::{Revision, UtcTimestamp};
 use environment_service::{
     EnvironmentRuntimeAdmission, EnvironmentRuntimeAuthority, PgEnvironmentStore,
     PgReleaseProjectionStore, ResourceUsageClientError,
@@ -23,11 +22,13 @@ use futures_util::StreamExt;
 use resource_service::{
     runtime_authorization::CurrentEnvironmentAuthorization, store::PgResourceStore,
 };
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use std::{sync::Arc, time::Duration};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, runners::AsyncRunner};
 use tower::ServiceExt;
+#[path = "environment_pending_attach.rs"]
+pub(super) mod pending_attachment;
 #[path = "environment_funded_auth.rs"]
 mod service_auth;
 #[path = "environment_funded_upgrade.rs"]
@@ -63,13 +64,17 @@ impl EnvironmentRuntimeAuthority for PgAuthority {
         input: &ResolveEnvironmentRuntimeAuthorizationRequest,
     ) -> std::result::Result<EnvironmentRuntimeAuthorizationResolution, ResourceUsageClientError>
     {
-        let value = resource_service::runtime_authorization::current_environment_authorization(
-            &self.1,
-            input.resource_request_id,
-            input.expected_lease_id,
+        let value = resource_service::runtime_authorization::resolve_environment_authorization(
+            &self.1, input,
         )
         .await
-        .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        .map_err(|error| ResourceUsageClientError::Problem {
+            retryable: matches!(
+                error,
+                resource_service::runtime_authorization::RuntimeBindingError::Unavailable
+            ),
+            diagnostic_code: error.to_string(),
+        })?;
         Ok(EnvironmentRuntimeAuthorizationResolution {
             valid_until: value.lease.expires_at.min(value.approval_valid_until),
             provider_binding: value.provider_binding,
@@ -94,50 +99,25 @@ pub(super) async fn exercise(
     resource: &PgResourceStore,
     original: &CurrentEnvironmentAuthorization,
 ) -> Result {
-    super::super::apply_domain_migrations(pool, persistence_sqlx::Domain::Environment)
-        .await
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let row=sqlx::query("SELECT release_contract,candidate_contract FROM control.runtime_authorization_configurations WHERE release_id=$1")
-        .bind(match original.binding.target {contracts::resource::ResourceTarget::Environment {release_id,..}=>release_id.as_uuid(),contracts::resource::ResourceTarget::Task { .. }=>return Err("environment target".into())}).fetch_one(pool).await?;
-    let release: contracts::supply_chain::EnvironmentTemplateRelease =
-        serde_json::from_value(row.try_get("release_contract")?)?;
-    let candidate: contracts::authoring::EnvironmentCandidate =
-        serde_json::from_value(row.try_get("candidate_contract")?)?;
-    let projection = ReleasePublished {
-        release,
-        environment_spec: candidate.spec,
+    use environment_service::ContainerReleaseResolver as _;
+    let releases = PgReleaseProjectionStore::new(pool.clone());
+    let contracts::resource::ResourceTarget::Environment {
+        release_id,
+        release_version,
+        ..
+    } = original.binding.target
+    else {
+        return Err("environment target".into());
     };
+    let projection = releases
+        .resolve(release_id, release_version)
+        .await?
+        .projection;
     if projection.environment_spec.class == contracts::authoring::EnvironmentClass::Experiment {
         assert_ne!(projection.release.project_id, original.lease.project_id);
     } else {
         assert_eq!(projection.release.project_id, original.lease.project_id);
     }
-    let releases = PgReleaseProjectionStore::new(pool.clone());
-    let contract = EVENT_CONTRACTS
-        .iter()
-        .find(|v| v.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED)
-        .ok_or("release event")?;
-    releases
-        .accept(
-            "funded-env-release",
-            &CloudEvent {
-                specversion: SPEC_VERSION.into(),
-                id: EventId::new(),
-                source: contract.source().into(),
-                event_type: contract.event_type.into(),
-                subject: contract.subject.into(),
-                time: projection.release.published_at,
-                datacontenttype: "application/json".into(),
-                dataschema: contract.data_schema(),
-                project_id: projection.release.project_id,
-                course_id: projection.release.course_id,
-                aggregate_revision: Revision::new(1)?,
-                aggregate_sequence: Sequence(1),
-                trace_id: "funded-environment".into(),
-                data: projection.clone(),
-            },
-        )
-        .await?;
     let store = PgEnvironmentStore::new(pool.clone());
     let admission = EnvironmentRuntimeAdmission::new(
         releases.clone(),

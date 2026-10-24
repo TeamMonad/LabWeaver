@@ -16,7 +16,10 @@ use persistence_sqlx::Sha256Digest;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 mod environment;
-pub use environment::{CurrentEnvironmentAuthorization, current_environment_authorization};
+pub use environment::{
+    CurrentEnvironmentAuthorization, current_environment_authorization,
+    resolve_environment_authorization,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeBindingError {
@@ -26,6 +29,8 @@ pub enum RuntimeBindingError {
     ScopeDenied,
     #[error("LW_RUNTIME_LEASE_NOT_ACTIVE")]
     LeaseNotActive,
+    #[error("LW_ENVIRONMENT_ALLOCATION_PENDING")]
+    AllocationPending,
     #[error("LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE")]
     Unavailable,
 }

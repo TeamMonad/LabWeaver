@@ -128,6 +128,13 @@ course, actor and configuration checks still apply. Work and an unscoped Experim
 require the same project. A supplied display label must match the Resource request's
 original label; omit it to use that label.
 
+Before lease activation, a scoped and still-valid approved allocation returns
+`409/LW_ENVIRONMENT_ALLOCATION_PENDING` without an Environment, operation, Outbox,
+API idempotency result or hold mutation. Resource verifies the original allocation
+chain and current policy before classifying it as pending; revoked/expired approvals
+and wrong owner/project/course/release remain denials, not pending. After activation
+and the original handoff, retry the same browser key to attach to that one create operation.
+
 `POST /internal/v1/resource/work-handoffs` returns a `ResourceEnvironmentHandoffReceipt`:
 the original `accepted` create operation plus request/lease/claim IDs and the lease
 revision actually accepted by Environment. That receipt commits atomically with the

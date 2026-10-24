@@ -646,12 +646,11 @@ def _configuration_policy(version: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _environment_executor_bindings(
-    model: dict[str, Any], files: dict[str, bytes], manifest: dict[str, Any]
+def environment_executor_bindings(
+    model: dict[str, Any], files: dict[str, bytes], inputs: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, bytes], dict[str, Any]]:
     """Bind existing executor startup inputs to the Environment owner's source."""
     application = model["application"]
-    inputs = _workload_inputs(application, manifest)
     defaults = _document(WORKLOADS_FILE.read_bytes())["workloads"]
     overrides = application["helmValues"].get("workloads", {})
     executors = [
@@ -1006,8 +1005,7 @@ def load_bundle(
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _configuration_policy(_settings(model, files))
-    _workload_inputs(application, manifest)
-    _environment_executor_bindings(model, files, manifest)
+    environment_executor_bindings(model, files, _workload_inputs(application, manifest))
     lock = _document(files[versions["lockFile"]])
     package = _document(files[versions["packageFile"]])
     if (
@@ -1094,7 +1092,7 @@ def derive_bundle(
     output.mkdir(mode=0o700)
     manifest = objects._load_manifest(manifest_path)
     workload_inputs, executor_configs, executor_authority = (
-        _environment_executor_bindings(model, files, manifest)
+        environment_executor_bindings(model, files, _workload_inputs(application, manifest))
     )
     manifest["namespace"] = model["target"]["namespace"]
     manifest_output = output / "object-manifest.json"
