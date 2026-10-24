@@ -153,29 +153,36 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
 
   instance.interceptors.request.use(async (config) => {
     requestEpochs.set(config, sessionEpoch.value)
-    if (!(await awaitConfirmedSession())) {
-      throw new LabWeaverApiError(
-        'LW_SDK_SESSION_UNCONFIRMED',
-        'The signed-in session could not be confirmed; the request was not sent.',
-      )
-    }
-    if (authentication.mode === 'bearer') {
-      const token = await authentication.accessToken()
-      if (!token) {
-        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
-      } else {
-        config.headers.Authorization = `Bearer ${token}`
+    // Credentials are fetched asynchronously, and a concurrent request may report
+    // a rejection meanwhile: the cookie may then already belong to another actor.
+    // Such a request is only sent once the session is confirmed again with fresh
+    // credentials; it has never reached the server, so this is not a replay.
+    for (;;) {
+      if (!(await awaitConfirmedSession())) {
+        throw new LabWeaverApiError(
+          'LW_SDK_SESSION_UNCONFIRMED',
+          'The signed-in session could not be confirmed; the request was not sent.',
+        )
       }
-    } else if (isUnsafeMethod(config.method)) {
-      const token = await csrfToken?.()
-      if (!token) {
-        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
+      // The actor changed while this request waited: a form of the previous actor is never sent as the new one.
+      if (startedInEarlierSession(config)) throw sessionChanged()
+      const credentialVersion = sessionCredentialVersion()
+      if (authentication.mode === 'bearer') {
+        const token = await authentication.accessToken()
+        if (!token) {
+          throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
+        } else {
+          config.headers.Authorization = `Bearer ${token}`
+        }
+      } else if (isUnsafeMethod(config.method)) {
+        const token = await csrfToken?.()
+        if (!token) {
+          throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
+        }
+        config.headers['X-CSRF-Token'] = token
       }
-      config.headers['X-CSRF-Token'] = token
+      if (sessionCredentialVersion() === credentialVersion) return config
     }
-    // The actor changed while this request waited: a form of the previous actor is never sent as the new one.
-    if (startedInEarlierSession(config)) throw sessionChanged()
-    return config
   })
 }
 

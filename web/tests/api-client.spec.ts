@@ -306,6 +306,81 @@ describe('browser session changes (#198)', () => {
 
     expect(confirm).toHaveBeenCalledOnce()
   })
+
+  describe('a rejection that arrives while a write is fetching its CSRF token', () => {
+    /**
+     * Write W passes the session check, then waits for its CSRF token. While it
+     * waits, a concurrent GET on the same client receives 401, which starts a
+     * re-read of the actor. Only then does W's token arrive.
+     */
+    async function writeWaitingForCsrf(confirm: (advanceSessionEpoch: () => void) => Promise<void>) {
+      const { session, client, axios: transportAxios } = await freshTransport()
+      let answerCsrf!: (value: unknown) => void
+      const csrfGet = vi.spyOn(transportAxios, 'get')
+        .mockReturnValueOnce(new Promise((resolve) => { answerCsrf = resolve }) as never)
+        .mockResolvedValueOnce({ data: { csrfToken: 'token-after-reread', expiresAt: future() } } as never)
+      session.registerSessionConfirmation(() => confirm(session.advanceSessionEpoch))
+      const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+      const writes: unknown[] = []
+      api.instance.defaults.adapter = vi.fn(async (config) => {
+        if (config.method === 'get') {
+          const body = { data: { diagnosticCode: 'LW_AUTH_SESSION_REJECTED' }, status: 401, statusText: 'Unauthorized', headers: new AxiosHeaders(), config }
+          throw new AxiosError('Request failed with status code 401', AxiosError.ERR_BAD_REQUEST, config, null, body as never)
+        }
+        writes.push(config.headers['X-CSRF-Token'])
+        return { data: { ok: true }, status: 201, statusText: 'Created', headers: {}, config }
+      })
+
+      const write = api.post({ url: '/api/v1/users/me/ssh-keys', body: { publicKey: 'A 的公钥' } })
+      await vi.waitFor(() => expect(csrfGet).toHaveBeenCalledOnce())
+      await api.get({ url: '/api/v1/projects' })
+      answerCsrf({ data: { csrfToken: 'token-before-reread', expiresAt: future() } })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return { write, writes }
+    }
+
+    it('waits for the re-read that is still in flight before sending', async () => {
+      const reread = deferred()
+      const confirm = vi.fn(() => reread.promise)
+      const { write, writes } = await writeWaitingForCsrf(confirm)
+
+      expect(confirm).toHaveBeenCalledOnce()
+      expect(writes).toEqual([])
+
+      // Same actor: the write was never sent, so sending it now with a token for the confirmed session is not a replay.
+      reread.resolve()
+      expect((await write).error).toBeUndefined()
+      expect(writes).toEqual(['token-after-reread'])
+    })
+
+    it('does not send when the re-read fails', async () => {
+      let failRead!: (error: Error) => void
+      const { write, writes } = await writeWaitingForCsrf(() => new Promise<void>((_, fail) => { failRead = fail }))
+
+      failRead(new Error('BFF session lookup failed with HTTP 503'))
+      const result = await write
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_UNCONFIRMED' })
+      expect(result.data).toBeUndefined()
+      expect(writes).toEqual([])
+    })
+
+    it('does not send when the re-read finds another actor', async () => {
+      const reread = deferred()
+      const { write, writes } = await writeWaitingForCsrf(async (advanceSessionEpoch) => {
+        await reread.promise
+        // useAuth advances the epoch when the re-read returns actor B.
+        advanceSessionEpoch()
+      })
+
+      reread.resolve()
+      const result = await write
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+      expect(result.data).toBeUndefined()
+      expect(writes).toEqual([])
+    })
+  })
 })
 
 describe('generated SSE authentication (#198)', () => {
