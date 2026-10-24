@@ -128,5 +128,65 @@
       "taintValue": "bad value"
     },
     "accepted": false
+  },
+  {
+    "name": "selector prefix segment 63",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name": "x"},
+      "taintKey": "pool",
+      "taintValue": "reserved"
+    },
+    "accepted": true
+  },
+  {
+    "name": "selector prefix segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name": "x"},
+      "taintKey": "pool",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "selector prefix middle segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"first.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.last/name": "x"},
+      "taintKey": "pool",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "taint prefix segment 63",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name",
+      "taintValue": "reserved"
+    },
+    "accepted": true
+  },
+  {
+    "name": "taint prefix segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/name",
+      "taintValue": "reserved"
+    },
+    "accepted": false
+  },
+  {
+    "name": "taint prefix middle segment 64",
+    "location": {
+      "kind": "dedicated_node_pool",
+      "nodeSelector": {"pool": "x"},
+      "taintKey": "first.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.last/name",
+      "taintValue": "reserved"
+    },
+    "accepted": false
   }
 ]

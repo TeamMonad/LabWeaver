@@ -1190,7 +1190,7 @@ fn platform_values_schema() -> Result<Value, GenerationError> {
     runtime["properties"]["preauthorizations"]["maxItems"] = json!(0);
     let prefixed_shape = format!(
         "^{} / {}$",
-        crate::platform_configuration::LABEL_PREFIX_PATTERN
+        crate::platform_configuration::label_prefix_pattern()
             .trim_start_matches('^')
             .trim_end_matches('$'),
         crate::platform_configuration::LABEL_NAME_PATTERN

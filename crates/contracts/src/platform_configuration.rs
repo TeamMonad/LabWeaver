@@ -164,8 +164,15 @@ pub const LABEL_NAME_MAX_LENGTH: usize = 63;
 pub const LABEL_VALUE_MAX_LENGTH: usize = 63;
 pub const LABEL_KEY_MAX_LENGTH: usize = LABEL_PREFIX_MAX_LENGTH + 1 + LABEL_NAME_MAX_LENGTH;
 pub const LABEL_KEY_PATTERN: &str = r"^([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)*[a-z0-9]([-a-z0-9]*[a-z0-9])?/([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$";
-pub const LABEL_PREFIX_PATTERN: &str =
-    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$";
+/// DNS prefix expression with the same per-segment limit as `valid_label_key`.
+#[must_use]
+pub fn label_prefix_pattern() -> String {
+    let segment = format!(
+        "[a-z0-9]([-a-z0-9]{{0,{}}}[a-z0-9])?",
+        LABEL_VALUE_MAX_LENGTH - 2
+    );
+    format!("^{segment}(\\.{segment})*$")
+}
 pub const LABEL_NAME_PATTERN: &str = r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$";
 pub const LABEL_VALUE_PATTERN: &str = r"^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$";
 
