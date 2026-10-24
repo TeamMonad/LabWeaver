@@ -54,6 +54,15 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
   let generation = 0
   /** Project whose runs `agentProgress` describes; a different project starts from an empty map. */
   let progressProjectId: string | null = null
+  /** Sequence of the latest requested progress read per run; only that read may write its row. */
+  const progressReadSequence = new Map<string, number>()
+  /**
+   * Slots shared by every task-progress read of this composable (batch loads of any
+   * project or generation, and single-row retries). A read whose result is no longer
+   * wanted keeps its slot until the request settles, so the bound always holds.
+   */
+  let progressSlotsInUse = 0
+  const progressSlotWaiters: Array<() => void> = []
 
   async function loadEnvironments(id: string, current: number) {
     environments.value = { kind: 'loading', message: '加载运行中的环境…' }
@@ -112,34 +121,58 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
     }
   }
 
+  function acquireProgressSlot(): Promise<void> {
+    if (progressSlotsInUse < AGENT_PROGRESS_MAX_CONCURRENCY) {
+      progressSlotsInUse += 1
+      return Promise.resolve()
+    }
+    // Promise.withResolvers is outside the project's ES2020 lib.
+    return new Promise((resolve) => { progressSlotWaiters.push(resolve) })
+  }
+
+  /** Hands the slot straight to the next waiter so nobody can take it in between. */
+  function releaseProgressSlot() {
+    const next = progressSlotWaiters.shift()
+    if (next) next()
+    else progressSlotsInUse -= 1
+  }
+
   /**
-   * Reads the current attempt of each open run with bounded concurrency. Rows
-   * already read keep their last reading until the new one arrives; rows that
-   * closed are dropped. A failed read only marks that run.
+   * Reads one run's progress through the shared slots and writes it only if it
+   * is still the latest read requested for that run in the current generation.
+   * A read superseded while it waited for a slot is never sent.
+   */
+  async function refreshRunProgress(id: string, runId: string, current: number) {
+    const sequence = (progressReadSequence.get(runId) ?? 0) + 1
+    progressReadSequence.set(runId, sequence)
+    const wanted = () => current === generation && progressReadSequence.get(runId) === sequence && runId in agentProgress.value
+    await acquireProgressSlot()
+    try {
+      if (!wanted()) return
+      const state = await readAgentProgress(id, runId)
+      if (wanted()) agentProgress.value = { ...agentProgress.value, [runId]: state }
+    } finally {
+      releaseProgressSlot()
+    }
+  }
+
+  /**
+   * Reads the current attempt of each open run. Rows already read keep their
+   * last reading until the new one arrives; rows that closed are dropped. A
+   * failed read only marks that run.
    */
   async function loadAgentProgress(id: string, runs: AgentRunHistoryItem[], current: number) {
     const previous = agentProgress.value
     agentProgress.value = Object.fromEntries(runs.map((run) => [run.id, previous[run.id] ?? { kind: 'loading' } as const]))
-    const queue = runs.map((run) => run.id)
-    async function worker() {
-      for (let runId = queue.shift(); runId !== undefined && current === generation; runId = queue.shift()) {
-        const state = await readAgentProgress(id, runId)
-        if (current !== generation) return
-        agentProgress.value = { ...agentProgress.value, [runId]: state }
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(AGENT_PROGRESS_MAX_CONCURRENCY, queue.length) }, () => worker()))
+    await Promise.all(runs.map((run) => refreshRunProgress(id, run.id, current)))
   }
 
   /** Re-reads one run after its row reported a failure; other rows are untouched. */
   async function retryAgentProgress(runId: string) {
     const id = projectId.value
     if (!id || id !== progressProjectId || !(runId in agentProgress.value)) return
-    const current = generation
     agentProgress.value = { ...agentProgress.value, [runId]: { kind: 'loading' } }
-    const state = await readAgentProgress(id, runId)
-    if (current !== generation || !(runId in agentProgress.value)) return
-    agentProgress.value = { ...agentProgress.value, [runId]: state }
+    await refreshRunProgress(id, runId, generation)
   }
 
   async function loadResourceRequests(id: string, current: number) {

@@ -132,7 +132,7 @@
                     >
                       <li v-for="track in runTracks(run.id)" :key="track.track" class="track-chip" :data-track="track.track">
                         <span class="track-chip__name">{{ track.trackLabel }}</span>
-                        <GcpStatusPill :state="toneState(track.tone)" domain="custom" :label="track.phaseLabel" size="sm" />
+                        <GcpStatusPill :state="track.phase" domain="custom" :tone="track.tone" :label="track.phaseLabel" :title="track.phaseDetail" size="sm" />
                         <span v-if="track.attempt" class="track-chip__attempt">第 {{ track.attempt }} 次尝试</span>
                       </li>
                     </ul>
@@ -223,7 +223,7 @@ import { useProjects } from '@/composables/useProjects'
 import { OIDC_ENABLED } from '@/config'
 import type { AgentRunHistoryItem, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
 import type { DiagnosticViewModel } from '@/types/async'
-import { readAgentTaskProgress, toneState, type AgentTrackReading } from '@/utils/agentTaskProgress'
+import { readAgentTaskProgress, type AgentTrackReading } from '@/utils/agentTaskProgress'
 import { formatBytes, formatTimestamp } from '@/utils/format'
 import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 import { environmentOperationKindLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'

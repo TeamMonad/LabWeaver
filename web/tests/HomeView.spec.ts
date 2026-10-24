@@ -187,6 +187,10 @@ describe('HomeView (current project in progress)', () => {
     expect(section.text()).not.toContain('失败')
     expect(section.text()).not.toContain('%')
     expect(section.find('[role="progressbar"]').exists()).toBe(false)
+    // The tooltip explains the phase in Chinese; the colour category never leaks as a state string.
+    const pills = section.get('[data-run-id="run-review"]').findAll('.track-chip .gcp-status-pill')
+    expect(pills.map((pill) => pill.attributes('title'))).toEqual(['这次尝试已完成。', '这次尝试已执行完，等待人工审核后才会继续。'])
+    expect(section.findAll('.track-chip .gcp-status-pill').map((pill) => pill.attributes('title')).join(' ')).not.toMatch(/[a-z_]{4,}/)
   })
 
   it('says in Chinese what a person has to do for each waiting track and links a resource wait to the requests', async () => {

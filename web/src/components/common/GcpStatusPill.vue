@@ -22,6 +22,7 @@ import {
   endpointHealthLabel,
   evaluationStateLabel,
 } from '@/utils/stateLabels'
+import type { StatusPillTone } from '@/types/statusPill'
 
 interface Props {
   state: string | null | undefined
@@ -29,6 +30,10 @@ interface Props {
   label?: string
   diagnostic?: string | null
   size?: 'sm' | 'md'
+  /** Explicit colour category; when set, `state` is not used for colour or shown in the tooltip. */
+  tone?: StatusPillTone
+  /** Tooltip text used together with `tone`; defaults to the label. */
+  title?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -36,6 +41,8 @@ const props = withDefaults(defineProps<Props>(), {
   label: undefined,
   diagnostic: null,
   size: 'md',
+  tone: undefined,
+  title: undefined,
 })
 
 const displayLabel = computed(() => {
@@ -60,7 +67,8 @@ const displayLabel = computed(() => {
   }
 })
 
-const category = computed<'success' | 'running' | 'warning' | 'error' | 'neutral'>(() => {
+const category = computed<StatusPillTone>(() => {
+  if (props.tone) return props.tone
   const s = (props.state ?? '').toLowerCase()
   if (['ready', 'running', 'active', 'succeeded', 'healthy', 'approved'].includes(s)) {
     return 'success'
@@ -80,6 +88,7 @@ const category = computed<'success' | 'running' | 'warning' | 'error' | 'neutral
 const isPulsing = computed(() => category.value === 'running')
 
 const titleText = computed(() => {
+  if (props.tone) return props.title ?? displayLabel.value
   const base = `${displayLabel.value} (${props.state ?? 'unknown'})`
   return props.diagnostic ? `${base} - ${props.diagnostic}` : base
 })
