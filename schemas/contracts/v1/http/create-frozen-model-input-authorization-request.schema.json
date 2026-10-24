@@ -1,0 +1,118 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EvaluationReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationReleaseId`.",
+      "type": "string"
+    },
+    "FrozenSubmissionId": {
+      "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
+      "type": "string"
+    },
+    "ModelInputAuthorizationContext": {
+      "additionalProperties": false,
+      "description": "First authenticated request context, persisted before immutable input artifacts exist.\nThis is decision evidence, not a permission grant or a task deadline. Consumers must\nrecheck the original session and current object permissions before reading or sending input.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "sessionSha256": {
+          "type": "string"
+        },
+        "validUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "sessionSha256",
+        "actorId",
+        "projectId",
+        "operationId",
+        "validUntil"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Evaluation requests binding only after a real freeze exists; Control derives object facts.",
+  "properties": {
+    "evaluationReleaseId": {
+      "$ref": "#/$defs/EvaluationReleaseId"
+    },
+    "evaluationReleaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "frozenSubmissionId": {
+      "$ref": "#/$defs/FrozenSubmissionId"
+    },
+    "inputAuthorizationContext": {
+      "$ref": "#/$defs/ModelInputAuthorizationContext"
+    },
+    "parentLeaseSha256": {
+      "description": "Derived by Evaluation from its actual fenced worker lease, not from user input.",
+      "type": "string"
+    },
+    "selectedPaths": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "taskRunId": {
+      "$ref": "#/$defs/TaskRunId"
+    }
+  },
+  "required": [
+    "inputAuthorizationContext",
+    "taskRunId",
+    "parentLeaseSha256",
+    "frozenSubmissionId",
+    "evaluationReleaseId",
+    "evaluationReleaseRevision",
+    "selectedPaths"
+  ],
+  "title": "CreateFrozenModelInputAuthorizationRequest",
+  "type": "object"
+}

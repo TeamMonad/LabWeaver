@@ -53,6 +53,8 @@ use uuid::Uuid;
 mod manual_work_template_cases;
 #[path = "cases/membership_governance.rs"]
 mod membership_governance_cases;
+#[path = "cases/rubric_model_input.rs"]
+mod rubric_model_input_cases;
 #[path = "cases/runtime_authorization.rs"]
 mod runtime_authorization_cases;
 mod support;
@@ -1314,10 +1316,38 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
     Ok(())
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PublicationCase {
+    Publication,
+    RubricRules,
+    FrozenSharedInputs,
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
 -> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(authoring_publication_fixture(PublicationCase::Publication)).await
+}
+
+#[tokio::test]
+async fn rubric_rules_require_current_instructor_and_exact_content_and_revoke()
+-> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(authoring_publication_fixture(PublicationCase::RubricRules)).await
+}
+
+#[tokio::test]
+async fn frozen_advisory_steps_with_identical_include_bind_their_current_step()
+-> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(authoring_publication_fixture(
+        PublicationCase::FrozenSharedInputs,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn authoring_publication_fixture(
+    case: PublicationCase,
+) -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let url = format!(
         "postgres://postgres:postgres@127.0.0.1:{}/postgres",
@@ -1473,7 +1503,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         .await?;
     assert_eq!(replay, approval);
     let mut changed_request = request.clone();
-    changed_request.reason = "different immutable decision".to_owned();
+    "different immutable decision".clone_into(&mut changed_request.reason);
     assert!(matches!(
         service
             .complete_authoring_approval(
@@ -1576,6 +1606,18 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         ready.submission_manifest.is_none(),
         "system-facts evaluations must not project a workspace submission manifest"
     );
+    if case != PublicationCase::Publication {
+        rubric_model_input_cases::assert_rubric_authority(
+            &pool,
+            &package,
+            &evaluation_release,
+            &environment_release,
+            case,
+            now,
+        )
+        .await?;
+        return Ok(());
+    }
 
     Box::pin(
         runtime_authorization_cases::assert_bindings_after_publication(
@@ -4341,4 +4383,1363 @@ async fn verified_teacher_fixture(
         roles: vec![contracts::PlatformRole::Teacher],
         expires_at: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
     })
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one longitudinal test keeps real authorization and capture facts together"
+)]
+async fn model_input_rechecks_current_session_roles_membership_and_object_scope()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::http::{
+        ModelInputAuthorizationBinding, ModelInputAuthorizationResolveRequest,
+        model_input_selection_sha256,
+    };
+    use sha2::Digest;
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
+        .execute(&pool)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+    let actor = ActorId::new();
+    sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256) VALUES($1,'https://synthetic.invalid',$2)").bind(actor.as_uuid()).bind("a".repeat(64)).execute(&pool).await?;
+    let key_ring = auth::KeyRing::parse(
+        "synthetic".to_owned(),
+        &format!(
+            "synthetic:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+        ),
+    )?;
+    let session_now = time::OffsetDateTime::now_utc();
+    let bff = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: actor.as_uuid(),
+            roles: vec![contracts::PlatformRole::Student],
+            authorization_revision: 1,
+            expires_at: session_now + time::Duration::hours(1),
+            idle_ttl: time::Duration::minutes(15),
+            oidc_sid: None,
+            logout_hint: "synthetic-logout-hint".to_owned(),
+        },
+        session_now,
+    )
+    .await?;
+    let session: contracts::BffSessionId = bff.session_id.to_string().parse()?;
+    let renewed = auth::load_bff_session(
+        &pool,
+        &key_ring,
+        bff.session_id,
+        time::Duration::minutes(15),
+        time::OffsetDateTime::now_utc().replace_nanosecond(123_456_000)?,
+    )
+    .await?;
+    assert_ne!(renewed.idle_expires_at.nanosecond() % 1_000_000, 0);
+    let stored_idle: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT idle_expires_at FROM access.bff_sessions WHERE session_id=$1")
+            .bind(bff.session_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored_idle, renewed.idle_expires_at);
+    let now = UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_nanosecond(0)?)?;
+    let project = service
+        .create_project(
+            actor,
+            contracts::PlatformRole::Student,
+            &contracts::CreateProjectRequest {
+                name: "synthetic model input".to_owned(),
+                description: None,
+                course_id: None,
+            },
+            &IdempotencyKey::parse("synthetic-model-project")?,
+            now,
+        )
+        .await?;
+    let policy = authoring_policy(project.id, None, now)?;
+    service
+        .activate_project_policy(
+            project.id,
+            policy.clone(),
+            &IdempotencyKey::parse("synthetic-model-policy")?,
+            None,
+        )
+        .await?;
+    let package: ProblemPackage = serde_json::from_value(
+        serde_json::json!({"id":contracts::ProblemPackageId::new(),"projectId":project.id,"courseId":null,"revision":1,"files":[{"path":"allowed.md","sha256":Sha256Digest::of_bytes(b"SYNTHETIC_ALLOWED_CONTENT").to_string(),"object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"one","sizeBytes":25,"mediaType":"text/plain"}},{"path":"unselected.md","sha256":Sha256Digest::of_bytes(b"x").to_string(),"object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"two","sizeBytes":1,"mediaType":"text/plain"}}],"retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"course_material","retainUntil":"2027-12-31T00:00:00.000Z","disposition":"delete"},"completedAt":now}),
+    )?;
+    sqlx::query("INSERT INTO control.problem_packages(package_id,project_id,course_id,revision,manifest_sha256,contract,completed_at) VALUES($1,$2,NULL,1,$3,$4,$5)").bind(package.id.as_uuid()).bind(project.id.as_uuid()).bind(Sha256Digest::of_canonical(&package.files)?.to_string()).bind(serde_json::to_value(&package)?).bind(now.get()).execute(&pool).await?;
+    let paths = vec!["allowed.md".to_owned()];
+    let request = ModelInputAuthorizationResolveRequest {
+        binding: ModelInputAuthorizationBinding {
+            session_sha256: format!("{:x}", sha2::Sha256::digest(session.to_string().as_bytes())),
+            actor_id: actor,
+            project_id: project.id,
+            course_id: None,
+            operation_id: "createProjectAgentRun".to_owned(),
+            valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
+            source: contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+                package_id: package.id,
+                package_revision: package.revision,
+            },
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)?,
+            selection_sha256: model_input_selection_sha256(&paths)?,
+        },
+        selected_paths: paths,
+    };
+    service.resolve_model_input_authorization(&request).await?;
+    let mut altered = request.clone();
+    altered.binding.project_id = ProjectId::new();
+    assert!(
+        service
+            .resolve_model_input_authorization(&altered)
+            .await
+            .is_err()
+    );
+    altered = request.clone();
+    altered.selected_paths = vec!["unselected.md".to_owned()];
+    assert!(
+        service
+            .resolve_model_input_authorization(&altered)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE control.project_memberships SET object_role='viewer',revision=revision+1 WHERE project_id=$1 AND actor_id=$2").bind(project.id.as_uuid()).bind(actor.as_uuid()).execute(&pool).await?;
+    assert!(
+        service
+            .resolve_model_input_authorization(&request)
+            .await
+            .is_err()
+    );
+    // Current session roles, rather than a previously authenticated administrator role, determine permission.
+    sqlx::query("UPDATE control.project_memberships SET state='revoked' WHERE project_id=$1 AND actor_id=$2").bind(project.id.as_uuid()).bind(actor.as_uuid()).execute(&pool).await?;
+    sqlx::query(
+        "UPDATE access.bff_sessions SET platform_roles=ARRAY['platform_admin'] WHERE session_id=$1",
+    )
+    .bind(session.as_uuid())
+    .execute(&pool)
+    .await?;
+    assert!(
+        service
+            .resolve_model_input_authorization(&request)
+            .await
+            .is_ok()
+    );
+    sqlx::query(
+        "UPDATE access.bff_sessions SET platform_roles=ARRAY['student'] WHERE session_id=$1",
+    )
+    .bind(session.as_uuid())
+    .execute(&pool)
+    .await?;
+    assert!(
+        service
+            .resolve_model_input_authorization(&request)
+            .await
+            .is_err()
+    );
+    sqlx::query(
+        "UPDATE control.project_memberships SET state='active' WHERE project_id=$1 AND actor_id=$2",
+    )
+    .bind(project.id.as_uuid())
+    .bind(actor.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE control.project_memberships SET object_role='owner' WHERE project_id=$1 AND actor_id=$2").bind(project.id.as_uuid()).bind(actor.as_uuid()).execute(&pool).await?;
+    sqlx::query(
+        "UPDATE access.bff_sessions SET platform_roles=ARRAY['invalid_role'] WHERE session_id=$1",
+    )
+    .bind(session.as_uuid())
+    .execute(&pool)
+    .await?;
+    assert!(
+        service
+            .resolve_model_input_authorization(&request)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE access.bff_sessions SET platform_roles=ARRAY['student'],revoked_at=now() WHERE session_id=$1").bind(session.as_uuid()).execute(&pool).await?;
+    assert!(
+        service
+            .resolve_model_input_authorization(&request)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE access.bff_sessions SET platform_roles=ARRAY['student'],revoked_at=NULL WHERE session_id=$1").bind(session.as_uuid()).execute(&pool).await?;
+    #[cfg(unix)]
+    {
+        use agent_service::claude_code::{
+            ClaudeCodeRuntime, ProblemPackageEgressGate, RunCancellation, TokioClaudeCodeProcess,
+        };
+        use agent_service::run_store::{AgentRunReservation, PostgresAgentRunStore};
+        use std::os::unix::fs::PermissionsExt;
+        apply_domain_migrations(&pool, Domain::Agent).await?;
+        let store = PostgresAgentRunStore::new(pool.clone());
+        let command = contracts::http::InternalCreateAgentRunRequest {
+            input_authorization: request.binding.clone(),
+            project_id: project.id,
+            course_id: None,
+            actor_id: actor,
+            request: contracts::http::InternalAgentRunRequest::Authoring(
+                contracts::http::CreateAgentRunRequest {
+                    selected_paths: Some(request.selected_paths.clone()),
+                    project_id: project.id,
+                    course_id: None,
+                    package_id: package.id,
+                    package_revision: package.revision,
+                    policy_id: policy.id,
+                    policy_revision: policy.revision,
+                    environment_class: EnvironmentClass::Experiment,
+                },
+            ),
+            purpose: AgentRunPurpose::Authoring {
+                environment_class: EnvironmentClass::Experiment,
+            },
+            package: package.clone(),
+            object_locators: package
+                .files
+                .iter()
+                .map(|file| {
+                    (
+                        file.object.artifact_id,
+                        format!("synthetic/{}", file.object.artifact_id),
+                    )
+                })
+                .collect(),
+            policy: policy.clone(),
+            preauthorization: None,
+        };
+        let AgentRunReservation::Created(run) = store
+            .reserve_internal_dispatch(
+                &command,
+                &IdempotencyKey::parse("model-linked-capture")?,
+                now,
+                "synthetic-linked",
+            )
+            .await
+            .map_err(|error| format!("model reserve: {error:?}"))?
+        else {
+            return Err("expected new run".into());
+        };
+        let selected = vec!["allowed.md".to_owned()];
+        let input = ProblemPackageEgressGate::new(
+            Arc::new(ModelCaptureReader),
+            Arc::new(
+                agent_service::classifier::DeterministicEgressClassifier::new(
+                    "synthetic".to_owned(),
+                    Revision::new(1)?,
+                )?,
+            ),
+        )
+        .prepare(&package, &policy, &selected)
+        .await?;
+        let dispatch = store
+            .claim_dispatch(std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| format!("claim_dispatch at 9066: {error:?}"))?
+            .ok_or("capture dispatch missing")?;
+        store
+            .bind_prepared_dispatch(&dispatch, input.sha256())
+            .await
+            .map_err(|error| format!("bind_prepared_dispatch at 9212: {error:?}"))?;
+        let track = store
+            .claim_track(
+                run.id,
+                AgentTrackKind::Environment,
+                input.sha256(),
+                "synthetic-capture",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| format!("claim_track at 9489: {error:?}"))?
+            .ok_or("environment track missing")?;
+        let fixture = tempfile::tempdir()?;
+        let binary = fixture.path().join("claude");
+        let capture = fixture.path().join("capture.jsonl");
+        let output = fixture.path().join("output.jsonl");
+        let session_id = Uuid::new_v4().to_string();
+        let events = [
+            serde_json::json!({"type":"system","subtype":"init","session_id":session_id}),
+            serde_json::json!({"type":"assistant","session_id":session_id,"message":{"role":"assistant","content":[{"type":"text","text":"{}"}]}}),
+            serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":session_id,"num_turns":1,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1},"permission_denials":[]}),
+        ];
+        std::fs::write(
+            &output,
+            events
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n")
+                + "\n",
+        )?;
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then printf '2.1.207\\n'; exit 0; fi\n/bin/cat >> \"$LABWEAVER_CAPTURE\"\nprintf '\\n' >> \"$LABWEAVER_CAPTURE\"\n/bin/cat \"$LABWEAVER_OUTPUT\"\n",
+        )?;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
+        let process = Arc::new(RevokeAfterCapture {
+            inner: TokioClaudeCodeProcess::new(std::collections::BTreeMap::from([
+                ("PATH".to_owned(), fixture.path().display().to_string()),
+                (
+                    "LABWEAVER_CAPTURE".to_owned(),
+                    capture.display().to_string(),
+                ),
+                ("LABWEAVER_OUTPUT".to_owned(), output.display().to_string()),
+            ])),
+            pool: pool.clone(),
+            project_id: project.id,
+            actor_id: actor,
+        });
+        let service = Arc::new(service);
+        let authorization = Arc::new(RealModelAuthorization {
+            control: service.clone(),
+            request: request.clone(),
+            store: store.clone(),
+            run_id: run.id,
+        });
+        let runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+            .with_input_authorization(authorization);
+        let failure = runtime
+            .generate(
+                AgentTrackKind::Environment,
+                input.clone(),
+                RunCancellation::new(),
+            )
+            .await
+            .err()
+            .ok_or("current Control membership must stop repair")?;
+        assert_eq!(
+            failure.diagnostic_code(),
+            "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        );
+        let completed = store
+            .complete_track(&track, Err(failure.clone()), now, "synthetic-capture")
+            .await
+            .map_err(|error| format!("complete_track at 12354: {error:?}"))?;
+        let diagnostics = store.diagnostics(run.id).await?;
+        assert_eq!(diagnostics.items.len(), 1);
+        let detail = &diagnostics.items[0];
+        assert_eq!(
+            detail.diagnostic_code,
+            "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        );
+        assert!(!detail.reason.is_empty());
+        assert!(!detail.next_step.is_empty());
+        assert_eq!(detail.usage.map(|usage| usage.requests), Some(1));
+        assert_eq!(
+            detail.expires_at.get() - detail.created_at.get(),
+            time::Duration::days(30)
+        );
+        let exported = serde_json::to_string(&diagnostics)?;
+        assert!(!exported.contains("SYNTHETIC_ALLOWED_CONTENT"));
+        assert!(!exported.contains("unselected.md"));
+        let durable_before = serde_json::to_value(store.load(run.id).await?)?;
+        let checkpoints_before = serde_json::to_value(store.load_checkpoints(run.id).await?)?;
+        sqlx::query("UPDATE agent.model_diagnostics SET created_at=clock_timestamp()-interval '31 days',expires_at=clock_timestamp()-interval '1 day' WHERE run_id=$1")
+            .bind(run.id.as_uuid()).execute(&pool).await?;
+        assert!(store.diagnostics(run.id).await?.items.is_empty());
+        assert_eq!(store.purge_expired_model_diagnostics().await?, 1);
+        assert_eq!(
+            serde_json::to_value(store.load(run.id).await?)?,
+            durable_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.load_checkpoints(run.id).await?)?,
+            checkpoints_before
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM control.problem_packages WHERE package_id=$1"
+            )
+            .bind(package.id.as_uuid())
+            .fetch_one(&pool)
+            .await?,
+            1
+        );
+        let prior = completed
+            .run
+            .tracks
+            .iter()
+            .find(|track| track.kind == AgentTrackKind::Environment)
+            .ok_or("prior environment missing")?
+            .attempts[0]
+            .clone();
+        assert_eq!(prior.usage.requests, 1);
+        assert!(prior.usage_observed);
+        let evaluation = store
+            .claim_track(
+                run.id,
+                AgentTrackKind::Evaluation,
+                input.sha256(),
+                "synthetic-capture",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| format!("claim_track at 12971: {error:?}"))?
+            .ok_or("evaluation track missing")?;
+        let denied = runtime
+            .generate(
+                AgentTrackKind::Evaluation,
+                input.clone(),
+                RunCancellation::new(),
+            )
+            .await
+            .err()
+            .ok_or("revoked before evaluation")?;
+        let completed = store
+            .complete_track(&evaluation, Err(denied), now, "synthetic-capture")
+            .await
+            .map_err(|error| format!("complete_track at 13404: {error:?}"))?;
+        store
+            .retry_track_revisioned(
+                project.id,
+                None,
+                run.id,
+                AgentTrackKind::Environment,
+                completed.run.revision,
+                &IdempotencyKey::parse("model-linked-retry")?,
+            )
+            .await
+            .map_err(|error| format!("retry_track_revisioned at 13712: {error:?}"))?;
+        let retry = store
+            .claim_dispatch(std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| format!("claim_dispatch at 13823: {error:?}"))?
+            .ok_or("retry dispatch missing")?;
+        let denied = store
+            .fail_dispatch_preparation(&retry, "LW_MODEL_INPUT_AUTHORIZATION_DENIED", now)
+            .await
+            .map_err(|error| format!("fail_dispatch_preparation at 14008: {error:?}"))?;
+        let attempts = &denied
+            .tracks
+            .iter()
+            .find(|track| track.kind == AgentTrackKind::Environment)
+            .ok_or("retry environment missing")?
+            .attempts;
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0], prior);
+        assert_eq!(attempts[1].usage.requests, 0);
+        assert!(!attempts[1].usage_observed);
+        assert_eq!(
+            attempts[1].state,
+            contracts::authoring::AgentAttemptState::Failed
+        );
+        // An expired running attempt is preserved by the existing recovery rule, without claiming
+        // old provider usage or cleanup. Only the new, blocked preflight has zero requests.
+        let AgentRunReservation::Created(expired) = store
+            .reserve_internal_dispatch(
+                &command,
+                &IdempotencyKey::parse("model-linked-expired")?,
+                now,
+                "synthetic-expired",
+            )
+            .await?
+        else {
+            return Err("expected expired fixture".into());
+        };
+        let dispatch = store
+            .claim_dispatch(std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| format!("claim_dispatch at 15190: {error:?}"))?
+            .ok_or("expired dispatch missing")?;
+        store
+            .bind_prepared_dispatch(&dispatch, input.sha256())
+            .await
+            .map_err(|error| format!("bind_prepared_dispatch at 15336: {error:?}"))?;
+        let running = store
+            .claim_track(
+                expired.id,
+                AgentTrackKind::Environment,
+                input.sha256(),
+                "synthetic-expired",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| format!("claim_track at 15619: {error:?}"))?
+            .ok_or("expired track missing")?;
+        let prior = running
+            .run
+            .tracks
+            .iter()
+            .find(|track| track.kind == AgentTrackKind::Environment)
+            .ok_or("running track missing")?
+            .attempts[0]
+            .clone();
+        sqlx::query("UPDATE agent.agent_track_work_items SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1 AND track='environment'").bind(expired.id.as_uuid()).execute(&pool).await?;
+        let dispatch = store
+            .claim_dispatch(std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| format!("claim_dispatch at 16220: {error:?}"))?
+            .ok_or("expired recovery missing")?;
+        let denied = store
+            .fail_dispatch_preparation(&dispatch, "LW_MODEL_INPUT_AUTHORIZATION_DENIED", now)
+            .await
+            .map_err(|error| format!("fail_dispatch_preparation at 16410: {error:?}"))?;
+        let attempts = &denied
+            .tracks
+            .iter()
+            .find(|track| track.kind == AgentTrackKind::Environment)
+            .ok_or("expired environment missing")?
+            .attempts;
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].usage, prior.usage);
+        assert_eq!(attempts[0].usage_observed, prior.usage_observed);
+        assert_eq!(attempts[0].checkpoint, prior.checkpoint);
+        assert_eq!(attempts[1].usage.requests, 0);
+        assert!(!attempts[1].usage_observed);
+        let sent = std::fs::read_to_string(&capture)?;
+        assert_eq!(sent.lines().count(), 1);
+        assert!(sent.contains("SYNTHETIC_ALLOWED_CONTENT"));
+        assert!(!sent.contains("unselected.md"));
+        // Durable cancellation after preparation is re-read before the first actual stdin write.
+        sqlx::query("UPDATE control.project_memberships SET object_role='owner' WHERE project_id=$1 AND actor_id=$2").bind(project.id.as_uuid()).bind(actor.as_uuid()).execute(&pool).await?;
+        let AgentRunReservation::Created(cancelled) = store
+            .reserve_internal_dispatch(
+                &command,
+                &IdempotencyKey::parse("model-linked-cancel")?,
+                now,
+                "synthetic-cancel",
+            )
+            .await
+            .map_err(|error| format!("model reserve: {error:?}"))?
+        else {
+            return Err("expected new run".into());
+        };
+        let reader = Arc::new(BlockingModelCaptureReader {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let gate = ProblemPackageEgressGate::new(
+            reader.clone(),
+            Arc::new(
+                agent_service::classifier::DeterministicEgressClassifier::new(
+                    "synthetic".to_owned(),
+                    Revision::new(1)?,
+                )?,
+            ),
+        );
+        let cancel_during_read = async {
+            reader.started.notified().await;
+            let result = store
+                .request_cancellation_revisioned(
+                    project.id,
+                    None,
+                    cancelled.id,
+                    cancelled.revision,
+                    &IdempotencyKey::parse("model-linked-cancel-action")?,
+                    now,
+                )
+                .await;
+            reader.release.notify_one();
+            result
+                .map(|_| ())
+                .map_err(Box::<dyn std::error::Error>::from)
+        };
+        let (prepared, cancel_result) = tokio::join!(
+            gate.prepare(&package, &policy, &selected),
+            cancel_during_read
+        );
+        let input = prepared?;
+        cancel_result?;
+        std::fs::remove_file(&capture)?;
+        let runtime = ClaudeCodeRuntime::new(policy, process)?.with_input_authorization(Arc::new(
+            RealModelAuthorization {
+                control: service.clone(),
+                request: request.clone(),
+                store: store.clone(),
+                run_id: cancelled.id,
+            },
+        ));
+        assert_eq!(
+            runtime
+                .generate(AgentTrackKind::Environment, input, RunCancellation::new())
+                .await
+                .err()
+                .ok_or("durable cancellation")?
+                .diagnostic_code(),
+            "LW_CONFLICT"
+        );
+        assert!(!capture.exists());
+        // An old unbound JSON dispatch is rejected individually; a valid following dispatch still claims.
+        let AgentRunReservation::Created(legacy) = store
+            .reserve_internal_dispatch(
+                &command,
+                &IdempotencyKey::parse("model-linked-legacy")?,
+                now,
+                "synthetic-legacy",
+            )
+            .await?
+        else {
+            return Err("expected legacy fixture".into());
+        };
+        sqlx::query(
+            "UPDATE agent.agent_run_dispatches SET request=request->'request' WHERE run_id=$1",
+        )
+        .bind(legacy.id.as_uuid())
+        .execute(&pool)
+        .await?;
+        // Cancelled dispatch may be claimed first; the legacy row is rejected on the next tick.
+        let _ = store
+            .claim_dispatch(std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| format!("claim_dispatch at 20717: {error:?}"))?;
+        let _ = store
+            .claim_dispatch(std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| format!("claim_dispatch at 20824: {error:?}"))?;
+        let diagnostic: String = sqlx::query_scalar(
+            "SELECT terminal_diagnostic FROM agent.agent_run_dispatches WHERE run_id=$1",
+        )
+        .bind(legacy.id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(diagnostic, "LW_MODEL_INPUT_AUTHORIZATION_REQUIRED");
+        store
+            .reserve_internal_dispatch(
+                &command,
+                &IdempotencyKey::parse("model-linked-following")?,
+                now,
+                "synthetic-following",
+            )
+            .await?;
+        assert!(
+            store
+                .claim_dispatch(std::time::Duration::from_secs(30))
+                .await
+                .map_err(|error| format!("claim_dispatch at 21498: {error:?}"))?
+                .is_some()
+        );
+    }
+
+    Ok(())
+}
+
+struct ModelCaptureReader;
+#[async_trait]
+impl agent_service::claude_code::ProblemPackageReader for ModelCaptureReader {
+    async fn read(
+        &self,
+        _reference: &ArtifactRef,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, agent_service::claude_code::PackageObjectReadError> {
+        Ok(b"SYNTHETIC_ALLOWED_CONTENT".to_vec())
+    }
+}
+struct RealModelAuthorization {
+    control: Arc<ControlService>,
+    request: contracts::http::ModelInputAuthorizationResolveRequest,
+    store: agent_service::run_store::PostgresAgentRunStore,
+    run_id: AgentRunId,
+}
+#[async_trait]
+impl agent_service::claude_code::ModelInputAuthorization for RealModelAuthorization {
+    async fn check(&self) -> Result<(), agent_service::claude_code::ClaudeCodeRuntimeError> {
+        use agent_service::claude_code::ClaudeCodeRuntimeError;
+        if self
+            .store
+            .cancellation_requested(self.run_id)
+            .await
+            .map_err(|_| ClaudeCodeRuntimeError::InputAuthorizationDenied)?
+        {
+            return Err(ClaudeCodeRuntimeError::Cancelled);
+        }
+        self.control
+            .resolve_model_input_authorization(&self.request)
+            .await
+            .map_err(|_| ClaudeCodeRuntimeError::InputAuthorizationDenied)?;
+        Ok(())
+    }
+}
+struct RevokeAfterCapture {
+    inner: agent_service::claude_code::TokioClaudeCodeProcess,
+    pool: sqlx::PgPool,
+    project_id: ProjectId,
+    actor_id: ActorId,
+}
+#[async_trait]
+impl agent_service::claude_code::ClaudeCodeProcess for RevokeAfterCapture {
+    async fn version(&self) -> Result<String, agent_service::claude_code::ClaudeCodeProcessError> {
+        self.inner.version().await
+    }
+    async fn execute(
+        &self,
+        scope: &agent_service::claude_code::ExecutionScope,
+        command: agent_service::claude_code::ClaudeCodeCommand,
+        cancellation: agent_service::claude_code::RunCancellation,
+    ) -> Result<
+        agent_service::claude_code::ClaudeCodeProcessOutput,
+        agent_service::claude_code::ClaudeCodeProcessError,
+    > {
+        let result = self.inner.execute(scope, command, cancellation).await?;
+        sqlx::query("UPDATE control.project_memberships SET object_role='viewer',revision=revision+1 WHERE project_id=$1 AND actor_id=$2").bind(self.project_id.as_uuid()).bind(self.actor_id.as_uuid()).execute(&self.pool).await.map_err(|_|agent_service::claude_code::ClaudeCodeProcessError::Io)?;
+        Ok(result)
+    }
+    async fn recover_authoring_terminal(
+        &self,
+        scope: &agent_service::claude_code::AuthoringAttemptScope,
+        cancellation: agent_service::claude_code::RunCancellation,
+    ) -> Result<
+        agent_service::claude_code::ClaudeCodeProcessOutput,
+        agent_service::claude_code::ClaudeCodeProcessError,
+    > {
+        self.inner
+            .recover_authoring_terminal(scope, cancellation)
+            .await
+    }
+}
+
+struct BlockingModelCaptureReader {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait]
+impl agent_service::claude_code::ProblemPackageReader for BlockingModelCaptureReader {
+    async fn read(
+        &self,
+        _reference: &ArtifactRef,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, agent_service::claude_code::PackageObjectReadError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(b"SYNTHETIC_ALLOWED_CONTENT".to_vec())
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn model_input_queue_outlives_initial_five_second_decision()
+-> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(exercise_initial_decision_lifetime(false)).await
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn model_input_schema_repair_outlives_initial_five_second_decision()
+-> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(exercise_initial_decision_lifetime(true)).await
+}
+
+#[cfg(unix)]
+struct TtlCaptureProcess {
+    inner: agent_service::claude_code::TokioClaudeCodeProcess,
+    delay_first_result: bool,
+    sends: std::sync::atomic::AtomicUsize,
+    recoveries: std::sync::atomic::AtomicUsize,
+    timeouts: tokio::sync::Mutex<Vec<std::time::Duration>>,
+}
+#[cfg(unix)]
+#[async_trait]
+impl agent_service::claude_code::ClaudeCodeProcess for TtlCaptureProcess {
+    async fn version(&self) -> Result<String, agent_service::claude_code::ClaudeCodeProcessError> {
+        self.inner.version().await
+    }
+    async fn execute(
+        &self,
+        scope: &agent_service::claude_code::ExecutionScope,
+        command: agent_service::claude_code::ClaudeCodeCommand,
+        cancellation: agent_service::claude_code::RunCancellation,
+    ) -> Result<
+        agent_service::claude_code::ClaudeCodeProcessOutput,
+        agent_service::claude_code::ClaudeCodeProcessError,
+    > {
+        use std::sync::atomic::Ordering;
+        self.timeouts.lock().await.push(command.timeout());
+        let number = self.sends.fetch_add(1, Ordering::SeqCst);
+        let result = self.inner.execute(scope, command, cancellation).await?;
+        if number == 0 && self.delay_first_result {
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        }
+        Ok(result)
+    }
+    async fn recover_authoring_terminal(
+        &self,
+        scope: &agent_service::claude_code::AuthoringAttemptScope,
+        cancellation: agent_service::claude_code::RunCancellation,
+    ) -> Result<
+        agent_service::claude_code::ClaudeCodeProcessOutput,
+        agent_service::claude_code::ClaudeCodeProcessError,
+    > {
+        self.recoveries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .recover_authoring_terminal(scope, cancellation)
+            .await
+    }
+}
+
+#[cfg(unix)]
+async fn ttl_attempt_scope(
+    pool: &sqlx::PgPool,
+    lease: &agent_service::run_store::AgentTrackLease,
+    actor_id: ActorId,
+    version: &str,
+) -> Result<agent_service::claude_code::AuthoringAttemptScope, Box<dyn std::error::Error>> {
+    let (started_at,lease_token):(time::OffsetDateTime,Uuid)=sqlx::query_as("SELECT attempt_started_at,lease_token FROM agent.agent_track_work_items WHERE run_id=$1 AND track='environment'").bind(lease.run_id.as_uuid()).fetch_one(pool).await?;
+    Ok(agent_service::claude_code::AuthoringAttemptScope {
+        run_id: lease.run_id,
+        project_id: lease.run.project_id,
+        course_id: lease.run.course_id,
+        actor_id,
+        track: lease.track,
+        attempt: lease.attempt,
+        execution_generation: 1,
+        started_at: UtcTimestamp::from_utc(started_at)?,
+        worker_id: lease.worker_id.clone(),
+        lease_token,
+        trace_id: "synthetic-ttl".to_owned(),
+        claude_code_version: version.to_owned(),
+    })
+}
+
+#[cfg(unix)]
+async fn reserve_ttl_attempt(
+    store: &agent_service::run_store::PostgresAgentRunStore,
+    command: &contracts::http::InternalCreateAgentRunRequest,
+    key: &str,
+    input_hash: Sha256Digest,
+    now: UtcTimestamp,
+) -> Result<agent_service::run_store::AgentTrackLease, Box<dyn std::error::Error>> {
+    let agent_service::run_store::AgentRunReservation::Created(run) = store
+        .reserve_internal_dispatch(command, &IdempotencyKey::parse(key)?, now, "synthetic-ttl")
+        .await?
+    else {
+        return Err("new TTL fixture expected".into());
+    };
+    let dispatch = store
+        .claim_dispatch(std::time::Duration::from_secs(30))
+        .await?
+        .ok_or("TTL dispatch missing")?;
+    assert_eq!(dispatch.run.id, run.id);
+    store.bind_prepared_dispatch(&dispatch, input_hash).await?;
+    store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Environment,
+            input_hash,
+            "synthetic-ttl",
+            std::time::Duration::from_secs(30),
+        )
+        .await?
+        .ok_or_else(|| "TTL attempt missing".into())
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "real session facts, elapsed decision TTL, capture and original task deadline form one bounded fixture"
+)]
+async fn exercise_initial_decision_lifetime(
+    repair: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use agent_service::claude_code::{
+        ClaudeCodeRuntime, ProblemPackageEgressGate, RunCancellation, TokioClaudeCodeProcess,
+    };
+    use agent_service::run_store::PostgresAgentRunStore;
+    use contracts::http::{
+        ModelInputAuthorizationBinding, ModelInputAuthorizationResolveRequest,
+        model_input_selection_sha256,
+    };
+    use sha2::Digest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
+        .execute(&pool)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    apply_domain_migrations(&pool, Domain::Agent).await?;
+    let config = control_config()?;
+    let base = config.virtual_machine_bases.clone();
+    let service = Arc::new(ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        config,
+    )?);
+    let actor = ActorId::new();
+    let session = contracts::BffSessionId::new();
+    sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256) VALUES($1,'https://synthetic.invalid',$2)").bind(actor.as_uuid()).bind("c".repeat(64)).execute(&pool).await?;
+    sqlx::query("INSERT INTO access.bff_sessions(session_id,actor_id,platform_roles,authorization_revision,expires_at,idle_expires_at,encrypted_csrf_token,csrf_encryption_key_id) VALUES($1,$2,ARRAY['student'],1,date_trunc('milliseconds',now())+interval '1 hour',date_trunc('milliseconds',now())+interval '1 hour',$3,'synthetic')").bind(session.as_uuid()).bind(actor.as_uuid()).bind(vec![0u8;32]).execute(&pool).await?;
+    let clock = time::OffsetDateTime::now_utc();
+    let now = UtcTimestamp::from_utc(
+        clock.replace_nanosecond(clock.nanosecond() / 1_000_000 * 1_000_000)?,
+    )?;
+    let project = service
+        .create_project(
+            actor,
+            contracts::PlatformRole::Student,
+            &contracts::CreateProjectRequest {
+                name: "synthetic decision TTL".to_owned(),
+                description: None,
+                course_id: None,
+            },
+            &IdempotencyKey::parse("ttl-project")?,
+            now,
+        )
+        .await?;
+    let mut policy = authoring_policy(project.id, None, now)?;
+    policy.budget.timeout_milliseconds = 20_000;
+    service
+        .activate_project_policy(
+            project.id,
+            policy.clone(),
+            &IdempotencyKey::parse("ttl-policy")?,
+            None,
+        )
+        .await?;
+    let package: ProblemPackage = serde_json::from_value(
+        serde_json::json!({"id":contracts::ProblemPackageId::new(),"projectId":project.id,"courseId":null,"revision":1,"files":[{"path":"allowed.md","sha256":Sha256Digest::of_bytes(b"SYNTHETIC_ALLOWED_CONTENT").to_string(),"object":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"one","sizeBytes":25,"mediaType":"text/plain"}}],"retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"course_material","retainUntil":"2027-12-31T00:00:00.000Z","disposition":"delete"},"completedAt":now}),
+    )?;
+    sqlx::query("INSERT INTO control.problem_packages(package_id,project_id,course_id,revision,manifest_sha256,contract,completed_at) VALUES($1,$2,NULL,1,$3,$4,$5)").bind(package.id.as_uuid()).bind(project.id.as_uuid()).bind(Sha256Digest::of_canonical(&package.files)?.to_string()).bind(serde_json::to_value(&package)?).bind(now.get()).execute(&pool).await?;
+    let paths = vec!["allowed.md".to_owned()];
+    let request = ModelInputAuthorizationResolveRequest {
+        binding: ModelInputAuthorizationBinding {
+            session_sha256: format!("{:x}", sha2::Sha256::digest(session.to_string().as_bytes())),
+            actor_id: actor,
+            project_id: project.id,
+            course_id: None,
+            operation_id: "createProjectAgentRun".to_owned(),
+            valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::seconds(5))?,
+            source: contracts::http::ModelInputAuthorizationSource::ProblemPackage {
+                package_id: package.id,
+                package_revision: package.revision,
+            },
+            policy_id: policy.id,
+            policy_revision: policy.revision,
+            policy_sha256: contracts::http::model_input_policy_sha256(&policy)?,
+            selection_sha256: model_input_selection_sha256(&paths)?,
+        },
+        selected_paths: paths.clone(),
+    };
+    let command = contracts::http::InternalCreateAgentRunRequest {
+        input_authorization: request.binding.clone(),
+        project_id: project.id,
+        course_id: None,
+        actor_id: actor,
+        request: contracts::http::InternalAgentRunRequest::Authoring(
+            contracts::http::CreateAgentRunRequest {
+                selected_paths: Some(paths.clone()),
+                project_id: project.id,
+                course_id: None,
+                package_id: package.id,
+                package_revision: package.revision,
+                policy_id: policy.id,
+                policy_revision: policy.revision,
+                environment_class: EnvironmentClass::Work,
+            },
+        ),
+        purpose: AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Work,
+        },
+        package: package.clone(),
+        object_locators: package
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.object.artifact_id,
+                    format!("synthetic/{}", file.object.artifact_id),
+                )
+            })
+            .collect(),
+        policy: policy.clone(),
+        preauthorization: None,
+    };
+    let input = ProblemPackageEgressGate::new(
+        Arc::new(ModelCaptureReader),
+        Arc::new(
+            agent_service::classifier::DeterministicEgressClassifier::new(
+                "synthetic".to_owned(),
+                Revision::new(1)?,
+            )?,
+        ),
+    )
+    .prepare(&package, &policy, &paths)
+    .await?;
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let lease = reserve_ttl_attempt(&store, &command, "ttl-positive", input.sha256(), now).await?;
+    let expired_lease =
+        reserve_ttl_attempt(&store, &command, "ttl-task-timeout", input.sha256(), now).await?;
+    let scope =
+        ttl_attempt_scope(&pool, &lease, actor, &policy.binding.claude_code_version).await?;
+    let snapshot:(String,String,String,String)=sqlx::query_as("SELECT d.request::text,d.dispatch_sha256,r.input_sha256,d.prepared_input_sha256 FROM agent.agent_run_dispatches d JOIN agent.agent_runs r USING(run_id) WHERE d.run_id=$1").bind(lease.run_id.as_uuid()).fetch_one(&pool).await?;
+    let fixture = tempfile::tempdir()?;
+    let binary = fixture.path().join("claude");
+    let capture = fixture.path().join("capture.jsonl");
+    let counter = fixture.path().join("count");
+    let bad = fixture.path().join("bad.jsonl");
+    let good = fixture.path().join("good.jsonl");
+    let candidate = serde_json::to_string(
+        &vm_environment_candidate(project.id, None, &base, EnvironmentClass::Work, now)?.spec,
+    )?;
+    for (output, text) in [(&bad, "{}"), (&good, candidate.as_str())] {
+        let session_id = Uuid::new_v4().to_string();
+        let events = [
+            serde_json::json!({"type":"system","subtype":"init","session_id":session_id}),
+            serde_json::json!({"type":"assistant","session_id":session_id,"message":{"role":"assistant","content":[{"type":"text","text":text}]}}),
+            serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":session_id,"num_turns":1,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1},"permission_denials":[]}),
+        ];
+        std::fs::write(
+            output,
+            events
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n")
+                + "\n",
+        )?;
+    }
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$2\" = \"--version\" ]; then printf '2.1.207\\n'; exit 0; fi\n/bin/cat >> \"$LABWEAVER_CAPTURE\"\nprintf '\\n' >> \"$LABWEAVER_CAPTURE\"\nif [ -f \"$LABWEAVER_COUNT\" ]; then /bin/cat \"$LABWEAVER_GOOD\"; else printf '1' > \"$LABWEAVER_COUNT\"; /bin/cat \"$LABWEAVER_BAD\"; fi\n",
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
+    if !repair {
+        std::fs::write(&counter, b"1")?;
+    }
+    let process = Arc::new(TtlCaptureProcess {
+        inner: TokioClaudeCodeProcess::new(std::collections::BTreeMap::from([
+            ("PATH".to_owned(), fixture.path().display().to_string()),
+            (
+                "LABWEAVER_CAPTURE".to_owned(),
+                capture.display().to_string(),
+            ),
+            ("LABWEAVER_COUNT".to_owned(), counter.display().to_string()),
+            ("LABWEAVER_BAD".to_owned(), bad.display().to_string()),
+            ("LABWEAVER_GOOD".to_owned(), good.display().to_string()),
+        ])),
+        delay_first_result: repair,
+        sends: AtomicUsize::new(0),
+        recoveries: AtomicUsize::new(0),
+        timeouts: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let authorization = Arc::new(RealModelAuthorization {
+        control: service.clone(),
+        request: request.clone(),
+        store: store.clone(),
+        run_id: lease.run_id,
+    });
+    let runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(authorization);
+    if !repair {
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    }
+    let execution = runtime
+        .generate_authoring(
+            &scope,
+            input.clone(),
+            RunCancellation::new(),
+            EnvironmentClass::Work,
+            &[],
+        )
+        .await.inspect_err(|failure| {
+            let captures=if capture.exists() {std::fs::read_to_string(&capture).map_or(usize::MAX,|sent|sent.lines().count())} else {0};
+            let elapsed=(time::OffsetDateTime::now_utc()-now.get()).whole_milliseconds();
+            eprintln!("initial-decision red evidence: repair={repair}, elapsed_ms={elapsed}, actual_stdin_captures={captures}, diagnostic={}",failure.diagnostic_code());
+            assert!(elapsed>5_000);
+            assert_eq!(captures,usize::from(repair));
+        })?;
+    assert!(time::OffsetDateTime::now_utc() > request.binding.valid_until.get());
+    let expected = if repair { 2 } else { 1 };
+    assert_eq!(execution.audit.usage.requests, expected);
+    assert!(execution.audit.usage_observed);
+    assert_eq!(
+        process.sends.load(Ordering::SeqCst),
+        usize::try_from(expected)?
+    );
+    let sent = std::fs::read_to_string(&capture)?;
+    assert_eq!(sent.lines().count(), usize::try_from(expected)?);
+    for line in sent.lines() {
+        assert!(line.contains("SYNTHETIC_ALLOWED_CONTENT"));
+    }
+    let timeouts = process.timeouts.lock().await;
+    assert!(
+        timeouts.iter().all(|timeout| *timeout
+            < std::time::Duration::from_millis(policy.budget.timeout_milliseconds))
+    );
+    if repair {
+        assert!(timeouts[1] < timeouts[0]);
+    }
+    drop(timeouts);
+    let completed_at = time::OffsetDateTime::now_utc();
+    store
+        .complete_track(
+            &lease,
+            Ok(execution),
+            UtcTimestamp::from_utc(
+                completed_at
+                    .replace_nanosecond(completed_at.nanosecond() / 1_000_000 * 1_000_000)?,
+            )?,
+            "synthetic-ttl",
+        )
+        .await?;
+    let after:(String,String,String,String)=sqlx::query_as("SELECT d.request::text,d.dispatch_sha256,r.input_sha256,d.prepared_input_sha256 FROM agent.agent_run_dispatches d JOIN agent.agent_runs r USING(run_id) WHERE d.run_id=$1").bind(lease.run_id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(snapshot, after);
+    std::fs::remove_file(&capture)?;
+    let denied_lease =
+        reserve_ttl_attempt(&store, &command, "ttl-current-denials", input.sha256(), now).await?;
+    let denied_scope = ttl_attempt_scope(
+        &pool,
+        &denied_lease,
+        actor,
+        &policy.binding.claude_code_version,
+    )
+    .await?;
+    let denied_runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(Arc::new(RealModelAuthorization {
+            control: service.clone(),
+            request: request.clone(),
+            store: store.clone(),
+            run_id: denied_lease.run_id,
+        }));
+    for update in [
+        "expires_at=now()-interval '1 second',idle_expires_at=now()-interval '1 second'",
+        "idle_expires_at=now()-interval '1 second'",
+        "revoked_at=now()",
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE access.bff_sessions SET {update} WHERE session_id=$1"
+        )))
+        .bind(session.as_uuid())
+        .execute(&pool)
+        .await?;
+        let failure = denied_runtime
+            .generate_authoring(
+                &denied_scope,
+                input.clone(),
+                RunCancellation::new(),
+                EnvironmentClass::Work,
+                &[],
+            )
+            .await
+            .err()
+            .ok_or("current original session must deny")?;
+        assert_eq!(
+            failure.diagnostic_code(),
+            "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+        );
+        assert!(!capture.exists());
+        sqlx::query("UPDATE access.bff_sessions SET expires_at=date_trunc('milliseconds',now())+interval '1 hour',idle_expires_at=date_trunc('milliseconds',now())+interval '1 hour',revoked_at=NULL WHERE session_id=$1").bind(session.as_uuid()).execute(&pool).await?;
+    }
+    sqlx::query("UPDATE control.project_memberships SET state='revoked' WHERE project_id=$1 AND actor_id=$2").bind(project.id.as_uuid()).bind(actor.as_uuid()).execute(&pool).await?;
+    assert_eq!(
+        denied_runtime
+            .generate_authoring(
+                &denied_scope,
+                input.clone(),
+                RunCancellation::new(),
+                EnvironmentClass::Work,
+                &[]
+            )
+            .await
+            .err()
+            .ok_or("member withdrawal must deny")?
+            .diagnostic_code(),
+        "LW_MODEL_INPUT_AUTHORIZATION_DENIED"
+    );
+    assert!(!capture.exists());
+    sqlx::query(
+        "UPDATE control.project_memberships SET state='active' WHERE project_id=$1 AND actor_id=$2",
+    )
+    .bind(project.id.as_uuid())
+    .bind(actor.as_uuid())
+    .execute(&pool)
+    .await?;
+    store
+        .request_cancellation_revisioned(
+            project.id,
+            None,
+            denied_lease.run_id,
+            denied_lease.run.revision,
+            &IdempotencyKey::parse("ttl-durable-cancel")?,
+            now,
+        )
+        .await?;
+    assert_eq!(
+        denied_runtime
+            .generate_authoring(
+                &denied_scope,
+                input.clone(),
+                RunCancellation::new(),
+                EnvironmentClass::Work,
+                &[]
+            )
+            .await
+            .err()
+            .ok_or("durable cancel must deny")?
+            .diagnostic_code(),
+        "LW_CONFLICT"
+    );
+    assert!(!capture.exists());
+    let expired_scope = ttl_attempt_scope(
+        &pool,
+        &expired_lease,
+        actor,
+        &policy.binding.claude_code_version,
+    )
+    .await?;
+    let deadline = expired_scope.started_at.get()
+        + time::Duration::milliseconds(i64::try_from(policy.budget.timeout_milliseconds)?);
+    if let Ok(wait) = std::time::Duration::try_from(
+        deadline - time::OffsetDateTime::now_utc() + time::Duration::milliseconds(100),
+    ) {
+        tokio::time::sleep(wait).await;
+    }
+    let expired_runtime = ClaudeCodeRuntime::new(policy.clone(), process.clone())?
+        .with_input_authorization(Arc::new(RealModelAuthorization {
+            control: service,
+            request,
+            store: store.clone(),
+            run_id: expired_lease.run_id,
+        }));
+    let failure = expired_runtime
+        .generate_authoring(
+            &expired_scope,
+            input,
+            RunCancellation::new(),
+            EnvironmentClass::Work,
+            &[],
+        )
+        .await
+        .err()
+        .ok_or("original task deadline must stop sending")?;
+    assert_eq!(failure.diagnostic_code(), "LW_PROVIDER_TIMEOUT");
+    assert!(!capture.exists());
+    assert_eq!(
+        process.sends.load(Ordering::SeqCst),
+        usize::try_from(expected)?
+    );
+    assert_eq!(process.recoveries.load(Ordering::SeqCst), 1);
+    assert_eq!(failure.audit().usage.requests, 0);
+    Ok(())
+}
+
+struct ForbiddenModelInputObjects(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl ImmutableObjectStore for ForbiddenModelInputObjects {
+    fn binding(&self) -> &'static str {
+        "forbidden-model-input"
+    }
+    async fn presign_upload(
+        &self,
+        _: &str,
+        _: u64,
+        _: &str,
+        _: UtcTimestamp,
+    ) -> Result<PresignedUpload, ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+    async fn read_verified(
+        &self,
+        _: &str,
+        _: &ArtifactRef,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+    async fn freeze_current(
+        &self,
+        _: &str,
+        _: u64,
+        _: &str,
+    ) -> Result<VerifiedObject, ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+    async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ObjectStoreError::ObjectIdentityMismatch)
+    }
+}
+
+#[tokio::test]
+async fn frozen_inputs_without_connected_authority_deny_before_database_or_objects()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::http::{
+        FrozenModelInputSource, ModelInputAuthorizationBinding,
+        ModelInputAuthorizationResolveRequest, ModelInputAuthorizationSource,
+        ModelInputRubricIdentity,
+    };
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(25))
+        .connect_lazy("postgres://synthetic:synthetic@127.0.0.1:9/unavailable")?;
+    let objects = Arc::new(ForbiddenModelInputObjects(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    let service = ControlService::new(pool, objects.clone(), control_config()?)?;
+    let source = FrozenModelInputSource {
+        parent_lease_sha256: "d".repeat(64),
+        task_run_id: contracts::TaskRunId::new(),
+        step_id: "review".to_owned(),
+        frozen_submission_id: contracts::FrozenSubmissionId::new(),
+        manifest_revision: Revision::new(3)?,
+        manifest_sha256: "a".repeat(64),
+        archive: verified("archive", "archive-v1", 50, "application/gzip").reference,
+        content_sha256: "b".repeat(64),
+        evaluation_release_id: EvaluationReleaseId::new(),
+        evaluation_release_revision: Revision::new(9)?,
+        environment: contracts::submission::FrozenEnvironmentIdentity {
+            environment_id: EnvironmentId::new(),
+            environment_revision: Revision::new(2)?,
+            release_id: ReleaseId::new(),
+            release_version: 4,
+            runtime_kind: RuntimeKind::Container,
+            build_request_id: None,
+        },
+        rubric: ModelInputRubricIdentity {
+            package_id: ProblemPackageId::new(),
+            package_revision: Revision::new(7)?,
+            path: "rubric.md".to_owned(),
+            artifact: verified("rubric", "rubric-v2", 20, "text/plain").reference,
+            sha256: "d".repeat(64),
+        },
+        rubric_permission: None,
+    };
+    let binding = ModelInputAuthorizationBinding {
+        session_sha256: "a".repeat(64),
+        actor_id: ActorId::new(),
+        project_id: ProjectId::new(),
+        course_id: Some(CourseId::new()),
+        operation_id: "freezeSubmission".to_owned(),
+        valid_until: "2026-10-14T12:00:00.000Z".parse()?,
+        source: ModelInputAuthorizationSource::FrozenSubmission(Box::new(source)),
+        policy_id: PolicyId::new(),
+        policy_revision: Revision::new(1)?,
+        policy_sha256: "a".repeat(64),
+        selection_sha256: "c".repeat(64),
+    };
+    binding.validate()?;
+    let request = ModelInputAuthorizationResolveRequest {
+        binding,
+        selected_paths: vec!["answer.rs".to_owned()],
+    };
+    assert!(matches!(
+        service.resolve_model_input_authorization(&request).await,
+        Err(ControlError::ContractInvalid)
+    ));
+    assert_eq!(objects.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    Ok(())
 }

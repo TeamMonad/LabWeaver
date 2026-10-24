@@ -511,12 +511,13 @@ impl SandboxAuthoringProcess {
             task_run_id: task_run_id.as_uuid(),
             ownership,
             trace_id: scope.trace_id.clone(),
-            command: command_argv(&command),
+            command: gated_command_argv(&command),
             command_environment: scoped_attempt_environment(
                 &self.configuration.worker_environment,
                 command.env(),
                 self.configuration.model_gateway.as_ref(),
                 scope,
+                task_run_id,
                 remaining,
             )?,
             expected_claude_version: scope.claude_code_version.clone(),
@@ -2069,6 +2070,7 @@ fn scoped_attempt_environment(
     command_environment: &BTreeMap<String, String>,
     gateway: Option<&crate::model_gateway::ModelGatewayRuntime>,
     scope: &AuthoringAttemptScope,
+    task_run_id: TaskRunId,
     valid_for: Duration,
 ) -> Result<BTreeMap<String, String>, ClaudeCodeProcessError> {
     let gateway = gateway.ok_or(ClaudeCodeProcessError::Unavailable)?;
@@ -2086,9 +2088,26 @@ fn scoped_attempt_environment(
         scope.project_id,
         scope.run_id.as_uuid(),
         scope.attempt,
+        crate::model_gateway::ModelGatewayScope::Authoring {
+            track: scope.track,
+            task_run_id,
+            lease_sha256: contracts::http::model_input_parent_lease_sha256(scope.lease_token),
+        },
         valid_for,
     ));
     Ok(environment)
+}
+
+fn gated_command_argv(command: &ClaudeCodeCommand) -> Vec<String> {
+    let mut argv = command_argv(command);
+    let hook = "curl --fail --silent --show-error --max-time 5 --request POST --header \"x-api-key: $ANTHROPIC_API_KEY\" --header 'Content-Type: application/json' --data-binary @- \"${ANTHROPIC_BASE_URL%/}/authorize\" >/dev/null || exit 2";
+    let settings = serde_json::json!({"hooks": {
+        "PreToolUse": [{"matcher":".*", "hooks":[{"type":"command","command":hook,"timeout":6}]}],
+        "PostToolUse": [{"matcher":".*", "hooks":[{"type":"command","command":hook,"timeout":6}]}]
+    }});
+    argv.insert(1, "--settings".to_owned());
+    argv.insert(2, settings.to_string());
+    argv
 }
 
 /// Timing of one observed attempt, taken from the shared observation.
@@ -2236,6 +2255,7 @@ mod tests {
             &BTreeMap::new(),
             Some(&gateway),
             &scope,
+            contracts::TaskRunId::new(),
             Duration::from_hours(1),
         )?;
         let output = tokio::process::Command::new("/bin/sh")
@@ -2259,6 +2279,7 @@ mod tests {
                 &BTreeMap::new(),
                 Some(&gateway),
                 &scope,
+                contracts::TaskRunId::new(),
                 Duration::from_hours(1)
             )
             .is_err()
@@ -2269,6 +2290,7 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 &scope,
+                contracts::TaskRunId::new(),
                 Duration::from_hours(1)
             )
             .is_err()

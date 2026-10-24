@@ -323,7 +323,7 @@ impl LlmReviewStore {
             .await
             .map_err(|_| LlmReviewStoreError::PersistenceFailed)?;
         let row = sqlx::query(
-            "SELECT task_run_id,project_id,course_id,request_json,request_sha256,state,attempt \
+            "SELECT task_run_id,project_id,course_id,request_json,request_sha256,state,attempt,receipt_json \
              FROM agent.llm_review_runs \
              WHERE state IN ('queued','running','cancelling') \
                AND (state='queued' OR lease_expires_at IS NULL OR lease_expires_at <= now()) \
@@ -376,8 +376,7 @@ impl LlmReviewStore {
             }
             receipt.state = AgentLlmReviewState::Failed;
             receipt.review = None;
-            // Any provider usage from an unfinished invocation is unknown. Do not infer zero.
-            receipt.usage = None;
+            // Preserve any already observed usage; absent observations remain unknown.
             receipt.diagnostic_code = Some(REVIEW_INTERRUPTED.to_owned());
             receipt.finished_at = Some(now);
             receipt
@@ -408,22 +407,42 @@ impl LlmReviewStore {
                 .map_err(|_| LlmReviewStoreError::PersistenceFailed)?;
             return Ok(None);
         }
-        let request: InternalAgentLlmReviewRequest = serde_json::from_value(
+        let request = serde_json::from_value::<InternalAgentLlmReviewRequest>(
             row.try_get::<Value, _>("request_json")
                 .map_err(|_| LlmReviewStoreError::InvalidContract)?,
-        )
-        .map_err(|_| LlmReviewStoreError::InvalidContract)?;
-        validate_request_for_worker(&request)?;
-        if request.task_run_id != task_run_id
-            || request.project_id != project_id
-            || request.course_id != course_id
-            || Sha256Digest::of_canonical(&request)
-                .map_err(|_| LlmReviewStoreError::InvalidContract)?
-                .to_string()
-                != request_sha256
-        {
-            return Err(LlmReviewStoreError::InvalidContract);
+        );
+        let valid = request.as_ref().is_ok_and(|request| {
+            validate_request_for_worker(request).is_ok()
+                && request.task_run_id == task_run_id
+                && request.project_id == project_id
+                && request.course_id == course_id
+                && Sha256Digest::of_canonical(request)
+                    .is_ok_and(|sha| sha.to_string() == request_sha256)
+        });
+        if !valid {
+            let mut receipt = decode_receipt(
+                row.try_get::<Value, _>("receipt_json")
+                    .map_err(|_| LlmReviewStoreError::InvalidContract)?,
+            )?;
+            if receipt.task_run_id != task_run_id || receipt.request_sha256 != request_sha256 {
+                return Err(LlmReviewStoreError::InvalidContract);
+            }
+            receipt.state = AgentLlmReviewState::Failed;
+            receipt.review = None;
+            receipt.diagnostic_code = Some("LW_MODEL_INPUT_AUTHORIZATION_REQUIRED".to_owned());
+            receipt.finished_at = Some(now);
+            receipt
+                .validate()
+                .map_err(|_| LlmReviewStoreError::InvalidContract)?;
+            sqlx::query("UPDATE agent.llm_review_runs SET state='failed',receipt_json=$2,diagnostic_code='LW_MODEL_INPUT_AUTHORIZATION_REQUIRED',finished_at=$3,updated_at=$3 WHERE task_run_id=$1 AND state='queued'")
+                .bind(task_run_id.as_uuid()).bind(serde_json::to_value(&receipt).map_err(|_| LlmReviewStoreError::InvalidContract)?).bind(now.get()).execute(&mut *transaction).await.map_err(|_| LlmReviewStoreError::PersistenceFailed)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| LlmReviewStoreError::PersistenceFailed)?;
+            return Ok(None);
         }
+        let request = request.map_err(|_| LlmReviewStoreError::InvalidContract)?;
         let attempt = row
             .try_get::<i64, _>("attempt")
             .map_err(|_| LlmReviewStoreError::InvalidContract)?
@@ -588,7 +607,7 @@ impl LlmReviewStore {
             (
                 AgentLlmReviewState::Cancelled,
                 None,
-                None,
+                usage,
                 Some(REVIEW_CANCELLED.to_owned()),
             )
         } else if let Some(review) = review {
@@ -661,9 +680,40 @@ pub struct LlmReviewLease {
     lease_token: Uuid,
 }
 
+impl LlmReviewLease {
+    #[must_use]
+    pub fn gateway_scope(&self) -> crate::model_gateway::ModelGatewayScope {
+        crate::model_gateway::ModelGatewayScope::Review {
+            lease_sha256: contracts::http::model_input_parent_lease_sha256(self.lease_token),
+        }
+    }
+}
+
+/// External current-authorization boundary, checked for this exact durable review lease.
+#[async_trait::async_trait]
+pub trait ReviewInputAuthorization: Send + Sync {
+    /// Rechecks authorization and current cancellation without refreshing the request budget.
+    async fn check(
+        &self,
+        lease: &LlmReviewLease,
+    ) -> Result<(), crate::claude_code::ClaudeCodeRuntimeError>;
+}
+
+struct ReviewInvocationGuard {
+    authority: Arc<dyn ReviewInputAuthorization>,
+    lease: LlmReviewLease,
+}
+#[async_trait::async_trait]
+impl crate::claude_code::ModelInputAuthorization for ReviewInvocationGuard {
+    async fn check(&self) -> Result<(), crate::claude_code::ClaudeCodeRuntimeError> {
+        self.authority.check(&self.lease).await
+    }
+}
+
 /// Long-running worker for Agent-owned advisory reviews.
 #[derive(Clone)]
 pub struct LlmReviewWorker {
+    pub authorization: Option<Arc<dyn ReviewInputAuthorization>>,
     pub store: LlmReviewStore,
     pub classifier: Arc<dyn EgressClassifier>,
     pub process: Arc<dyn ClaudeCodeProcess>,
@@ -807,6 +857,13 @@ impl LlmReviewWorker {
         deadline_reached: &AtomicBool,
     ) -> Result<crate::claude_code::ClaudeCodeReviewExecution, ReviewExecutionFailure> {
         let request = &lease.request;
+        let authority = self.authorization.as_ref().ok_or_else(|| {
+            review_execution_failure("LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE", None)
+        })?;
+        authority
+            .check(lease)
+            .await
+            .map_err(|error| review_execution_failure(error.diagnostic_code(), None))?;
         if let Some(failure) = cancellation_failure(&cancellation, deadline_reached, None) {
             return Err(failure);
         }
@@ -859,7 +916,11 @@ impl LlmReviewWorker {
             return Err(failure);
         }
         let runtime = ClaudeCodeRuntime::new(request.policy.clone(), Arc::clone(&self.process))
-            .map_err(|error| review_execution_failure(error.diagnostic_code(), None))?;
+            .map_err(|error| review_execution_failure(error.diagnostic_code(), None))?
+            .with_input_authorization(Arc::new(ReviewInvocationGuard {
+                authority: Arc::clone(authority),
+                lease: lease.clone(),
+            }));
         let gateway = self
             .model_gateway
             .as_ref()
@@ -870,6 +931,7 @@ impl LlmReviewWorker {
             request.project_id,
             request.task_run_id.as_uuid(),
             lease.attempt,
+            lease.gateway_scope(),
             remaining.min(Duration::from_millis(
                 request.policy.budget.timeout_milliseconds,
             )),
@@ -1138,11 +1200,29 @@ impl LlmReviewStoreError {
     }
 }
 
+impl LlmReviewStore {
+    /// Read-only per-invocation fence; it does not extend the lease or alter the original deadline.
+    pub async fn check_invocation(
+        &self,
+        lease: &LlmReviewLease,
+    ) -> Result<(), LlmReviewStoreError> {
+        if OffsetDateTime::now_utc() >= lease.request.deadline_at.get() {
+            return Err(LlmReviewStoreError::InvalidContract);
+        }
+        let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent.llm_review_runs WHERE task_run_id=$1 AND project_id=$2 AND course_id IS NOT DISTINCT FROM $3 AND state='running' AND worker_id=$4 AND lease_token=$5 AND lease_expires_at>clock_timestamp())")
+            .bind(lease.task_run_id.as_uuid()).bind(lease.request.project_id.as_uuid()).bind(lease.request.course_id.map(CourseId::as_uuid)).bind(&lease.worker_id).bind(lease.lease_token)
+            .fetch_one(&self.pool).await.map_err(|_| LlmReviewStoreError::PersistenceFailed)?;
+        if !allowed {
+            return Err(LlmReviewStoreError::LeaseLost);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
 
     use async_trait::async_trait;
@@ -1285,23 +1365,102 @@ mod tests {
         .expect("test policy is valid")
     }
 
+    struct AllowReviewAuthorization;
+    #[async_trait::async_trait]
+    impl super::ReviewInputAuthorization for AllowReviewAuthorization {
+        async fn check(
+            &self,
+            _: &super::LlmReviewLease,
+        ) -> Result<(), crate::claude_code::ClaudeCodeRuntimeError> {
+            Ok(())
+        }
+    }
+
     fn request(deadline_at: UtcTimestamp) -> InternalAgentLlmReviewRequest {
         let project_id = policy().project_id;
         let course_id = policy().course_id;
         let submission = "submission";
         let rubric = "rubric";
+        let task_run_id = TaskRunId::new();
+        let frozen_submission_id = FrozenSubmissionId::new();
+        let submission_artifact = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "minio-primary".to_owned(),
+            object_version: "version-1".to_owned(),
+            size_bytes: submission.len() as u64,
+            media_type: "text/plain".to_owned(),
+        };
+        let rubric_artifact = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "minio-primary".to_owned(),
+            object_version: "version-1".to_owned(),
+            size_bytes: rubric.len() as u64,
+            media_type: "text/plain".to_owned(),
+        };
+        let source = contracts::http::FrozenModelInputSource {
+            parent_lease_sha256: "d".repeat(64),
+            task_run_id,
+            step_id: "review".to_owned(),
+            frozen_submission_id,
+            manifest_revision: contracts::Revision::new(1).expect("revision"),
+            manifest_sha256: "a".repeat(64),
+            archive: submission_artifact.clone(),
+            content_sha256: "b".repeat(64),
+            evaluation_release_id: contracts::EvaluationReleaseId::new(),
+            evaluation_release_revision: contracts::Revision::new(1).expect("revision"),
+            environment: contracts::submission::FrozenEnvironmentIdentity {
+                environment_id: contracts::EnvironmentId::new(),
+                environment_revision: contracts::Revision::new(1).expect("revision"),
+                release_id: contracts::ReleaseId::new(),
+                release_version: 1,
+                runtime_kind: contracts::authoring::RuntimeKind::Container,
+                build_request_id: None,
+            },
+            rubric: contracts::http::ModelInputRubricIdentity {
+                package_id: contracts::ProblemPackageId::new(),
+                package_revision: contracts::Revision::new(1).expect("revision"),
+                path: "rubric.md".to_owned(),
+                artifact: rubric_artifact.clone(),
+                sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
+            },
+            rubric_permission: Some(contracts::http::ModelInputRubricPermissionRef {
+                authoring_project_id: project_id,
+                policy_id: policy().id,
+                policy_revision: policy().revision,
+                approved_by: contracts::ActorId::new(),
+                approver_course_membership_revision: contracts::Revision::new(1).expect("revision"),
+            }),
+        };
+        let selection_sha256 = contracts::http::frozen_model_input_selection_sha256(
+            &source,
+            &[(
+                "submission.md".to_owned(),
+                Sha256Digest::of_bytes(submission.as_bytes()).to_string(),
+            )],
+        )
+        .expect("selection");
         InternalAgentLlmReviewRequest {
-            task_run_id: TaskRunId::new(),
+            input_authorization: contracts::http::ModelInputAuthorizationBinding {
+                session_sha256: "c".repeat(64),
+                actor_id: contracts::ActorId::new(),
+                project_id,
+                course_id,
+                operation_id: "freezeSubmission".to_owned(),
+                valid_until: deadline_at,
+                source: contracts::http::ModelInputAuthorizationSource::FrozenSubmission(Box::new(
+                    source,
+                )),
+                policy_id: policy().id,
+                policy_revision: policy().revision,
+                policy_sha256: contracts::http::model_input_policy_sha256(&policy())
+                    .expect("policy hash"),
+                selection_sha256,
+            },
+            task_run_id,
             project_id,
             course_id,
-            frozen_submission_id: FrozenSubmissionId::new(),
-            submission_artifact: ArtifactRef {
-                artifact_id: ArtifactId::new(),
-                store_binding: "minio-primary".to_owned(),
-                object_version: "version-1".to_owned(),
-                size_bytes: submission.len() as u64,
-                media_type: "text/plain".to_owned(),
-            },
+            frozen_submission_id,
+            submission_artifact,
             policy: policy(),
             files: vec![AgentLlmReviewFile {
                 path: "submission.md".to_owned(),
@@ -1309,13 +1468,7 @@ mod tests {
                 content: submission.to_owned(),
             }],
             rubric: AgentLlmReviewRubric {
-                artifact: ArtifactRef {
-                    artifact_id: ArtifactId::new(),
-                    store_binding: "minio-primary".to_owned(),
-                    object_version: "version-1".to_owned(),
-                    size_bytes: rubric.len() as u64,
-                    media_type: "text/plain".to_owned(),
-                },
+                artifact: rubric_artifact,
                 path: "rubric.md".to_owned(),
                 sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
                 content: rubric.to_owned(),
@@ -1352,6 +1505,7 @@ mod tests {
             .connect_lazy("postgres://invalid")
             .expect("test pool URL is valid");
         let worker = LlmReviewWorker {
+            authorization: Some(Arc::new(AllowReviewAuthorization)),
             store: LlmReviewStore::new(pool),
             classifier: Arc::new(DelayedClassifier {
                 delay: Duration::from_millis(200),
@@ -1388,6 +1542,7 @@ mod tests {
         let version_calls = Arc::new(AtomicUsize::new(0));
         let execute_calls = Arc::new(AtomicUsize::new(0));
         let worker = LlmReviewWorker {
+            authorization: Some(Arc::new(AllowReviewAuthorization)),
             store: LlmReviewStore::new(
                 sqlx::postgres::PgPoolOptions::new()
                     .connect_lazy("postgres://invalid")
@@ -1431,7 +1586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_worker_subprocess_receives_gateway_and_scoped_key_only()
+    async fn review_lease_subprocess_receives_gateway_and_scoped_key_only()
     -> Result<(), Box<dyn std::error::Error>> {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use std::os::unix::fs::PermissionsExt;
@@ -1441,34 +1596,25 @@ mod tests {
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\ncase \"$*\" in *--version*) echo '2.1.207'; exit 0;; esac\n[ \"$ANTHROPIC_BASE_URL\" = 'http://agent-service:9460/' ] || exit 19\n[ -n \"$ANTHROPIC_API_KEY\" ] || exit 20\n[ -z \"$ANTHROPIC_AUTH_TOKEN\" ] || exit 21\nprintf '%s' \"$ANTHROPIC_API_KEY\" > '{}'\nexit 1\n",
+                "#!/bin/sh\n[ \"$ANTHROPIC_BASE_URL\" = 'http://agent-service:9460/' ] || exit 19\n[ -n \"$ANTHROPIC_API_KEY\" ] || exit 20\n[ -z \"$ANTHROPIC_AUTH_TOKEN\" ] || exit 21\nprintf '%s' \"$ANTHROPIC_API_KEY\" > '{}'\nprintf '2.1.207\\n'\n",
                 evidence.display()
             ),
         )?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-        let process = crate::claude_code::TokioClaudeCodeProcess::new(BTreeMap::from([
-            (
-                "PATH".into(),
-                directory.path().to_string_lossy().into_owned(),
-            ),
-            ("ANTHROPIC_MODEL".into(), "fixture-model".into()),
-        ]));
-        let worker = LlmReviewWorker {
-            store: LlmReviewStore::new(
-                sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://invalid")?,
-            ),
-            classifier: Arc::new(DeterministicEgressClassifier::new(
-                "dlp-v1".into(),
-                Revision::new(1)?,
-            )?),
-            process: Arc::new(process),
-            worker_id: "review-process-test".into(),
-            lease_duration: Duration::from_secs(10),
-            poll_interval: Duration::from_millis(10),
-            model_gateway: Some(test_gateway()),
-        };
         let lease = lease(request(deadline_after(5_000)));
-        let _ = worker.execute(&lease, RunCancellation::new()).await;
+        let mut environment = test_gateway().environment(
+            lease.request.project_id,
+            lease.task_run_id.as_uuid(),
+            lease.attempt,
+            lease.gateway_scope(),
+            Duration::from_secs(5),
+        );
+        environment.insert(
+            "PATH".to_owned(),
+            directory.path().to_string_lossy().into_owned(),
+        );
+        let process = crate::claude_code::TokioClaudeCodeProcess::new(environment);
+        assert_eq!(process.version().await?, "2.1.207");
         let token = std::fs::read_to_string(evidence)?;
         let claims: serde_json::Value = serde_json::from_slice(
             &URL_SAFE_NO_PAD.decode(token.split_once('.').ok_or("token")?.0)?,

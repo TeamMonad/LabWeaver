@@ -251,6 +251,12 @@ pub trait EgressClassifier: Send + Sync {
     ) -> Result<BTreeSet<DeniedDataClass>, EgressClassificationError>;
 }
 
+/// Current authorization at a real invocation boundary; production checks Control and durable cancellation.
+#[async_trait]
+pub trait ModelInputAuthorization: Send + Sync {
+    async fn check(&self) -> Result<(), ClaudeCodeRuntimeError>;
+}
+
 /// Service-owned gate that is the only constructor for Claude Code egress input.
 pub struct ProblemPackageEgressGate {
     reader: Arc<dyn ProblemPackageReader>,
@@ -287,7 +293,15 @@ impl ProblemPackageEgressGate {
         &self,
         package: &ProblemPackage,
         policy: &ProjectLlmEgressPolicy,
+        selected_paths: &[String],
     ) -> Result<ImmutableEgressInput, EgressPreparationError> {
+        let paths = contracts::http::validate_model_input_selection(package, Some(selected_paths))
+            .map_err(|_| EgressPreparationError::PackageInvalid)?;
+        let mut selected_package = package.clone();
+        selected_package
+            .files
+            .retain(|file| paths.contains(&file.path));
+        let package = &selected_package;
         policy
             .validate()
             .map_err(|_| EgressPreparationError::PolicyInvalid)?;
@@ -332,9 +346,7 @@ impl ProblemPackageEgressGate {
             raw_bytes = raw_bytes
                 .checked_add(bytes.len())
                 .ok_or(EgressPreparationError::InputLimitExceeded)?;
-            if raw_bytes > MAX_EGRESS_INPUT_BYTES
-                || u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.object.size_bytes
-            {
+            if raw_bytes > MAX_EGRESS_INPUT_BYTES || !package_object_matches(file, &bytes) {
                 return Err(EgressPreparationError::ObjectIdentityMismatch);
             }
             let denied = if is_build_context_media_type(&file.object.media_type) {
@@ -389,6 +401,11 @@ impl ProblemPackageEgressGate {
             classifier_revision,
         )
     }
+}
+
+fn package_object_matches(file: &contracts::authoring::PackageFile, bytes: &[u8]) -> bool {
+    u64::try_from(bytes.len()).ok() == Some(file.object.size_bytes)
+        && Some(Sha256Digest::of_bytes(bytes)) == file.sha256.parse::<Sha256Digest>().ok()
 }
 
 #[derive(Serialize)]
@@ -520,7 +537,7 @@ impl RunCancellation {
         *self.sender.borrow()
     }
 
-    pub(crate) async fn cancelled(&self) {
+    pub async fn cancelled(&self) {
         let mut receiver = self.sender.subscribe();
         while !*receiver.borrow() {
             if receiver.changed().await.is_err() {
@@ -927,6 +944,8 @@ async fn execute_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    crate::model_diagnostics::mark_context(workspace.path())
+        .map_err(|_| ClaudeCodeProcessError::Io)?;
     let mut child = process.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ClaudeCodeProcessError::Unavailable
@@ -1334,12 +1353,23 @@ pub struct ClaudeCodeExecution {
 }
 
 /// Failed invocation with hash-only evidence and no raw provider payload.
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Error)]
 #[error("{error}")]
 pub struct ClaudeCodeFailure {
     error: ClaudeCodeRuntimeError,
     audit: Box<ClaudeCodeAudit>,
     repair_detail: Option<String>,
+}
+
+impl Debug for ClaudeCodeFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaudeCodeFailure")
+            .field("error", &self.error)
+            .field("audit", &self.audit)
+            .field("repair_detail", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ClaudeCodeFailure {
@@ -1361,6 +1391,67 @@ impl ClaudeCodeFailure {
     pub fn is_schema_invalid(&self) -> bool {
         matches!(self.error, ClaudeCodeRuntimeError::SchemaInvalid)
     }
+
+    /// Fixed messages only: provider text and selected material never become diagnostics.
+    #[must_use]
+    pub fn user_guidance(&self) -> (&'static str, &'static str) {
+        use ClaudeCodeRuntimeError as E;
+        match self.error {
+            E::InputAuthorizationDenied => (
+                "原会话、对象或模型输入许可已失效。",
+                "检查当前授权；需要更换会话或材料时新建任务。",
+            ),
+            E::ConfigurationInvalid | E::RuntimeUnavailable => (
+                "模型运行配置不可用。",
+                "请管理员检查已部署的模型及运行版本。",
+            ),
+            E::InputLimitExceeded => ("所选材料超过模型输入上限。", "减少所选材料后新建任务。"),
+            E::BudgetExceeded => (
+                "本次任务的模型预算已耗尽。",
+                "检查已有用量，调整策略后新建任务。",
+            ),
+            E::OutputLimitExceeded => ("模型返回内容超过捕获上限。", "缩小生成范围后重试。"),
+            E::SchemaInvalid
+            | E::ProtocolInvalid
+            | E::EnvironmentClassMismatch
+            | E::ProtectedField => (
+                "模型结果不符合任务约定，未发布候选。",
+                "检查材料与任务目标后重试；不要把失败当作发布成功。",
+            ),
+            E::MaterializationFailed => (
+                "生成内容无法绑定到可验证的构建材料。",
+                "检查所选材料和构建上下文后重试。",
+            ),
+            E::ToolDenied => (
+                "模型尝试了不允许的工具动作。",
+                "检查任务输入范围后重新提交。",
+            ),
+            E::TimedOut => (
+                "模型任务超过原定执行期限。",
+                "缩小任务范围后重试；重试不会回退已发生的用量。",
+            ),
+            E::Cancelled => (
+                "任务已取消，未启动后续模型调用。",
+                "查看已产生的用量；需要继续时显式重试。",
+            ),
+            E::ResourceApprovalTimeout | E::ResourceApprovalExpired | E::ResourceLeaseExpired => (
+                "任务的资源批准或租约已到期。",
+                "重新申请资源后重试，不复用已到期的执行授权。",
+            ),
+            E::RateLimited => (
+                "模型服务限流，任务未完成。",
+                "稍后显式重试，并查看已有用量。",
+            ),
+            E::Refused => (
+                "模型拒绝处理本次任务。",
+                "检查任务要求与模型使用政策后调整输入。",
+            ),
+            E::ExecutionFailed | E::UpstreamUnavailable => (
+                "模型服务或运行进程失败，任务未完成。",
+                "检查模型服务可用性后重试，并保留本次诊断编号。",
+            ),
+        }
+    }
 }
 
 /// Claude Code-only Agent runtime.
@@ -1375,6 +1466,7 @@ pub struct ClaudeCodeRuntime {
     /// Container provider bindings the deployment actually registers.
     provider_bindings: Vec<String>,
     process_environment: BTreeMap<String, String>,
+    input_authorization: Option<Arc<dyn ModelInputAuthorization>>,
 }
 
 /// Validated advisory review returned by one Claude Code invocation.
@@ -1449,6 +1541,7 @@ impl ClaudeCodeRuntime {
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
             process_environment: BTreeMap::new(),
+            input_authorization: None,
         })
     }
 
@@ -1456,6 +1549,13 @@ impl ClaudeCodeRuntime {
     #[must_use]
     pub fn with_process_environment(mut self, environment: BTreeMap<String, String>) -> Self {
         self.process_environment = environment;
+        self
+    }
+
+    /// Attaches the current authorization check used before every process invocation.
+    #[must_use]
+    pub fn with_input_authorization(mut self, check: Arc<dyn ModelInputAuthorization>) -> Self {
+        self.input_authorization = Some(check);
         self
     }
 
@@ -1493,6 +1593,7 @@ impl ClaudeCodeRuntime {
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             provider_bindings: Vec::new(),
             process_environment: BTreeMap::new(),
+            input_authorization: None,
         })
     }
 
@@ -1572,6 +1673,17 @@ impl ClaudeCodeRuntime {
         platform_images: &[PlatformImageEntry],
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
         let authoring = matches!(scope, ExecutionScope::Authoring(_));
+        if authoring && self.input_authorization.is_none() {
+            return Err(self.failure(
+                track,
+                &input,
+                &Value::Null,
+                "",
+                tool_policy_sha256(true),
+                ClaudeCodeRuntimeError::InputAuthorizationDenied,
+                None,
+            ));
+        }
         let tool_policy = tool_policy_sha256(authoring);
         // VM evaluations are executed by the deployment-owned Evaluation worker against the
         // running guest.  Only Container evaluations need an Agent-materialized runner image.
@@ -1741,6 +1853,41 @@ impl ClaudeCodeRuntime {
                     &current_prompt,
                     tool_policy,
                     ClaudeCodeRuntimeError::TimedOut,
+                    None,
+                );
+                failure.audit.usage = total_usage;
+                failure.audit.usage_observed = all_usage_observed && total_usage.requests > 0;
+                return Err(failure);
+            }
+            if let Some(check) = &self.input_authorization {
+                let checked = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => Err(ClaudeCodeRuntimeError::Cancelled),
+                    result = check.check() => result,
+                };
+                if let Err(error) = checked {
+                    let mut failure = self.failure(
+                        track,
+                        &input,
+                        &schema,
+                        &current_prompt,
+                        tool_policy,
+                        error,
+                        None,
+                    );
+                    failure.audit.usage = total_usage;
+                    failure.audit.usage_observed = all_usage_observed && total_usage.requests > 0;
+                    return Err(failure);
+                }
+            }
+            if cancellation.is_cancelled() {
+                let mut failure = self.failure(
+                    track,
+                    &input,
+                    &schema,
+                    &current_prompt,
+                    tool_policy,
+                    ClaudeCodeRuntimeError::Cancelled,
                     None,
                 );
                 failure.audit.usage = total_usage;
@@ -2029,6 +2176,24 @@ impl ClaudeCodeRuntime {
                 false,
             )
             .with_environment(self.process_environment.clone());
+            if cancellation.is_cancelled() {
+                return Err(review_failure(
+                    ClaudeCodeRuntimeError::Cancelled,
+                    usage_option(total_usage),
+                ));
+            }
+            if let Some(check) = &self.input_authorization {
+                check
+                    .check()
+                    .await
+                    .map_err(|error| review_failure(error, usage_option(total_usage)))?;
+            }
+            if cancellation.is_cancelled() {
+                return Err(review_failure(
+                    ClaudeCodeRuntimeError::Cancelled,
+                    usage_option(total_usage),
+                ));
+            }
             let process_output = self
                 .process
                 .execute(&ExecutionScope::Advisory, command, cancellation.clone())
@@ -3795,7 +3960,7 @@ fn preserve_declared_environment_surfaces(
 
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
 
-const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":false,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
+const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"authorization":{"modelRequests":"original_session_current_permission_and_live_attempt_proxy","toolHooks":["PreToolUse","PostToolUse"]},"bare":false,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
 
 const AUTHORING_MAX_TURNS: u32 = 60;
 const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";
@@ -3890,6 +4055,8 @@ fn decimal_to_microusd(value: &str) -> Option<u64> {
 /// Stable runtime failures. Display strings never include provider responses or input material.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ClaudeCodeRuntimeError {
+    #[error("LW_MODEL_INPUT_AUTHORIZATION_DENIED")]
+    InputAuthorizationDenied,
     /// Policy or binding is invalid.
     #[error("LW_AGENT_RUNTIME_IDENTITY_INVALID: Claude Code runtime configuration is invalid")]
     ConfigurationInvalid,
@@ -3959,6 +4126,7 @@ impl ClaudeCodeRuntimeError {
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self {
+            Self::InputAuthorizationDenied => "LW_MODEL_INPUT_AUTHORIZATION_DENIED",
             Self::ConfigurationInvalid => diagnostic::INVALID_REQUEST,
             Self::InputLimitExceeded | Self::BudgetExceeded | Self::OutputLimitExceeded => {
                 diagnostic::RESOURCE_EXHAUSTED
