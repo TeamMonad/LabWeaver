@@ -224,8 +224,16 @@ export async function startExperimentRunByUi(page, projectId) {
     return response.request().method() === 'POST'
       && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
   })
-  await page.getByRole('button', { name: '启动实验生成', exact: true }).click()
-  const run = await expectJson(await responsePromise, 'REAL_EXPERIMENT_AGENT_RUN_CREATE_FAILED')
+  // #216: nothing is sent to the model until files are explicitly ticked; the generator needs the whole package here.
+  const start = page.getByRole('button', { name: '启动实验生成', exact: true })
+  await expect(start).toBeDisabled()
+  const options = page.getByTestId('model-input-path-option')
+  const packagePaths = await options.evaluateAll((inputs) => inputs.map((input) => input.value))
+  await page.getByTestId('model-input-select-all').click()
+  await start.click()
+  const response = await responsePromise
+  expect(response.request().postDataJSON().selectedPaths).toEqual(packagePaths)
+  const run = await expectJson(response, 'REAL_EXPERIMENT_AGENT_RUN_CREATE_FAILED')
   expect(run).toMatchObject({
     id: expect.any(String),
     projectId,
