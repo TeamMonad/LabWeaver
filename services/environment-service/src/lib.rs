@@ -101,6 +101,7 @@ pub use store::{
     EnvironmentInventoryFilter, EnvironmentInventoryPage, EnvironmentOperationPage,
     EnvironmentStoreError, InboundCommandDecision, InboundLifecycleCommand, LeasedEnvironment,
     PgEnvironmentStore, StoredEnvironmentInventory, StoredEnvironmentOperation,
+    TemplateUpgradeError,
 };
 pub use terminal_bridge::{TerminalBridgeError, TerminalExecutorGateway, terminal_bridge_router};
 pub use terminal_executor::{

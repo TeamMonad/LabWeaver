@@ -80,6 +80,12 @@ Work 首次创建仍需 Resource 申请和审批；`POST /environments` 只创�
 
 环境详情接口将 `connection.instanceReady` 与 `connection.state` 分开返回，并提供 `guestInstructions`。VM 已运行但 SSH 握手尚未成功时，连接状态为 `unknown`，不伪装为健康入口。平台身份不会自动登录 guest；桌面使用镜像管理员说明的 guest 登录方式，SSH 先登记个人公钥并经平台网关连接。Agent 配置读取失败是失败，不等同于“未配置模型”；手工 Work 的创建和连接不读取项目模型配置。
 
+升级模板必须显式确认。容器 Work 在原实例内切换到同一模板族的新 release，重启会中断终端、应用连接和活动进程；原 `/workspace` 持久卷及其中的文件保留，临时容器根文件系统中的安装和修改不保留。原资源租约、批准的资源规格和数据保留期限不随模板升级延长。目标版本改变资源、网络、安全策略或连接入口时，原授权不覆盖该变化，服务端拒绝原地升级并要求重新资源准入。
+
+`upgradeEnvironmentTemplate` 受理不代表完成。查询返回的 operation URL，查看 `state`、`diagnosticCode` 与 `templateUpgrade` 中的原版本、目标版本和 `preserve_workspace` 数据规则。Work 的 release 字段在受理后表示本次请求的固定目标，只有操作 `succeeded` 才表示目标已运行就绪。失败和超时保持失败状态及诊断，不删除工作目录、不自动回滚到旧镜像；重试仍针对已确认的目标版本。取消升级停止运行实例并保留持久卷，不等同于删除 Work；已经执行的镜像切换不会伪装成撤销成功。
+
+VM Work 不支持原地模板升级：服务端返回 `LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM` 和中文原因“需要导出/导入流程，当前不可用”。拒绝时不重建实例、不修改原模板或磁盘。
+
 ## SSH 与环境生命周期
 
 在“SSH 公钥”登记自己的公钥，私钥留在客户端。环境就绪并获得访问授权后，从环境页面复制完整 SSH 命令并实际连接。连接中断后先检查环境与授权状态，再使用页面命令重连；授权过期时从界面重新签发，撤销后不能继续使用原授权。

@@ -6150,6 +6150,134 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/api/v1/environments/{environmentId}/template-upgrade": {
+      "post": {
+        "description": "Permission: environment:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "upgradeEnvironmentTemplate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/upgrade-environment-template-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/environment-operation-accepted.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "environment:write"
+            ]
+          }
+        ],
+        "summary": "upgradeEnvironmentTemplate",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": true,
+        "x-labweaver-errors": [
+          "LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM",
+          "LW_WORK_TEMPLATE_UPGRADE_CONFIRMATION_REQUIRED",
+          "LW_WORK_TEMPLATE_UPGRADE_WORK_REQUIRED",
+          "LW_WORK_TEMPLATE_UPGRADE_SCOPE_DENIED",
+          "LW_WORK_TEMPLATE_UPGRADE_FAMILY_MISMATCH",
+          "LW_WORK_TEMPLATE_UPGRADE_TARGET_NOT_NEWER",
+          "LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL",
+          "LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE",
+          "LW_WORK_TEMPLATE_UPGRADE_TIMEOUT",
+          "LW_ENVIRONMENT_REVISION_CONFLICT",
+          "LW_IDEMPOTENCY_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "environment:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "environment",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/me/ssh-public-keys": {
       "get": {
         "description": "Permission: ssh_key:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",

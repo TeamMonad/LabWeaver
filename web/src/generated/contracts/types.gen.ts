@@ -2545,6 +2545,7 @@ export type EnvironmentOperation = {
     resetTarget?: EnvironmentResetTarget | null;
     retryFromPhase?: ObservedEnvironmentState | null;
     state: OperationState;
+    templateUpgrade?: EnvironmentTemplateUpgrade | null;
     traceId: string;
 };
 
@@ -2568,6 +2569,17 @@ export type EnvironmentResetTarget = {
     authorizationRevision: EnvironmentDetailSchemaRevision;
     configurationRevision: EnvironmentDetailSchemaRevision;
     kind: 'work_configuration';
+};
+
+/**
+ * Accepted container Work cutover. The release is desired until the operation succeeds.
+ */
+export type EnvironmentTemplateUpgrade = {
+    dataPolicy: WorkTemplateUpgradeDataPolicy;
+    sourceReleaseId: EnvironmentDetailSchemaReleaseId;
+    sourceReleaseVersion: number;
+    targetReleaseId: EnvironmentDetailSchemaReleaseId;
+    targetReleaseVersion: number;
 };
 
 /**
@@ -2656,6 +2668,11 @@ export type EnvironmentDetailSchemaRuntimeKind = 'container' | 'virtual_machine'
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentDetailSchemaUtcTimestamp = string;
+
+/**
+ * Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.
+ */
+export type WorkTemplateUpgradeDataPolicy = 'preserve_workspace';
 
 /**
  * Requested or approved workload resources, independent of Kubernetes quantity syntax.
@@ -2883,6 +2900,7 @@ export type EnvironmentInstanceSchemaEnvironmentOperation = {
     resetTarget?: EnvironmentInstanceSchemaEnvironmentResetTarget | null;
     retryFromPhase?: EnvironmentInstanceSchemaObservedEnvironmentState | null;
     state: EnvironmentInstanceSchemaOperationState;
+    templateUpgrade?: EnvironmentInstanceSchemaEnvironmentTemplateUpgrade | null;
     traceId: string;
 };
 
@@ -2906,6 +2924,17 @@ export type EnvironmentInstanceSchemaEnvironmentResetTarget = {
     authorizationRevision: EnvironmentInstanceSchemaRevision;
     configurationRevision: EnvironmentInstanceSchemaRevision;
     kind: 'work_configuration';
+};
+
+/**
+ * Accepted container Work cutover. The release is desired until the operation succeeds.
+ */
+export type EnvironmentInstanceSchemaEnvironmentTemplateUpgrade = {
+    dataPolicy: EnvironmentInstanceSchemaWorkTemplateUpgradeDataPolicy;
+    sourceReleaseId: EnvironmentInstanceSchemaReleaseId;
+    sourceReleaseVersion: number;
+    targetReleaseId: EnvironmentInstanceSchemaReleaseId;
+    targetReleaseVersion: number;
 };
 
 /**
@@ -2996,6 +3025,11 @@ export type EnvironmentInstanceSchemaRuntimeKind = 'container' | 'virtual_machin
 export type EnvironmentInstanceSchemaUtcTimestamp = string;
 
 /**
+ * Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.
+ */
+export type EnvironmentInstanceSchemaWorkTemplateUpgradeDataPolicy = 'preserve_workspace';
+
+/**
  * Requested or approved workload resources, independent of Kubernetes quantity syntax.
  */
 export type EnvironmentInstanceSchemaWorkloadResources = {
@@ -3024,6 +3058,7 @@ export type EnvironmentOperationSnapshotSchema = {
     operationId: EnvironmentOperationSnapshotSchemaOperationId;
     retryEligible: boolean;
     state: EnvironmentOperationSnapshotSchemaOperationState;
+    templateUpgrade?: EnvironmentOperationSnapshotSchemaEnvironmentTemplateUpgrade | null;
     terminalAt?: EnvironmentOperationSnapshotSchemaUtcTimestamp | null;
     traceId: string;
 };
@@ -3047,6 +3082,17 @@ export type EnvironmentOperationSnapshotSchemaEnvironmentId = string;
 export type EnvironmentOperationSnapshotSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
 
 /**
+ * Accepted container Work cutover. The release is desired until the operation succeeds.
+ */
+export type EnvironmentOperationSnapshotSchemaEnvironmentTemplateUpgrade = {
+    dataPolicy: EnvironmentOperationSnapshotSchemaWorkTemplateUpgradeDataPolicy;
+    sourceReleaseId: EnvironmentOperationSnapshotSchemaReleaseId;
+    sourceReleaseVersion: number;
+    targetReleaseId: EnvironmentOperationSnapshotSchemaReleaseId;
+    targetReleaseVersion: number;
+};
+
+/**
  * Strongly typed UUIDv7 identifier for `OperationId`.
  */
 export type EnvironmentOperationSnapshotSchemaOperationId = string;
@@ -3057,6 +3103,11 @@ export type EnvironmentOperationSnapshotSchemaOperationId = string;
 export type EnvironmentOperationSnapshotSchemaOperationState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
 
 /**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type EnvironmentOperationSnapshotSchemaReleaseId = string;
+
+/**
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type EnvironmentOperationSnapshotSchemaRevision = number;
@@ -3065,6 +3116,11 @@ export type EnvironmentOperationSnapshotSchemaRevision = number;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentOperationSnapshotSchemaUtcTimestamp = string;
+
+/**
+ * Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.
+ */
+export type EnvironmentOperationSnapshotSchemaWorkTemplateUpgradeDataPolicy = 'preserve_workspace';
 
 /**
  * EnvironmentWorkConfigurationTarget
@@ -6167,8 +6223,20 @@ export type EnvironmentOperationSnapshot = {
     operationId: EnvironmentOperationPageSchemaOperationId;
     retryEligible: boolean;
     state: EnvironmentOperationPageSchemaOperationState;
+    templateUpgrade?: EnvironmentOperationPageSchemaEnvironmentTemplateUpgrade | null;
     terminalAt?: EnvironmentOperationPageSchemaUtcTimestamp | null;
     traceId: string;
+};
+
+/**
+ * Accepted container Work cutover. The release is desired until the operation succeeds.
+ */
+export type EnvironmentOperationPageSchemaEnvironmentTemplateUpgrade = {
+    dataPolicy: EnvironmentOperationPageSchemaWorkTemplateUpgradeDataPolicy;
+    sourceReleaseId: EnvironmentOperationPageSchemaReleaseId;
+    sourceReleaseVersion: number;
+    targetReleaseId: EnvironmentOperationPageSchemaReleaseId;
+    targetReleaseVersion: number;
 };
 
 /**
@@ -6182,6 +6250,11 @@ export type EnvironmentOperationPageSchemaOperationId = string;
 export type EnvironmentOperationPageSchemaOperationState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled';
 
 /**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type EnvironmentOperationPageSchemaReleaseId = string;
+
+/**
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type EnvironmentOperationPageSchemaRevision = number;
@@ -6192,6 +6265,11 @@ export type EnvironmentOperationPageSchemaStreamSequence = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentOperationPageSchemaUtcTimestamp = string;
+
+/**
+ * Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.
+ */
+export type EnvironmentOperationPageSchemaWorkTemplateUpgradeDataPolicy = 'preserve_workspace';
 
 /**
  * SnapshotPage
@@ -6267,6 +6345,7 @@ export type EnvironmentSummaryPageSchemaEnvironmentOperationSnapshot = {
     operationId: EnvironmentSummaryPageSchemaOperationId;
     retryEligible: boolean;
     state: EnvironmentSummaryPageSchemaOperationState;
+    templateUpgrade?: EnvironmentSummaryPageSchemaEnvironmentTemplateUpgrade | null;
     terminalAt?: EnvironmentSummaryPageSchemaUtcTimestamp | null;
     traceId: string;
 };
@@ -6306,6 +6385,17 @@ export type EnvironmentSummary = {
     revision: EnvironmentSummaryPageSchemaRevision;
     runtimeKind: EnvironmentSummaryPageSchemaRuntimeKind;
     updatedAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+};
+
+/**
+ * Accepted container Work cutover. The release is desired until the operation succeeds.
+ */
+export type EnvironmentSummaryPageSchemaEnvironmentTemplateUpgrade = {
+    dataPolicy: EnvironmentSummaryPageSchemaWorkTemplateUpgradeDataPolicy;
+    sourceReleaseId: EnvironmentSummaryPageSchemaReleaseId;
+    sourceReleaseVersion: number;
+    targetReleaseId: EnvironmentSummaryPageSchemaReleaseId;
+    targetReleaseVersion: number;
 };
 
 /**
@@ -6349,6 +6439,11 @@ export type EnvironmentSummaryPageSchemaStreamSequence = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type EnvironmentSummaryPageSchemaUtcTimestamp = string;
+
+/**
+ * Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.
+ */
+export type EnvironmentSummaryPageSchemaWorkTemplateUpgradeDataPolicy = 'preserve_workspace';
 
 /**
  * EnvironmentTemplateReleaseView
@@ -10908,6 +11003,23 @@ export type UpdateProjectRequestSchema = {
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type UpdateProjectRequestSchemaRevision = number;
+
+/**
+ * UpgradeEnvironmentTemplateRequest
+ *
+ * Explicitly confirms restarting a Work onto a newer release while retaining /workspace.
+ * Ephemeral rootfs changes and active connections do not survive the restart.
+ */
+export type UpgradeEnvironmentTemplateRequestSchema = {
+    confirmed: boolean;
+    targetReleaseId: UpgradeEnvironmentTemplateRequestSchemaReleaseId;
+    targetReleaseVersion: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type UpgradeEnvironmentTemplateRequestSchemaReleaseId = string;
 
 /**
  * UpsertResourceBudgetRequest
@@ -16961,6 +17073,77 @@ export type StopEnvironmentResponses = {
 };
 
 export type StopEnvironmentResponse = StopEnvironmentResponses[keyof StopEnvironmentResponses];
+
+export type UpgradeEnvironmentTemplateData = {
+    body: UpgradeEnvironmentTemplateRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        environmentId: string;
+    };
+    query?: never;
+    url: '/api/v1/environments/{environmentId}/template-upgrade';
+};
+
+export type UpgradeEnvironmentTemplateErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type UpgradeEnvironmentTemplateError = UpgradeEnvironmentTemplateErrors[keyof UpgradeEnvironmentTemplateErrors];
+
+export type UpgradeEnvironmentTemplateResponses = {
+    /**
+     * Successful response
+     */
+    202: EnvironmentOperationAcceptedSchema;
+};
+
+export type UpgradeEnvironmentTemplateResponse = UpgradeEnvironmentTemplateResponses[keyof UpgradeEnvironmentTemplateResponses];
 
 export type ListSshPublicKeysData = {
     body?: never;

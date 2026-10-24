@@ -1,3 +1,6 @@
+mod template_upgrade;
+pub use template_upgrade::TemplateUpgradeError;
+
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use std::str::FromStr;
 use std::time::Duration;
@@ -1221,7 +1224,7 @@ fn build_create_instance(
     {
         return Err(EnvironmentStoreError::InvalidCreateAggregate);
     }
-    let eligibility_expires_at = match spec.class {
+    match spec.class {
         contracts::authoring::EnvironmentClass::Experiment => {
             if spec.lease_id.is_some()
                 || spec.capacity_binding.is_some()
@@ -1229,7 +1232,6 @@ fn build_create_instance(
             {
                 return Err(EnvironmentStoreError::InvalidCreateAggregate);
             }
-            spec.eligibility_expires_at
         }
         contracts::authoring::EnvironmentClass::Work => {
             let authorization = lease_authorization
@@ -1247,9 +1249,8 @@ fn build_create_instance(
                 return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
             }
             authorization.validate()?;
-            spec.eligibility_expires_at
         }
-    };
+    }
     let instance = EnvironmentInstance {
         id: command.environment_id,
         display_label: spec.display_label.clone(),
@@ -1291,8 +1292,9 @@ fn build_create_instance(
             retry_from_phase: None,
             reset_target: None,
             lease_authorization,
+            template_upgrade: None,
         },
-        eligibility_expires_at,
+        eligibility_expires_at: spec.eligibility_expires_at,
         endpoints: Vec::new(),
         last_diagnostic_code: None,
         failed_phase: None,
@@ -1555,7 +1557,7 @@ async fn update_instance(
         "UPDATE environment.environment_instances SET generation=$3, observed_generation=$4, \
          desired_state=$5, observed_state=$6, provider_binding=$7, lease_id=$8, \
          capacity_binding=$9, revision=$10, terminal_diagnostic=$11, failed_phase=$12, \
-         eligibility_expires_at=$13, contract=$14, updated_at=now() \
+         eligibility_expires_at=$13, contract=$14, release_id=$15, updated_at=now() \
          WHERE environment_id=$1 AND revision=$2",
     )
     .bind(current.id.as_uuid())
@@ -1572,6 +1574,7 @@ async fn update_instance(
     .bind(updated.failed_phase.map(wire_name).transpose()?)
     .bind(updated.eligibility_expires_at.map(UtcTimestamp::get))
     .bind(serde_json::to_value(updated)?)
+    .bind(updated.release_id.as_uuid())
     .execute(&mut **transaction)
     .await?;
     if result.rows_affected() != 1 {
@@ -1940,6 +1943,7 @@ fn public_operation_snapshot(
         cancel_eligible,
         diagnostic_code,
         trace_id: record.operation.trace_id.clone(),
+        template_upgrade: record.operation.template_upgrade,
     };
     snapshot
         .validate()
@@ -2255,6 +2259,8 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnvironmentStoreError {
+    #[error(transparent)]
+    TemplateUpgrade(#[from] TemplateUpgradeError),
     #[error("LW_ENVIRONMENT_NOT_FOUND")]
     EnvironmentNotFound,
     #[error("LW_ENVIRONMENT_OPERATION_NOT_FOUND")]

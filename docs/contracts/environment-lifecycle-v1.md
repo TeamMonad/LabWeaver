@@ -18,6 +18,27 @@ Environment 唯一写入环境 Namespace、Quota、PVC、容器和 VM。Resource
 费用估算不由 Environment 推算，定价/估价依赖 Resource 的 #210 接口。
 
 
+### 显式升级 Work 模板
+
+`POST /api/v1/environments/{environmentId}/template-upgrade`（SDK `upgradeEnvironmentTemplate`）
+要求 `Idempotency-Key`、当前 `If-Match` 和 `{targetReleaseId,targetReleaseVersion,confirmed:true}`。
+仅容器 Work 可接受同项目、同课程、同模板族且版本更高的 release；资源、网络、安全策略、
+provider、端口和入口必须与原批准配置一致，否则以
+`LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL` 拒绝。VM 总是以 HTTP 422
+`LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM` 拒绝，并返回中文 `ProblemDetails.detail`；不隐式重建。
+
+服务端先验证兼容性，再校验当前 Resource 租约和撤销旧连接。接受事务只改变期望 release，
+复用原 Restart、Reconciler、代次、Outbox 与操作查询，不新建资源申请或第二套升级状态机。
+`getEnvironmentOperation` 和历史列表中的 `templateUpgrade` 保存源/目标 release 及
+`dataPolicy: preserve_workspace`；状态与错误直接来自同一 operation。`releaseId/releaseVersion`
+此时是已确认的期望目标，不能独立于 `state` 当作升级完成。Deployment 的新副本、就绪副本和
+总副本都收敛后才完成；旧 Pod 仍可用不能令升级成功。
+
+Namespace、`workspace` PVC、Resource 申请、租约、批准资源及原数据保留期限不变；仅
+`/workspace` 持久数据保留。容器临时 rootfs 与进程会随重启丢失。失败/超时进入 Failed 并
+保留数据，不进入删除 namespace 的超时清理；取消升级走停止实例而不是删除 PVC。
+用户重试或恢复继续同一个目标 release；不做未经确认的镜像回滚。
+
 ## 状态、访问和回收
 
 desiredState 表达请求，observedState 表达实际状态。请求受理不等于 Ready，停止请求不等于已释放。保留现有 Reconciler、持久任务、取消、租约、Outbox 和条件更新，不复制第二套状态机。

@@ -1898,6 +1898,16 @@ pub struct CreateEnvironmentRequest {
     pub display_label: Option<String>,
 }
 
+/// Explicitly confirms restarting a Work onto a newer release while retaining /workspace.
+/// Ephemeral rootfs changes and active connections do not survive the restart.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpgradeEnvironmentTemplateRequest {
+    pub target_release_id: ReleaseId,
+    pub target_release_version: u64,
+    pub confirmed: bool,
+}
+
 /// Browser request for one explicitly selected, immutable Environment reset target.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -4180,6 +4190,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Post,
         "/api/v1/environments/{environmentId}/restart",
         "restartEnvironment",
+        "environment:write",
+        Oidc,
+        IdempotentRevisioned,
+        202,
+        true,
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/environments/{environmentId}/template-upgrade",
+        "upgradeEnvironmentTemplate",
         "environment:write",
         Oidc,
         IdempotentRevisioned,

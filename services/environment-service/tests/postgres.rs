@@ -5,6 +5,8 @@
 )]
 
 mod support;
+#[path = "cases/template_upgrade.rs"]
+mod template_upgrade_cases;
 
 use std::collections::HashSet;
 use std::time::Duration;

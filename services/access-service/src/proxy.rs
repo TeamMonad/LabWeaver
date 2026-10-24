@@ -588,6 +588,7 @@ pub(super) async fn forward_environment(
         && (uri.path() == "/api/v1/environments"
             || uri.path().ends_with("/start")
             || uri.path().ends_with("/restart")
+            || uri.path().ends_with("/template-upgrade")
             || uri.path().ends_with("/reset")
             || uri.path().ends_with("/retry"))
     {
@@ -2397,9 +2398,9 @@ async fn read_owned_environment(
     )
     .await
     .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
-    let instance =
-        contracts::parse_strict_json::<contracts::environment::EnvironmentInstance>(&bytes)
-            .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    let detail = contracts::parse_strict_json::<contracts::environment::EnvironmentDetail>(&bytes)
+        .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
+    let instance = detail.instance;
     instance
         .validate()
         .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;

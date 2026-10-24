@@ -131,6 +131,7 @@ fn operation_snapshot_requires_consistent_terminal_facts() -> Result<(), Box<dyn
             "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
         )?),
         trace_id: "trace-81".to_owned(),
+        template_upgrade: None,
     };
     assert!(snapshot.validate().is_ok());
     snapshot.cancel_eligible = true;

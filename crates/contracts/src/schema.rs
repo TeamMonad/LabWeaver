@@ -300,6 +300,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::ResetEnvironmentRequest
     );
     document!(
+        "schemas/contracts/v1/http/upgrade-environment-template-request.schema.json",
+        crate::http::UpgradeEnvironmentTemplateRequest
+    );
+    document!(
         "schemas/contracts/v1/environment-lease-verification-request.schema.json",
         crate::environment::EnvironmentLeaseVerificationRequest
     );
@@ -2155,6 +2159,19 @@ fn environment_management_errors(operation_id: &str) -> Option<Value> {
             "LW_HTTP_SERVICE_UNAVAILABLE",
             "LW_HTTP_INTERNAL",
         ],
+        "upgradeEnvironmentTemplate" => vec![
+            "LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM",
+            "LW_WORK_TEMPLATE_UPGRADE_CONFIRMATION_REQUIRED",
+            "LW_WORK_TEMPLATE_UPGRADE_WORK_REQUIRED",
+            "LW_WORK_TEMPLATE_UPGRADE_SCOPE_DENIED",
+            "LW_WORK_TEMPLATE_UPGRADE_FAMILY_MISMATCH",
+            "LW_WORK_TEMPLATE_UPGRADE_TARGET_NOT_NEWER",
+            "LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL",
+            "LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE",
+            "LW_WORK_TEMPLATE_UPGRADE_TIMEOUT",
+            "LW_ENVIRONMENT_REVISION_CONFLICT",
+            "LW_IDEMPOTENCY_CONFLICT",
+        ],
         _ => return None,
     };
     Some(json!(errors))
@@ -2224,6 +2241,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         }
         "createEnvironment" => "http/create-environment-request",
         "resetEnvironment" => "http/reset-environment-request",
+        "upgradeEnvironmentTemplate" => "http/upgrade-environment-template-request",
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
         "createCreditAdminOperation" => "credit-admin-operation",
@@ -2487,6 +2505,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "startEnvironment",
             "stopEnvironment",
             "restartEnvironment",
+            "upgradeEnvironmentTemplate",
             "resetEnvironment",
             "retryEnvironment",
             "cancelEnvironmentOperation",
@@ -2510,6 +2529,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
                 "startEnvironment",
                 "stopEnvironment",
                 "restartEnvironment",
+                "upgradeEnvironmentTemplate",
                 "resetEnvironment",
                 "retryEnvironment",
                 "cancelEnvironmentOperation",

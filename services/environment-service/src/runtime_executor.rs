@@ -381,8 +381,16 @@ impl KubernetesContainerExecutor {
         let desired = pointer_u64(&value, "/spec/replicas")?;
         let available = pointer_u64_or_zero(&value, "/status/availableReplicas")?;
         let unavailable = pointer_u64_or_zero(&value, "/status/unavailableReplicas")?;
+        let updated = pointer_u64_or_zero(&value, "/status/updatedReplicas")?;
+        let ready = pointer_u64_or_zero(&value, "/status/readyReplicas")?;
+        let total = pointer_u64_or_zero(&value, "/status/replicas")?;
         Ok(ContainerApplyObservation {
-            ready: observed_generation >= generation && available == desired && unavailable == 0,
+            ready: observed_generation >= generation
+                && available == desired
+                && unavailable == 0
+                && updated == desired
+                && ready == desired
+                && total == desired,
             observed_at: timestamp()?,
         })
     }
@@ -1171,9 +1179,6 @@ impl KubernetesContainerExecutor {
         if !condition_true("Ready") {
             return Err((unavailable(), "vmi_not_ready"));
         }
-        let ssh_host_key_sha256 = self
-            .probe_ssh_readiness(service_cluster_ip, plan.environment_id)
-            .await?;
         Ok(KubeVirtRunningObservation {
             observed_environment_generation: fence.environment_generation,
             vm_resource_generation: pointer_u64(&vm, "/metadata/generation").map_err(|error| {
@@ -1205,7 +1210,9 @@ impl KubernetesContainerExecutor {
                 .map_err(|error| (error, "pvc_uid_invalid"))?,
             guest_ip,
             service_cluster_ip,
-            ssh_host_key_sha256,
+            ssh_host_key_sha256: self
+                .probe_ssh_readiness(service_cluster_ip, plan.environment_id)
+                .await?,
             guest_agent_connected: condition_true("AgentConnected"),
             observed_at: timestamp().map_err(|error| (error, "observation_time_invalid"))?,
         })
@@ -4029,7 +4036,7 @@ mod tests {
             return axum::Json(json!({
                 "metadata":{"generation":1},
                 "spec":{"replicas":1},
-                "status":{"observedGeneration":1,"availableReplicas":1,"unavailableReplicas":0}
+                "status":{"observedGeneration":1,"availableReplicas":1,"unavailableReplicas":0,"updatedReplicas":1,"readyReplicas":1,"replicas":1}
             }))
             .into_response();
         }

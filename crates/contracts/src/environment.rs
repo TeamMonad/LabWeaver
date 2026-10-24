@@ -941,6 +941,24 @@ impl OperationState {
     }
 }
 
+/// Accepted container Work cutover. The release is desired until the operation succeeds.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentTemplateUpgrade {
+    pub source_release_id: ReleaseId,
+    pub source_release_version: u64,
+    pub target_release_id: ReleaseId,
+    pub target_release_version: u64,
+    pub data_policy: WorkTemplateUpgradeDataPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkTemplateUpgradeDataPolicy {
+    /// Preserve the existing /workspace PVC; restart discards ephemeral container rootfs data.
+    PreserveWorkspace,
+}
+
 /// Safe operation representation for Public REST and SSE consumers.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -960,6 +978,8 @@ pub struct EnvironmentOperationSnapshot {
     pub cancel_eligible: bool,
     pub diagnostic_code: Option<DiagnosticCode>,
     pub trace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_upgrade: Option<EnvironmentTemplateUpgrade>,
 }
 
 impl EnvironmentOperationSnapshot {
@@ -1107,6 +1127,8 @@ pub struct EnvironmentOperation {
     pub retry_from_phase: Option<ObservedEnvironmentState>,
     pub reset_target: Option<EnvironmentResetTarget>,
     pub lease_authorization: Option<EnvironmentLeaseAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_upgrade: Option<EnvironmentTemplateUpgrade>,
 }
 
 /// Sanitized Environment-owned endpoint metadata.
@@ -1243,6 +1265,17 @@ impl EnvironmentInstance {
                 .trace_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err(EnvironmentError::InvalidAggregate);
+        }
+        if let Some(upgrade) = self.operation.template_upgrade
+            && (self.class != EnvironmentClass::Work
+                || self.runtime_kind != RuntimeKind::Container
+                || !self.operation.preserve_mutable_disk
+                || upgrade.source_release_version == 0
+                || upgrade.target_release_version <= upgrade.source_release_version
+                || upgrade.target_release_id != self.release_id
+                || upgrade.target_release_version != self.release_version)
         {
             return Err(EnvironmentError::InvalidAggregate);
         }

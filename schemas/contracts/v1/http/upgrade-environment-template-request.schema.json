@@ -1,0 +1,31 @@
+{
+  "$defs": {
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Explicitly confirms restarting a Work onto a newer release while retaining /workspace.\nEphemeral rootfs changes and active connections do not survive the restart.",
+  "properties": {
+    "confirmed": {
+      "type": "boolean"
+    },
+    "targetReleaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "targetReleaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "targetReleaseId",
+    "targetReleaseVersion",
+    "confirmed"
+  ],
+  "title": "UpgradeEnvironmentTemplateRequest",
+  "type": "object"
+}

@@ -135,6 +135,10 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             post(restart_environment),
         )
         .route(
+            "/api/v1/environments/{environment_id}/template-upgrade",
+            post(upgrade_environment_template),
+        )
+        .route(
             "/api/v1/environments/{environment_id}/retry",
             post(retry_environment),
         )
@@ -158,6 +162,13 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/api/v1/environments/{environment_id}/endpoints",
             get(list_endpoints),
         )
+        .merge(internal_environment_routes())
+        .with_state(state);
+    telemetry::instrument_http(router, "environment-service", "environment-api")
+}
+
+fn internal_environment_routes() -> Router<EnvironmentApiState> {
+    Router::new()
         .route(
             "/internal/v1/environments/{environment_id}/freeze-binding",
             post(resolve_freeze_binding),
@@ -202,8 +213,6 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/internal/v1/work-configurations/{run_id}/cancel",
             post(cancel_work_configuration),
         )
-        .with_state(state);
-    telemetry::instrument_http(router, "environment-service", "environment-api")
 }
 
 async fn start_work_configuration(
@@ -1212,6 +1221,66 @@ async fn recover_environment(
     .await
 }
 
+async fn upgrade_environment_template(
+    State(state): State<EnvironmentApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    headers: HeaderMap,
+    Json(request): Json<contracts::http::UpgradeEnvironmentTemplateRequest>,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    require_access_bff(caller)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    let key = idempotency_key(&headers)?;
+    let expected_revision = if_match(&headers)?;
+    let instance = load_owned(&state, environment_id, actor_id).await?;
+    if let Some(accepted) = state
+        .store
+        .lookup_work_template_upgrade_replay(
+            key.as_str(),
+            environment_id,
+            actor_id,
+            expected_revision,
+            &request,
+        )
+        .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(accepted)));
+    }
+    if instance.revision != expected_revision {
+        return Err(EnvironmentApiError::RevisionConflict);
+    }
+    state
+        .store
+        .prepare_work_template_upgrade(&instance, &request)
+        .await?;
+    let accepted_at = state.store.current_time().await?;
+    let authorization = verify_work_lease(&state, &instance, accepted_at).await?;
+    let revocation = state
+        .access_revoker
+        .revoke(&instance, "environment_template_upgraded")
+        .await?;
+    let command = EnvironmentLifecycleCommand {
+        environment_id,
+        kind: EnvironmentOperationKind::Restart,
+        expected_revision,
+        actor_id,
+        trace_id: context.trace_id().to_owned(),
+        accepted_at,
+        deadline_at: add_duration(accepted_at, OPERATION_DEADLINE)?,
+        access_revocation_revision: Some(revocation),
+        preserve_mutable_disk: true,
+        max_attempts: 3,
+        reset_target: None,
+    };
+    let accepted = state
+        .store
+        .accept_work_template_upgrade(key.as_str(), &command, &request, authorization)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the HTTP boundary passes each lifecycle precondition and immutable command field explicitly"
@@ -1269,30 +1338,7 @@ async fn accept_lifecycle(
                 | EnvironmentOperationKind::Recover
                 | EnvironmentOperationKind::Reset
         ) {
-        let lease_id = instance
-            .lease_id
-            .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
-        let capacity_binding = instance
-            .capacity_binding
-            .clone()
-            .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
-        Some(
-            state
-                .lease_verifier
-                .verify(
-                    EnvironmentLeaseVerificationRequest {
-                        version: 1,
-                        lease_id,
-                        environment_id,
-                        project_id: instance.project_id,
-                        course_id: instance.course_id,
-                        owner_actor_id: instance.owner_id,
-                        capacity_binding,
-                    },
-                    accepted_at,
-                )
-                .await?,
-        )
+        Some(verify_work_lease(state, &instance, accepted_at).await?)
     } else {
         None
     };
@@ -1321,6 +1367,35 @@ async fn accept_lifecycle(
         )
         .await?;
     Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
+async fn verify_work_lease(
+    state: &EnvironmentApiState,
+    instance: &EnvironmentInstance,
+    now: UtcTimestamp,
+) -> Result<contracts::environment::EnvironmentLeaseAuthorization, EnvironmentApiError> {
+    let lease_id = instance
+        .lease_id
+        .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
+    let capacity_binding = instance
+        .capacity_binding
+        .clone()
+        .ok_or(EnvironmentApiError::LeaseFenceInvalid)?;
+    Ok(state
+        .lease_verifier
+        .verify(
+            EnvironmentLeaseVerificationRequest {
+                version: 1,
+                lease_id,
+                environment_id: instance.id,
+                project_id: instance.project_id,
+                course_id: instance.course_id,
+                owner_actor_id: instance.owner_id,
+                capacity_binding,
+            },
+            now,
+        )
+        .await?)
 }
 
 async fn load_owned(
@@ -1523,8 +1598,41 @@ pub enum EnvironmentApiError {
     WorkExecution(#[from] WorkExecutionError),
 }
 
+fn template_upgrade_problem(error: &crate::TemplateUpgradeError) -> Response {
+    let context =
+        telemetry::current_request_context().unwrap_or_else(telemetry::RequestContext::generate);
+    let request_id = context.request_id().to_owned();
+    let diagnostic_code = DiagnosticCode::parse(error.to_string())
+        .unwrap_or_else(|_| DiagnosticCode::registered("LW_ENVIRONMENT_REQUEST_FAILED"));
+    let status = StatusCode::UNPROCESSABLE_ENTITY;
+    let problem = contracts::ProblemDetails {
+        problem_type: format!(
+            "urn:labweaver:problem:{}",
+            diagnostic_code.as_str().to_ascii_lowercase()
+        ),
+        title: "无法升级 Work 模板".to_owned(),
+        status: status.as_u16(),
+        detail: error.detail().to_owned(),
+        instance: format!("urn:labweaver:request:{request_id}"),
+        diagnostic_code,
+        request_id,
+        trace_id: Some(context.trace_id().to_owned()),
+        retryable: false,
+        violations: Vec::new(),
+    };
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        Json(problem),
+    )
+        .into_response()
+}
+
 impl IntoResponse for EnvironmentApiError {
     fn into_response(self) -> Response {
+        if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
+            return template_upgrade_problem(error);
+        }
         let status = match self {
             Self::CallerDenied
             | Self::ScopeDenied
@@ -1551,6 +1659,7 @@ impl IntoResponse for EnvironmentApiError {
             ) => StatusCode::BAD_REQUEST,
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
             Self::RevisionConflict
+            | Self::Store(EnvironmentStoreError::RevisionConflict)
             | Self::LeaseFenceInvalid
             | Self::WorkExecution(
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
@@ -1570,7 +1679,8 @@ impl IntoResponse for EnvironmentApiError {
             | Self::WorkExecution(WorkExecutionError::NotFound) => StatusCode::NOT_FOUND,
             Self::Store(
                 EnvironmentStoreError::IdempotencyConflict
-                | EnvironmentStoreError::IdempotencyInProgress,
+                | EnvironmentStoreError::IdempotencyInProgress
+                | EnvironmentStoreError::Lifecycle(crate::LifecycleError::OperationActive),
             ) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
