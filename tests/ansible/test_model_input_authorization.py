@@ -1,4 +1,4 @@
-"""Rendered model-input proxy ingress and cross-namespace trust configuration."""
+"""Rendered authorization for the sole metered model gateway."""
 from pathlib import Path
 import subprocess
 import unittest
@@ -28,14 +28,13 @@ class ModelInputAuthorizationDeploymentTests(unittest.TestCase):
             if item and item.get("kind") == "NetworkPolicy"
         }
 
-    def test_only_owned_authoring_pods_reach_the_attempt_proxy_port(self) -> None:
+    def test_authoring_namespace_reaches_only_the_single_model_gateway_port(self) -> None:
         rules = self.policies["agent-service"]["spec"]["ingress"]
         cross_namespace = [rule for rule in rules if any("namespaceSelector" in peer for peer in rule["from"])]
         self.assertEqual(len(cross_namespace), 1)
-        self.assertEqual(cross_namespace[0]["ports"], [{"protocol": "TCP", "port": 9445}])
+        self.assertEqual(cross_namespace[0]["ports"], [{"protocol": "TCP", "port": 9460}])
         self.assertEqual(cross_namespace[0]["from"], [{
             "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "labweaver-authoring"}},
-            "podSelector": {"matchLabels": {"labweaver.io/managed-by": "agent-service"}},
         }])
 
     def test_agent_reaches_the_control_authorization_api(self) -> None:
@@ -49,9 +48,11 @@ class ModelInputAuthorizationDeploymentTests(unittest.TestCase):
     def test_sandbox_uses_cross_namespace_agent_dns_not_a_provider_credential(self) -> None:
         configuration = yaml.safe_load((ROOT / "deploy/config/agent-control-plane.yaml.example").read_text())
         sandbox = configuration["sandbox"]
-        proxy = urlsplit(sandbox["model_proxy_base_uri"])
-        self.assertEqual(proxy.scheme, "https")
-        self.assertEqual(proxy.hostname, "agent-service.labweaver-system.svc")
-        self.assertEqual(proxy.port, 9445)
-        self.assertEqual(sandbox["model_proxy_ca_file"], "/etc/labweaver/secrets/mtls-ca.pem")
-        self.assertTrue(any(destination.endswith(":9445") for destination in sandbox["allowed_egress"]))
+        gateway = urlsplit(configuration["model_gateway"]["public_base_url"])
+        self.assertEqual(gateway.hostname, "agent-service.labweaver-system.svc")
+        self.assertEqual(gateway.port, 9460)
+        self.assertTrue(any(destination.endswith(":9460") for destination in sandbox["allowed_egress"]))
+        self.assertFalse(any(destination.endswith(":9445") for destination in sandbox["allowed_egress"]))
+        self.assertNotIn("model_proxy_base_uri", sandbox)
+        self.assertNotIn("model_proxy_ca_file", sandbox)
+        self.assertEqual(set(configuration["worker_environment_files"]), {"ANTHROPIC_MODEL"})

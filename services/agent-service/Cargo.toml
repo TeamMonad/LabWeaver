@@ -50,6 +50,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+control-service = { path = "../control-service" }
 h2 = "=0.4.15"
 http.workspace = true
 resource-service = { path = "../resource-service" }

@@ -59,11 +59,10 @@ use tower::ServiceExt;
 
 const SERVICE_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsibGFid2VhdmVyLWFjY2VzcyIsImxhYndlYXZlci1hZ2VudCIsImxhYndlYXZlci1lbnZpcm9ubWVudCIsImxhYndlYXZlci1ldmFsdWF0aW9uIl19.signature";
 
-#[path = "cases/model_input_proxy.rs"]
-mod model_input_proxy;
+#[path = "cases/model_gateway_authorization.rs"]
+mod model_gateway_authorization;
 #[path = "cases/parent_task_client.rs"]
 mod parent_task_client;
-mod support;
 
 #[derive(Clone)]
 struct AccessState {

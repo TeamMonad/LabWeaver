@@ -680,6 +680,15 @@ pub struct LlmReviewLease {
     lease_token: Uuid,
 }
 
+impl LlmReviewLease {
+    #[must_use]
+    pub fn gateway_scope(&self) -> crate::model_gateway::ModelGatewayScope {
+        crate::model_gateway::ModelGatewayScope::Review {
+            lease_sha256: contracts::http::model_input_parent_lease_sha256(self.lease_token),
+        }
+    }
+}
+
 /// External current-authorization boundary, checked for this exact durable review lease.
 #[async_trait::async_trait]
 pub trait ReviewInputAuthorization: Send + Sync {
@@ -922,6 +931,7 @@ impl LlmReviewWorker {
             request.project_id,
             request.task_run_id.as_uuid(),
             lease.attempt,
+            lease.gateway_scope(),
             remaining.min(Duration::from_millis(
                 request.policy.budget.timeout_milliseconds,
             )),
@@ -1213,7 +1223,6 @@ impl LlmReviewStore {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
 
     use async_trait::async_trait;
@@ -1577,7 +1586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_worker_subprocess_receives_gateway_and_scoped_key_only()
+    async fn review_lease_subprocess_receives_gateway_and_scoped_key_only()
     -> Result<(), Box<dyn std::error::Error>> {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use std::os::unix::fs::PermissionsExt;
@@ -1587,34 +1596,25 @@ mod tests {
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\ncase \"$*\" in *--version*) echo '2.1.207'; exit 0;; esac\n[ \"$ANTHROPIC_BASE_URL\" = 'http://agent-service:9460/' ] || exit 19\n[ -n \"$ANTHROPIC_API_KEY\" ] || exit 20\n[ -z \"$ANTHROPIC_AUTH_TOKEN\" ] || exit 21\nprintf '%s' \"$ANTHROPIC_API_KEY\" > '{}'\nexit 1\n",
+                "#!/bin/sh\n[ \"$ANTHROPIC_BASE_URL\" = 'http://agent-service:9460/' ] || exit 19\n[ -n \"$ANTHROPIC_API_KEY\" ] || exit 20\n[ -z \"$ANTHROPIC_AUTH_TOKEN\" ] || exit 21\nprintf '%s' \"$ANTHROPIC_API_KEY\" > '{}'\nprintf '2.1.207\\n'\n",
                 evidence.display()
             ),
         )?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-        let process = crate::claude_code::TokioClaudeCodeProcess::new(BTreeMap::from([
-            (
-                "PATH".into(),
-                directory.path().to_string_lossy().into_owned(),
-            ),
-            ("ANTHROPIC_MODEL".into(), "fixture-model".into()),
-        ]));
-        let worker = LlmReviewWorker {
-            store: LlmReviewStore::new(
-                sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://invalid")?,
-            ),
-            classifier: Arc::new(DeterministicEgressClassifier::new(
-                "dlp-v1".into(),
-                Revision::new(1)?,
-            )?),
-            process: Arc::new(process),
-            worker_id: "review-process-test".into(),
-            lease_duration: Duration::from_secs(10),
-            poll_interval: Duration::from_millis(10),
-            model_gateway: Some(test_gateway()),
-        };
         let lease = lease(request(deadline_after(5_000)));
-        let _ = worker.execute(&lease, RunCancellation::new()).await;
+        let mut environment = test_gateway().environment(
+            lease.request.project_id,
+            lease.task_run_id.as_uuid(),
+            lease.attempt,
+            lease.gateway_scope(),
+            Duration::from_secs(5),
+        );
+        environment.insert(
+            "PATH".to_owned(),
+            directory.path().to_string_lossy().into_owned(),
+        );
+        let process = crate::claude_code::TokioClaudeCodeProcess::new(environment);
+        assert_eq!(process.version().await?, "2.1.207");
         let token = std::fs::read_to_string(evidence)?;
         let claims: serde_json::Value = serde_json::from_slice(
             &URL_SAFE_NO_PAD.decode(token.split_once('.').ok_or("token")?.0)?,

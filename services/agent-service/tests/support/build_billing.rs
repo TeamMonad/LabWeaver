@@ -38,9 +38,9 @@ async fn jwks(State(s): State<TokenAuthority>) -> Json<Value> {
 async fn token(State(s): State<TokenAuthority>) -> Json<Value> {
     Json(json!({"access_token":s.token,"token_type":"Bearer","expires_in":300}))
 }
-struct TlsListener {
-    listener: tokio::net::TcpListener,
-    acceptor: tokio_rustls::TlsAcceptor,
+pub struct TlsListener {
+    pub listener: tokio::net::TcpListener,
+    pub acceptor: tokio_rustls::TlsAcceptor,
 }
 impl axum::serve::Listener for TlsListener {
     type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
@@ -61,6 +61,8 @@ pub struct BuildBillingFixture {
     pub client: ResourceClient,
     pub store: resource_service::store::PgResourceStore,
     pub credits: resource_service::credits::PgCreditStore,
+    pub token_client: Arc<ServiceTokenClient>,
+    pub issuer: String,
     pool: PgPool,
     _directory: tempfile::TempDir,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -109,7 +111,7 @@ impl BuildBillingFixture {
         header.kid = Some(kid.into());
         let token_value = jsonwebtoken::encode(
             &header,
-            &json!({"iss":issuer,"sub":"synthetic-service-account","azp":CLIENT,"aud":AUDIENCE,"exp":time::OffsetDateTime::now_utc().unix_timestamp()+3600,"nbf":time::OffsetDateTime::now_utc().unix_timestamp()-1,"resource_access":{(AUDIENCE):{"roles":["resource.credits.hold","resource.usage.record"]}}}),
+            &json!({"iss":issuer,"sub":"synthetic-service-account","azp":CLIENT,"aud":[AUDIENCE,"labweaver-control"],"exp":time::OffsetDateTime::now_utc().unix_timestamp()+3600,"nbf":time::OffsetDateTime::now_utc().unix_timestamp()-1,"resource_access":{(AUDIENCE):{"roles":["resource.credits.hold","resource.usage.record"]},"labweaver-control":{"roles":["control.agent_run.read","access.control.forward"]}}}),
             &jsonwebtoken::EncodingKey::from_ec_der(&signing.serialize_der()),
         )?;
         let app = Router::new()
@@ -186,6 +188,7 @@ impl BuildBillingFixture {
         let directory = tempfile::tempdir()?;
         let ca = directory.path().join("resource-ca.pem");
         std::fs::write(&ca, tls.cert.pem())?;
+        let token_client = Arc::new(token_client);
         let client = ResourceClient::from_configuration(
             ResourceClientConfiguration {
                 base_uri: format!("https://localhost:{port}/").parse()?,
@@ -195,13 +198,15 @@ impl BuildBillingFixture {
                 max_response_bytes: 8_388_608,
                 audience: AUDIENCE.into(),
             },
-            Arc::new(token_client),
+            Arc::clone(&token_client),
             scopes,
         )?;
         Ok(Self {
             client,
             store,
             credits,
+            token_client,
+            issuer,
             pool,
             _directory: directory,
             tasks: vec![issuer_task, server],
@@ -256,6 +261,57 @@ impl BuildBillingFixture {
                         project_id: command.request.project_id,
                         amount: contracts::resource::FixedDecimal::parse("100.000000")?,
                         reason: "isolated fencing regression allowance".into(),
+                    },
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    pub async fn model_tariffs(
+        &self,
+        project: contracts::ProjectId,
+        model: &str,
+        funded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use contracts::resource::{FixedDecimal, Money, ResourceBillingUnit};
+        let now = self.store.current_time().await?;
+        for (unit, price) in [
+            (ResourceBillingUnit::LlmInputToken, "1.000000"),
+            (ResourceBillingUnit::LlmOutputToken, "2.000000"),
+            (ResourceBillingUnit::LlmCacheReadToken, "3.000000"),
+            (ResourceBillingUnit::LlmCacheWriteToken, "4.000000"),
+        ] {
+            self.store
+                .create_rate(
+                    &contracts::EventId::new().to_string(),
+                    &contracts::http::CreateResourceRateRequest {
+                        builder_binding: None,
+                        model_binding: Some(model.to_owned()),
+                        max_preauthorization: Some(FixedDecimal::parse("10.000000")?),
+                        unit,
+                        unit_quantity: 1000,
+                        gpu_class: None,
+                        gpu_mode: None,
+                        unit_price: Money {
+                            currency: "CREDITS".to_owned(),
+                            amount: FixedDecimal::parse(price)?,
+                        },
+                        effective_from: now,
+                        effective_until: None,
+                    },
+                )
+                .await?;
+        }
+        if funded {
+            self.credits
+                .admin(
+                    &contracts::EventId::new().to_string(),
+                    contracts::ActorId::new(),
+                    &[contracts::PlatformRole::PlatformAdmin],
+                    &contracts::resource::credits::CreditAdminOperation::Grant {
+                        project_id: project,
+                        amount: FixedDecimal::parse("100.000000")?,
+                        reason: "isolated gateway test".to_owned(),
                     },
                 )
                 .await?;

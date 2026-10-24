@@ -2,10 +2,9 @@
 #![allow(clippy::too_many_lines, clippy::expect_used)]
 #[path = "support/build_billing.rs"]
 mod build_billing;
-use agent_service::{
-    llm_review::LlmReviewStore,
-    model_gateway::{GatewayState, ModelGatewayRuntime, ScopedTokenIssuer},
-};
+#[path = "support/model_authorization.rs"]
+mod model_authorization;
+use agent_service::model_gateway::{GatewayState, ModelGatewayRuntime, ScopedTokenIssuer};
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -14,14 +13,11 @@ use axum::{
     routing::post,
 };
 use build_billing::BuildBillingFixture;
-use contracts::http::{IdempotencyKey, InternalAgentLlmReviewRequest};
-use contracts::resource::credits::{CreditAdminOperation, CreditHold, CreditHoldState};
-use contracts::resource::{FixedDecimal, Money, ResourceBillingUnit};
-use contracts::{
-    ActorId, ArtifactId, EventId, FrozenSubmissionId, PlatformRole, PolicyId, ProjectId, TaskRunId,
-    UtcTimestamp,
-};
-use persistence_sqlx::{Domain, MigrationCatalog, Sha256Digest};
+use contracts::ProjectId;
+use contracts::resource::FixedDecimal;
+use contracts::resource::credits::{CreditHold, CreditHoldState};
+use model_authorization::ModelAuthorizationFixture;
+use persistence_sqlx::{Domain, MigrationCatalog};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -110,37 +106,20 @@ async fn upstream(
         }
     }
 }
-fn review_request(
-    project: ProjectId,
-    task: TaskRunId,
-    now: UtcTimestamp,
-) -> Result<InternalAgentLlmReviewRequest, Box<dyn std::error::Error>> {
-    let request: InternalAgentLlmReviewRequest = serde_json::from_value(json!({
-        "taskRunId":task,"projectId":project,"courseId":null,"frozenSubmissionId":FrozenSubmissionId::new(),
-        "submissionArtifact":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"1","sizeBytes":10,"mediaType":"text/plain"},
-        "policy":{"id":PolicyId::new(),"projectId":project,"courseId":null,"revision":1,"binding":{"runtimeBinding":"claude-code","model":"fixture-model","claudeCodeVersion":"2.1.207","maxInFlightPerWorker":1},
-            "budget":{"maxInputTokens":1000,"maxOutputTokens":1000,"maxRequests":8,"maxCostMicrousd":1_000_000,"timeoutMilliseconds":120_000,"maxTransientRetries":0,"maxSchemaRepairs":0},
-            "deniedDataClasses":["secret","token","private_key","personally_identifiable_information","unallowlisted_student_submission"],"studentContentMode":"manifest_allowlist_only","activatedAt":now},
-        "files":[{"path":"submission.md","sha256":Sha256Digest::of_bytes(b"submission").to_string(),"content":"submission"}],
-        "rubric":{"artifact":{"artifactId":ArtifactId::new(),"storeBinding":"fixture","objectVersion":"1","sizeBytes":6,"mediaType":"text/plain"},"path":"rubric.md","sha256":Sha256Digest::of_bytes(b"rubric").to_string(),"content":"rubric"},
-        "deadlineAt":UtcTimestamp::from_utc(now.get()+time::Duration::minutes(3))?
-    }))?;
-    request.validate()?;
-    Ok(request)
-}
 struct Fixture {
     _pg: testcontainers::ContainerAsync<Postgres>,
     billing: BuildBillingFixture,
     pool: sqlx::PgPool,
     runtime: ModelGatewayRuntime,
     project: ProjectId,
-    task: TaskRunId,
+    run_id: contracts::AgentRunId,
     attempt: u32,
     capability: String,
     calls: Arc<AtomicUsize>,
     gateway: tokio::task::JoinHandle<()>,
     upstream: tokio::task::JoinHandle<()>,
     upstream_url: reqwest::Url,
+    authority: ModelAuthorizationFixture,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -182,64 +161,11 @@ impl Fixture {
             .execute(&mut *connection)
             .await?;
         drop(connection);
-        let project = ProjectId::new();
-        let task = TaskRunId::new();
-        let now = billing.store.current_time().await?;
-        for (unit, price) in [
-            (ResourceBillingUnit::LlmInputToken, "1.000000"),
-            (ResourceBillingUnit::LlmOutputToken, "2.000000"),
-            (ResourceBillingUnit::LlmCacheReadToken, "3.000000"),
-            (ResourceBillingUnit::LlmCacheWriteToken, "4.000000"),
-        ] {
-            billing
-                .store
-                .create_rate(
-                    &EventId::new().to_string(),
-                    &contracts::http::CreateResourceRateRequest {
-                        builder_binding: None,
-                        model_binding: Some("fixture-model".into()),
-                        max_preauthorization: Some(FixedDecimal::parse("10.000000")?),
-                        unit,
-                        unit_quantity: 1000,
-                        gpu_class: None,
-                        gpu_mode: None,
-                        unit_price: Money {
-                            currency: "CREDITS".into(),
-                            amount: FixedDecimal::parse(price)?,
-                        },
-                        effective_from: now,
-                        effective_until: None,
-                    },
-                )
-                .await?;
-        }
-        if funded {
-            billing
-                .credits
-                .admin(
-                    "model-fixture-grant",
-                    ActorId::new(),
-                    &[PlatformRole::PlatformAdmin],
-                    &CreditAdminOperation::Grant {
-                        project_id: project,
-                        amount: FixedDecimal::parse("100.000000")?,
-                        reason: "isolated gateway test".into(),
-                    },
-                )
-                .await?;
-        }
-        let reviews = LlmReviewStore::new(pool.clone());
-        reviews
-            .enqueue(
-                &review_request(project, task, now)?,
-                &IdempotencyKey::parse("gateway-review")?,
-                now,
-            )
+        let authority = ModelAuthorizationFixture::start(pool.clone(), &billing).await?;
+        let project = authority.project;
+        billing
+            .model_tariffs(project, "fixture-model", funded)
             .await?;
-        let lease = reviews
-            .claim("gateway-fixture", Duration::from_mins(2), now)
-            .await?
-            .ok_or("review claim")?;
         let calls = Arc::new(AtomicUsize::new(0));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let upstream_url = format!("http://{}/", listener.local_addr()?);
@@ -267,14 +193,16 @@ impl Fixture {
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            authorization: authority.authorization.clone(),
         };
         let gateway = tokio::spawn(async move {
             let _ = agent_service::model_gateway::serve(state, listener).await;
         });
         let capability = runtime.issuer.issue_for(
             project,
-            task.as_uuid(),
-            lease.attempt,
+            authority.run_id.as_uuid(),
+            authority.attempt,
+            authority.scope.clone(),
             Duration::from_hours(1),
         );
         Ok(Self {
@@ -283,13 +211,14 @@ impl Fixture {
             pool,
             runtime,
             project,
-            task,
-            attempt: lease.attempt,
+            run_id: authority.run_id,
+            attempt: authority.attempt,
             capability,
             calls,
             gateway,
             upstream,
             upstream_url: upstream_url.parse()?,
+            authority,
         })
     }
     fn request(&self, key: &str) -> reqwest::RequestBuilder {
@@ -459,8 +388,9 @@ async fn scoped_token_rejects_wrong_project_expiry_and_finished_run()
     let url = f.runtime.base_url.join("v1/messages")?;
     let wrong = f.runtime.issuer.issue_for(
         ProjectId::new(),
-        f.task.as_uuid(),
+        f.run_id.as_uuid(),
         f.attempt,
+        f.authority.scope.clone(),
         Duration::from_hours(1),
     );
     assert_eq!(
@@ -476,8 +406,9 @@ async fn scoped_token_rejects_wrong_project_expiry_and_finished_run()
     let issuer = ScopedTokenIssuer::new(vec![11; 32], Duration::from_nanos(1)).ok_or("issuer")?;
     let expired = issuer.issue_for(
         f.project,
-        f.task.as_uuid(),
+        f.run_id.as_uuid(),
         f.attempt,
+        f.authority.scope.clone(),
         Duration::from_secs(1),
     );
     assert_eq!(
@@ -490,8 +421,8 @@ async fn scoped_token_rejects_wrong_project_expiry_and_finished_run()
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    sqlx::query("UPDATE agent.llm_review_runs SET state='cancelled' WHERE task_run_id=$1")
-        .bind(f.task.as_uuid())
+    sqlx::query("UPDATE agent.agent_runs SET state='cancelled',cancellation_requested_at=clock_timestamp() WHERE run_id=$1")
+        .bind(f.run_id.as_uuid())
         .execute(&f.pool)
         .await?;
     assert_eq!(
@@ -524,8 +455,9 @@ async fn scoped_worker_key_cannot_bypass_gateway_or_create_hold()
     let f = Fixture::new(Mode::Json, true).await?;
     let worker = f.runtime.environment(
         f.project,
-        f.task.as_uuid(),
+        f.run_id.as_uuid(),
         f.attempt,
+        f.authority.scope.clone(),
         Duration::from_hours(1),
     );
     let response = reqwest::Client::new()
@@ -592,8 +524,9 @@ async fn cli_process_headerless_response_loss_never_replays_upstream()
     let f = Fixture::new(Mode::Disconnect, true).await?;
     let environment = f.runtime.environment(
         f.project,
-        f.task.as_uuid(),
+        f.run_id.as_uuid(),
         f.attempt,
+        f.authority.scope.clone(),
         Duration::from_hours(1),
     );
     let script = r#"
@@ -649,6 +582,7 @@ async fn sdk_retry_after_gateway_restart_retains_original_persisted_call_fence()
         pool: fixture.pool.clone(),
         resource: fixture.billing.client.clone(),
         http: reqwest::Client::new(),
+        authorization: fixture.authority.authorization.clone(),
     };
     fixture.gateway = tokio::spawn(async move {
         let _ = agent_service::model_gateway::serve(state, listener).await;

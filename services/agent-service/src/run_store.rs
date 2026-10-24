@@ -102,9 +102,9 @@ pub struct AgentRunDispatchLease {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PersistedAgentDispatchRequest {
-    request: InternalAgentRunRequest,
-    input_authorization: contracts::http::ModelInputAuthorizationBinding,
+pub(crate) struct PersistedAgentDispatchRequest {
+    pub(crate) request: InternalAgentRunRequest,
+    pub(crate) input_authorization: contracts::http::ModelInputAuthorizationBinding,
 }
 
 /// Result of atomically reserving an `AgentRun` request.
