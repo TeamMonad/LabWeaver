@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
@@ -9,6 +13,10 @@
   "additionalProperties": false,
   "description": "Synchronizer token returned only to an authenticated browser session.",
   "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId",
+      "description": "Issuing session's actor, so clients can confirm the token belongs to their current actor."
+    },
     "csrfToken": {
       "description": "Opaque token to send in the `X-CSRF-Token` request header.",
       "type": "string"
@@ -19,6 +27,7 @@
     }
   },
   "required": [
+    "actorId",
     "csrfToken",
     "expiresAt"
   ],

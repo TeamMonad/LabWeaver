@@ -2424,6 +2424,10 @@ export type CreditLedgerPageSchemaUtcTimestamp = string;
  */
 export type CsrfTokenResponseSchema = {
     /**
+     * Issuing session's actor, so clients can confirm the token belongs to their current actor.
+     */
+    actorId: CsrfTokenResponseSchemaActorId;
+    /**
      * Opaque token to send in the `X-CSRF-Token` request header.
      */
     csrfToken: string;
@@ -2432,6 +2436,11 @@ export type CsrfTokenResponseSchema = {
      */
     expiresAt: CsrfTokenResponseSchemaUtcTimestamp;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CsrfTokenResponseSchemaActorId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.

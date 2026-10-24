@@ -142,6 +142,33 @@ async fn stale_csrf_write_returns_problem_details_without_writing_to_replacement
         let _ = axum::serve(listener, router).await;
     }));
     let client = reqwest::Client::builder().no_proxy().build()?;
+    let csrf_a: contracts::CsrfTokenResponse = client
+        .get(format!("{base}/api/v1/auth/csrf"))
+        .header(
+            header::COOKIE,
+            format!(
+                "{}={}",
+                state.deployment.browser.session_cookie_name, a.session_id
+            ),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let csrf_b: contracts::CsrfTokenResponse = client
+        .get(format!("{base}/api/v1/auth/csrf"))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(csrf_a.actor_id.as_uuid(), actor_a);
+    assert_eq!(csrf_b.actor_id.as_uuid(), actor_b);
+    assert_ne!(csrf_a.actor_id, csrf_b.actor_id);
+    assert_eq!(csrf_a.csrf_token, a.csrf_token.expose());
+    assert_eq!(csrf_b.csrf_token, b.csrf_token.expose());
     let endpoint = format!("{base}/api/v1/me/ssh-public-keys");
     let request = json!({
         "publicKeyOpenssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA synthetic-contract-test"
@@ -159,16 +186,20 @@ async fn stale_csrf_write_returns_problem_details_without_writing_to_replacement
     for (origin, csrf, diagnostic) in [
         (
             Some(ORIGIN),
-            Some(a.csrf_token.expose()),
+            Some(csrf_a.csrf_token.as_str()),
             "LW_AUTH_CSRF_REJECTED",
         ),
         (Some(ORIGIN), None, "LW_AUTH_CSRF_REJECTED"),
         (
             Some("https://attacker.example.invalid"),
-            Some(b.csrf_token.expose()),
+            Some(csrf_b.csrf_token.as_str()),
             "LW_AUTH_CSRF_REJECTED",
         ),
-        (None, Some(b.csrf_token.expose()), "LW_AUTH_CSRF_REJECTED"),
+        (
+            None,
+            Some(csrf_b.csrf_token.as_str()),
+            "LW_AUTH_CSRF_REJECTED",
+        ),
     ] {
         let request_id = format!("csrf-contract-{}", Uuid::now_v7());
         let mut post = client
@@ -214,7 +245,7 @@ async fn stale_csrf_write_returns_problem_details_without_writing_to_replacement
         .post(&endpoint)
         .header(header::COOKIE, &cookie)
         .header(header::ORIGIN, ORIGIN)
-        .header("x-csrf-token", b.csrf_token.expose())
+        .header("x-csrf-token", &csrf_b.csrf_token)
         .header("Idempotency-Key", Uuid::now_v7().to_string())
         .json(&request)
         .send()
