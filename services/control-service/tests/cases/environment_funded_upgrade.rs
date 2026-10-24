@@ -31,7 +31,8 @@ pub(super) async fn exercise(
     let releases = PgReleaseProjectionStore::new(pool.clone());
     let mut target = releases
         .resolve(instance.release_id, instance.release_version)
-        .await?
+        .await
+        .map_err(|error| std::io::Error::other(format!("upgrade source projection: {error}")))?
         .projection;
     target.release.id = ReleaseId::new();
     target.release.version += 1;
@@ -67,7 +68,7 @@ pub(super) async fn exercise(
                 dataschema: event_contract.data_schema(),
                 project_id: target.release.project_id,
                 course_id: target.release.course_id,
-                aggregate_revision: Revision::new(1)?,
+                aggregate_revision: Revision::new(target.release.version)?,
                 aggregate_sequence: Sequence(1),
                 trace_id: "native-upgrade-target".into(),
                 data: target.clone(),
@@ -81,7 +82,10 @@ pub(super) async fn exercise(
     };
     store
         .prepare_work_template_upgrade(instance, &request)
-        .await?;
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!("upgrade compatibility precheck: {error}"))
+        })?;
     let counts = ledger_counts(pool).await?;
     let provider_calls = calls.load(Ordering::SeqCst);
     for key in [

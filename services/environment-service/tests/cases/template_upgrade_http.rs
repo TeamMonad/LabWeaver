@@ -760,6 +760,12 @@ async fn seed_existing_running_work(
     ready.observed_generation = ready.generation;
     ready.observed_state = ObservedEnvironmentState::Ready;
     ready.operation.state = OperationState::Succeeded;
+    ready.endpoints = support::ready_instance().endpoints;
+    let observed_at = store.current_time().await?;
+    for endpoint in &mut ready.endpoints {
+        endpoint.revision = ready.revision;
+        endpoint.observed_at = observed_at;
+    }
     store.save_reconciled(&lease, &ready).await?;
     Ok(())
 }
@@ -940,7 +946,7 @@ async fn assert_lease_rejection(
     );
     assert_eq!(
         harness.peers.lease_queries.load(Ordering::SeqCst),
-        queries + usize::from(route.starts_with("/internal/")),
+        queries + usize::from(route.ends_with("work-lease-updates")),
         "{route}, mode {mode}"
     );
     // Public Restart/Reset revoke before fresh admission; internal lease routes do not.
@@ -1013,7 +1019,7 @@ async fn authenticated_http_work_operations_require_runtime_authority_or_reject_
 }
 
 #[tokio::test]
-async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_leases_from_protocol_damage()
+async fn authenticated_resource_handoff_requires_runtime_authority_and_renewal_keeps_lease_diagnostics()
 -> TestResult {
     let harness = Box::pin(Harness::start()).await?;
     let authorization = harness
@@ -1072,8 +1078,23 @@ async fn authenticated_resource_work_handoff_and_renewal_distinguish_inactive_le
             serde_json::to_value(update)?,
         ),
     ] {
-        for &case in LEASE_REJECTIONS {
-            assert_lease_rejection(&harness, route, Some(&body), &token, case).await?;
+        if route.ends_with("work-handoffs") {
+            assert_lease_rejection(
+                &harness,
+                route,
+                Some(&body),
+                &token,
+                (
+                    0,
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
+                ),
+            )
+            .await?;
+        } else {
+            for &case in LEASE_REJECTIONS {
+                assert_lease_rejection(&harness, route, Some(&body), &token, case).await?;
+            }
         }
     }
     Ok(())

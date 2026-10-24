@@ -61,6 +61,12 @@ async fn ready_work(
     ready.observed_generation = ready.generation;
     ready.observed_state = ObservedEnvironmentState::Ready;
     ready.operation.state = OperationState::Succeeded;
+    ready.endpoints = support::ready_instance().endpoints;
+    let observed_at = store.current_time().await?;
+    for endpoint in &mut ready.endpoints {
+        endpoint.revision = ready.revision;
+        endpoint.observed_at = observed_at;
+    }
     store.save_reconciled(&lease, &ready).await?;
     Ok(ready)
 }

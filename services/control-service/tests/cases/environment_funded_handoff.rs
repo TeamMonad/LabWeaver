@@ -488,7 +488,13 @@ pub(super) async fn exercise(
     Box::pin(exercise_execution(
         pool, resource, &store, &admission, &instance, &grant, &http,
     ))
-    .await?;
+    .await
+    .map_err(|error| {
+        std::io::Error::other(format!(
+            "native {:?}/{:?} lifecycle: {error}",
+            instance.class, instance.runtime_kind
+        ))
+    })?;
     replies.abort();
     access_probe.abort();
     Ok(())
@@ -1113,7 +1119,8 @@ async fn exercise_execution(
             Box::pin(upgrade_guards::exercise(
                 pool, store, admission, &worker, &restarted, http, &calls,
             ))
-            .await?
+            .await
+            .map_err(|error| std::io::Error::other(format!("C-stage upgrade admission: {error}")))?
         } else {
             restarted
         };
