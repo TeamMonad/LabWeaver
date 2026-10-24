@@ -13,6 +13,7 @@ import {
 } from '@/generated/contracts'
 import { diagnosticFromError, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey } from '@/utils/format'
+import { clearPendingCommand, listPendingCommands, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 
 const fixedDecimalPattern = /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/
 
@@ -120,7 +121,30 @@ export function creditLedgerKindLabel(kind: string): string {
   return creditLedgerKindLabels[kind] ?? kind
 }
 
-export function useProjectCredits(projectId: Ref<string | null>) {
+/** Answers that prove the server did not apply the command; any other failure may have been applied. */
+const NOT_APPLIED_CODES = ['LW_CREDITS_INVALID', 'LW_CREDITS_PRECISION', 'LW_CREDITS_INSUFFICIENT', 'LW_CREDITS_SCOPE_DENIED', 'LW_CREDITS_NOT_FOUND']
+
+const PENDING_SCOPE_PREFIX = 'credits-admin:'
+
+export interface PendingCreditOperation {
+  scope: string
+  input: CreditAdminFormInput
+}
+
+export type CreditAdminSubmitResult = 'accepted' | 'failed' | 'stale'
+
+/**
+ * Project Credits account, ledger and holds, plus platform-admin writes.
+ *
+ * Every admin write without a definite outcome is kept as a pending command
+ * (session storage, per actor) under its own scope: project + canonical body.
+ * A retry, a refresh or resubmitting the same operation replays it with the
+ * same Idempotency-Key, and a different draft or another project never
+ * replaces it. The entry is removed only when that operation is accepted or
+ * the server proves it was not applied. An answer that arrives after the
+ * project or actor changed only updates storage, never the current view.
+ */
+export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<string | null>) {
   const account = ref<AsyncState<CreditAccountSchema>>({ kind: 'idle' })
   const ledger = ref<AsyncState<CreditLedgerPageSchema>>({ kind: 'idle' })
   const holds = ref<AsyncState<CreditHoldPageSchema>>({ kind: 'idle' })
@@ -129,11 +153,12 @@ export function useProjectCredits(projectId: Ref<string | null>) {
   const pageSize = ref(25)
   const acting = ref<string | null>(null)
   const outcome = ref<{ kind: 'success' | 'error'; diagnostic: DiagnosticViewModel } | null>(null)
+  /** Unconfirmed admin operations of this actor in this project, restored after a refresh. */
+  const pendingOperations = ref<PendingCreditOperation[]>([])
   let loadGeneration = 0
+  /** Changes with the project or actor; a write answer for an older context only updates storage. */
+  let context = 0
   let disposed = false
-  // One Idempotency-Key per operation body. A failed or lost response keeps the
-  // key, so resubmitting the same operation replays it instead of booking twice.
-  let pendingOperation: { fingerprint: string; key: string } | null = null
 
   onScopeDispose(() => {
     disposed = true
@@ -141,6 +166,14 @@ export function useProjectCredits(projectId: Ref<string | null>) {
 
   function current(id: string, generation: number) {
     return !disposed && projectId.value === id && generation === loadGeneration
+  }
+
+  function refreshPending() {
+    const id = projectId.value
+    const actor = actorId.value
+    pendingOperations.value = id && actor
+      ? listPendingCommands<CreditAdminFormInput>(actor, `${PENDING_SCOPE_PREFIX}${id}:`).map(({ scope, command }) => ({ scope, input: command.data }))
+      : []
   }
 
   async function loadLedgerPage(id: string, page: number, generation: number) {
@@ -234,16 +267,17 @@ export function useProjectCredits(projectId: Ref<string | null>) {
     await loadHoldsPage(id, page, loadGeneration)
   }
 
-  async function submitAdminOperation(input: CreditAdminFormInput): Promise<boolean> {
+  async function submitAdminOperation(input: CreditAdminFormInput): Promise<CreditAdminSubmitResult> {
     const id = projectId.value
-    if (!id || acting.value !== null) return false
+    const actor = actorId.value
+    if (!id || !actor || acting.value !== null) return 'failed'
     const reason = input.reason.trim()
     if (!reason) {
       outcome.value = {
         kind: 'error',
         diagnostic: makeDiagnostic('CREDITS_REASON_REQUIRED', '管理员操作必须填写原因。', false),
       }
-      return false
+      return 'failed'
     }
 
     let body: CreditAdminOperationSchema
@@ -253,7 +287,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
           kind: 'error',
           diagnostic: makeDiagnostic('CREDITS_AMOUNT_INVALID', '发放金额必须是大于零的六位小数字符串。', false),
         }
-        return false
+        return 'failed'
       }
       body = { action: 'grant', projectId: id, amount: input.amount, reason }
     } else if (input.action === 'transfer') {
@@ -262,7 +296,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
           kind: 'error',
           diagnostic: makeDiagnostic('CREDITS_AMOUNT_INVALID', '转移金额必须是大于零的六位小数字符串。', false),
         }
-        return false
+        return 'failed'
       }
       const destinationProjectId = input.destinationProjectId.trim()
       if (!destinationProjectId || destinationProjectId === id) {
@@ -270,7 +304,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
           kind: 'error',
           diagnostic: makeDiagnostic('CREDITS_DESTINATION_INVALID', '转移必须指定与当前项目不同的目标项目。', false),
         }
-        return false
+        return 'failed'
       }
       body = {
         action: 'transfer',
@@ -285,7 +319,7 @@ export function useProjectCredits(projectId: Ref<string | null>) {
           kind: 'error',
           diagnostic: makeDiagnostic('CREDITS_AMOUNT_INVALID', '调整金额必须是非零的六位小数字符串。', false),
         }
-        return false
+        return 'failed'
       }
       body = { action: 'adjust', projectId: id, amount: input.amount, reason }
     } else {
@@ -295,41 +329,57 @@ export function useProjectCredits(projectId: Ref<string | null>) {
           kind: 'error',
           diagnostic: makeDiagnostic('CREDITS_ENTRY_REQUIRED', '冲正必须指定原账目条目 ID。', false),
         }
-        return false
+        return 'failed'
       }
       body = { action: 'reverse', entryId, reason }
     }
 
+    const scope = `${PENDING_SCOPE_PREFIX}${id}:${JSON.stringify(body)}`
+    const stored = readPendingCommand<CreditAdminFormInput>(actor, scope)
+    const command = stored ?? { fingerprint: scope, idempotencyKey: idempotencyKey(), data: { ...input, reason } }
+    // Recorded before sending: a response lost after this point is replayed, never re-minted.
+    writePendingCommand(actor, scope, command)
+    const requestContext = context
+    const isCurrent = () => !disposed && requestContext === context
     acting.value = input.action
     outcome.value = null
-    const fingerprint = JSON.stringify(body)
-    if (pendingOperation?.fingerprint !== fingerprint) pendingOperation = { fingerprint, key: idempotencyKey() }
-    const requestKey = pendingOperation.key
+    refreshPending()
+    let next: { kind: 'success' | 'error'; diagnostic: DiagnosticViewModel }
     try {
       const result = await createCreditAdminOperation({
-        headers: { 'Idempotency-Key': requestKey },
+        headers: { 'Idempotency-Key': command.idempotencyKey },
         body,
       })
       if (result.error) throw result.error
-      pendingOperation = null
-      await load({ clearOutcome: false })
-      outcome.value = {
+      clearPendingCommand(actor, scope, command.idempotencyKey)
+      next = {
         kind: 'success',
         diagnostic: makeDiagnostic('CREDITS_ADMIN_OPERATION_SUCCEEDED', `${creditActionLabel(input.action)}已入账，账户和账目已刷新。`, false),
       }
-      return true
     } catch (error) {
-      outcome.value = {
-        kind: 'error',
-        diagnostic: diagnosticFromError(error, 'CREDITS_ADMIN_OPERATION_FAILED', `${creditActionLabel(input.action)}没有完成。重新提交同一操作不会重复入账。`),
-      }
-      return false
-    } finally {
-      acting.value = null
+      const diagnostic = diagnosticFromError(error, 'CREDITS_ADMIN_OPERATION_FAILED', `${creditActionLabel(input.action)}的结果尚未确认。重新提交同一操作不会重复入账。`)
+      if (NOT_APPLIED_CODES.includes(diagnostic.code)) clearPendingCommand(actor, scope, command.idempotencyKey)
+      next = { kind: 'error', diagnostic }
     }
+    if (!isCurrent()) return 'stale'
+    acting.value = null
+    refreshPending()
+    if (next.kind === 'success') await load({ clearOutcome: false })
+    if (!isCurrent()) return 'stale'
+    outcome.value = next
+    return next.kind === 'success' ? 'accepted' : 'failed'
   }
 
-  watch(projectId, () => {
+  /** Replays one unconfirmed operation with its original body and Idempotency-Key. */
+  async function retryPending(scope: string): Promise<CreditAdminSubmitResult> {
+    const pending = pendingOperations.value.find((item) => item.scope === scope)
+    return pending ? submitAdminOperation(pending.input) : 'failed'
+  }
+
+  watch([projectId, actorId], () => {
+    context += 1
+    acting.value = null
+    refreshPending()
     void load()
   }, { immediate: true })
 
@@ -342,10 +392,12 @@ export function useProjectCredits(projectId: Ref<string | null>) {
     pageSize,
     acting,
     outcome,
+    pendingOperations,
     load,
     loadLedger,
     loadHolds,
     submitAdminOperation,
+    retryPending,
   }
 }
 

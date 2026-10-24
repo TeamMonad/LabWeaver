@@ -531,7 +531,7 @@ describe('Work acceptance demonstration rates', () => {
   const context = (rates) => ({ request: { get: vi.fn(async () => ({ ok: () => true, text: async () => JSON.stringify(rates) })) } })
   const rate = (target, overrides = {}) => ({
     id: 'operator-rate', revision: 1, unit: target.unit, unitQuantity: target.unitQuantity,
-    gpuClass: null, gpuMode: null, unitPrice: { amount: '7.000000', currency: 'USD' },
+    gpuClass: null, gpuMode: null, unitPrice: { amount: '7.000000', currency: 'CREDITS' },
     effectiveFrom: '2026-10-04T05:00:00Z', effectiveUntil: null, ...overrides,
   })
 
@@ -547,7 +547,7 @@ describe('Work acceptance demonstration rates', () => {
     expect(target).toBeDefined()
     expect(Number.isSafeInteger(target.unitQuantity)).toBe(true)
     expect(quantity / target.unitQuantity * Number(target.amount)).toBe(1)
-    expect(target.currency).toBe('USD')
+    expect(target.currency).toBe('CREDITS')
   })
 
   it('keeps the current operator price when a later version is scheduled', async () => {
@@ -556,6 +556,14 @@ describe('Work acceptance demonstration rates', () => {
     const future = rate(target, { id: 'future', revision: 2, effectiveFrom: current.effectiveUntil })
     const page = { getByTestId: vi.fn() }
     await expect(ensureRateByUi(page, context([future, current]), target)).resolves.toEqual(current)
+    expect(page.getByTestId).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on an active operator price that cannot fund Credits admission, without replacing it', async () => {
+    const target = DEFAULT_RATE_INPUTS[0]
+    const page = { getByTestId: vi.fn() }
+    await expect(ensureRateByUi(page, context([rate(target, { unitPrice: { amount: '7.000000', currency: 'USD' } })]), target))
+      .rejects.toThrow('REAL_WORK_RATE_ACTIVE_NOT_CREDITS:cpu_millicore_second:USD')
     expect(page.getByTestId).not.toHaveBeenCalled()
   })
 
@@ -593,7 +601,7 @@ describe('Work acceptance demonstration rates', () => {
   })
 
   it('keeps the explicit GPU price conflict guard', async () => {
-    const target = { unit: 'gpu_unit_second', unitQuantity: 1, amount: '0.000100', currency: 'USD', gpuClass: 'nvidia-cuda', gpuMode: 'exclusive' }
+    const target = { unit: 'gpu_unit_second', unitQuantity: 1, amount: '0.000100', currency: 'CREDITS', gpuClass: 'nvidia-cuda', gpuMode: 'exclusive' }
     await expect(ensureRateByUi({}, context([rate(target, { gpuClass: target.gpuClass, gpuMode: target.gpuMode })]), target))
       .rejects.toThrow('REAL_WORK_GPU_RATE_ACTIVE_CONFLICT:nvidia-cuda')
   })

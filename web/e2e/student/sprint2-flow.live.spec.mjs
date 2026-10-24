@@ -19,6 +19,7 @@ import {
   configureRealWorkBudgetByUi,
   cleanupWorkResources,
   createRealWorkPackage,
+  ensureRealWorkCreditsByUi,
   ensureRealWorkRates,
   inspectRealWorkFinanceByUi,
   realWorkConfig,
@@ -267,7 +268,7 @@ async function readContinuationGpuRate(browser, baseURL) {
         && rate.gpuClass === 'nvidia-cuda'
         && rate.gpuMode === 'exclusive'
         && rate.unitQuantity === 1
-        && rate.unitPrice?.currency === 'USD'
+        && rate.unitPrice?.currency === 'CREDITS'
         && rate.unitPrice?.amount === '0.000100'
         && Number.isFinite(effectiveFrom)
         && effectiveFrom <= Date.now()
@@ -836,6 +837,8 @@ test('student provisions a Work environment, configures it, and releases its cap
       if (!PRESERVE_EXISTING_PROJECT) {
         await configureRealWorkBudgetByUi(browser, baseURL, project.id)
       }
+      // Resource funds the approved request from project Credits before the environment starts.
+      await ensureRealWorkCreditsByUi(browser, baseURL, project.id)
     }
 
     // Work is created by hand from the Work page: pick the published template

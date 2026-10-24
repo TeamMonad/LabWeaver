@@ -78,8 +78,23 @@ describe('Credits amount and label helpers', () => {
   })
 })
 
+function keyOf(call: number) {
+  return (vi.mocked(createCreditAdminOperation).mock.calls[call]![0].headers as Record<string, string>)['Idempotency-Key']
+}
+
+function setup(project = 'project-new', actor: string | null = 'actor-admin') {
+  const projectId = ref<string | null>(project)
+  const actorId = ref<string | null>(actor)
+  const credits = useProjectCredits(projectId, actorId)
+  return { credits, projectId, actorId }
+}
+
+const lostResponse = () => Promise.reject(new Error('network lost'))
+const accepted = () => Promise.resolve({ data: [], error: undefined } as never)
+
 describe('useProjectCredits', () => {
   beforeEach(() => {
+    window.sessionStorage.clear()
     vi.mocked(getProjectCredits).mockReset()
     vi.mocked(listProjectCreditLedger).mockReset()
     vi.mocked(listProjectCreditHolds).mockReset()
@@ -101,7 +116,7 @@ describe('useProjectCredits', () => {
       error: undefined,
     } as never)
 
-    const credits = useProjectCredits(ref<string | null>('project-new'))
+    const { credits } = setup()
     await flushPromises()
 
     expect(getProjectCredits).toHaveBeenCalledWith({ path: { projectId: 'project-new' } })
@@ -116,7 +131,7 @@ describe('useProjectCredits', () => {
       data: undefined,
       error: { type: 'about:blank', title: 'Forbidden', status: 403, detail: 'scope denied', diagnosticCode: 'LW_CREDITS_SCOPE_DENIED', requestId: 'req-403', retryable: false },
     } as never)
-    const credits = useProjectCredits(ref<string | null>('project-new'))
+    const { credits } = setup()
     await flushPromises()
     expect(credits.account.value.kind).toBe('error')
     if (credits.account.value.kind === 'error') {
@@ -125,64 +140,146 @@ describe('useProjectCredits', () => {
     }
   })
 
-  it('submits grant with an idempotency key and reloads', async () => {
+  it('submits grant with an idempotency key, reloads and leaves nothing pending', async () => {
     mockReads()
-    vi.mocked(createCreditAdminOperation).mockResolvedValue({ data: [], error: undefined } as never)
-    const credits = useProjectCredits(ref<string | null>('project-new'))
+    vi.mocked(createCreditAdminOperation).mockImplementation(accepted)
+    const { credits } = setup()
     await flushPromises()
-    expect(await credits.submitAdminOperation(grant)).toBe(true)
+    expect(await credits.submitAdminOperation(grant)).toBe('accepted')
     expect(createCreditAdminOperation).toHaveBeenCalledWith({
       headers: { 'Idempotency-Key': expect.any(String) },
       body: { action: 'grant', projectId: 'project-new', amount: '10.000000', reason: '补发额度' },
     })
     expect(getProjectCredits).toHaveBeenCalledTimes(2)
     expect(credits.outcome.value?.kind).toBe('success')
+    expect(credits.pendingOperations.value).toEqual([])
   })
 
-  it('replays a failed operation with the same key and uses a new key after success', async () => {
+  it('replays a lost operation with the same key and uses a new key after success', async () => {
     mockReads()
-    vi.mocked(createCreditAdminOperation)
-      .mockRejectedValueOnce(new Error('network lost'))
-      .mockResolvedValueOnce({ data: [], error: undefined } as never)
-      .mockResolvedValueOnce({ data: [], error: undefined } as never)
-    const credits = useProjectCredits(ref<string | null>('project-new'))
+    vi.mocked(createCreditAdminOperation).mockImplementationOnce(lostResponse).mockImplementation(accepted)
+    const { credits } = setup()
     await flushPromises()
 
-    expect(await credits.submitAdminOperation(grant)).toBe(false)
+    expect(await credits.submitAdminOperation(grant)).toBe('failed')
     expect(credits.outcome.value?.diagnostic.message).toContain('不会重复入账')
-    expect(await credits.submitAdminOperation(grant)).toBe(true)
-    expect(await credits.submitAdminOperation(grant)).toBe(true)
-
-    const keys = vi.mocked(createCreditAdminOperation).mock.calls.map(([options]) => (options.headers as Record<string, string>)['Idempotency-Key'])
-    expect(keys[0]).toBe(keys[1])
-    expect(keys[2]).not.toBe(keys[1])
+    expect(credits.pendingOperations.value).toHaveLength(1)
+    expect(await credits.submitAdminOperation(grant)).toBe('accepted')
+    expect(await credits.submitAdminOperation(grant)).toBe('accepted')
+    expect(keyOf(0)).toBe(keyOf(1))
+    expect(keyOf(2)).not.toBe(keyOf(1))
   })
 
-  it('shows insufficient balance as a Chinese reason with a next step', async () => {
+  it('keeps an unconfirmed key when another draft or another project is submitted in between', async () => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementationOnce(lostResponse).mockImplementation(accepted)
+    const { credits, projectId } = setup('project-a')
+    await flushPromises()
+
+    expect(await credits.submitAdminOperation(grant)).toBe('failed')
+    expect(await credits.submitAdminOperation({ ...grant, amount: '3.000000' })).toBe('accepted')
+    projectId.value = 'project-b'
+    await flushPromises()
+    expect(credits.pendingOperations.value).toEqual([])
+    expect(await credits.submitAdminOperation(grant)).toBe('accepted')
+    projectId.value = 'project-a'
+    await flushPromises()
+    expect(credits.pendingOperations.value.map((item) => item.input.amount)).toEqual(['10.000000'])
+
+    expect(await credits.submitAdminOperation(grant)).toBe('accepted')
+    expect(keyOf(3)).toBe(keyOf(0))
+    expect(new Set([keyOf(0), keyOf(1), keyOf(2)]).size).toBe(3)
+    expect(credits.pendingOperations.value).toEqual([])
+  })
+
+  it('restores an unconfirmed operation after a refresh and retries it with the original key', async () => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementationOnce(lostResponse).mockImplementation(accepted)
+    const first = setup()
+    await flushPromises()
+    expect(await first.credits.submitAdminOperation(grant)).toBe('failed')
+
+    // A new page instance reads the same session storage.
+    const refreshed = setup()
+    await flushPromises()
+    expect(refreshed.credits.pendingOperations.value).toHaveLength(1)
+    expect(refreshed.credits.pendingOperations.value[0]!.input).toMatchObject({ action: 'grant', amount: '10.000000', reason: '补发额度' })
+    expect(await refreshed.credits.retryPending(refreshed.credits.pendingOperations.value[0]!.scope)).toBe('accepted')
+    expect(keyOf(1)).toBe(keyOf(0))
+    expect(refreshed.credits.pendingOperations.value).toEqual([])
+  })
+
+  it('does not offer another actor\'s unconfirmed operations', async () => {
+    mockReads()
+    vi.mocked(createCreditAdminOperation).mockImplementationOnce(lostResponse)
+    const { credits, actorId } = setup()
+    await flushPromises()
+    expect(await credits.submitAdminOperation(grant)).toBe('failed')
+    actorId.value = 'actor-other'
+    await flushPromises()
+    expect(credits.pendingOperations.value).toEqual([])
+  })
+
+  it('drops the pending entry only when the server proves it was not applied', async () => {
     mockReads()
     vi.mocked(createCreditAdminOperation).mockResolvedValue({
       data: undefined,
       error: { type: 'about:blank', title: 'Conflict', status: 409, detail: 'insufficient', diagnosticCode: 'LW_CREDITS_INSUFFICIENT', requestId: 'req-409', retryable: false },
     } as never)
-    const credits = useProjectCredits(ref<string | null>('project-new'))
+    const { credits } = setup()
     await flushPromises()
-    expect(await credits.submitAdminOperation({ ...grant, action: 'transfer', destinationProjectId: 'project-other' })).toBe(false)
+    expect(await credits.submitAdminOperation({ ...grant, action: 'transfer', destinationProjectId: 'project-other' })).toBe('failed')
     expect(credits.outcome.value?.diagnostic).toMatchObject({
       code: 'LW_CREDITS_INSUFFICIENT',
       requestId: 'req-409',
     })
     expect(credits.outcome.value?.diagnostic.message).toContain('可用余额不足')
     expect(credits.outcome.value?.diagnostic.nextStep).toContain('发放 Credits')
+    expect(credits.pendingOperations.value).toEqual([])
+
+    vi.mocked(createCreditAdminOperation).mockResolvedValue({
+      data: undefined,
+      error: { type: 'about:blank', title: 'Unavailable', status: 503, detail: 'db', diagnosticCode: 'LW_CREDITS_STORAGE', requestId: 'req-503', retryable: true },
+    } as never)
+    expect(await credits.submitAdminOperation(grant)).toBe('failed')
+    expect(credits.pendingOperations.value).toHaveLength(1)
+  })
+
+  it.each([
+    ['succeeds', accepted],
+    ['fails', lostResponse],
+  ])('ignores an answer that %s after the project changed', async (_label, answer) => {
+    mockReads()
+    let release!: () => void
+    vi.mocked(createCreditAdminOperation).mockImplementation(() => new Promise<void>((resolve) => { release = resolve }).then(answer))
+    const { credits, projectId } = setup('project-a')
+    await flushPromises()
+    const pending = credits.submitAdminOperation(grant)
+    await flushPromises()
+    expect(credits.acting.value).toBe('grant')
+
+    projectId.value = 'project-b'
+    await flushPromises()
+    expect(credits.acting.value).toBeNull()
+    const readsBefore = vi.mocked(getProjectCredits).mock.calls.length
+    release()
+    expect(await pending).toBe('stale')
+    await flushPromises()
+
+    expect(credits.outcome.value).toBeNull()
+    expect(credits.acting.value).toBeNull()
+    expect(vi.mocked(getProjectCredits).mock.calls.length).toBe(readsBefore)
+    expect(credits.pendingOperations.value).toEqual([])
   })
 
   it('rejects invalid operations locally without calling the server', async () => {
     mockReads()
-    const credits = useProjectCredits(ref<string | null>('project-new'))
+    const { credits } = setup()
     await flushPromises()
-    expect(await credits.submitAdminOperation({ ...grant, reason: '  ' })).toBe(false)
-    expect(await credits.submitAdminOperation({ ...grant, action: 'transfer', destinationProjectId: 'project-new' })).toBe(false)
-    expect(await credits.submitAdminOperation({ ...grant, action: 'adjust', amount: '0.000000' })).toBe(false)
-    expect(await credits.submitAdminOperation({ ...grant, action: 'reverse', entryId: '' })).toBe(false)
+    expect(await credits.submitAdminOperation({ ...grant, reason: '  ' })).toBe('failed')
+    expect(await credits.submitAdminOperation({ ...grant, action: 'transfer', destinationProjectId: 'project-new' })).toBe('failed')
+    expect(await credits.submitAdminOperation({ ...grant, action: 'adjust', amount: '0.000000' })).toBe('failed')
+    expect(await credits.submitAdminOperation({ ...grant, action: 'reverse', entryId: '' })).toBe('failed')
     expect(createCreditAdminOperation).not.toHaveBeenCalled()
   })
 })

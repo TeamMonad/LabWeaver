@@ -64,6 +64,30 @@ export function clearPendingCommand(actorId: string, scope: string, idempotencyK
 }
 
 /**
+ * Every pending command of `actorId` whose scope starts with `scopePrefix`,
+ * for pages that keep several unconfirmed commands of one kind side by side
+ * (one scope per command identity) and must offer all of them after a refresh.
+ */
+export function listPendingCommands<T>(actorId: string, scopePrefix: string): Array<{ scope: string; command: PendingCommand<T> }> {
+  const storage = store()
+  if (!storage) return []
+  const prefix = entryKey(actorId, '')
+  const entries: Array<{ scope: string; command: PendingCommand<T> }> = []
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (!key?.startsWith(entryKey(actorId, scopePrefix))) continue
+      const scope = key.slice(prefix.length)
+      const command = readPendingCommand<T>(actorId, scope)
+      if (command) entries.push({ scope, command })
+    }
+  } catch {
+    // Storage disabled: nothing was stored either.
+  }
+  return entries.sort((left, right) => left.scope.localeCompare(right.scope))
+}
+
+/**
  * Remove every pending command of `actorId` whose scope starts with
  * `scopePrefix`. Only for a command kind the page can no longer send: no newer
  * command of that kind can exist, so nothing has to be compared first.

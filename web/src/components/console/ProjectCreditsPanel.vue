@@ -232,6 +232,31 @@
           <p>每笔操作都需要填写原因，并在账目中留下记录。已预占的资金不能转出或调减。</p>
         </div>
       </div>
+      <div
+        v-if="credits.pendingOperations.length"
+        class="pending-operations"
+        role="status"
+        data-testid="credits-pending-operations"
+      >
+        <strong>以下操作的结果尚未确认</strong>
+        <small>平台可能已经入账。点击“重新提交”会沿用原请求，已入账的操作不会重复入账；也可以先查看上方账目。</small>
+        <ul>
+          <li
+            v-for="pending in credits.pendingOperations"
+            :key="pending.scope"
+          >
+            <span>{{ pendingSummary(pending.input) }}</span>
+            <button
+              type="button"
+              class="text-button"
+              :disabled="credits.acting !== null"
+              @click="credits.retryPending(pending.scope)"
+            >
+              重新提交
+            </button>
+          </li>
+        </ul>
+      </div>
       <div class="two-columns">
         <label>
           <span>操作</span>
@@ -342,7 +367,7 @@ import {
 import { useAuth } from '@/composables/useAuth'
 import { useProjects } from '@/composables/useProjects'
 import { formatTimestamp } from '@/utils/format'
-import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
+import { actorIdFromProfile, hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const props = defineProps<{
   projectId: string | null
@@ -350,7 +375,7 @@ const props = defineProps<{
 
 const auth = useAuth()
 const projects = useProjects()
-const credits = reactive(useProjectCredits(toRef(props, 'projectId')))
+const credits = reactive(useProjectCredits(toRef(props, 'projectId'), computed(() => actorIdFromProfile(auth.user.value?.profile))))
 // The server enforces the platform-admin role on every write; the form is only
 // shown to the same role so members never see controls that would be refused.
 const canManage = computed(() => hasAnyRole(rolesFromProfile(auth.user.value?.profile), ['admin']))
@@ -467,8 +492,9 @@ async function confirmAdmin() {
 
 async function execute(input: CreditAdminFormInput) {
   lastSubmitted.value = input
-  const ok = await credits.submitAdminOperation(input)
-  if (!ok) return
+  const result = await credits.submitAdminOperation(input)
+  // 'stale': the project or actor changed while this answer was in flight; this draft belongs to another context.
+  if (result !== 'accepted') return
   lastSubmitted.value = null
   adminReason.value = ''
   adminAmount.value = ''
@@ -478,6 +504,15 @@ async function execute(input: CreditAdminFormInput) {
 async function submitAdmin() {
   if (lastSubmitted.value) await execute(lastSubmitted.value)
   else await credits.load()
+}
+
+function pendingSummary(input: CreditAdminFormInput) {
+  const label = creditActionLabel(input.action)
+  if (input.action === 'reverse') return `${label}账目 ${input.entryId} · ${input.reason}`
+  const destination = input.action === 'transfer'
+    ? ` → ${destinationOptions.value.find((project) => project.id === input.destinationProjectId)?.name ?? input.destinationProjectId}`
+    : ''
+  return `${label} ${input.amount} CREDITS${destination} · ${input.reason}`
 }
 
 defineExpose({ reload: () => credits.load({ clearOutcome: true }) })
@@ -509,6 +544,9 @@ defineExpose({ reload: () => credits.load({ clearOutcome: true }) })
 .two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .credit-admin-form label { display: grid; gap: var(--space-1); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .form-actions { display: flex; justify-content: flex-end; }
+.pending-operations { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); font: var(--md-sys-body-small); }
+.pending-operations ul { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+.pending-operations li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); overflow-wrap: anywhere; }
 .state-chip { display: inline-flex; width: fit-content; white-space: nowrap; padding: var(--space-1) var(--space-2); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .state-chip--pending { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
 .state-chip--released { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }

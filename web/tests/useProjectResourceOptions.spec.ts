@@ -215,4 +215,25 @@ describe('useProjectResourceOptions environments', () => {
     expect(mocks.fetchEnvironmentTemplateReleases).toHaveBeenCalledWith('project-1', 'course-1')
     scope.stop()
   })
+
+  it('keeps compute and GPU rates from a list that also holds build and model token rates', async () => {
+    mocks.listEnvironments.mockResolvedValue(environmentPage([]))
+    mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({ items: [] })
+    const cpu = rate({ id: 'rate-cpu', unit: 'cpu_millicore_second', unitQuantity: 3_600_000, gpuClass: null, gpuMode: null })
+    const gpu = rate({ id: 'rate-gpu' })
+    const build = rate({ id: 'rate-build', unit: 'build_second', unitQuantity: 3600, gpuClass: null, gpuMode: null, builderBinding: 'buildkit-primary-v1' })
+    const model = rate({ id: 'rate-model', unit: 'llm_output_token', unitQuantity: 1_000_000, gpuClass: null, gpuMode: null, modelBinding: 'claude-sonnet-4', maxPreauthorization: '2.000000' })
+    mocks.apiGet.mockImplementation(({ url }: { url: string }) => Promise.resolve(url.endsWith('/resource/rates')
+      ? { data: [cpu, build, gpu, model], error: undefined }
+      : { data: [], error: undefined }))
+
+    const scope = effectScope()
+    let state!: ReturnType<typeof useProjectResourceOptions>
+    scope.run(() => { state = useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>(null)) })
+
+    await vi.waitFor(() => expect(state.rates.kind).toBe('success'))
+    expect(state.rates.kind === 'success' ? state.rates.data.map((item) => item.id) : []).toEqual(['rate-cpu', 'rate-gpu'])
+    expect(state.gpuRateSelection({ id: 'gpu-1', class: 'a100', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }).rate?.id).toBe('rate-gpu')
+    scope.stop()
+  })
 })
