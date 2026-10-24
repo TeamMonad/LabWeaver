@@ -546,5 +546,100 @@ describe('generated SSE authentication (#198)', () => {
       const authorizations = fetch.mock.calls.map(([request]) => (request as Request).headers.get('authorization'))
       expect(authorizations).toEqual(['Bearer bearer-before-refresh', 'Bearer bearer-after-refresh'])
     })
+
+    it('delivers and reports no buffered event once the epoch ends between two events of one chunk', async () => {
+      const { session, client } = await freshTransport()
+      vi.stubGlobal('fetch', vi.fn(async (_request: Request) => new Response(
+        'data: {"streamSequence":"1"}\n\ndata: {"streamSequence":"2"}\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )))
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: { mode: 'bearer', accessToken: async () => 'bearer-of-actor-a' },
+      })
+      const onSseEvent = vi.fn()
+
+      const events = await api.sse.get({ url: eventsUrl, security: [...security], onSseEvent })
+      expect((await events.stream.next()).value).toEqual({ streamSequence: '1' })
+      // Another actor signs in while the second event of the same chunk is still buffered.
+      session.advanceSessionEpoch()
+
+      expect(await events.stream.next()).toEqual({ done: true, value: undefined })
+      expect(onSseEvent).toHaveBeenCalledOnce()
+      expect(onSseEvent.mock.calls[0][0].data).toEqual({ streamSequence: '1' })
+    })
+
+    /** Abort listeners currently registered on `signal`, observed through its own add/remove calls. */
+    function abortListenersOf(signal: AbortSignal) {
+      const listeners = new Set<unknown>()
+      const add = signal.addEventListener.bind(signal)
+      const remove = signal.removeEventListener.bind(signal)
+      vi.spyOn(signal, 'addEventListener').mockImplementation((type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) => {
+        if (type === 'abort') listeners.add(listener)
+        add(type, listener, options)
+      })
+      vi.spyOn(signal, 'removeEventListener').mockImplementation((type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) => {
+        if (type === 'abort') listeners.delete(listener)
+        remove(type, listener, options)
+      })
+      return listeners
+    }
+
+    type Stream = { stream: AsyncGenerator<unknown, void, unknown> }
+
+    it.each([
+      {
+        ending: 'normal completion',
+        responses: () => [eventStream()],
+        consume: async ({ stream }: Stream) => {
+          expect((await stream.next()).value).toEqual({ streamSequence: '1' })
+          expect((await stream.next()).done).toBe(true)
+        },
+      },
+      {
+        ending: 'several reconnects with the built-in backoff',
+        responses: () => [new Response('', { status: 503 }), new Response('', { status: 503 }), eventStream()],
+        consume: async ({ stream }: Stream) => {
+          expect((await stream.next()).value).toEqual({ streamSequence: '1' })
+          expect((await stream.next()).done).toBe(true)
+        },
+      },
+      {
+        ending: 'caller cancellation',
+        responses: () => [eventStream()],
+        consume: async ({ stream }: Stream, cancel: () => void) => {
+          expect((await stream.next()).value).toEqual({ streamSequence: '1' })
+          cancel()
+          expect((await stream.next()).done).toBe(true)
+        },
+      },
+      {
+        ending: 'return() before the first event',
+        responses: () => [eventStream()],
+        consume: async ({ stream }: Stream) => {
+          expect((await stream.return(undefined)).done).toBe(true)
+        },
+      },
+    ])('leaves no listener on the epoch or caller signal after $ending', async ({ responses, consume }) => {
+      const { session, client } = await freshTransport()
+      const queued = responses()
+      const fetch = vi.fn(async (_request: Request) => queued.shift() ?? new Response('', { status: 503 }))
+      vi.stubGlobal('fetch', fetch)
+      const api = client.createLabWeaverApiClient({
+        baseUrl: 'https://api.example.test',
+        authentication: { mode: 'bearer', accessToken: async () => 'bearer-of-actor-a' },
+      })
+      const epochListeners = abortListenersOf(session.sessionEpochSignal())
+      const caller = new AbortController()
+      const callerListeners = abortListenersOf(caller.signal)
+
+      const events = await api.sse.get({ url: eventsUrl, security: [...security], signal: caller.signal, sseDefaultRetryDelay: 1 })
+      expect(epochListeners.size).toBe(1)
+      expect(callerListeners.size).toBe(1)
+      await consume(events, () => caller.abort())
+
+      expect(epochListeners.size).toBe(0)
+      expect(callerListeners.size).toBe(0)
+    })
   })
 })

@@ -4,7 +4,7 @@ import { getOidcAccessToken } from '@/composables/useAuth'
 import type { ProblemDetails } from '@/generated/contracts'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
-import type { ServerSentEventsOptions } from '@/generated/contracts/core/serverSentEvents.gen'
+import type { ServerSentEventsOptions, ServerSentEventsResult } from '@/generated/contracts/core/serverSentEvents.gen'
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
 import { reportSessionRejected, sessionActor, sessionCredentialVersion, sessionEpoch, sessionEpochSignal } from './session'
 
@@ -259,17 +259,18 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
 
 /** Generated SSE passes these through to its fetch loop; the request options type does not list them. */
 type StreamOptions = Parameters<Client['sse']['get']>[0] & Pick<ServerSentEventsOptions, 'fetch' | 'sseSleepFn'>
+type OpenStream = (options: StreamOptions) => Promise<ServerSentEventsResult>
 
 /**
  * Generated SSE opens and reopens streams with fetch, outside the Axios
  * interceptors. Every fetch of a stream (the first one, made on the first
  * `next()`, and each reconnect) happens only in the session epoch the stream
  * was opened in and, in bearer mode, with a current token read just before it.
- * A stream whose epoch ended stops instead of reconnecting; the browser sends
- * the BFF cookie itself.
+ * A stream whose epoch ended delivers nothing more and does not reconnect; the
+ * browser sends the BFF cookie itself.
  */
 function guardStreams(client: Client, accessToken?: AccessTokenProvider): void {
-  const sse = client.sse as Record<keyof Client['sse'], (options: StreamOptions) => Promise<unknown>>
+  const sse = client.sse as Record<keyof Client['sse'], OpenStream>
   for (const method of Object.keys(sse) as (keyof Client['sse'])[]) {
     const open = sse[method]
     sse[method] = async (options) => {
@@ -286,25 +287,46 @@ function guardStreams(client: Client, accessToken?: AccessTokenProvider): void {
       // Fails before the stream exists, so no request is ever made without a bearer.
       let openingBearer = await currentBearer()
 
+      // The one end of the stream, however it ends: completion, error, the
+      // caller's cancellation, `return()` or the end of its session epoch. It
+      // releases the listeners on the caller's and the epoch's signals.
       const stopped = new AbortController()
-      const stop = () => stopped.abort()
-      if (options.signal?.aborted) stop()
-      options.signal?.addEventListener?.('abort', stop)
-      epochEnded.addEventListener('abort', stop)
-      /** `Promise.withResolvers` is outside the project's ES2020 lib; the pause ends early once the stream stops. */
-      const pause = (ms: number) => new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, ms)
-        stopped.signal.addEventListener('abort', () => {
-          clearTimeout(timer)
+      const callerSignal = options.signal ?? undefined
+      let wakeFromBackoff: (() => void) | undefined
+      const stop = () => {
+        callerSignal?.removeEventListener?.('abort', stop)
+        epochEnded.removeEventListener('abort', stop)
+        stopped.abort()
+        wakeFromBackoff?.()
+      }
+      if (callerSignal?.aborted || epochEnded.aborted) {
+        stop()
+      } else {
+        callerSignal?.addEventListener?.('abort', stop)
+        epochEnded.addEventListener('abort', stop)
+      }
+      /** `Promise.withResolvers` is outside the project's ES2020 lib; a backoff ends early once the stream stops. */
+      const backoff = (ms: number) => new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          wakeFromBackoff = undefined
           resolve()
-        })
+        }, ms)
+        wakeFromBackoff = () => {
+          clearTimeout(timer)
+          wakeFromBackoff = undefined
+          resolve()
+        }
       })
 
-      return open({
+      const { stream } = await open({
         ...options,
         signal: stopped.signal,
+        // Events of an ended epoch are neither reported nor delivered.
+        onSseEvent: options.onSseEvent && ((event) => {
+          if (!stopped.signal.aborted) options.onSseEvent?.(event)
+        }),
         sseSleepFn: async (ms) => {
-          if (!stopped.signal.aborted) await (options.sseSleepFn ?? pause)(ms)
+          if (!stopped.signal.aborted) await (options.sseSleepFn ?? backoff)(ms)
         },
         fetch: async (input, init) => {
           try {
@@ -321,6 +343,36 @@ function guardStreams(client: Client, accessToken?: AccessTokenProvider): void {
           }
         },
       })
+
+      const close = async (): Promise<IteratorResult<unknown, void>> => {
+        stop()
+        await stream.return(undefined)
+        return { done: true, value: undefined }
+      }
+      // One network chunk can hold several events, which the generated loop
+      // hands out without reading again; the epoch is therefore also checked
+      // at every delivery, not only before each fetch.
+      const delivered: AsyncGenerator<unknown, void, unknown> = {
+        async next() {
+          if (stopped.signal.aborted) return close()
+          try {
+            const result = await stream.next()
+            return result.done || stopped.signal.aborted ? close() : result
+          } catch (error) {
+            await close()
+            throw error
+          }
+        },
+        return: close,
+        async throw(error: unknown) {
+          await close()
+          throw error
+        },
+        [Symbol.asyncIterator]() {
+          return this
+        },
+      }
+      return { stream: delivered }
     }
   }
 }
