@@ -4,6 +4,7 @@ use crate::run_store::PostgresAgentRunStore;
 use async_trait::async_trait;
 use contracts::http::{ModelInputAuthorizationResolution, ModelInputAuthorizationResolveRequest};
 use futures_util::StreamExt;
+use sqlx::Row as _;
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::sync::Arc;
@@ -335,6 +336,137 @@ mod tests {
             ))
             .is_err()
         );
+        Ok(())
+    }
+}
+
+/// Current-session authorization and deterministic DLP for the single metered model gateway.
+#[derive(Clone)]
+pub struct GatewayInputAuthorization {
+    pub client: Option<ModelInputAuthorizationClient>,
+    pub classifier: Arc<dyn crate::claude_code::EgressClassifier>,
+}
+
+impl GatewayInputAuthorization {
+    pub(crate) async fn check(
+        &self,
+        pool: &sqlx::PgPool,
+        claims: &crate::model_gateway::TokenClaims,
+    ) -> Result<String, &'static str> {
+        const DENIED: &str = "LW_MODEL_INPUT_AUTHORIZATION_DENIED";
+        let client = self
+            .client
+            .as_ref()
+            .ok_or("LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE")?;
+        let (binding, selected_paths, policy) = match &claims.scope {
+            crate::model_gateway::ModelGatewayScope::Authoring { track, .. } => {
+                let track = match track {
+                    contracts::authoring::AgentTrackKind::Environment => "environment",
+                    contracts::authoring::AgentTrackKind::Evaluation => "evaluation",
+                    contracts::authoring::AgentTrackKind::WorkConfiguration => "work_configuration",
+                };
+                let row = sqlx::query("SELECT d.request,d.policy FROM agent.agent_run_dispatches d JOIN agent.agent_runs r USING(run_id) JOIN agent.agent_track_work_items t USING(run_id) WHERE r.run_id=$1 AND r.project_id=$2 AND t.track=$3 AND t.attempt_number=$4 AND t.attempt_started_at+((d.policy->'budget'->>'timeoutMilliseconds')::bigint*interval '1 millisecond')>clock_timestamp()")
+                    .bind(claims.agent_run_id).bind(claims.project_id.as_uuid()).bind(track).bind(i64::from(claims.attempt)).fetch_optional(pool).await.map_err(|_| DENIED)?.ok_or(DENIED)?;
+                let dispatch: crate::run_store::PersistedAgentDispatchRequest =
+                    serde_json::from_value(row.try_get("request").map_err(|_| DENIED)?)
+                        .map_err(|_| DENIED)?;
+                let selected = match dispatch.request {
+                    contracts::http::InternalAgentRunRequest::Authoring(request) => {
+                        request.selected_paths
+                    }
+                    contracts::http::InternalAgentRunRequest::WorkConfiguration(request) => {
+                        request.selected_paths
+                    }
+                }
+                .ok_or(DENIED)?;
+                (
+                    dispatch.input_authorization,
+                    selected,
+                    row.try_get::<serde_json::Value, _>("policy")
+                        .map_err(|_| DENIED)?,
+                )
+            }
+            crate::model_gateway::ModelGatewayScope::Review { .. } => {
+                let row = sqlx::query("SELECT request_json->'inputAuthorization' AS binding,request_json->'policy' AS policy,jsonb_path_query_array(request_json,'$.files[*].path') AS paths FROM agent.llm_review_runs WHERE task_run_id=$1 AND project_id=$2 AND attempt=$3 AND (request_json->>'deadlineAt')::timestamptz>clock_timestamp()")
+                    .bind(claims.agent_run_id).bind(claims.project_id.as_uuid()).bind(i64::from(claims.attempt)).fetch_optional(pool).await.map_err(|_| DENIED)?.ok_or(DENIED)?;
+                let binding: contracts::http::ModelInputAuthorizationBinding =
+                    serde_json::from_value(row.try_get("binding").map_err(|_| DENIED)?)
+                        .map_err(|_| DENIED)?;
+                if !matches!(&binding.source, contracts::http::ModelInputAuthorizationSource::FrozenSubmission(source) if source.task_run_id.as_uuid()==claims.agent_run_id)
+                {
+                    return Err(DENIED);
+                }
+                let paths = serde_json::from_value(row.try_get("paths").map_err(|_| DENIED)?)
+                    .map_err(|_| DENIED)?;
+                (
+                    binding,
+                    paths,
+                    row.try_get::<serde_json::Value, _>("policy")
+                        .map_err(|_| DENIED)?,
+                )
+            }
+        };
+        let policy: contracts::authoring::ProjectLlmEgressPolicy =
+            serde_json::from_value(policy).map_err(|_| DENIED)?;
+        if binding.project_id != claims.project_id
+            || policy.project_id != claims.project_id
+            || contracts::http::model_input_policy_sha256(&policy).map_err(|_| DENIED)?
+                != binding.policy_sha256
+        {
+            return Err(DENIED);
+        }
+        client
+            .resolve(&ModelInputAuthorizationResolveRequest {
+                binding,
+                selected_paths,
+            })
+            .await
+            .map_err(|_| DENIED)?;
+        Ok(policy.binding.model)
+    }
+
+    pub(crate) async fn classify(
+        &self,
+        value: &serde_json::Value,
+        capability: &str,
+        credential: &str,
+    ) -> Result<(), &'static str> {
+        let mut pending = vec![value];
+        while let Some(value) = pending.pop() {
+            match value {
+                serde_json::Value::String(text) => {
+                    self.classify_text(text, capability, credential).await?;
+                }
+                serde_json::Value::Array(values) => pending.extend(values),
+                serde_json::Value::Object(values) => {
+                    for (key, value) in values {
+                        self.classify_text(key, capability, credential).await?;
+                        pending.push(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn classify_text(
+        &self,
+        text: &str,
+        capability: &str,
+        credential: &str,
+    ) -> Result<(), &'static str> {
+        if !self
+            .classifier
+            .classify("model/tool-result", text.as_bytes())
+            .await
+            .map_err(|_| "LW_MODEL_INPUT_AUTHORIZATION_DENIED")?
+            .is_empty()
+            || text.contains(capability)
+            || text.contains(credential)
+        {
+            return Err("LW_MODEL_INPUT_AUTHORIZATION_DENIED");
+        }
         Ok(())
     }
 }

@@ -35,7 +35,6 @@ use task_execution::{ExecutionTiming, usage_deliveries};
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 #[path = "sandbox_cleanup.rs"]
 mod sandbox_cleanup;
@@ -105,7 +104,6 @@ pub struct SandboxAuthoringProcess {
     objects: Arc<S3ImmutableObjectStore>,
     configuration: SandboxProcessConfiguration,
     object_store_ca_base64: Option<String>,
-    model_proxy_ca_base64: String,
 }
 
 impl SandboxAuthoringProcess {
@@ -126,7 +124,6 @@ impl SandboxAuthoringProcess {
             || configuration.stderr_max_bytes > 1024 * 1024
             || !configuration.kubernetes_api_server.starts_with("https://")
             || !(100..=60_000).contains(&configuration.request_timeout_milliseconds)
-            || !valid_model_proxy_origin(&configuration.model_proxy_base_uri)
             || configuration
                 .object_store_ca_file
                 .as_ref()
@@ -138,7 +135,6 @@ impl SandboxAuthoringProcess {
             Some(path) => Some(read_object_store_ca(path)?),
             None => None,
         };
-        let model_proxy_ca_base64 = read_object_store_ca(&configuration.model_proxy_ca_file)?;
         let api = KubernetesApiClient::new(
             KubernetesApiConfiguration {
                 kubernetes_api_server: reqwest::Url::parse(&configuration.kubernetes_api_server)
@@ -165,7 +161,6 @@ impl SandboxAuthoringProcess {
             objects,
             configuration,
             object_store_ca_base64,
-            model_proxy_ca_base64,
         })
     }
 
@@ -522,6 +517,7 @@ impl SandboxAuthoringProcess {
                 command.env(),
                 self.configuration.model_gateway.as_ref(),
                 scope,
+                task_run_id,
                 remaining,
             )?,
             expected_claude_version: scope.claude_code_version.clone(),
@@ -2074,6 +2070,7 @@ fn scoped_attempt_environment(
     command_environment: &BTreeMap<String, String>,
     gateway: Option<&crate::model_gateway::ModelGatewayRuntime>,
     scope: &AuthoringAttemptScope,
+    task_run_id: TaskRunId,
     valid_for: Duration,
 ) -> Result<BTreeMap<String, String>, ClaudeCodeProcessError> {
     let gateway = gateway.ok_or(ClaudeCodeProcessError::Unavailable)?;
@@ -2091,26 +2088,19 @@ fn scoped_attempt_environment(
         scope.project_id,
         scope.run_id.as_uuid(),
         scope.attempt,
+        crate::model_gateway::ModelGatewayScope::Authoring {
+            track: scope.track,
+            task_run_id,
+            lease_sha256: contracts::http::model_input_parent_lease_sha256(scope.lease_token),
+        },
         valid_for,
     ));
     Ok(environment)
 }
 
-fn valid_model_proxy_origin(value: &str) -> bool {
-    reqwest::Url::parse(value).is_ok_and(|url| {
-        url.scheme() == "https"
-            && url.host_str().is_some()
-            && matches!(url.path(), "" | "/")
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.query().is_none()
-            && url.fragment().is_none()
-    })
-}
-
 fn gated_command_argv(command: &ClaudeCodeCommand) -> Vec<String> {
     let mut argv = command_argv(command);
-    let hook = "cat >/dev/null; curl --fail --silent --show-error --max-time 5 --cacert /run/labweaver/model-proxy-ca.pem --request POST --header \"Authorization: Bearer $ANTHROPIC_AUTH_TOKEN\" \"$ANTHROPIC_BASE_URL/authorize\" >/dev/null || exit 2";
+    let hook = "curl --fail --silent --show-error --max-time 5 --request POST --header \"x-api-key: $ANTHROPIC_API_KEY\" --header 'Content-Type: application/json' --data-binary @- \"${ANTHROPIC_BASE_URL%/}/authorize\" >/dev/null || exit 2";
     let settings = serde_json::json!({"hooks": {
         "PreToolUse": [{"matcher":".*", "hooks":[{"type":"command","command":hook,"timeout":6}]}],
         "PostToolUse": [{"matcher":".*", "hooks":[{"type":"command","command":hook,"timeout":6}]}]
@@ -2265,6 +2255,7 @@ mod tests {
             &BTreeMap::new(),
             Some(&gateway),
             &scope,
+            contracts::TaskRunId::new(),
             Duration::from_hours(1),
         )?;
         let output = tokio::process::Command::new("/bin/sh")
@@ -2288,6 +2279,7 @@ mod tests {
                 &BTreeMap::new(),
                 Some(&gateway),
                 &scope,
+                contracts::TaskRunId::new(),
                 Duration::from_hours(1)
             )
             .is_err()
@@ -2298,6 +2290,7 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 &scope,
+                contracts::TaskRunId::new(),
                 Duration::from_hours(1)
             )
             .is_err()

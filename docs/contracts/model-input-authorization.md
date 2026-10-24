@@ -56,13 +56,11 @@ Bundle/Helm 从同一 Control 连接来源给 Agent 提供四项配置；服务�
 
 ## Sandbox 内的工具与模型请求
 
-Authoring sandbox 不持有上游模型凭据。Agent 在自己的进程中保留 `ANTHROPIC_AUTH_TOKEN`，给 sandbox 只下发当前 task/原 track lease 限定的不可反推 capability。它不能调用 Agent 的普通服务接口，也不能授权其他 task。
+Authoring sandbox 不持有上游模型凭据。唯一模型出口是 #252 的 `model_gateway`（9460）：`model_gateway.public_base_url` 使用可跨 namespace 解析的完整 Service DNS，例如 `http://agent-service.labweaver-system.svc:9460/`。sandbox 的网络只放行对象传输与 9460 网关，不直连 provider；普通 Agent 服务接口仍须服务 JWT。
 
-- `sandbox.model_proxy_base_uri` 指向可达的 Agent HTTPS origin，例如 `https://agent-service.labweaver-system.svc:9445/`；sandbox 与 API 不在同一 namespace，不能使用短 DNS 名。
-- `sandbox.model_proxy_ca_file` 固定该 HTTPS 服务的 CA；Agent 把 CA 放进临时 attempt Secret，sandbox 使用独立 CA 文件。
-- sandbox 的网络只放行对象传输与 Agent 模型代理，不直接放行模型 endpoint。Helm 仅允许 `labweaver-authoring` 内 Agent 管理的 Pod 到 Agent 的 9445/TCP；普通内部 API 仍须服务 JWT。
+每次 CLI invocation 获得签名 capability，绑定 project、run/task、attempt、原执行 lease 摘要和 authoring track；`ANTHROPIC_API_KEY` 是该 capability，不是 provider key。网关按「原会话与当前对象授权 → 全 JSON 键/值 DLP → Resource admission → 上游 → settle」处理模型请求。已有 hold 在上游发送前被拒绝时按已确认零用量释放；已经发送或结果未知的调用不会被改写成零费用。SDK retry 的 invocation/call identity 和持久执行 fence 沿用原账务实现，不能重复发送或重复扣款。
 
-Claude 的 `PreToolUse`/`PostToolUse` hook 在每个工具动作前后调用 task 专属检查。每次 Anthropic-compatible `messages`/`count_tokens` HTTP 请求也由 Agent 代理重新核对原 session、当前成员/对象许可、原策略/文件版本、当前 track lease、取消与固定任务截止。代理对实际消息和工具结果复用秘密分类器，拒绝凭据与 capability 泄漏；扫描不授予对象许可。服务端不把 sandbox 提交的 actor、project、policy 或 provider URL 当权威。模型调用已开始后不能撤回已发送内容，撤权/取消会阻止后续请求和 repair。
+Claude 的 `PreToolUse`/`PostToolUse` hook 调用同一网关的 `/authorize` 检查。每个新模型请求重新检查原 session、当前成员/对象权限、策略与内容版本、原 execution lease、取消及固定任务截止。服务端不信任 sandbox 自报 actor/project/provider URL；已开始的发送不能撤回，撤权与取消阻止后续动作与 repair。
 
 秘密分类在 JSON 解码后覆盖所有字符串值和对象键，包括明文键、Unicode 转义键和任意嵌套对象键。对象键中的私钥、AWS key、JWT、provider credential 或 task capability 与字符串值使用同一拒绝规则，不会因位于工具输入的键而绕过检查。
 

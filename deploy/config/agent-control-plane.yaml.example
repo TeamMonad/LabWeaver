@@ -37,7 +37,7 @@ worker_environment_files:
   ANTHROPIC_MODEL: "/etc/labweaver/config/anthropic-model"
 model_gateway:
   bind_addr: "0.0.0.0:9460"
-  public_base_url: "http://agent-service:9460/"
+  public_base_url: "http://agent-service.labweaver-system.svc:9460/"
   upstream_url_file: "/etc/labweaver/secrets/model-gateway-upstream-url"
   upstream_key_file: "/etc/labweaver/secrets/model-gateway-upstream-key"
   signing_key_file: "/etc/labweaver/secrets/model-gateway-signing-key"
