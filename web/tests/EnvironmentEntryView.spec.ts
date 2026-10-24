@@ -2140,6 +2140,31 @@ describe('EnvironmentEntryView', () => {
       expect(link.attributes('href')).toContain('releaseId=release-work-1')
     })
 
+    it('explains a funded-lease upgrade refusal and offers a new Work on the target version', async () => {
+      mockWork()
+      vi.mocked(upgradeEnvironmentTemplate).mockResolvedValue({
+        data: undefined,
+        error: { status: 409, diagnosticCode: 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL', detail: 'requires approval', requestId: 'req-funded', retryable: false },
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, false, '/researcher/environments')
+      const panel = await vi.waitFor(() => wrapper.get('[data-testid="template-upgrade"]'))
+      await vi.waitFor(() => expect(panel.find('[data-testid="upgrade-to-2"]').exists()).toBe(true))
+      await panel.get('[data-testid="upgrade-to-2"]').trigger('click')
+      upgradeDialog(wrapper).vm.$emit('confirm')
+      await flushPromises()
+
+      const banner = panel.get('.diagnostic-banner')
+      expect(banner.text()).toContain('本版本暂不支持在原资金租约上升级模板。可以用新版本新建 Work，再自行迁移 /workspace 数据。')
+      expect(banner.text()).toContain('LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL')
+      expect(banner.text()).toContain('req-funded')
+      const link = panel.get('[data-testid="upgrade-new-work-link"]')
+      expect(link.text()).toBe('用 Python 分析 v2 新建 Work')
+      expect(link.attributes('href')).toContain('/researcher/resources')
+      expect(link.attributes('href')).toContain('releaseId=release-work-2')
+      expect(link.attributes('href')).toContain('releaseVersion=2')
+      expect(panel.find('[data-testid="lease-new-request-link"]').exists()).toBe(false)
+    })
+
     it('shows a running upgrade from the instance operation and never calls the target version complete before success', async () => {
       mockWork({
         releaseId: 'release-work-2',

@@ -65,6 +65,8 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '平台暂时无法核验这个 Work 的资源使用授权，本次操作没有执行。'
     case 'LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM':
       return '虚拟机 Work 不支持在原 Work 内升级模板：需要导出/导入流程，当前不可用。'
+    case 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL':
+      return '本版本暂不支持在原资金租约上升级模板。可以用新版本新建 Work，再自行迁移 /workspace 数据。'
     default:
       return message
   }

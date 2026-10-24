@@ -85,6 +85,14 @@
       >
         提交新的资源申请
       </RouterLink>
+      <RouterLink
+        v-if="upgradeDiagnostic.code === 'LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL' && lastTargetRelease"
+        class="outlined-button small"
+        data-testid="upgrade-new-work-link"
+        :to="{ path: '/researcher/resources', query: { projectId: data.projectId, releaseId: lastTargetRelease.id, releaseVersion: String(lastTargetRelease.version) } }"
+      >
+        用 {{ workTemplateTitle(lastTargetRelease) }} 新建 Work
+      </RouterLink>
     </div>
 
     <ConfirmDialog
@@ -132,6 +140,11 @@ const upgradeDiagnostic = ref<DiagnosticViewModel | null>(null)
 const lastTarget = ref<{ releaseId: string; version: number } | null>(null)
 
 const releaseRows = computed(() => releases.releases.kind === 'success' ? releases.releases.data : [])
+/** The release the last refused upgrade targeted; offered as the version for a new Work. */
+const lastTargetRelease = computed(() => {
+  const target = lastTarget.value
+  return target ? releaseRows.value.find((release) => release.id === target.releaseId && release.version === target.version) ?? null : null
+})
 const currentRelease = computed(() => releaseRows.value.find((release) => (
   release.id === props.data.releaseId && release.version === props.data.releaseVersion
 )) ?? null)
