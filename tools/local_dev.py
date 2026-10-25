@@ -392,9 +392,9 @@ def local_gpu_capacity_configuration(example: str, provider_binding: str) -> str
     hands Resource its own projected service account token and CA through the
     in-cluster API endpoint, so the seeded provider binding becomes observable
     instead of failing closed forever. Second, Resource resolves a GPU allocation
-    for the exact provider binding that will run the workload, and the local
-    device plugin advertises the stock `nvidia.com/gpu` extended resource, so the
-    single reviewed class on that pool is placed on this run's environment
+    for the exact provider binding that will run the workload, and an NVIDIA
+    device plugin (when one is installed) advertises the stock `nvidia.com/gpu`
+    extended resource, so the single reviewed class on that pool is placed on this run's environment
     provider binding. Its class, mode, capacity and `allocationBinding` stay as
     reviewed, and every other reviewed class is left untouched. Resource admits
     one active class per allocation pool, so no second class is added for it.
