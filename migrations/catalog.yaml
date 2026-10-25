@@ -69,7 +69,7 @@ domains:
         sha256: 984124941db34315b203bce850f32e2e77a5614da905c14749180add5d3e110e
       - id: 21
         file: control/0021_notifications.sql
-        sha256: 5803770c429fec82c58df674cb4c2739fb6478d700a70ebc39065e4e2ca7888d
+        sha256: cd3f1faa0f5a230a229279a69b9896ab7f3967e95f601c5df176c130a36d9e6c
   - name: access
     migrations:
       - id: 1

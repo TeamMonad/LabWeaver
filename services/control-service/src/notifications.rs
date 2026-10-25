@@ -173,6 +173,7 @@ pub async fn project(
         id: EventId::new(),
         event_id: event.id,
         project_id: event.project_id,
+        course_id: event.course_id,
         kind: if lease_event {
             NotificationKind::LeaseChanged
         } else {
@@ -293,12 +294,12 @@ async fn insert(
     due: UtcTimestamp,
     email: bool,
 ) -> Result<(), NotificationError> {
-    sqlx::query("INSERT INTO control.notifications(notification_id,event_id,recipient_id,project_id,aggregate_id,reminder_seconds,due_at,contract,email_state,email_next_at,deadline_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$7,$10) ON CONFLICT DO NOTHING")
-        .bind(notice.id.as_uuid()).bind(notice.event_id.as_uuid()).bind(recipient.as_uuid()).bind(notice.project_id.as_uuid()).bind(aggregate).bind(window).bind(due.get()).bind(serde_json::to_value(notice)?).bind(if email { "pending" } else { "disabled" }).bind(notice.deadline.map(UtcTimestamp::get)).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO control.notifications(notification_id,event_id,recipient_id,project_id,aggregate_id,reminder_seconds,due_at,contract,email_state,email_next_at,deadline_at,course_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$7,$10,$11) ON CONFLICT DO NOTHING")
+        .bind(notice.id.as_uuid()).bind(notice.event_id.as_uuid()).bind(recipient.as_uuid()).bind(notice.project_id.as_uuid()).bind(aggregate).bind(window).bind(due.get()).bind(serde_json::to_value(notice)?).bind(if email { "pending" } else { "disabled" }).bind(notice.deadline.map(UtcTimestamp::get)).bind(notice.course_id.map(contracts::CourseId::as_uuid)).execute(&mut **tx).await?;
     Ok(())
 }
 // The recipient is not itself an object grant. Membership is rechecked on every list/count/read.
-const VISIBLE: &str = "n.recipient_id=$1 AND NOT n.cancelled AND n.due_at<=clock_timestamp() AND (n.reminder_seconds<=0 OR n.deadline_at>clock_timestamp()) AND EXISTS(SELECT 1 FROM control.project_memberships m WHERE m.project_id=n.project_id AND m.actor_id=$1 AND m.state='active' AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp()))";
+const VISIBLE: &str = "n.recipient_id=$1 AND NOT n.cancelled AND n.due_at<=clock_timestamp() AND (n.reminder_seconds<=0 OR n.deadline_at>clock_timestamp()) AND EXISTS(SELECT 1 FROM control.project_memberships m WHERE m.project_id=n.project_id AND m.actor_id=$1 AND m.state='active' AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp())) AND (n.course_id IS NULL OR EXISTS(SELECT 1 FROM control.course_memberships cm WHERE cm.course_id=n.course_id AND cm.actor_id=n.recipient_id AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>clock_timestamp())))";
 /// Lists only this recipient's currently authorized, due notifications.
 pub async fn list(
     pool: &PgPool,

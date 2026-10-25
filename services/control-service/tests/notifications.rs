@@ -406,18 +406,35 @@ async fn jetstream_replay_projects_once_after_restart() -> Result {
         UtcTimestamp::from_utc(from.get() + time::Duration::hours(1))?,
         subjects::RESOURCE_LEASE_ACTIVATED,
     )?;
+    let config = std::process::Command::new("python3")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/notification_nats.py"),
+        )
+        .output()?;
+    assert!(config.status.success(), "NATS permission fixture failed");
     let nats = GenericImage::new("nats", "2.11.8-alpine")
         .with_exposed_port(4222.tcp())
         .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
-        .with_cmd(["-js"])
+        .with_copy_to("/etc/nats/notifications.json", config.stdout)
+        .with_cmd(["-c", "/etc/nats/notifications.json"])
         .start()
         .await?;
-    let client = async_nats::connect(format!(
-        "nats://127.0.0.1:{}",
-        nats.get_host_port_ipv4(4222).await?
-    ))
-    .await?;
-    let context = async_nats::jetstream::new(client.clone());
+    let endpoint = format!("nats://127.0.0.1:{}", nats.get_host_port_ipv4(4222).await?);
+    let operator = async_nats::ConnectOptions::new()
+        .user_and_password("operator".into(), "operator-fixture".into())
+        .connect(&endpoint)
+        .await?;
+    let resource = async_nats::ConnectOptions::new()
+        .user_and_password("resource-service".into(), "identity-fixture".into())
+        .connect(&endpoint)
+        .await?;
+    let client = async_nats::ConnectOptions::new()
+        .user_and_password("control-service".into(), "identity-fixture".into())
+        .connect(&endpoint)
+        .await?;
+    let context = async_nats::jetstream::new(operator);
+    let publisher = async_nats::jetstream::new(resource);
     context
         .create_stream(async_nats::jetstream::stream::Config {
             name: "LABWEAVER_RESOURCE_EVENTS".into(),
@@ -434,11 +451,47 @@ async fn jetstream_replay_projects_once_after_restart() -> Result {
         })
         .await?;
     for _ in 0..2 {
-        context
+        publisher
             .publish(event.subject.clone(), serde_json::to_vec(&event)?.into())
             .await?
             .await?;
     }
+    let mut created = lease_event(
+        &request,
+        from,
+        UtcTimestamp::from_utc(from.get() + time::Duration::hours(1))?,
+        subjects::RESOURCE_LEASE_CREATED,
+    )?;
+    created.aggregate_revision = Revision::new(1)?;
+    created.aggregate_sequence = Sequence(1);
+    created.data.lease.revision = created.aggregate_revision;
+    created.data.lease.state = ResourceLeaseState::Allocating;
+    created.data.lease.active_from = None;
+    created.data.lease.expires_at = None;
+    publisher
+        .publish(
+            created.subject.clone(),
+            serde_json::to_vec(&created)?.into(),
+        )
+        .await?
+        .await?;
+    let mut fenced = created;
+    fenced.id = EventId::new();
+    fenced.subject = subjects::RESOURCE_LEASE_FENCED.into();
+    fenced.event_type.clone_from(&fenced.subject);
+    fenced.dataschema = EVENT_CONTRACTS
+        .iter()
+        .find(|c| c.subject == fenced.subject)
+        .ok_or("fenced contract")?
+        .data_schema();
+    fenced.aggregate_revision = Revision::new(2)?;
+    fenced.aggregate_sequence = Sequence(2);
+    fenced.data.lease.revision = fenced.aggregate_revision;
+    fenced.data.lease.state = ResourceLeaseState::Revoked;
+    publisher
+        .publish(fenced.subject.clone(), serde_json::to_vec(&fenced)?.into())
+        .await?
+        .await?;
     let consumer = NotificationConsumer::bind(client.clone()).await?;
     let (stop, receiver) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(consumer.run(pool.clone(), vec![86400, 3600], false, receiver));
@@ -449,7 +502,7 @@ async fn jetstream_replay_projects_once_after_restart() -> Result {
                 .get_consumer("control-notifications-v1")
                 .await
                 .map_err(std::io::Error::other)?;
-            if consumer.info().await?.ack_floor.stream_sequence >= 2 {
+            if consumer.info().await?.ack_floor.stream_sequence >= 4 {
                 break Ok::<(), Box<dyn Error>>(());
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -461,13 +514,13 @@ async fn jetstream_replay_projects_once_after_restart() -> Result {
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM control.notifications")
         .fetch_one(&pool)
         .await?;
-    assert_eq!(count, 3);
+    assert_eq!(count, 5);
     let _restarted = NotificationConsumer::bind(client).await?;
     assert_eq!(
         notifications::unread(&pool, request.requester_id)
             .await?
             .unread_count,
-        3
+        5
     );
     Ok(())
 }
@@ -487,6 +540,9 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
     .await?;
     let mut request = request(store.current_time().await?)?;
     request.requester_id = actor.actor_id.to_string().parse()?;
+    let course_id = contracts::CourseId::new();
+    request.course_id = Some(course_id);
+    sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,state,revision) VALUES($1,$2,'student','active',1)").bind(course_id.as_uuid()).bind(actor.actor_id).execute(&pool).await?;
     member(&pool, &request).await?;
     store
         .create_task(
@@ -582,6 +638,53 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
         from: "notices@example.invalid".into(),
         portal_base_url: "https://portal.example.invalid".into(),
     })?;
+    let notice_id = notifications::list(
+        &pool,
+        request.requester_id,
+        &NotificationListQuery::default(),
+    )
+    .await?
+    .items[0]
+        .id;
+    for revoked in [true, false] {
+        sqlx::query("UPDATE control.course_memberships SET state=CASE WHEN $2 THEN 'revoked' ELSE 'active' END,expires_at=CASE WHEN $2 THEN NULL ELSE clock_timestamp()-interval '1 second' END WHERE course_id=$1").bind(course_id.as_uuid()).bind(revoked).execute(&pool).await?;
+        assert!(
+            notifications::list(
+                &pool,
+                request.requester_id,
+                &NotificationListQuery::default()
+            )
+            .await?
+            .items
+            .is_empty()
+        );
+        assert_eq!(
+            notifications::unread(&pool, request.requester_id)
+                .await?
+                .unread_count,
+            0
+        );
+        assert!(matches!(
+            notifications::mark_read(&pool, request.requester_id, notice_id).await,
+            Err(NotificationError::NotFound)
+        ));
+        assert!(!worker.deliver_one(&pool).await?);
+        let attempts: i16 = sqlx::query_scalar(
+            "SELECT email_attempts FROM control.notifications WHERE notification_id=$1",
+        )
+        .bind(notice_id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(attempts, 0);
+        let project_active:bool=sqlx::query_scalar("SELECT state='active' FROM control.project_memberships WHERE project_id=$1 AND actor_id=$2").bind(request.project_id.as_uuid()).bind(actor.actor_id).fetch_one(&pool).await?;
+        assert!(project_active);
+    }
+    sqlx::query(
+        "UPDATE control.course_memberships SET state='active',expires_at=NULL WHERE course_id=$1",
+    )
+    .bind(course_id.as_uuid())
+    .execute(&pool)
+    .await?;
     for attempt in 1..=5 {
         notifications::project(&pool, &bytes, &[86400], true).await?;
         assert!(worker.deliver_one(&pool).await?);

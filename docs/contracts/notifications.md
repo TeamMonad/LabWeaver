@@ -8,13 +8,13 @@ Rust 真源为 `contracts::notifications` 与 `http::OPERATIONS`。Control 保�
 | --- | --- | --- |
 | `GET /api/v1/notifications?cursor=…&limit=50` | `listNotifications` | `NotificationPage`，复用 `CursorPage<Notification>` |
 | `GET /api/v1/notifications/unread-count` | `getNotificationUnreadCount` | `NotificationUnreadCount` |
-| `PUT /api/v1/notifications/{notificationId}/read` | `markNotificationRead` | `Notification` |
+| `POST /api/v1/notifications/{notificationId}/read` | `markNotificationRead` | `Notification` |
 
 Access 使用真实浏览器会话鉴别调用者，写请求沿用 Origin/CSRF 检查，Control 再向 Access 验证会话。客户端不能提供 recipient。所有平台角色均可读取自己的通知；同项目的其他成员、平台管理员都不能借这三个接口读取别人的通知。
 
 分页按数据库单调 ordinal 倒序，游标为上页最后一条的 ordinal。`limit` 默认 50、范围 1–100；只在确有后页时返回 `nextCursor`。游标不携带授权，改写游标也不会扩大 recipient 或当前成员范围。新通知不挤入已经翻过的区间。空列表与未读数零均为正常结果。
 
-每次列表、计数和已读写入都检查当前 active 项目成员与到期时间。撤权后列表不返回这些通知，计数不含它们，已读请求返回 404。标记已读是集合赋值幂等操作，不要求新幂等键，保留首次 `readAt`。通知没有撤权能力，也不构成对象授权；`objectUrl` 仅为门户路径与对象 ID，打开后仍经现有对象授权。
+通知持久化保留 Owner 的 `courseId`。每次列表、计数、已读写入及 SMTP 领取均检查当前 active 项目成员与到期时间；课程关联通知同时要求当前 active 且未过期的课程成员。只撤销或过期课程成员，即使项目成员仍 active，也不再暴露或发送这些通知；独立项目不受课程成员变化影响。已读写入拒绝时返回 404，重复成功保留首次 `readAt`。`objectUrl` 不含授权，打开对象仍经现有授权。已读使用 POST，与 Access 既有命令转发方法集一致；Origin/CSRF 不变。
 
 申请结果和申请时短租期提示指向 `/researcher/resources?projectId=…&requestId=…`，不会把被拒绝的申请错误地指向尚不存在的环境。Environment 租约通知指向现有 `/researcher/environments?projectId=…&environmentId=…`；Task 租约仍指向原资源申请。前端通知入口应保留这些 query 参数，并在资源页定位指定 `requestId`，不把通知当作授权凭据。
 

@@ -227,7 +227,7 @@ tar -czf vm-template.tar.gz disk/disk.qcow2
 
 ## 通知与邮件
 
-通知后端保存资源申请批准/拒绝、租约变更与到期提醒，离线后仍可查询。当前用户通过 `GET /api/v1/notifications` 读取自己的通知，通过 `GET /api/v1/notifications/unread-count` 读取未读数，通过 `PUT /api/v1/notifications/{notificationId}/read` 标记已读；重复标记不改变首次已读时间。站内入口由前端消费这些接口，不需要配置 SMTP。
+通知后端保存资源申请批准/拒绝、租约变更与到期提醒，离线后仍可查询。当前用户通过 `GET /api/v1/notifications` 读取自己的通知，通过 `GET /api/v1/notifications/unread-count` 读取未读数，通过 `POST /api/v1/notifications/{notificationId}/read` 标记已读；重复标记不改变首次已读时间。项目成员和课程关联通知的课程成员必须都有效，撤销或过期任一范围后不可读，也不会领取发送邮件。站内入口由前端消费这些接口，不需要配置 SMTP。
 
 到期提醒读取进程实际加载的平台配置，默认提前 24 小时和 1 小时。申请时长短于提醒窗口时立即记录短租期提示；实际租约开始后，按 Owner 给出的 UTC 起止时间记录提醒。与提醒窗口恰好相等的租约在开始时提醒。页面可转换本地时间，但不能把服务器 UTC 时间解释成本地墙钟。保存新的 desired 不会立即改变已运行进程或既有提醒。
 

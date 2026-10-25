@@ -30,6 +30,7 @@ pub struct Notification {
     pub id: EventId,
     pub event_id: EventId,
     pub project_id: ProjectId,
+    pub course_id: Option<crate::CourseId>,
     pub kind: NotificationKind,
     pub object_url: String,
     pub summary: String,

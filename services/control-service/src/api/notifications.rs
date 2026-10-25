@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::{get, post},
 };
 use contracts::{EventId, notifications::NotificationListQuery};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ pub(super) fn routes() -> Router<Arc<ApiState>> {
         .route("/api/v1/notifications/unread-count", get(unread))
         .route(
             "/api/v1/notifications/{notification_id}/read",
-            put(mark_read),
+            post(mark_read),
         )
 }
 async fn list(

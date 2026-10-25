@@ -2878,7 +2878,7 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
-        Put,
+        Post,
         "/api/v1/notifications/{notificationId}/read",
         "markNotificationRead",
         "notification:write",

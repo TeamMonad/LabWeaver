@@ -585,3 +585,6 @@ async fn real_oidc_verified_email_is_private_and_cleared_when_provider_withdraws
     sqlx::query("RESET ROLE").execute(&mut *connection).await?;
     Ok(())
 }
+
+#[path = "notification_browser_tests.rs"]
+mod notification_browser_tests;

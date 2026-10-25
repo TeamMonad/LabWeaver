@@ -12049,11 +12049,17 @@ export type NotificationPageSchema = {
 };
 
 /**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type NotificationPageSchemaCourseId = string;
+
+/**
  * Strongly typed UUIDv7 identifier for `EventId`.
  */
 export type NotificationPageSchemaEventId = string;
 
 export type Notification = {
+    courseId?: NotificationPageSchemaCourseId | null;
     deadline?: NotificationPageSchemaUtcTimestamp | null;
     emailAttempts: number;
     emailDetail?: string | null;
@@ -12094,6 +12100,7 @@ export type NotificationUnreadCountSchema = {
  * Notification
  */
 export type NotificationSchema = {
+    courseId?: NotificationSchemaCourseId | null;
     deadline?: NotificationSchemaUtcTimestamp | null;
     emailAttempts: number;
     emailDetail?: string | null;
@@ -12108,6 +12115,11 @@ export type NotificationSchema = {
     readAt?: NotificationSchemaUtcTimestamp | null;
     summary: string;
 };
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type NotificationSchemaCourseId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `EventId`.

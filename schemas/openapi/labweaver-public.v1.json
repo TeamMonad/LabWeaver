@@ -7325,7 +7325,7 @@
       }
     },
     "/api/v1/notifications/{notificationId}/read": {
-      "put": {
+      "post": {
         "description": "Permission: notification:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "markNotificationRead",
         "parameters": [

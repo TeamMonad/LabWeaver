@@ -44,6 +44,23 @@ class ResourceBundleAndTlsTests(unittest.TestCase):
             expected[2],
         )
 
+    def test_created_and_fenced_permissions_are_required_without_expanding_other_subjects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            original = list(bundle.RESOURCE_PUBLISH_SUBJECTS)
+            for missing in (None, "labweaver.resource.lease.created.v1", "labweaver.resource.lease.fenced.v1", "extra"):
+                publishes = [subject for subject in original if subject != missing]
+                if missing == "extra":
+                    publishes.append("labweaver.resource.unreviewed.v1")
+                claims = {"iss": "fixture-account", "nats": {"pub": {"allow": publishes}, "sub": {"allow": list(bundle.RESOURCE_SUBSCRIBE_SUBJECTS)}, "resp": {"max": 1}}}
+                payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
+                (directory / "nats.creds").write_bytes(b"-----BEGIN NATS USER JWT-----\na." + payload + b".signature\n------END NATS USER JWT------\n")
+                if missing is None:
+                    bundle.validate_creds(directory, "fixture-account")
+                else:
+                    with self.subTest(missing=missing), self.assertRaisesRegex(bundle.BundleError, "LW_RESOURCE_NATS_PERMISSIONS_INVALID"):
+                        bundle.validate_creds(directory, "fixture-account")
+
     def test_resource_manifest_rejects_extra_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _manifest_root(Path(temporary))

@@ -15,6 +15,7 @@ CREATE TABLE control.notifications (
     event_id uuid NOT NULL,
     recipient_id uuid NOT NULL,
     project_id uuid NOT NULL,
+    course_id uuid,
     aggregate_id uuid NOT NULL,
     reminder_seconds bigint NOT NULL DEFAULT 0,
     due_at timestamptz NOT NULL,

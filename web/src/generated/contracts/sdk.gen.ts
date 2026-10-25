@@ -1083,7 +1083,7 @@ export const getNotificationUnreadCount = <ThrowOnError extends boolean = false>
  *
  * Permission: notification:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
-export const markNotificationRead = <ThrowOnError extends boolean = false>(options: Options<MarkNotificationReadData, ThrowOnError>): RequestResult<MarkNotificationReadResponses, MarkNotificationReadErrors, ThrowOnError> => (options.client ?? client).put<MarkNotificationReadResponses, MarkNotificationReadErrors, ThrowOnError>({
+export const markNotificationRead = <ThrowOnError extends boolean = false>(options: Options<MarkNotificationReadData, ThrowOnError>): RequestResult<MarkNotificationReadResponses, MarkNotificationReadErrors, ThrowOnError> => (options.client ?? client).post<MarkNotificationReadResponses, MarkNotificationReadErrors, ThrowOnError>({
     responseType: 'json',
     security: [{
             key: 'oidc',

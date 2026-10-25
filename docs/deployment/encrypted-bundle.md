@@ -42,6 +42,8 @@ notifications:
 
 平台应用角色同时建立 `LABWEAVER_RESOURCE_EVENTS` / `control-notifications-v1` durable consumer（`filter_subjects: [labweaver.resource.>]`、显式 ACK、最多 10 次交付）。Control 的既有 NATS 身份需允许读取该 stream/consumer、pull、ACK 和 inbox 回复；沿用现有 NATS 用户签发与凭据校验，不新增身份签发器。已有 stream 需要纳入 `lease.created`、`lease.fenced` 两个 Owner 已有 subject，再启动新 Control。
 
+Resource 发布权限的唯一列表为 `tools/prepare_platform_foundation.py::NATS_USERS["resource-service"]`；基础设施签发、Resource 专用签发和 Bundle 精确校验均复用该列表。升级前重新签发包含 `lease.created.v1` 与 `lease.fenced.v1` 的受限 Resource 凭据。缺少任一权限或增加未审核 subject 都会在 Bundle 阶段拒绝；不得改成 `labweaver.resource.>` 的发布通配符或移除精确校验来绕过。
+
 用户和运维从通知 API 查看 `emailState`、`emailAttempts`、`emailDiagnostic` 与 `emailDetail`。邮件采用 at-most-once：仅明确 4xx 临时拒绝最多重试 5 次；5xx 永久拒绝立即 `failed`；超时、连接断开、过期 sending claim 一律 `delivery_unknown`，不自动重发。未知文案为“邮件可能已送达，系统无法确认”。核对 relay 日志，不要重置队列或重复资源/账务操作来重发。`no_verified_email` 不重试、不算故障。完整状态与 PII 边界见[通知契约](../contracts/notifications.md)。不记录完整邮箱或 SMTP 密码。
 
 ## 前提

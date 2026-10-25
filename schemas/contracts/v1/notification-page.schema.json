@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "EventId": {
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
       "type": "string"
@@ -7,6 +11,16 @@
     "Notification": {
       "additionalProperties": false,
       "properties": {
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "deadline": {
           "anyOf": [
             {

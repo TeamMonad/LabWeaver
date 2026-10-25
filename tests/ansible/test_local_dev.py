@@ -2406,6 +2406,8 @@ class LocalDevBundleTests(unittest.TestCase):
                         "labweaver.resource.request.rejected.v1",
                         "labweaver.resource.request.cancelled.v1",
                         "labweaver.resource.request.state_changed.v1",
+                        "labweaver.resource.lease.created.v1",
+                        "labweaver.resource.lease.fenced.v1",
                         "labweaver.resource.lease.activated.v1",
                         "labweaver.resource.lease.renewed.v1",
                         "labweaver.resource.lease.revoked.v1",
