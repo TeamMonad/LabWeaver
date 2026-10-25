@@ -819,13 +819,24 @@ async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> Test
             )?))?)
     };
     let mut uid = PlatformConfigurationDesired::default();
-    uid.runtime_policy.default_container_uid = 1000;
+    uid.runtime_policy.default_container_uid = u32::MAX;
     let mut capabilities = PlatformConfigurationDesired::default();
     capabilities
         .runtime_policy
         .allowed_capabilities
-        .insert(LinuxCapability::NetAdmin);
+        .insert(LinuxCapability::SysAdmin);
     let mut preauthorization = PlatformConfigurationDesired::default();
+    preauthorization.runtime_policy.privileged_allowed = true;
+    preauthorization
+        .runtime_policy
+        .privileged_execution_location = Some(PrivilegedExecutionLocation::DedicatedNodePool {
+        node_selector: std::collections::BTreeMap::from([(
+            "pool".to_owned(),
+            "research".to_owned(),
+        )]),
+        taint_key: "labweaver.io/research".to_owned(),
+        taint_value: "true".to_owned(),
+    });
     preauthorization
         .runtime_policy
         .preauthorizations
@@ -834,7 +845,7 @@ async fn http_policy_unsupported_fields_are_rejected_with_field_detail() -> Test
                 project_id: ProjectId::new(),
             },
             capabilities: std::collections::BTreeSet::new(),
-            privileged: false,
+            privileged: true,
         });
     let mut guest = PlatformConfigurationDesired::default();
     guest.runtime_policy.privileged_allowed = true;

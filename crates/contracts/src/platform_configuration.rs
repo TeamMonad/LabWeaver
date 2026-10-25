@@ -296,6 +296,13 @@ pub const PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS: &[PlatformConfigurationPoli
         is_unsupported: unsupported_preauthorizations,
         #[cfg(test)]
         rejected_sample: |configuration| {
+            configuration.runtime_policy.privileged_allowed = true;
+            configuration.runtime_policy.privileged_execution_location =
+                Some(PrivilegedExecutionLocation::DedicatedNodePool {
+                    node_selector: BTreeMap::from([("pool".to_owned(), "research".to_owned())]),
+                    taint_key: "labweaver.io/research".to_owned(),
+                    taint_value: "true".to_owned(),
+                });
             configuration
                 .runtime_policy
                 .preauthorizations

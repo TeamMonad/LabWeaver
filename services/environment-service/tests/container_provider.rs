@@ -813,7 +813,10 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     instance
 }
 
-fn configure_work(instance: &mut contracts::environment::EnvironmentInstance) {
+fn configure_work(
+    instance: &mut contracts::environment::EnvironmentInstance,
+    projection: &ReleasePublished,
+) {
     instance.class = contracts::authoring::EnvironmentClass::Work;
     instance.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
     let lease_id = contracts::LeaseId::new();
@@ -834,6 +837,7 @@ fn configure_work(instance: &mut contracts::environment::EnvironmentInstance) {
             active_from: timestamp("2026-07-14T00:00:00.000Z"),
             expires_at: timestamp("2027-07-15T00:00:00.000Z"),
         });
+    instance.runtime_authorization = Some(support::runtime_receipt(instance, projection));
 }
 
 #[derive(Clone, Copy)]
@@ -881,7 +885,7 @@ async fn existing_work_freeze_and_http_target_follow_pinned_placement_and_keep_i
     let mut projection = projection();
     projection.environment_spec.class = contracts::authoring::EnvironmentClass::Work;
     let mut instance = instance_for(&projection);
-    configure_work(&mut instance);
+    configure_work(&mut instance, &projection);
     let event_contract = EVENT_CONTRACTS
         .iter()
         .copied()
@@ -1057,7 +1061,7 @@ fn existing_namespace_plan_scopes_work_objects_and_preserves_operator_policies()
     let mut projection = projection();
     projection.environment_spec.class = contracts::authoring::EnvironmentClass::Work;
     let mut instance = instance_for(&projection);
-    configure_work(&mut instance);
+    configure_work(&mut instance, &projection);
     let profile = environment_service::ContainerNamespaceProfile::Existing {
         namespace: "synthetic-work-tests".to_owned(),
         namespace_uid: uuid::Uuid::from_u128(207),
@@ -1144,7 +1148,7 @@ fn existing_namespace_profile_rejects_wrong_project_experiment_and_network_modes
             )
             .is_err()
     );
-    configure_work(&mut instance);
+    configure_work(&mut instance, &projection);
     projection.environment_spec.class = contracts::authoring::EnvironmentClass::Work;
     projection.environment_spec.network = NetworkPolicySpec::AllowAll;
     assert!(
