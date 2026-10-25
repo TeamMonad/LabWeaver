@@ -94,7 +94,7 @@ cutover 不改历史批准：缺少投影的旧批准读取为旧格式，但在
 
 项目预授权只匹配相同项目。课程预授权只适用于该课程已获完整教师批准的 Experiment。付款项目仍检查请求者的当前项目动作，课程仍检查当前成员。无关课程、任务或他人的 Work 不能借用这份批准。平台允许清单始终是上限，教师批准不能扩大它。
 
-当前 `EnvironmentSpec` 只声明 NonRootRequired 和禁止提权。运行授权因此只包含空 capabilities 和非特权基线；不会把预授权清单的最大权限复制给实例。#207 扩展同一安全声明并接入执行消费者后，需更新本模块的穷尽投影。额外 capabilities、privileged 执行和超范围审批尚不能据此开放。
+`EnvironmentSpec.security` 分别声明 `runAsUser`、`privileged`、`capabilities`、`allowPrivilegeEscalation`、`readOnlyRootFilesystem` 和 `seccomp`。运行权限从本版本实际声明的 capabilities 与非特权模式穷尽投影，不能把平台允许清单或 scope 预授权的最大能力复制给实例；完整规格的 canonical 身份同时约束 UID、rootfs、提权和 seccomp。`runAsUser=null` 只消费同一 verified applied receipt 的 `defaultContainerUid`，不得拼接另一版本默认值。当前普通容器支持 root 和获准的有限 capabilities，但仍拒绝 privileged、unconfined seccomp 与更广内核权限；VM 不因此取得容器权限。声明增加、版本变化或平台换版都须重新经过原授权判定，不自动扩大旧批准。
 
 `GET /api/v1/resource-requests/{requestId}/runtime-authorization` 通过现有 Access 服务鉴权及用户范围返回当前有效绑定，使用 `Cache-Control: no-store`。它重新读取当前请求、未过期的原 ResourceApproval、当前成员、Control 配置和已验证策略。请求换代、配置换版、发布撤回或范围失效会拒绝读取。已验证 applied 版本变更使旧绑定返回 `LW_RUNTIME_POLICY_CHANGED`，需要按新版本重新判定。desired 草稿不使旧绑定失效。响应不能替代 #207 在实际创建和实例换代时的检查。
 

@@ -429,9 +429,8 @@ class DeploymentBundleTests(unittest.TestCase):
     def test_policy_without_an_execution_consumer_fails_before_seal(self) -> None:
         configurations = []
         for group, field, value in (
-            ("runtimePolicy", "defaultContainerUid", 1000),
-            ("runtimePolicy", "allowedCapabilities", ["NET_ADMIN"]),
-            ("runtimePolicy", "preauthorizations", [{"scope": {"kind": "project", "projectId": "0197f0e0-0000-7000-8000-000000000013"}, "capabilities": [], "privileged": False}]),
+            ("runtimePolicy", "defaultContainerUid", 4294967295),
+            ("runtimePolicy", "allowedCapabilities", ["SYS_ADMIN"]),
             ("runtimePolicy", "privilegedExecutionLocation", {"kind": "virtual_machine_guest", "providerBinding": "kubevirt"}),
             ("builderPolicy", "capabilities", ["NET_ADMIN"]),
             ("builderPolicy", "entitlements", ["network.host"]),
@@ -450,6 +449,120 @@ class DeploymentBundleTests(unittest.TestCase):
             self.configuration[group][field] = original
             self.configuration["runtimePolicy"]["privilegedAllowed"] = original_privileged
             self.save_version()
+
+    def test_ordinary_runtime_uids_and_scoped_capabilities_use_the_rust_validator(self) -> None:
+        for uid in (0, 1000, 4294967294):
+            with self.subTest(uid=uid):
+                self.configuration["runtimePolicy"].update(
+                    defaultContainerUid=uid,
+                    allowedCapabilities=["NET_ADMIN", "NET_RAW"],
+                    preauthorizations=[{
+                        "scope": {"kind": "project", "projectId": "0197f0e0-0000-7000-8000-000000000013"},
+                        "capabilities": ["NET_ADMIN"],
+                        "privileged": False,
+                    }],
+                )
+                self.save_version()
+                bundle.load_bundle(self.root)
+        self.assertEqual(
+            self.configuration["builderPolicy"],
+            {"capabilities": [], "allowPrivilegeEscalation": False, "entitlements": []},
+        )
+
+    def test_runtime_policy_rejects_broad_capabilities_and_out_of_scope_grants(self) -> None:
+        baseline = copy.deepcopy(self.configuration["runtimePolicy"])
+        for capability in ("SYS_ADMIN", "SYS_MODULE", "BPF", "PERFMON"):
+            with self.subTest(capability=capability):
+                self.configuration["runtimePolicy"] = copy.deepcopy(baseline)
+                self.configuration["runtimePolicy"]["allowedCapabilities"] = [capability]
+                self.save_version()
+                with self.assertRaisesRegex(
+                    bundle.BundleError,
+                    "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:runtimePolicy.allowedCapabilities",
+                ):
+                    bundle.load_bundle(self.root)
+        for grant in (
+            {"capabilities": ["NET_RAW"], "privileged": False},
+            {"capabilities": [], "privileged": True},
+        ):
+            with self.subTest(grant=grant):
+                self.configuration["runtimePolicy"] = copy.deepcopy(baseline)
+                self.configuration["runtimePolicy"].update(
+                    allowedCapabilities=["NET_ADMIN"],
+                    preauthorizations=[{
+                        "scope": {"kind": "project", "projectId": "0197f0e0-0000-7000-8000-000000000013"},
+                        **grant,
+                    }],
+                )
+                self.save_version()
+                with self.assertRaisesRegex(bundle.BundleError, "LW_BUNDLE_CONFIGURATION_INVALID"):
+                    bundle.load_bundle(self.root)
+
+    def test_runtime_policy_is_preserved_without_platform_pod_or_rbac_escalation(self) -> None:
+        self.configuration["runtimePolicy"].update(
+            defaultContainerUid=1000,
+            allowedCapabilities=["NET_ADMIN", "NET_RAW"],
+            preauthorizations=[{
+                "scope": {"kind": "project", "projectId": "0197f0e0-0000-7000-8000-000000000013"},
+                "capabilities": ["NET_ADMIN"],
+                "privileged": False,
+            }],
+        )
+        self.save_version()
+        bundle.seal_bundle(self.root, self.archive, [self.key()], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+            values = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
+            self.assertEqual(values["platformConfigurationPolicy"]["runtimePolicy"], self.configuration["runtimePolicy"])
+            self.assertEqual(values["platformConfigurationPolicy"]["builderPolicy"], self.configuration["builderPolicy"])
+            helm = shutil.which("helm")
+            self.assertIsNotNone(helm, "The pinned Helm renderer is required for runtime isolation tests.")
+            rendered = subprocess.run(
+                [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent),
+                 "--namespace", "labweaver-system", "--values", str(loaded / "helm-values.yaml")],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            objects = [item for item in yaml.safe_load_all(rendered.stdout) if item]
+            deployments = {item["metadata"]["name"]: item for item in objects if item["kind"] == "Deployment"}
+            for name in ("build-executor", "environment-service", "container-executor", "kubevirt-executor"):
+                with self.subTest(workload=name):
+                    pod = deployments[name]["spec"]["template"]["spec"]
+                    security = pod["containers"][0]["securityContext"]
+                    self.assertTrue(pod["securityContext"]["runAsNonRoot"])
+                    self.assertNotEqual(pod["securityContext"]["runAsUser"], 1000)
+                    self.assertFalse(security["allowPrivilegeEscalation"])
+                    self.assertTrue(security["readOnlyRootFilesystem"])
+                    self.assertEqual(security["capabilities"], {"drop": ["ALL"]})
+                    self.assertFalse(security.get("privileged", False))
+                    for flag in ("hostNetwork", "hostPID", "hostIPC"):
+                        self.assertFalse(pod.get(flag, False))
+                    self.assertFalse(any("hostPath" in volume for volume in pod.get("volumes", [])))
+            service_accounts = {item["metadata"]["name"]: item for item in objects if item["kind"] == "ServiceAccount"}
+            self.assertFalse(service_accounts["build-executor"]["automountServiceAccountToken"])
+            roles = [item for item in objects if item["kind"] in {"Role", "ClusterRole"}]
+            for role in roles:
+                for rule in role.get("rules") or []:
+                    self.assertNotIn("rbac.authorization.k8s.io", rule["apiGroups"])
+                    self.assertNotIn("*", rule["apiGroups"])
+                    self.assertNotIn("*", rule["resources"])
+                    self.assertNotIn("*", rule["verbs"])
+                    self.assertTrue({"bind", "escalate", "impersonate"}.isdisjoint(rule["verbs"]))
+                    self.assertTrue({"serviceaccounts/token", "nodes/proxy", "pods/binding"}.isdisjoint(rule["resources"]))
+            owner_role = next(role for role in roles if role["metadata"]["name"] == "labweaver-system-environment-service")
+            self.assertEqual(owner_role["rules"], [
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+                {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["get", "create"]},
+            ])
+            for binding in (item for item in objects if item["kind"] in {"RoleBinding", "ClusterRoleBinding"}):
+                self.assertNotIn("build-executor", {subject["name"] for subject in binding["subjects"]})
+            tasks = yaml.safe_load((REPOSITORY / "deploy/ansible/roles/platform_application/tasks/main.yml").read_bytes())
+            namespace_task = next(task for task in tasks if task.get("name") == "Reconcile application namespace without deleting retained state")
+            labels = namespace_task["kubernetes.core.k8s"]["definition"]["metadata"]["labels"]
+            self.assertEqual(labels["pod-security.kubernetes.io/enforce"], "baseline")
+            self.assertEqual(labels["pod-security.kubernetes.io/audit"], "restricted")
+            self.assertEqual(labels["pod-security.kubernetes.io/warn"], "restricted")
+        self.clean_runtime()
 
     def test_plain_helm_rejects_policy_without_authenticated_source(self) -> None:
         helm = shutil.which("helm")
