@@ -130,3 +130,9 @@ python tools/smoke_ha_foundation.py --name labweaver-ha-smoke --charts .tmp
 - Harbor 固定版本的 registry S3 driver 上传、拉取、GC、TLS、签名与版本/保留配置组合，不能由应用上传测试外推 Harbor 兼容。
 
 RGW 测试通过后，在同一个受控 Bundle 中切换唯一对象端点，再退役旧 MinIO/NFS 等价路径；与 #207 的单写 fencing 和保留/导出规则联动。备份目标仍必须在另一个故障域，不能随着生产端点切换到同一 RGW。
+
+## 验收工具的创作队列观测
+
+`tools/user_acceptance.py` 从实际部署的数据库 Service selector 选择唯一 Ready Pod：HA 使用 CNPG 的 `postgres-rw` 当前 primary，单节点开发仍使用原 `postgres` Service 对应的 Pod。每次观测都重新解析，不缓存主节点名称，primary 切换后不会继续 exec 已失效的固定 Pod。
+
+无法读取 Service/primary、没有唯一 Ready primary、SQL 查询失败或计数无效时，队列状态为未知。`preflight` 以 `LW_ACCEPTANCE_AUTHORING_QUEUE_UNAVAILABLE` 明确失败，不把未知当作空队列或成功；默认等待队列的 `run` 同样停止。`--no-queue-wait` 仍表示操作者明确跳过等待。
