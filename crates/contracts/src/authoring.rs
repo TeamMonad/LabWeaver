@@ -542,7 +542,9 @@ pub struct EnvironmentSecuritySpec {
     pub security_profile_binding: String,
 }
 
-fn nullable_privilege_escalation<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+fn nullable_privilege_escalation<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
     Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
 }
 

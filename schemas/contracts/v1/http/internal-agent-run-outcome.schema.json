@@ -866,8 +866,16 @@
       "description": "Runtime permissions, independently declared and bound to the immutable approved spec.",
       "properties": {
         "allowPrivilegeEscalation": {
-          "default": false,
-          "type": "boolean"
+          "anyOf": [
+            {
+              "const": false,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": false
         },
         "capabilities": {
           "default": [],

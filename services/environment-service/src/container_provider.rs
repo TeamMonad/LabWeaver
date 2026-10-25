@@ -525,8 +525,14 @@ impl PgContainerExecutorFenceStore {
         self
     }
 
-    pub fn with_projection_configuration(mut self, binding: String, configuration: ContainerProviderConfiguration) -> Result<Self, ContainerExecutorFenceError> {
-        if !valid_binding(&binding) { return Err(ContainerExecutorFenceError::ConfigurationInvalid); }
+    pub fn with_projection_configuration(
+        mut self,
+        binding: String,
+        configuration: ContainerProviderConfiguration,
+    ) -> Result<Self, ContainerExecutorFenceError> {
+        if !valid_binding(&binding) {
+            return Err(ContainerExecutorFenceError::ConfigurationInvalid);
+        }
         self.projection_configuration = Some((binding, configuration));
         Ok(self)
     }
@@ -638,7 +644,13 @@ impl PgContainerExecutorFenceStore {
                 return Err(ContainerExecutorFenceError::IdentityMismatch);
             }
             runtime_gate?;
-            validate_container_execution_plan(&mut transaction, envelope, self.projection_configuration.as_ref(), &self.namespace_profile).await?;
+            validate_container_execution_plan(
+                &mut transaction,
+                envelope,
+                self.projection_configuration.as_ref(),
+                &self.namespace_profile,
+            )
+            .await?;
             sqlx::query(
                 "UPDATE environment.container_executor_fences SET highest_generation=$2, \
                      operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
@@ -658,7 +670,13 @@ impl PgContainerExecutorFenceStore {
             .await?;
         } else {
             runtime_gate?;
-            validate_container_execution_plan(&mut transaction, envelope, self.projection_configuration.as_ref(), &self.namespace_profile).await?;
+            validate_container_execution_plan(
+                &mut transaction,
+                envelope,
+                self.projection_configuration.as_ref(),
+                &self.namespace_profile,
+            )
+            .await?;
             sqlx::query(
                 "INSERT INTO environment.container_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
@@ -909,7 +927,9 @@ fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFa
     match error {
         ContainerExecutorFenceError::RuntimeAdmission(error) => error.provider_failure(),
         ContainerExecutorFenceError::IdentityMismatch => ProviderFailure {
-            code: ProviderFailureCode::RuntimeAdmission(contracts::DiagnosticCode::registered("LW_ENVIRONMENT_CONTAINER_EXECUTOR_IDENTITY_MISMATCH")),
+            code: ProviderFailureCode::RuntimeAdmission(contracts::DiagnosticCode::registered(
+                "LW_ENVIRONMENT_CONTAINER_EXECUTOR_IDENTITY_MISMATCH",
+            )),
             retryable: false,
         },
         ContainerExecutorFenceError::InProgress
@@ -947,13 +967,26 @@ async fn validate_container_execution_plan(
         .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
     let projection: ReleasePublished = serde_json::from_value(row.try_get("projection")?)
         .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
-    let (binding, configuration) = projection_configuration.ok_or(ContainerExecutorFenceError::ConfigurationInvalid)?;
+    let (binding, configuration) =
+        projection_configuration.ok_or(ContainerExecutorFenceError::ConfigurationInvalid)?;
     let resolved = ResolvedContainerRelease {
         projection,
-        authority_now: UtcTimestamp::from_utc(row.try_get("authority_now")?).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
-        withdrawn_at: row.try_get::<Option<time::OffsetDateTime>, _>("withdrawn_at")?.map(UtcTimestamp::from_utc).transpose().map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+        authority_now: UtcTimestamp::from_utc(row.try_get("authority_now")?)
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+        withdrawn_at: row
+            .try_get::<Option<time::OffsetDateTime>, _>("withdrawn_at")?
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
     };
-    let expected = configuration.project_plan(binding, namespace_profile, &instance, &resolved, envelope.fence.action)
+    let expected = configuration
+        .project_plan(
+            binding,
+            namespace_profile,
+            &instance,
+            &resolved,
+            envelope.fence.action,
+        )
         .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
     crate::runtime_admission::validate_container_runtime_plan(
         &instance,
@@ -1250,7 +1283,8 @@ impl ContainerProviderConfiguration {
             }
         }
         let image = format!("{repository}@{digest}");
-        let placement = namespace_profile.for_instance(instance)
+        let placement = namespace_profile
+            .for_instance(instance)
             .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
         if placement.namespace_uid.is_some()
             && projection.environment_spec.network != NetworkPolicySpec::DenyAll
@@ -1868,10 +1902,14 @@ where
         resolved: &ResolvedContainerRelease,
         action: ReconcileAction,
     ) -> Result<ContainerResourcePlan, ReleaseProjectionError> {
-        self.configuration.project_plan(&self.binding, &self.namespace_profile, instance, resolved, action)
+        self.configuration.project_plan(
+            &self.binding,
+            &self.namespace_profile,
+            instance,
+            resolved,
+            action,
+        )
     }
-
-
 
     fn cleanup_plan(
         &self,

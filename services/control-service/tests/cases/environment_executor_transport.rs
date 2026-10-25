@@ -1,7 +1,7 @@
 //! Real native Provider -> NATS executor -> worker diagnostics, with real Resource authorities.
+use super::super::super::ContainerSecurityTampering as Tamper;
 use super::super::super::ExecutorFailure as Fault;
 use super::super::{LifecycleHttp, PgAuthority, run_due, vm_boundary};
-use super::super::super::ContainerSecurityTampering as Tamper;
 use super::{Cluster, Result};
 use async_trait::async_trait;
 use contracts::{
@@ -12,11 +12,10 @@ use contracts::{
     },
 };
 use environment_service::{
-    ContainerProvider, ContainerProviderBackend,
-    EnvironmentRuntimeAdmission, EnvironmentRuntimeAuthority, FencedContainerExecutor,
-    FencedKubeVirtExecutor, KubeVirtExecutionInstance, NatsContainerExecutorServer,
-    NatsContainerProviderBackend, NatsKubeVirtExecutorServer, NatsKubeVirtProviderBackend,
-    PgEnvironmentStore, PgKubeVirtExecutorFenceStore,
+    ContainerProvider, EnvironmentRuntimeAdmission, EnvironmentRuntimeAuthority,
+    FencedContainerExecutor, FencedKubeVirtExecutor, KubeVirtExecutionInstance,
+    NatsContainerExecutorServer, NatsContainerProviderBackend, NatsKubeVirtExecutorServer,
+    NatsKubeVirtProviderBackend, PgEnvironmentStore, PgKubeVirtExecutorFenceStore,
     PgReleaseProjectionStore, ProviderRegistry, ReconcileWorker, ReconcileWorkerOutcome,
     Reconciler, ResourceUsageClientError,
 };
@@ -167,10 +166,21 @@ pub(in super::super) async fn exercise(
     let mut transitions = 0;
     loop {
         transitions += 1;
-        assert!(transitions <= 12, "native denial must complete within bounded lifecycle steps");
+        assert!(
+            transitions <= 12,
+            "native denial must complete within bounded lifecycle steps"
+        );
         let outcome = run_due(&worker, &store, "executor-transport-denial").await?;
         let persisted = store.load(initial.id).await?;
-        if matches!(fault, Fault::Security(_)) && matches!(outcome, ReconcileWorkerOutcome::Advanced { terminal: false, .. }) {
+        if matches!(fault, Fault::Security(_))
+            && matches!(
+                outcome,
+                ReconcileWorkerOutcome::Advanced {
+                    terminal: false,
+                    ..
+                }
+            )
+        {
             assert_eq!(calls.load(Ordering::SeqCst), 0);
             assert!(persisted.last_diagnostic_code.is_none());
             continue;
@@ -236,8 +246,11 @@ async fn start_server(
         let server = NatsContainerExecutorServer::new(
             client.clone(),
             subject.into(),
-            FencedContainerExecutor::new(super::super::container_fence_store(pool.clone(), instance).await?, cluster)
-                .with_runtime_admission(admission),
+            FencedContainerExecutor::new(
+                super::super::container_fence_store(pool.clone(), instance).await?,
+                cluster,
+            )
+            .with_runtime_admission(admission),
         )?;
         Ok(tokio::spawn(async move {
             let _ = server.serve().await;
@@ -279,14 +292,24 @@ async fn registry(
         .resolve(instance.release_id, instance.release_version)
         .await?;
     let mut registry = ProviderRegistry::default();
-    if matches!(&resolved.projection.release.artifact, contracts::supply_chain::ImageArtifact::Container { .. })
-    {
+    if matches!(
+        &resolved.projection.release.artifact,
+        contracts::supply_chain::ImageArtifact::Container { .. }
+    ) {
         let config = super::super::projection_configuration(&resolved.projection)?;
         registry.register(Arc::new(ContainerProvider::new(
             instance.provider_binding.clone(),
             Arc::new(TamperingContainerTransport {
-                transport: NatsContainerProviderBackend::new(client.clone(), subject.into(), Duration::from_secs(2))?,
-                tampering: if let Fault::Security(tamper) = fault { Some(tamper) } else { None },
+                transport: NatsContainerProviderBackend::new(
+                    client.clone(),
+                    subject.into(),
+                    Duration::from_secs(2),
+                )?,
+                tampering: if let Fault::Security(tamper) = fault {
+                    Some(tamper)
+                } else {
+                    None
+                },
             }),
             Arc::new(releases),
             config,
@@ -320,25 +343,49 @@ impl Tamper {
     fn apply(self, plan: &mut environment_service::ContainerResourcePlan) -> Result {
         use serde_json::json;
         if self == Self::NamespacePsa {
-            let namespace = plan.resources.iter_mut().find(|r| r.kind == "Namespace").ok_or("namespace")?;
-            assert_eq!(namespace.document["metadata"]["labels"]["pod-security.kubernetes.io/enforce"], "baseline");
-            namespace.document["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = json!("privileged");
+            let namespace = plan
+                .resources
+                .iter_mut()
+                .find(|r| r.kind == "Namespace")
+                .ok_or("namespace")?;
+            assert_eq!(
+                namespace.document["metadata"]["labels"]["pod-security.kubernetes.io/enforce"],
+                "baseline"
+            );
+            namespace.document["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] =
+                json!("privileged");
             return Ok(());
         }
-        let deployment = plan.resources.iter_mut().find(|r| r.kind == "Deployment").ok_or("deployment")?;
-        let pod = deployment.document.pointer_mut("/spec/template/spec").ok_or("pod")?;
+        let deployment = plan
+            .resources
+            .iter_mut()
+            .find(|r| r.kind == "Deployment")
+            .ok_or("deployment")?;
+        let pod = deployment
+            .document
+            .pointer_mut("/spec/template/spec")
+            .ok_or("pod")?;
         match self {
             Self::HostNetwork => pod["hostNetwork"] = json!(true),
             Self::HostPid => pod["hostPID"] = json!(true),
             Self::HostIpc => pod["hostIPC"] = json!(true),
             Self::HostPath => {
-                pod["volumes"].as_array_mut().ok_or("volumes")?.push(json!({"name":"host-root","hostPath":{"path":"/","type":"Directory"}}));
-                pod["containers"][0]["volumeMounts"].as_array_mut().ok_or("mounts")?.push(json!({"name":"host-root","mountPath":"/host"}));
+                pod["volumes"]
+                    .as_array_mut()
+                    .ok_or("volumes")?
+                    .push(json!({"name":"host-root","hostPath":{"path":"/","type":"Directory"}}));
+                pod["containers"][0]["volumeMounts"]
+                    .as_array_mut()
+                    .ok_or("mounts")?
+                    .push(json!({"name":"host-root","mountPath":"/host"}));
             }
             Self::ExtraContainer => {
                 let mut extra = pod["containers"][0].clone();
                 extra["name"] = json!("extra-runtime");
-                pod["containers"].as_array_mut().ok_or("containers")?.push(extra);
+                pod["containers"]
+                    .as_array_mut()
+                    .ok_or("containers")?
+                    .push(extra);
             }
             Self::ServiceAccount => pod["serviceAccountName"] = json!("default"),
             Self::ServiceAccountToken => {
@@ -348,7 +395,8 @@ impl Tamper {
             }
             Self::PrivilegeEscalation => {
                 pod["containers"][0]["securityContext"]["allowPrivilegeEscalation"] = json!(true);
-                pod["initContainers"][0]["securityContext"]["allowPrivilegeEscalation"] = json!(true);
+                pod["initContainers"][0]["securityContext"]["allowPrivilegeEscalation"] =
+                    json!(true);
             }
             Self::NamespacePsa => return Err("namespace branch must be handled first".into()),
         }
@@ -358,34 +406,68 @@ impl Tamper {
 
 #[async_trait]
 impl environment_service::ContainerProviderBackend for TamperingContainerTransport {
-    async fn apply(&self, fence: &environment_service::ContainerBackendFence, plan: &environment_service::ContainerResourcePlan)
-    -> std::result::Result<environment_service::ContainerApplyObservation, environment_service::ProviderFailure> {
+    async fn apply(
+        &self,
+        fence: &environment_service::ContainerBackendFence,
+        plan: &environment_service::ContainerResourcePlan,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
         if let Some(tampering) = self.tampering {
             let mut changed = plan.clone();
-            tampering.apply(&mut changed).map_err(|_| environment_service::ProviderFailure {
-                code: environment_service::ProviderFailureCode::Rejected, retryable: false,
-            })?;
+            tampering
+                .apply(&mut changed)
+                .map_err(|_| environment_service::ProviderFailure {
+                    code: environment_service::ProviderFailureCode::Rejected,
+                    retryable: false,
+                })?;
             self.transport.apply(fence, &changed).await
-        } else { self.transport.apply(fence, plan).await }
+        } else {
+            self.transport.apply(fence, plan).await
+        }
     }
 
-    async fn observe(&self, fence: &environment_service::ContainerBackendFence, plan: &environment_service::ContainerResourcePlan)
-    -> std::result::Result<environment_service::ContainerApplyObservation, environment_service::ProviderFailure> {
+    async fn observe(
+        &self,
+        fence: &environment_service::ContainerBackendFence,
+        plan: &environment_service::ContainerResourcePlan,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
         self.transport.observe(fence, plan).await
     }
 
-    async fn scale(&self, fence: &environment_service::ContainerBackendFence, plan: &environment_service::ContainerResourcePlan, replicas: u32)
-    -> std::result::Result<environment_service::ContainerApplyObservation, environment_service::ProviderFailure> {
+    async fn scale(
+        &self,
+        fence: &environment_service::ContainerBackendFence,
+        plan: &environment_service::ContainerResourcePlan,
+        replicas: u32,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
         self.transport.scale(fence, plan, replicas).await
     }
 
-    async fn restart(&self, fence: &environment_service::ContainerBackendFence, plan: &environment_service::ContainerResourcePlan, revision: contracts::Revision)
-    -> std::result::Result<environment_service::ContainerApplyObservation, environment_service::ProviderFailure> {
+    async fn restart(
+        &self,
+        fence: &environment_service::ContainerBackendFence,
+        plan: &environment_service::ContainerResourcePlan,
+        revision: contracts::Revision,
+    ) -> std::result::Result<
+        environment_service::ContainerApplyObservation,
+        environment_service::ProviderFailure,
+    > {
         self.transport.restart(fence, plan, revision).await
     }
 
-    async fn delete_namespace(&self, fence: &environment_service::ContainerBackendFence, plan: &environment_service::ContainerResourcePlan)
-    -> std::result::Result<contracts::ArtifactRef, environment_service::ProviderFailure> {
+    async fn delete_namespace(
+        &self,
+        fence: &environment_service::ContainerBackendFence,
+        plan: &environment_service::ContainerResourcePlan,
+    ) -> std::result::Result<contracts::ArtifactRef, environment_service::ProviderFailure> {
         self.transport.delete_namespace(fence, plan).await
     }
 }

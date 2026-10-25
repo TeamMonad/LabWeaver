@@ -90,7 +90,10 @@ pub use outbox::{
 mod kubevirt_execution;
 mod kubevirt_launcher_sizing;
 pub use kubevirt_execution::{KubeVirtExecutionInstance, KubeVirtExecutionPermit};
-pub use process::{EnvironmentProcessRuntime, EnvironmentProcessRuntimeError, container_projection_configuration_from_env};
+pub use process::{
+    EnvironmentProcessRuntime, EnvironmentProcessRuntimeError,
+    container_projection_configuration_from_env,
+};
 pub use reconciler::{
     EnvironmentProvider, ProviderFailure, ProviderFailureCode, ProviderObservation,
     ProviderOutcome, ProviderRegistry, ReconcileAction, ReconcileError, ReconcileWorker,

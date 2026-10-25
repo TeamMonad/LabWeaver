@@ -235,11 +235,14 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
     match kind {
         RuntimeKind::Container => {
             let terminal = terminal.ok_or(MainError::Configuration)?;
-            let (binding, projection_configuration) = environment_service::container_projection_configuration_from_env()
-                .map_err(|_| MainError::Configuration)?;
+            let (binding, projection_configuration) =
+                environment_service::container_projection_configuration_from_env()
+                    .map_err(|_| MainError::Configuration)?;
             let executor = FencedContainerExecutor::new(
-                PgContainerExecutorFenceStore::new(pool).with_namespace_profile(namespace_profile)
-                    .with_projection_configuration(binding, projection_configuration).map_err(|_| MainError::Configuration)?,
+                PgContainerExecutorFenceStore::new(pool)
+                    .with_namespace_profile(namespace_profile)
+                    .with_projection_configuration(binding, projection_configuration)
+                    .map_err(|_| MainError::Configuration)?,
                 backend,
             )
             .with_runtime_admission(runtime_admission);

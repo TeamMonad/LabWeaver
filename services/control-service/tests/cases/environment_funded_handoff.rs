@@ -724,31 +724,76 @@ impl environment_service::ContainerExecutorBackend for PhysicalClusterFixture {
         }
     }
 }
-fn projection_configuration(projection: &contracts::events::ReleasePublished) -> Result<environment_service::ContainerProviderConfiguration> {
-    let (repository, _) = projection.release.artifact.container_reference().ok_or("container image")?;
-    let approval = projection.release.approval.as_ref().ok_or("generated container approval")?;
+fn projection_configuration(
+    projection: &contracts::events::ReleasePublished,
+) -> Result<environment_service::ContainerProviderConfiguration> {
+    let (repository, _) = projection
+        .release
+        .artifact
+        .container_reference()
+        .ok_or("container image")?;
+    let approval = projection
+        .release
+        .approval
+        .as_ref()
+        .ok_or("generated container approval")?;
     Ok(environment_service::ContainerProviderConfiguration::new(
-        environment_service::ContainerReleasePolicy::new(contracts::PolicyId::new(), approval.policy_revision, approval.trust_revision)?,
-        repository.rsplit_once('/').ok_or("image repository prefix")?.0.into(),
-        "synthetic-access".into(), "synthetic-access".into(), "registry-pull".into(), "synthetic-storage".into(), "ReadWriteOnce",
+        environment_service::ContainerReleasePolicy::new(
+            contracts::PolicyId::new(),
+            approval.policy_revision,
+            approval.trust_revision,
+        )?,
+        repository
+            .rsplit_once('/')
+            .ok_or("image repository prefix")?
+            .0
+            .into(),
+        "synthetic-access".into(),
+        "synthetic-access".into(),
+        "registry-pull".into(),
+        "synthetic-storage".into(),
+        "ReadWriteOnce",
     )?)
 }
 
-async fn trusted_container_plan(pool: &PgPool, instance: &contracts::environment::EnvironmentInstance) -> Result<environment_service::ContainerResourcePlan> {
+async fn trusted_container_plan(
+    pool: &PgPool,
+    instance: &contracts::environment::EnvironmentInstance,
+) -> Result<environment_service::ContainerResourcePlan> {
     use environment_service::ContainerReleaseResolver as _;
-    let current = PgEnvironmentStore::new(pool.clone()).load(instance.id).await?;
-    let resolved = PgReleaseProjectionStore::new(pool.clone()).resolve(current.release_id, current.release_version).await?;
+    let current = PgEnvironmentStore::new(pool.clone())
+        .load(instance.id)
+        .await?;
+    let resolved = PgReleaseProjectionStore::new(pool.clone())
+        .resolve(current.release_id, current.release_version)
+        .await?;
     let configuration = projection_configuration(&resolved.projection)?;
-    Ok(configuration.project_plan(&current.provider_binding, &environment_service::ContainerNamespaceProfile::Dedicated {}, &current, &resolved, environment_service::ReconcileAction::Stop)?)
+    Ok(configuration.project_plan(
+        &current.provider_binding,
+        &environment_service::ContainerNamespaceProfile::Dedicated {},
+        &current,
+        &resolved,
+        environment_service::ReconcileAction::Stop,
+    )?)
 }
 
-async fn container_fence_store(pool: PgPool, instance: &contracts::environment::EnvironmentInstance) -> Result<environment_service::PgContainerExecutorFenceStore> {
+async fn container_fence_store(
+    pool: PgPool,
+    instance: &contracts::environment::EnvironmentInstance,
+) -> Result<environment_service::PgContainerExecutorFenceStore> {
     use environment_service::ContainerReleaseResolver as _;
     let store = environment_service::PgContainerExecutorFenceStore::new(pool.clone());
     if instance.runtime_kind == contracts::authoring::RuntimeKind::Container {
-        let resolved = PgReleaseProjectionStore::new(pool).resolve(instance.release_id, instance.release_version).await?;
-        Ok(store.with_projection_configuration(instance.provider_binding.clone(), projection_configuration(&resolved.projection)?)?)
-    } else { Ok(store) }
+        let resolved = PgReleaseProjectionStore::new(pool)
+            .resolve(instance.release_id, instance.release_version)
+            .await?;
+        Ok(store.with_projection_configuration(
+            instance.provider_binding.clone(),
+            projection_configuration(&resolved.projection)?,
+        )?)
+    } else {
+        Ok(store)
+    }
 }
 
 async fn physical_envelope(
@@ -765,20 +810,22 @@ async fn physical_envelope(
     let namespace = format!("lw-env-{}", instance.id);
     let mut plan = if instance.runtime_kind == contracts::authoring::RuntimeKind::Container {
         trusted_container_plan(pool, instance).await?
-    } else { ContainerResourcePlan {
-        environment_id: instance.id,
-        project_id: instance.project_id,
-        namespace: namespace.clone(),
-        namespace_uid: None,
-        image: "synthetic/runtime".into(),
-        plan_sha256: persistence_sqlx::Sha256Digest::of_bytes(b"funded-pvc"),
-        resources: vec![ContainerResource {
-            kind: "PersistentVolumeClaim".into(),
-            namespace: Some(namespace),
-            name: "workspace".into(),
-            document: serde_json::json!({"kind":"PersistentVolumeClaim"}),
-        }],
-    }};
+    } else {
+        ContainerResourcePlan {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            namespace: namespace.clone(),
+            namespace_uid: None,
+            image: "synthetic/runtime".into(),
+            plan_sha256: persistence_sqlx::Sha256Digest::of_bytes(b"funded-pvc"),
+            resources: vec![ContainerResource {
+                kind: "PersistentVolumeClaim".into(),
+                namespace: Some(namespace),
+                name: "workspace".into(),
+                document: serde_json::json!({"kind":"PersistentVolumeClaim"}),
+            }],
+        }
+    };
     plan.project_id = instance.project_id;
     let action = if cleanup {
         ReconcileAction::Cleanup
@@ -930,7 +977,10 @@ async fn exercise_execution(
         .resolve(instance.release_id, instance.release_version)
         .await?;
     let projection = &resolved.projection;
-    if matches!(&projection.release.artifact, contracts::supply_chain::ImageArtifact::Container { .. }) {
+    if matches!(
+        &projection.release.artifact,
+        contracts::supply_chain::ImageArtifact::Container { .. }
+    ) {
         assert_eq!(instance.project_id, projection.release.project_id);
         assert_eq!(instance.release_id, projection.release.id);
         assert_eq!(instance.release_version, projection.release.version);
@@ -991,7 +1041,10 @@ async fn exercise_execution(
         )?;
     }
     if let Some(fault @ super::ExecutorFailure::Security(_)) = http.executor_failure {
-        return Box::pin(executor_gate::exercise_transport(pool, resource, admission, instance, http, fault)).await;
+        return Box::pin(executor_gate::exercise_transport(
+            pool, resource, admission, instance, http, fault,
+        ))
+        .await;
     }
     let worker = environment_service::ReconcileWorker::new(
         store.clone(),

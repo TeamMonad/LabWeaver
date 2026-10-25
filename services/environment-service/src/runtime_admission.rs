@@ -443,9 +443,12 @@ pub(crate) fn validate_container_runtime_plan(
     {
         return Err(crate::ReleaseProjectionError::IdentityMismatch);
     }
-    if plan.environment_id != expected.environment_id || plan.project_id != expected.project_id
-        || plan.namespace != expected.namespace || plan.namespace_uid != expected.namespace_uid
-        || plan.image != expected.image || plan.plan_sha256 != expected.plan_sha256
+    if plan.environment_id != expected.environment_id
+        || plan.project_id != expected.project_id
+        || plan.namespace != expected.namespace
+        || plan.namespace_uid != expected.namespace_uid
+        || plan.image != expected.image
+        || plan.plan_sha256 != expected.plan_sha256
     {
         return Err(crate::ReleaseProjectionError::IdentityMismatch);
     }
@@ -454,8 +457,11 @@ pub(crate) fn validate_container_runtime_plan(
     // added Pod/Deployment/Namespace fields are rejected without a field blacklist.
     let mut resources = expected.resources.iter();
     for received in &plan.resources {
-        let expected = resources.find(|candidate| candidate.kind == received.kind
-            && candidate.name == received.name && candidate.namespace == received.namespace);
+        let expected = resources.find(|candidate| {
+            candidate.kind == received.kind
+                && candidate.name == received.name
+                && candidate.namespace == received.namespace
+        });
         if expected != Some(received) {
             return Err(crate::ReleaseProjectionError::SecurityPostureInvalid);
         }

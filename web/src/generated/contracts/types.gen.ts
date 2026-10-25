@@ -5347,7 +5347,7 @@ export type EnvironmentRuntimeSpec = {
  * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type EnvironmentSecuritySpec = {
-    allowPrivilegeEscalation?: boolean;
+    allowPrivilegeEscalation?: false | null;
     capabilities?: Array<CreateEnvironmentTemplateReleaseRequestSchemaLinuxCapability>;
     privileged?: boolean;
     publicExposurePolicy: PublicExposurePolicy;
@@ -6209,7 +6209,7 @@ export type EnvironmentCandidateViewSchemaEnvironmentRuntimeSpec = {
  * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type EnvironmentCandidateViewSchemaEnvironmentSecuritySpec = {
-    allowPrivilegeEscalation?: boolean;
+    allowPrivilegeEscalation?: false | null;
     capabilities?: Array<EnvironmentCandidateViewSchemaLinuxCapability>;
     privileged?: boolean;
     publicExposurePolicy: EnvironmentCandidateViewSchemaPublicExposurePolicy;
@@ -6953,7 +6953,7 @@ export type EnvironmentTemplateReleaseViewSchemaEnvironmentRuntimeSpec = {
  * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type EnvironmentTemplateReleaseViewSchemaEnvironmentSecuritySpec = {
-    allowPrivilegeEscalation?: boolean;
+    allowPrivilegeEscalation?: false | null;
     capabilities?: Array<EnvironmentTemplateReleaseViewSchemaLinuxCapability>;
     privileged?: boolean;
     publicExposurePolicy: EnvironmentTemplateReleaseViewSchemaPublicExposurePolicy;
@@ -8854,7 +8854,7 @@ export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
  * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type InternalAgentRunOutcomeSchemaEnvironmentSecuritySpec = {
-    allowPrivilegeEscalation?: boolean;
+    allowPrivilegeEscalation?: false | null;
     capabilities?: Array<InternalAgentRunOutcomeSchemaLinuxCapability>;
     privileged?: boolean;
     publicExposurePolicy: InternalAgentRunOutcomeSchemaPublicExposurePolicy;

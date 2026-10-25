@@ -4,13 +4,12 @@ use async_trait::async_trait;
 use contracts::{UtcTimestamp, authoring::RuntimeKind, environment::EnvironmentInstance};
 use environment_service::{
     ContainerApplyObservation, ContainerBackendFence, ContainerExecutorBackend,
-    ContainerExecutorRequest, ContainerExecutorResponse,
-    FencedContainerExecutor, FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
-    KubeVirtBackendFence, KubeVirtBaseDiskIdentity, KubeVirtExecutionInstance,
-    KubeVirtExecutionPermit, KubeVirtExecutorBackend, KubeVirtExecutorRequest,
-    KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, PgKubeVirtExecutorFenceStore,
-    ProviderFailure, ProviderFailureCode, ReconcileAction,
+    ContainerExecutorRequest, ContainerExecutorResponse, FencedContainerExecutor,
+    FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
+    KubeVirtBaseDiskIdentity, KubeVirtExecutionInstance, KubeVirtExecutionPermit,
+    KubeVirtExecutorBackend, KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope,
+    KubeVirtExecutorResponse, KubeVirtResourcePlan, KubeVirtRunningObservation,
+    PgKubeVirtExecutorFenceStore, ProviderFailure, ProviderFailureCode, ReconcileAction,
 };
 use persistence_sqlx::Sha256Digest;
 use sqlx::PgPool;
@@ -118,7 +117,10 @@ async fn execute(
             return Err("apply fixture".into());
         };
         // Sparse writes retain the trusted projector's exact Service document and metadata.
-        plan.resources.retain(|resource| matches!(action, ReconcileAction::Provision | ReconcileAction::Reset) && resource.kind == "Service");
+        plan.resources.retain(|resource| {
+            matches!(action, ReconcileAction::Provision | ReconcileAction::Reset)
+                && resource.kind == "Service"
+        });
         envelope.request = match action {
             ReconcileAction::Provision | ReconcileAction::Reset => {
                 ContainerExecutorRequest::Apply { plan }
@@ -136,11 +138,13 @@ async fn execute(
             "operationId": instance.operation.id, "providerStep": 1, "operationGeneration": instance.generation,
             "attempt": 1, "action": action, "deadlineAt": deadline, "request": envelope.request,
         }))?;
-        let response =
-            FencedContainerExecutor::new(super::container_fence_store(pool.clone(), instance).await?, backend)
-                .with_runtime_admission(admission.clone())
-                .execute(envelope)
-                .await?;
+        let response = FencedContainerExecutor::new(
+            super::container_fence_store(pool.clone(), instance).await?,
+            backend,
+        )
+        .with_runtime_admission(admission.clone())
+        .execute(envelope)
+        .await?;
         assert!(matches!(
             response.response,
             ContainerExecutorResponse::Observed { .. }
@@ -321,7 +325,9 @@ pub(super) async fn assert_security_rejections(
                 .ok_or("receipt")?
                 .valid_until,
         );
-        let mut fence = super::physical_envelope(pool, instance, 1, false, deadline).await?.fence;
+        let mut fence = super::physical_envelope(pool, instance, 1, false, deadline)
+            .await?
+            .fence;
         fence.request_id = Sha256Digest::of_canonical(&serde_json::json!({
             "protocolVersion": fence.protocol_version, "environmentId": fence.environment_id,
             "operationId": fence.operation_id, "providerStep": fence.provider_step,
