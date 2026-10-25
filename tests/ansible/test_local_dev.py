@@ -1750,7 +1750,7 @@ class LocalDevBundleTests(unittest.TestCase):
                 local_dev.apply(Path("kubeconfig"), invalid_objects)
             run_mock.assert_not_called()
 
-    def test_package_check_runs_before_first_image_build(self) -> None:
+    def test_prepare_and_build_images_runs_check_before_first_image_build(self) -> None:
         captured: list[list[str]] = []
 
         def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1766,8 +1766,7 @@ class LocalDevBundleTests(unittest.TestCase):
             patch.object(local_dev, "run", side_effect=fake_run),
             patch.object(local_dev, "build_images", side_effect=fake_build_images),
         ):
-            local_dev.check_package_inputs()
-            local_dev.build_images(external_fixtures=True)
+            local_dev.prepare_and_build_images(external_fixtures=True)
 
         check_index = captured.index(["cargo", "xtask", "package-check"])
         build_index = captured.index(["docker", "buildx", "build"])
@@ -1784,7 +1783,7 @@ class LocalDevBundleTests(unittest.TestCase):
 
         with patch.object(local_dev, "run", side_effect=fake_run):
             with self.assertRaisesRegex(local_dev.LocalDevError, "LW_PACKAGE_INPUT_STALE") as error:
-                local_dev.check_package_inputs()
+                local_dev.prepare_and_build_images(external_fixtures=True)
         self.assertIn("cargo xtask package-prepare", str(error.exception))
         self.assertEqual([["cargo", "xtask", "package-check"]], captured)
 

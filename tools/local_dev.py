@@ -3059,6 +3059,11 @@ def check_package_inputs() -> None:
         fail(message)
 
 
+def prepare_and_build_images(*, external_fixtures: bool) -> dict[str, str]:
+    check_package_inputs()
+    return build_images(external_fixtures=external_fixtures)
+
+
 def build_images(*, external_fixtures: bool) -> dict[str, str]:
     commit = run(["git","rev-parse","--short=12","HEAD"], capture=True).stdout.strip()
     epoch = run(["git", "show", "-s", "--format=%ct", "HEAD"], capture=True).stdout.strip()
@@ -3985,8 +3990,7 @@ def up(
             configure_local_harbor_dns(kubeconfig)
             configure_kind_harbor_trust(real_build_provider)
         info=json.loads(STATE_FILE.read_text()); info["phase"]="building"; write(STATE_FILE,json.dumps(info,indent=2)+"\n")
-        check_package_inputs()
-        images=build_images(external_fixtures=external_fixtures)
+        images=prepare_and_build_images(external_fixtures=external_fixtures)
         if external_fixtures:
             source_image = build_work_runtime_fixture()
             start_build_executor_fixture(kubeconfig, foundation, source_image)
