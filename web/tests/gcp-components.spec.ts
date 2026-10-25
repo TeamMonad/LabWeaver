@@ -397,6 +397,8 @@ describe('GCP Console Components', () => {
       useProjects().select('project-later')
       const wrapper = mount(GcpProjectSelector)
       try {
+        // The same project can still be cached from the previous mount; wait for this load's second page.
+        await vi.waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2))
         await vi.waitFor(() => expect(wrapper.find('.trigger-primary').text()).toBe('Later page project'))
         // Paging stops once the current project is listed; the rest stays behind the cursor.
         expect(listProjects).toHaveBeenCalledTimes(2)

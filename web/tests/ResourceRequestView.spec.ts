@@ -164,8 +164,8 @@ describe('ResourceRequestView', () => {
     mocks.gpuRateSelection.mockReturnValue({ rate: null, ambiguous: false })
     authState.user.value = null
     vi.mocked(getProjectCredits).mockReset().mockResolvedValue({ data: creditAccount, error: undefined } as never)
-    vi.mocked(listProjectCreditLedger).mockReset().mockResolvedValue({ data: { items: [grantEntry], page: 1, pageSize: 25, hasMore: false }, error: undefined } as never)
-    vi.mocked(listProjectCreditHolds).mockReset().mockResolvedValue({ data: { items: [], page: 1, pageSize: 25, hasMore: false }, error: undefined } as never)
+    vi.mocked(listProjectCreditLedger).mockReset().mockResolvedValue({ data: { items: [grantEntry], nextCursor: null }, error: undefined } as never)
+    vi.mocked(listProjectCreditHolds).mockReset().mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(createCreditAdminOperation).mockReset()
     vi.mocked(estimateProjectResourceCost).mockReset()
     projectsState.selectedProjectId = projectOne.id

@@ -16,10 +16,10 @@ use contracts::environment::{
 };
 use contracts::http::{
     AcknowledgeTaskResourceRequest, ApproveResourceRequest, CreateResourceAdjustmentRequest,
-    CreateResourceRateRequest, CreateResourceRequest, EndResourceRateRequest,
-    InternalCreateTaskResourceRequest, PageQuery, RecordResourceUsageRequest,
-    ReleaseTaskResourceRequest, RenewResourceLease, ResourceOperationAccepted,
-    ResourceRequestListQuery, StrongEtag, TaskResourceStatus, UpsertResourceBudgetRequest,
+    CreateResourceRateRequest, CreateResourceRequest, CursorPage, EndResourceRateRequest,
+    InternalCreateTaskResourceRequest, RecordResourceUsageRequest, ReleaseTaskResourceRequest,
+    RenewResourceLease, ResourceListQuery, ResourceOperationAccepted, ResourceRequestListQuery,
+    StrongEtag, TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     GpuCatalogEntry, ResourceCharge, ResourceRate, ResourceRequest, ResourceRequestState,
@@ -29,7 +29,6 @@ use contracts::{
     ActorId, ChargeId, DiagnosticCode, LeaseId, ProblemDetails, ProjectId, RateId,
     ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
 };
-use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -318,24 +317,14 @@ pub fn with_delegation(router: Router, delegation_key: Arc<Vec<u8>>) -> Router {
     ))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmptyListQuery {}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProjectListQuery {
-    course_id: Option<contracts::CourseId>,
-}
-
 async fn list_requests(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
-    Query(_query): Query<EmptyListQuery>,
-) -> Result<Json<Vec<ResourceRequest>>, ResourceApiError> {
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<CursorPage<ResourceRequest>>, ResourceApiError> {
     authorize(&principal);
     require_admin(&principal)?;
-    let requests = state.store.list_all_requests().await?;
+    let requests = state.store.list_all_requests(&query).await?;
     Ok(Json(requests))
 }
 
@@ -698,11 +687,11 @@ async fn get_lease(
 async fn list_leases(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
-    Query(_query): Query<EmptyListQuery>,
-) -> Result<Json<Vec<contracts::resource::ResourceLease>>, ResourceApiError> {
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<CursorPage<contracts::resource::ResourceLease>>, ResourceApiError> {
     authorize(&principal);
     require_admin(&principal)?;
-    let leases = state.store.list_all_leases().await?;
+    let leases = state.store.list_all_leases(&query).await?;
     Ok(Json(leases))
 }
 
@@ -710,20 +699,18 @@ async fn list_leases_for_project(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project_id): Path<ProjectId>,
-    Query(query): Query<ProjectListQuery>,
+    Query(query): Query<ResourceListQuery>,
 ) -> Result<Response, ResourceApiError> {
     authorize(&principal);
-    let leases = if is_admin(&principal)? {
-        state
-            .store
-            .list_leases_for_project(project_id, query.course_id)
-            .await?
+    let actor = if is_admin(&principal)? {
+        None
     } else {
-        state
-            .store
-            .list_owned_leases(principal.actor_id, project_id, query.course_id)
-            .await?
+        Some(principal.actor_id)
     };
+    let leases = state
+        .store
+        .list_project_leases(project_id, actor, &query)
+        .await?;
     let mut response = Json(leases).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -1066,9 +1053,10 @@ fn require_environment_service(
 async fn list_rates(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
-) -> Result<Json<Vec<ResourceRate>>, ResourceApiError> {
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<CursorPage<ResourceRate>>, ResourceApiError> {
     authorize(&principal);
-    Ok(Json(state.store.list_rates().await?))
+    Ok(Json(state.store.list_rates(&query).await?))
 }
 
 async fn create_rate(
@@ -1113,9 +1101,10 @@ async fn end_rate(
 async fn list_gpu_catalog(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
-) -> Result<Json<Vec<GpuCatalogEntry>>, ResourceApiError> {
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<CursorPage<GpuCatalogEntry>>, ResourceApiError> {
     authorize(&principal);
-    Ok(Json(state.store.list_gpu_catalog().await?))
+    Ok(Json(state.store.list_gpu_catalog(&query).await?))
 }
 
 async fn create_gpu_catalog_entry(
@@ -1181,27 +1170,22 @@ async fn list_charges(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project_id): Path<ProjectId>,
-) -> Result<Json<Vec<ResourceCharge>>, ResourceApiError> {
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<CursorPage<ResourceCharge>>, ResourceApiError> {
     authorize(&principal);
     require_admin(&principal)?;
-    Ok(Json(state.store.list_charges(project_id).await?))
+    Ok(Json(state.store.list_charges(project_id, &query).await?))
 }
 
 async fn list_usage(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project_id): Path<ProjectId>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<ResourceListQuery>,
 ) -> Result<Json<ResourceUsagePage>, ResourceApiError> {
     authorize(&principal);
     require_admin(&principal)?;
-    let (page, page_size, offset) = query.normalized().map_err(|_| ResourceApiError::Invalid)?;
-    Ok(Json(
-        state
-            .store
-            .list_usage(project_id, page, page_size, offset)
-            .await?,
-    ))
+    Ok(Json(state.store.list_usage(project_id, &query).await?))
 }
 
 async fn create_adjustment(
@@ -1939,23 +1923,23 @@ mod tests {
     #[test]
     fn global_list_query_is_empty_and_project_list_query_is_camel_case() {
         let empty = axum::http::Uri::from_static("/api/v1/resource-requests");
-        assert!(Query::<EmptyListQuery>::try_from_uri(&empty).is_ok());
+        assert!(Query::<ResourceListQuery>::try_from_uri(&empty).is_ok());
         let forged_scope = axum::http::Uri::from_static(
             "/api/v1/resource-requests?projectId=01900000-0000-7000-8000-000000000001",
         );
-        assert!(Query::<EmptyListQuery>::try_from_uri(&forged_scope).is_err());
+        assert!(Query::<ResourceListQuery>::try_from_uri(&forged_scope).is_err());
 
         let project = axum::http::Uri::from_static(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-leases?courseId=01900000-0000-7000-8000-000000000002",
         );
         assert!(
-            Query::<ProjectListQuery>::try_from_uri(&project)
+            Query::<ResourceListQuery>::try_from_uri(&project)
                 .is_ok_and(|Query(query)| query.course_id.is_some())
         );
         let snake_case = axum::http::Uri::from_static(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-leases?course_id=01900000-0000-7000-8000-000000000002",
         );
-        assert!(Query::<ProjectListQuery>::try_from_uri(&snake_case).is_err());
+        assert!(Query::<ResourceListQuery>::try_from_uri(&snake_case).is_err());
     }
 
     #[test]

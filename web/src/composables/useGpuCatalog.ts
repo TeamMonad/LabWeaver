@@ -1,14 +1,12 @@
 import { reactive, ref } from 'vue'
-import {
-  createResourceGpuCatalogEntry,
-  listResourceGpuCatalog,
-} from '@/generated/contracts'
+import { createResourceGpuCatalogEntry } from '@/generated/contracts'
 import type {
   GpuAllocationMode,
   GpuCatalogEntrySchema,
 } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, newUuidV7 } from '@/utils/format'
+import { fetchAllGpuCatalogEntries } from '@/utils/resourceLists'
 
 export type GpuCatalogState =
   | { kind: 'idle' }
@@ -58,13 +56,12 @@ export function useGpuCatalog() {
 
   async function load(): Promise<void> {
     state.value = { kind: 'loading' }
-    const result = await listResourceGpuCatalog()
-    if (result.error) {
-      failure(result.error, 'GPU_CATALOG_LOAD_FAILED', '加载 GPU 目录失败。')
-      return
+    try {
+      entries.value = await fetchAllGpuCatalogEntries()
+      state.value = { kind: 'ready' }
+    } catch (error) {
+      failure(error, 'GPU_CATALOG_LOAD_FAILED', '加载 GPU 目录失败。')
     }
-    entries.value = result.data
-    state.value = { kind: 'ready' }
   }
 
   async function create(input: CreateGpuCatalogEntryInput): Promise<boolean> {

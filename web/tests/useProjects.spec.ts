@@ -123,6 +123,39 @@ describe('useProjectMemberships', () => {
     scope.stop()
   })
 
+  it.each([false, 0, undefined, ''])('rejects invalid member page continuation %j instead of presenting a complete list', async (nextCursor) => {
+    listProjectMemberships.mockResolvedValueOnce({ data: { items: [membership('student-partial')], nextCursor } })
+    const scope = effectScope()
+    const state = scope.run(() => useProjectMemberships(ref('project-1')))
+    if (!state) throw new Error('项目成员查询未进入测试作用域')
+
+    await vi.waitFor(() => expect(state.memberships).toMatchObject({ kind: 'error', diagnostic: { code: 'PROJECT_MEMBERS_LIST_FAILED' } }))
+    expect(state.memberships).not.toHaveProperty('data')
+    expect(state.hasMore).toBe(false)
+    scope.stop()
+  })
+
+  it('keeps the valid member prefix on a repeated cursor and retries the rejected page', async () => {
+    listProjectMemberships
+      .mockResolvedValueOnce(result([membership('student-1')], 'cursor-2'))
+      .mockResolvedValueOnce(result([membership('student-invalid')], 'cursor-2'))
+      .mockResolvedValueOnce(result([membership('student-2')]))
+    const scope = effectScope()
+    const state = scope.run(() => useProjectMemberships(ref('project-1')))
+    if (!state) throw new Error('项目成员查询未进入测试作用域')
+    await vi.waitFor(() => expect(state.hasMore).toBe(true))
+
+    await state.loadMore()
+    expect(state.memberships).toEqual({ kind: 'success', data: [membership('student-1')] })
+    expect(state.loadMoreError).toMatchObject({ code: 'PROJECT_MEMBERS_LIST_MORE_FAILED' })
+    expect(state.hasMore).toBe(true)
+    await state.loadMore()
+    expect(state.memberships).toEqual({ kind: 'success', data: [membership('student-1'), membership('student-2')] })
+    expect(state.loadMoreError).toBeNull()
+    expect(state.hasMore).toBe(false)
+    scope.stop()
+  })
+
   it('keeps loaded members when a later page fails and drops a page that arrives after a project switch', async () => {
     let resolveLate!: (value: unknown) => void
     listProjectMemberships

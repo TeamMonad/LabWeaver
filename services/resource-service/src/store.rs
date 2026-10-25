@@ -48,6 +48,9 @@ use subtle::ConstantTimeEq;
 use crate::capacity::GpuCatalogSeed;
 use crate::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
 
+#[path = "pagination.rs"]
+mod pagination;
+
 const REQUEST_SUBMITTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_SUBMITTED;
 const REQUEST_APPROVED_SUBJECT: &str = subjects::RESOURCE_REQUEST_APPROVED;
 const REQUEST_REJECTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_REJECTED;
@@ -260,8 +263,8 @@ struct ResourceRequestCursor {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SignedResourceRequestCursor {
-    cursor: ResourceRequestCursor,
+struct SignedResourceCursor<T> {
+    cursor: T,
     signature: String,
 }
 
@@ -304,23 +307,13 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     result.finalize().into()
 }
 
-fn encode_request_cursor(
-    cursor: &ResourceRequestCursor,
+pub(crate) fn encode_resource_cursor<T: Serialize>(
+    cursor: &T,
     key: &[u8],
 ) -> Result<String, ResourceStoreError> {
     let payload = serde_json::to_vec(cursor)?;
-    let signed = SignedResourceRequestCursor {
-        cursor: ResourceRequestCursor {
-            version: cursor.version,
-            key_id: cursor.key_id.clone(),
-            project_id: cursor.project_id,
-            course_id: cursor.course_id,
-            actor_id: cursor.actor_id,
-            states: cursor.states.clone(),
-            snapshot_at: cursor.snapshot_at,
-            created_at: cursor.created_at,
-            request_id: cursor.request_id,
-        },
+    let signed = SignedResourceCursor {
+        cursor,
         signature: URL_SAFE_NO_PAD.encode(hmac_sha256(key, &payload)),
     };
     let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&signed)?);
@@ -330,15 +323,12 @@ fn encode_request_cursor(
     Ok(encoded)
 }
 
-fn decode_request_cursor(
+pub(crate) fn decode_resource_cursor<T: serde::de::DeserializeOwned + Serialize>(
     value: &str,
-    project_id: ProjectId,
-    course_id: Option<contracts::CourseId>,
-    actor_id: Option<contracts::ActorId>,
-    states: &[String],
     current: &[u8],
     previous: Option<&[u8]>,
-) -> Result<ResourceRequestCursor, ResourceStoreError> {
+    key_id: fn(&T) -> &str,
+) -> Result<T, ResourceStoreError> {
     if value.is_empty() || value.len() > MAX_CURSOR_LENGTH {
         return Err(ResourceStoreError::InvalidCursor);
     }
@@ -348,15 +338,16 @@ fn decode_request_cursor(
     if URL_SAFE_NO_PAD.encode(&bytes) != value {
         return Err(ResourceStoreError::InvalidCursor);
     }
-    let signed: SignedResourceRequestCursor =
+    let signed: SignedResourceCursor<T> =
         serde_json::from_slice(&bytes).map_err(|_| ResourceStoreError::InvalidCursor)?;
     if serde_json::to_vec(&signed).map_err(|_| ResourceStoreError::InvalidCursor)? != bytes {
         return Err(ResourceStoreError::InvalidCursor);
     }
+    let key_id = key_id(&signed.cursor);
     let current_id = cursor_key_id("resource", current);
-    let key = if signed.cursor.key_id == current_id {
+    let key = if key_id == current_id {
         Some(current)
-    } else if previous.is_some_and(|key| signed.cursor.key_id == cursor_key_id("resource", key)) {
+    } else if previous.is_some_and(|key| key_id == cursor_key_id("resource", key)) {
         previous
     } else {
         None
@@ -373,15 +364,36 @@ fn decode_request_cursor(
                 .as_slice()
                 .ct_eq(hmac_sha256(key, &payload).as_slice()),
         )
-        || signed.cursor.version != RESOURCE_REQUEST_CURSOR_VERSION
-        || signed.cursor.project_id != project_id
-        || signed.cursor.course_id != course_id
-        || signed.cursor.actor_id != actor_id
-        || signed.cursor.states != states
     {
         return Err(ResourceStoreError::InvalidCursor);
     }
     Ok(signed.cursor)
+}
+
+fn decode_request_cursor(
+    value: &str,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
+    actor_id: Option<contracts::ActorId>,
+    states: &[String],
+    current: &[u8],
+    previous: Option<&[u8]>,
+) -> Result<ResourceRequestCursor, ResourceStoreError> {
+    let cursor: ResourceRequestCursor = decode_resource_cursor(
+        value,
+        current,
+        previous,
+        |cursor: &ResourceRequestCursor| &cursor.key_id,
+    )?;
+    if cursor.version != RESOURCE_REQUEST_CURSOR_VERSION
+        || cursor.project_id != project_id
+        || cursor.course_id != course_id
+        || cursor.actor_id != actor_id
+        || cursor.states != states
+    {
+        return Err(ResourceStoreError::InvalidCursor);
+    }
+    Ok(cursor)
 }
 
 impl PgResourceStore {
@@ -809,34 +821,6 @@ impl PgResourceStore {
         Ok(request)
     }
 
-    /// Lists every request for a platform administrator. The HTTP boundary must enforce the
-    /// global administrator policy before invoking this method.
-    pub async fn list_all_requests(&self) -> Result<Vec<ResourceRequest>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.resource_requests \
-             ORDER BY created_at, request_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_request(row.try_get("contract")?))
-            .collect()
-    }
-
-    /// Lists every lease for a platform administrator. The HTTP boundary must enforce the
-    /// global administrator policy before invoking this method.
-    pub async fn list_all_leases(&self) -> Result<Vec<ResourceLease>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.resource_leases \
-             ORDER BY created_at, lease_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_lease(row.try_get("contract")?))
-            .collect()
-    }
-
     /// Lists project requests using an authorization predicate and stable keyset pagination.
     pub async fn list_project_requests_page(
         &self,
@@ -922,7 +906,7 @@ impl PgResourceStore {
             .collect::<Result<Vec<_>, ResourceStoreError>>()?;
         let next_cursor = if has_more {
             let (last, created_at) = decoded.last().ok_or(ResourceStoreError::InvalidCursor)?;
-            Some(encode_request_cursor(
+            Some(encode_resource_cursor(
                 &ResourceRequestCursor {
                     version: RESOURCE_REQUEST_CURSOR_VERSION,
                     key_id: cursor_key_id("resource", self.cursor_signing_key_current.as_slice()),
@@ -941,100 +925,6 @@ impl PgResourceStore {
         };
         let items = decoded.drain(..).map(|(request, _)| request).collect();
         Ok(ResourceRequestPage { items, next_cursor })
-    }
-
-    /// Lists only requests owned by the authenticated actor. The database predicate is part of
-    /// Lists only requests owned by the authenticated actor. The database predicate is part of
-    /// the authority boundary; callers cannot fetch another actor's projections by filtering the
-    /// returned JSON in memory.
-    pub async fn list_owned(
-        &self,
-        actor_id: contracts::ActorId,
-        project_id: ProjectId,
-        course_id: Option<contracts::CourseId>,
-    ) -> Result<Vec<ResourceRequest>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.resource_requests \
-             WHERE requester_id=$1 AND project_id=$2 \
-               AND ($3::uuid IS NULL OR course_id=$3) \
-             ORDER BY created_at, request_id",
-        )
-        .bind(actor_id.as_uuid())
-        .bind(project_id.as_uuid())
-        .bind(course_id.map(contracts::CourseId::as_uuid))
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_request(row.try_get("contract")?))
-            .collect()
-    }
-
-    /// Lists all requests in one course for an Access-authorized platform
-    /// administrator. The caller must enforce the course authorization before
-    /// invoking this method.
-    pub async fn list_for_project(
-        &self,
-        project_id: ProjectId,
-        course_id: Option<contracts::CourseId>,
-    ) -> Result<Vec<ResourceRequest>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.resource_requests \
-             WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) \
-             ORDER BY created_at, request_id",
-        )
-        .bind(project_id.as_uuid())
-        .bind(course_id.map(contracts::CourseId::as_uuid))
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_request(row.try_get("contract")?))
-            .collect()
-    }
-
-    /// Lists leases owned by one actor in one course without in-memory scope
-    /// filtering.
-    pub async fn list_owned_leases(
-        &self,
-        actor_id: contracts::ActorId,
-        project_id: ProjectId,
-        course_id: Option<contracts::CourseId>,
-    ) -> Result<Vec<ResourceLease>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT l.contract FROM resource.resource_leases l \
-             JOIN resource.resource_requests r ON r.request_id=l.request_id \
-             WHERE r.project_id=$1 AND r.requester_id=$2 \
-               AND ($3::uuid IS NULL OR r.course_id=$3) \
-             ORDER BY l.created_at,l.lease_id",
-        )
-        .bind(project_id.as_uuid())
-        .bind(actor_id.as_uuid())
-        .bind(course_id.map(contracts::CourseId::as_uuid))
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_lease(row.try_get("contract")?))
-            .collect()
-    }
-
-    /// Lists all leases in one course for an Access-authorized administrator.
-    pub async fn list_leases_for_project(
-        &self,
-        project_id: ProjectId,
-        course_id: Option<contracts::CourseId>,
-    ) -> Result<Vec<ResourceLease>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT l.contract FROM resource.resource_leases l \
-             JOIN resource.resource_requests r ON r.request_id=l.request_id \
-             WHERE r.project_id=$1 AND ($2::uuid IS NULL OR r.course_id=$2) \
-             ORDER BY l.created_at,l.lease_id",
-        )
-        .bind(project_id.as_uuid())
-        .bind(course_id.map(contracts::CourseId::as_uuid))
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_lease(row.try_get("contract")?))
-            .collect()
     }
 
     /// Records one immutable provider meter interval.
@@ -1508,19 +1398,6 @@ impl PgResourceStore {
         Ok(Some(charge))
     }
 
-    /// Lists every immutable rate version, newest revisions first.
-    pub async fn list_rates(&self) -> Result<Vec<ResourceRate>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.resource_rates
-             ORDER BY effective_from DESC, revision DESC, rate_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_rate(row.try_get("contract")?))
-            .collect()
-    }
-
     /// Creates one immutable rate version. Overlapping effective windows for the same dimension
     /// are rejected so a charge never depends on an arbitrary row ordering.
     #[allow(clippy::too_many_lines)]
@@ -1843,19 +1720,6 @@ impl PgResourceStore {
         };
         transaction.commit().await?;
         Ok(result)
-    }
-
-    /// Lists the active and inactive GPU catalog revisions.
-    pub async fn list_gpu_catalog(&self) -> Result<Vec<GpuCatalogEntry>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.gpu_catalog_entries
-             ORDER BY class, mode, revision DESC, entry_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_gpu_catalog(row.try_get("contract")?))
-            .collect()
     }
 
     /// Lists the durable GPU reservations that still own capacity.
@@ -2688,57 +2552,6 @@ impl PgResourceStore {
         };
         transaction.commit().await?;
         Ok(budget)
-    }
-
-    /// Lists calculated charges for one project in creation order.
-    pub async fn list_charges(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Vec<ResourceCharge>, ResourceStoreError> {
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.resource_charges
-             WHERE project_id=$1 ORDER BY created_at, charge_id",
-        )
-        .bind(project_id.as_uuid())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| decode_charge(row.try_get("contract")?))
-            .collect()
-    }
-
-    /// Lists bounded usage observations for one project in newest-first order.
-    pub async fn list_usage(
-        &self,
-        project_id: ProjectId,
-        page: u32,
-        page_size: u16,
-        offset: u32,
-    ) -> Result<contracts::resource::ResourceUsagePage, ResourceStoreError> {
-        let limit = i64::from(page_size) + 1;
-        let rows = sqlx::query(
-            "SELECT contract FROM resource.resource_usage_records
-             WHERE project_id=$1
-             ORDER BY observed_at DESC, usage_record_id DESC
-             LIMIT $2 OFFSET $3",
-        )
-        .bind(project_id.as_uuid())
-        .bind(limit)
-        .bind(i64::from(offset))
-        .fetch_all(&self.pool)
-        .await?;
-        let has_more = rows.len() > usize::from(page_size);
-        let items = rows
-            .into_iter()
-            .take(usize::from(page_size))
-            .map(|row| decode_usage(row.try_get("contract")?))
-            .collect::<Result<Vec<_>, ResourceStoreError>>()?;
-        Ok(contracts::resource::ResourceUsagePage {
-            items,
-            page,
-            page_size,
-            has_more,
-        })
     }
 
     /// Appends an administrator adjustment without mutating the original charge.

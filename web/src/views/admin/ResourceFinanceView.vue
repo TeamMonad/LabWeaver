@@ -422,7 +422,7 @@
               class="usage-empty"
               role="status"
             >
-              {{ usageEmptyText(data) }}
+              {{ usageEmptyText() }}
             </p>
             <ul
               v-else
@@ -460,24 +460,24 @@
               </li>
             </ul>
             <div
-              v-if="data.items.length > 0 || data.page > 1 || data.hasMore"
+              v-if="data.items.length > 0 || finance.usagePage > 1 || finance.usageHasNextPage"
               class="usage-pagination"
               aria-label="项目用量分页"
             >
               <button
                 type="button"
                 class="outlined-button small"
-                :disabled="data.page <= 1 || finance.usage.kind === 'loading'"
-                @click="finance.loadUsagePage(data.page - 1)"
+                :disabled="finance.usagePage <= 1 || finance.usage.kind === 'loading'"
+                @click="finance.loadUsagePage(finance.usagePage - 1)"
               >
                 上一页
               </button>
-              <span>第 {{ data.page }} 页</span>
+              <span>第 {{ finance.usagePage }} 页</span>
               <button
                 type="button"
                 class="outlined-button small"
-                :disabled="!data.hasMore || finance.usage.kind === 'loading'"
-                @click="finance.loadUsagePage(data.page + 1)"
+                :disabled="!finance.usageHasNextPage || finance.usage.kind === 'loading'"
+                @click="finance.loadUsagePage(finance.usagePage + 1)"
               >
                 下一页
               </button>
@@ -667,6 +667,31 @@
                 </div>
               </li>
             </ul>
+            <div class="list-more">
+              <button
+                v-if="finance.chargesNextCursor"
+                type="button"
+                class="outlined-button small"
+                :disabled="finance.chargesLoadingMore"
+                @click="finance.loadMoreCharges()"
+              >
+                {{ finance.chargesLoadingMore ? '加载中…' : '加载更多费用' }}
+              </button>
+              <span
+                v-else
+                class="list-more-end"
+              >已显示全部 {{ data.length }} 条费用记录</span>
+            </div>
+            <DiagnosticBanner
+              v-if="finance.chargesMoreDiagnostic"
+              :code="finance.chargesMoreDiagnostic.code"
+              :request-id="finance.chargesMoreDiagnostic.requestId"
+              :next-step="finance.chargesMoreDiagnostic.nextStep"
+              :message="finance.chargesMoreDiagnostic.message"
+              :retryable="finance.chargesMoreDiagnostic.retryable"
+              severity="warning"
+              @retry="finance.loadMoreCharges()"
+            />
           </template>
         </AsyncStateView>
 
@@ -763,7 +788,7 @@ import { useProjectResourceFinance, type ResourceCharge } from '@/composables/us
 import { canonicalRateAmount, equivalentRatePrice, modelTokenUnits, rateDisplayUnits, rateVersionState, validRateBinding } from '@/utils/resourceRates'
 import { billingUnitLabel } from '@/composables/useProjectResourceCostEstimate'
 import { canonicalCreditsAmount } from '@/composables/useProjectCredits'
-import { listResourceGpuCatalog } from '@/generated/contracts'
+import { fetchAllGpuCatalogEntries } from '@/utils/resourceLists'
 import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import { useResourceRates } from '@/composables/useResourceRates'
 import { useProjects } from '@/composables/useProjects'
@@ -773,7 +798,6 @@ import type {
   GpuCatalogEntrySchema,
   ResourceBillingUnit,
   ResourceRateSchema,
-  ResourceUsagePageSchema,
   ResourceUsageQuantities,
   ResourceUsageRecord,
 } from '@/generated/contracts'
@@ -867,10 +891,8 @@ const gpuModeDescription = computed(() => selectedGpu.value ? ({
 async function loadCatalog() {
   catalog.value = { kind: 'loading', message: '加载 GPU 类型…' }
   try {
-    const result = await listResourceGpuCatalog()
-    if (result.error) throw result.error
     const options = new Map<string, GpuCatalogEntrySchema>()
-    for (const entry of result.data) {
+    for (const entry of await fetchAllGpuCatalogEntries()) {
       if (!entry.active) continue
       const key = gpuOptionKey(entry)
       if (!options.has(key) || options.get(key)!.revision < entry.revision) options.set(key, entry)
@@ -1021,9 +1043,9 @@ function usageIntervalLabel(record: ResourceUsageRecord) {
   return `${formatTimestamp(record.measuredFrom)} 至 ${formatTimestamp(record.measuredUntil)}`
 }
 
-function usageEmptyText(page: ResourceUsagePageSchema) {
-  if (page.page === 1 && !page.hasMore) return '该项目暂无用量记录。'
-  return `本页没有项目用量记录。${page.hasMore ? '可查看下一页。' : ''}`
+function usageEmptyText() {
+  if (finance.usagePage === 1 && !finance.usageHasNextPage) return '该项目暂无用量记录。'
+  return `本页没有项目用量记录。${finance.usageHasNextPage ? '可查看下一页。' : ''}`
 }
 
 function environmentLabel(environmentId: string) {
@@ -1218,6 +1240,8 @@ onMounted(() => { void rates.load(); void loadCatalog() })
 .usage-quantities { color: var(--md-sys-color-on-surface); }
 .usage-empty { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
 .usage-pagination { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.list-more { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-3); }
+.list-more-end { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .advanced-details { display: grid; gap: var(--space-1); margin-top: 2px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .advanced-details summary { color: var(--md-sys-color-primary); cursor: pointer; }
 .budget-card, .charges-card { display: grid; gap: var(--space-5); padding: var(--space-5); }

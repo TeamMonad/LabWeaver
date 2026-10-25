@@ -74,7 +74,7 @@
     <AsyncStateView
       :state="credits.ledger"
       empty-text="该项目还没有 Credits 账目。"
-      @retry="credits.loadLedger(credits.ledgerPage)"
+      @retry="credits.loadLedger('current')"
     >
       <template #success="{ data }">
         <ul
@@ -119,17 +119,17 @@
           <button
             type="button"
             class="outlined-button small"
-            :disabled="data.page <= 1 || credits.acting !== null"
-            @click="credits.loadLedger(data.page - 1)"
+            :disabled="credits.ledgerPage <= 1 || credits.acting !== null"
+            @click="credits.loadLedger('previous')"
           >
             上一页
           </button>
-          <span>第 {{ data.page }} 页</span>
+          <span>第 {{ credits.ledgerPage }} 页</span>
           <button
             type="button"
             class="outlined-button small"
-            :disabled="!data.hasMore || credits.acting !== null"
-            @click="credits.loadLedger(data.page + 1)"
+            :disabled="!data.nextCursor || credits.acting !== null"
+            @click="credits.loadLedger('next')"
           >
             下一页
           </button>
@@ -146,7 +146,7 @@
     <AsyncStateView
       :state="credits.holds"
       empty-text="该项目暂无 Credits 预占。"
-      @retry="credits.loadHolds(credits.holdsPage)"
+      @retry="credits.loadHolds('current')"
     >
       <template #success="{ data }">
         <ul
@@ -193,17 +193,17 @@
           <button
             type="button"
             class="outlined-button small"
-            :disabled="data.page <= 1 || credits.acting !== null"
-            @click="credits.loadHolds(data.page - 1)"
+            :disabled="credits.holdsPage <= 1 || credits.acting !== null"
+            @click="credits.loadHolds('previous')"
           >
             上一页
           </button>
-          <span>第 {{ data.page }} 页</span>
+          <span>第 {{ credits.holdsPage }} 页</span>
           <button
             type="button"
             class="outlined-button small"
-            :disabled="!data.hasMore || credits.acting !== null"
-            @click="credits.loadHolds(data.page + 1)"
+            :disabled="!data.nextCursor || credits.acting !== null"
+            @click="credits.loadHolds('next')"
           >
             下一页
           </button>

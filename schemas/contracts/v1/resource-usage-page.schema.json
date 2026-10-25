@@ -243,34 +243,23 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Bounded project usage view. `has_more` is true when another page exists;\ncallers never need an unbounded usage query.",
+  "description": "Stable project usage history; continue with `next_cursor` until it is absent.",
   "properties": {
-    "hasMore": {
-      "type": "boolean"
-    },
     "items": {
       "items": {
         "$ref": "#/$defs/ResourceUsageRecord"
       },
       "type": "array"
     },
-    "page": {
-      "format": "uint32",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "pageSize": {
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0,
-      "type": "integer"
+    "nextCursor": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
-    "items",
-    "page",
-    "pageSize",
-    "hasMore"
+    "items"
   ],
   "title": "ResourceUsagePage",
   "type": "object"

@@ -77,6 +77,23 @@ Evaluation release 列表按 `published_at DESC, release_id DESC` 排序；学�
 也不会因为删除上一页末项而重复或跳过仍符合过滤条件的记录。状态或权限改变后，每页采用当前权限，
 不承诺重放已失效的记录。Agent 历史游标同样保留 PostgreSQL 微秒精度，公开 DTO 仍使用毫秒。
 
+## Resource 管理、目录与账务列表
+
+以下 GET 接口统一使用 `cursor` 与 `limit`（默认 50，范围 1–100），返回 `{items, nextCursor}`：
+
+- `/api/v1/resource-requests`：平台管理员的全局申请。
+- `/api/v1/resource-leases`：平台管理员的全局租约。
+- `/api/v1/projects/{projectId}/resource-leases`：项目租约；保留可选 `courseId`，非管理员仅可见本人申请的租约。
+- `/api/v1/resource/rates`、`/api/v1/resource/gpu-catalog`：已授权调用者可读的费率/GPU 目录历史。
+- `/api/v1/projects/{projectId}/charges`、`/api/v1/projects/{projectId}/usage`：平台管理员的项目费用与用量。
+- `/api/v1/projects/{projectId}/credits/ledger`、`/api/v1/projects/{projectId}/credits/holds`：当前项目成员或平台管理员可读的账目与预占。
+
+这些接口不再返回无界数组，也不接受 `page`/`pageSize`。各集合按 Resource0024 生成的不可变唯一 `ordinal DESC` 排序；目录的显示分组或费率生效时间不作为续页键。迁移时已有记录获得稳定序号，但不承诺用该序号还原历史提交时序。每页在 SQL `LIMIT` 前应用项目、课程和 owner 过滤，并读取 `limit+1` 判断是否确有下一页。末页返回 `nextCursor=null`，不额外提供空续页。
+
+客户端只把显式 `nextCursor=null` 视为末页；续页值必须为非空字符串。缺失游标、空字符串、布尔值、数值、数组或对象均为无效响应，显示中文诊断并拒绝整次集合读取，不把已读的部分费率或 GPU 目录当作完整结果。重复游标同样报错，不循环读取或静默终止。
+
+复用 Resource 已有 canonical base64url/HMAC-SHA256 编码、当前/上一把签名密钥和轮换规则。签名绑定集合、项目、课程和 owner 范围，篡改或换范围重用游标返回 `400/LW_RESOURCE_REQUEST_CURSOR_INVALID`；每次查询仍验证真实身份及当前权限。游标保存序号，不回查上一页锚点。删除锚点、同时间戳、状态更新不改变剩余行的续页位置。并发插入分配的新序号排在边界之前，要刷新首页才能看到；这不是跨 HTTP 请求的事务快照，不承诺包含尚未提交的并发写。账务流水仅做只读分页，不合并、不重算、不删除原有账目。项目申请列表保持上一节已有的时间+ID快照游标，不改变其状态过滤契约。
+
 ## Environment 清理身份检查点
 
 持久化及内部 NATS 使用的 `EnvironmentOperation` 包含可选 `cleanupTarget`：namespace、原 UID

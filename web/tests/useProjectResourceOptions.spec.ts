@@ -8,17 +8,21 @@ import {
 } from '@/composables/useProjectResourceOptions'
 
 const mocks = vi.hoisted(() => ({
-  apiGet: vi.fn(),
   fetchEnvironmentTemplateReleases: vi.fn(),
   listEnvironments: vi.fn(),
+  listResourceGpuCatalog: vi.fn(),
+  listResourceRates: vi.fn(),
 }))
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
-  return { ...actual, listEnvironments: mocks.listEnvironments }
+  return {
+    ...actual,
+    listEnvironments: mocks.listEnvironments,
+    listResourceGpuCatalog: mocks.listResourceGpuCatalog,
+    listResourceRates: mocks.listResourceRates,
+  }
 })
-
-vi.mock('@/api/client', () => ({ apiClient: { get: mocks.apiGet } }))
 
 vi.mock('@/composables/useEnvironmentTemplateReleases', () => ({
   fetchEnvironmentTemplateReleases: mocks.fetchEnvironmentTemplateReleases,
@@ -49,8 +53,13 @@ function environmentPage(items: unknown[], nextCursor: string | null = null) {
   return { data: { items, nextCursor } as never, error: undefined as never }
 }
 
+function cursorPage(items: unknown[], nextCursor: string | null = null) {
+  return { data: { items, nextCursor }, error: undefined }
+}
+
 beforeEach(() => {
-  mocks.apiGet.mockReset()
+  mocks.listResourceGpuCatalog.mockReset()
+  mocks.listResourceRates.mockReset()
   mocks.fetchEnvironmentTemplateReleases.mockReset()
   mocks.listEnvironments.mockReset()
 })
@@ -117,7 +126,8 @@ describe('useProjectResourceOptions environments', () => {
       .mockResolvedValueOnce(environmentPage([environment('environment-1')], 'cursor-2'))
       .mockResolvedValueOnce(environmentPage([environment('environment-2')]))
     mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({ items: [] })
-    mocks.apiGet.mockResolvedValue({ data: [], error: undefined })
+    mocks.listResourceGpuCatalog.mockResolvedValue(cursorPage([]))
+    mocks.listResourceRates.mockResolvedValue(cursorPage([]))
 
     const scope = effectScope()
     const projectId = ref<string | null>('project-1')
@@ -149,7 +159,8 @@ describe('useProjectResourceOptions environments', () => {
       .mockResolvedValueOnce(environmentPage([environment('environment-1')], 'cursor-2'))
       .mockResolvedValueOnce({ data: undefined, error: pageError })
     mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({ items: [] })
-    mocks.apiGet.mockResolvedValue({ data: [], error: undefined })
+    mocks.listResourceGpuCatalog.mockResolvedValue(cursorPage([]))
+    mocks.listResourceRates.mockResolvedValue(cursorPage([]))
 
     const scope = effectScope()
     const projectId = ref<string | null>('project-1')
@@ -179,7 +190,8 @@ describe('useProjectResourceOptions environments', () => {
         { ...base, id: 'release-experiment', version: 3, purpose: 'experiment' },
       ],
     })
-    mocks.apiGet.mockResolvedValue({ data: [], error: undefined })
+    mocks.listResourceGpuCatalog.mockResolvedValue(cursorPage([]))
+    mocks.listResourceRates.mockResolvedValue(cursorPage([]))
 
     const scope = effectScope()
     let state!: ReturnType<typeof useProjectResourceOptions>
@@ -202,7 +214,8 @@ describe('useProjectResourceOptions environments', () => {
         { ...base, id: 'release-experiment-withdrawn', version: 1, purpose: 'experiment', withdrawal: { reasonCode: 'TEACHER_WITHDRAWN' } },
       ],
     })
-    mocks.apiGet.mockResolvedValue({ data: [], error: undefined })
+    mocks.listResourceGpuCatalog.mockResolvedValue(cursorPage([]))
+    mocks.listResourceRates.mockResolvedValue(cursorPage([]))
 
     const scope = effectScope()
     let state!: ReturnType<typeof useProjectResourceOptions>
@@ -223,17 +236,62 @@ describe('useProjectResourceOptions environments', () => {
     const gpu = rate({ id: 'rate-gpu' })
     const build = rate({ id: 'rate-build', unit: 'build_second', unitQuantity: 3600, gpuClass: null, gpuMode: null, builderBinding: 'buildkit-primary-v1' })
     const model = rate({ id: 'rate-model', unit: 'llm_output_token', unitQuantity: 1_000_000, gpuClass: null, gpuMode: null, modelBinding: 'claude-sonnet-4', maxPreauthorization: '2.000000' })
-    mocks.apiGet.mockImplementation(({ url }: { url: string }) => Promise.resolve(url.endsWith('/resource/rates')
-      ? { data: [cpu, build, gpu, model], error: undefined }
-      : { data: [], error: undefined }))
+    mocks.listResourceGpuCatalog.mockResolvedValue(cursorPage([]))
+    mocks.listResourceRates
+      .mockResolvedValueOnce(cursorPage([cpu, build], 'rates-2'))
+      .mockResolvedValueOnce(cursorPage([gpu, model]))
 
     const scope = effectScope()
-    let state!: ReturnType<typeof useProjectResourceOptions>
-    scope.run(() => { state = useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>(null)) })
+    const state = scope.run(() => useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>(null)))
+    if (!state) throw new Error('useProjectResourceOptions did not run in the effect scope')
 
     await vi.waitFor(() => expect(state.rates.kind).toBe('success'))
     expect(state.rates.kind === 'success' ? state.rates.data.map((item) => item.id) : []).toEqual(['rate-cpu', 'rate-gpu'])
+    expect(mocks.listResourceRates.mock.calls).toEqual([[{ query: { limit: 100 } }], [{ query: { limit: 100, cursor: 'rates-2' } }]])
     expect(state.gpuRateSelection({ id: 'gpu-1', class: 'a100', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }).rate?.id).toBe('rate-gpu')
+    scope.stop()
+  })
+
+  it.each([false, 0, true, undefined, {}, [], ''])('rejects malformed catalog continuation %j without offering partial options', async (nextCursor) => {
+    mocks.listEnvironments.mockResolvedValue(environmentPage([]))
+    mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({ items: [] })
+    mocks.listResourceRates
+      .mockResolvedValueOnce(cursorPage([rate({ id: 'rate-first' })], 'rates-2'))
+      .mockResolvedValueOnce({ data: { items: [rate({ id: 'rate-partial' })], nextCursor } })
+    mocks.listResourceGpuCatalog
+      .mockResolvedValueOnce(cursorPage([{ id: 'gpu-first', class: 'a100', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }], 'gpu-2'))
+      .mockResolvedValueOnce({ data: { items: [{ id: 'gpu-partial', class: 'a100', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }], nextCursor } })
+
+    const scope = effectScope()
+    const state = scope.run(() => useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>(null)))
+    if (!state) throw new Error('useProjectResourceOptions did not run in the effect scope')
+
+    await vi.waitFor(() => {
+      expect(state.rates).toMatchObject({ kind: 'error', diagnostic: { code: 'RESOURCE_RATES_LOAD_FAILED', message: '加载资源费率失败' } })
+      expect(state.catalog).toMatchObject({ kind: 'error', diagnostic: { code: 'GPU_CATALOG_LOAD_FAILED', message: '加载 GPU 目录失败' } })
+    })
+    expect(state.rates).not.toHaveProperty('data')
+    expect(state.catalog).not.toHaveProperty('data')
+    expect(mocks.listResourceRates).toHaveBeenCalledTimes(2)
+    expect(mocks.listResourceGpuCatalog).toHaveBeenCalledTimes(2)
+    scope.stop()
+  })
+
+  it('fails rate and GPU options closed on a repeated cursor instead of offering a partial select', async () => {
+    mocks.listEnvironments.mockResolvedValue(environmentPage([]))
+    mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({ items: [] })
+    mocks.listResourceRates.mockImplementation(() => Promise.resolve(cursorPage([rate({ id: 'rate-loop' })], 'rates-loop')))
+    mocks.listResourceGpuCatalog.mockImplementation(() => Promise.resolve(cursorPage([{ id: 'gpu-loop', class: 'a100', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }], 'gpu-loop')))
+
+    const scope = effectScope()
+    const state = scope.run(() => useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>(null)))
+    if (!state) throw new Error('useProjectResourceOptions did not run in the effect scope')
+
+    await vi.waitFor(() => expect(state.rates.kind).toBe('error'))
+    expect(state.rates).toMatchObject({ kind: 'error', diagnostic: { code: 'RESOURCE_RATES_LOAD_FAILED', message: '加载资源费率失败' } })
+    expect(state.catalog).toMatchObject({ kind: 'error', diagnostic: { code: 'GPU_CATALOG_LOAD_FAILED', message: '加载 GPU 目录失败' } })
+    expect(mocks.listResourceRates).toHaveBeenCalledTimes(2)
+    expect(mocks.listResourceGpuCatalog).toHaveBeenCalledTimes(2)
     scope.stop()
   })
 })

@@ -1,4 +1,4 @@
-import { onScopeDispose, ref, watch, type Ref } from 'vue'
+import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
 import {
   createCreditAdminOperation,
   getProjectCredits,
@@ -141,6 +141,12 @@ export type CreditAdminSubmitResult = 'accepted' | 'failed' | 'stale'
 
 const NOT_PERSISTED_NEXT_STEP = '浏览器无法保存这笔操作的重试记录：在本页点击“重新提交”仍会沿用原请求，但刷新或关闭页面后无法安全重试，请先在账目中确认是否已入账。'
 
+/** Rows per ledger/holds page; the server accepts 1..100. */
+export const CREDITS_PAGE_LIMIT = 25
+
+/** Which page of a cursor list to show next; cursors are forward-only, so going back replays an earlier cursor. */
+export type CreditsPageMove = 'current' | 'next' | 'previous'
+
 /**
  * Project Credits account, ledger and holds, plus platform-admin writes.
  *
@@ -156,14 +162,18 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
   const account = ref<AsyncState<CreditAccountSchema>>({ kind: 'idle' })
   const ledger = ref<AsyncState<CreditLedgerPageSchema>>({ kind: 'idle' })
   const holds = ref<AsyncState<CreditHoldPageSchema>>({ kind: 'idle' })
-  const ledgerPage = ref(1)
-  const holdsPage = ref(1)
-  const pageSize = ref(25)
+  /** Cursors that reached the shown page; empty means page 1. The total page count is never known. */
+  const ledgerTrail = ref<string[]>([])
+  const holdsTrail = ref<string[]>([])
+  const ledgerPage = computed(() => ledgerTrail.value.length + 1)
+  const holdsPage = computed(() => holdsTrail.value.length + 1)
   const acting = ref<string | null>(null)
   const outcome = ref<{ kind: 'success' | 'error'; diagnostic: DiagnosticViewModel } | null>(null)
   /** Unconfirmed admin operations of this actor in this project, restored after a refresh. */
   const pendingOperations = ref<PendingCreditOperation[]>([])
   let loadGeneration = 0
+  let ledgerRequest = 0
+  let holdsRequest = 0
   /** Changes with the project or actor; a write answer for an older context only updates storage. */
   let context = 0
   let disposed = false
@@ -185,22 +195,33 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
       : []
   }
 
-  async function loadLedgerPage(id: string, page: number, generation: number) {
+  /** The trail to request for a move, or null when that page does not exist. */
+  function moveTrail(trail: string[], state: AsyncState<{ nextCursor?: string | null }>, move: CreditsPageMove): string[] | null {
+    if (move === 'current') return trail
+    if (move === 'previous') return trail.length ? trail.slice(0, -1) : null
+    const nextCursor = state.kind === 'success' ? state.data.nextCursor : null
+    return nextCursor ? [...trail, nextCursor] : null
+  }
+
+  async function loadLedgerPage(id: string, trail: string[], generation: number) {
+    const request = ++ledgerRequest
     ledger.value = { kind: 'loading', message: '加载 Credits 账目…' }
+    const cursor = trail[trail.length - 1]
     try {
       const result = await listProjectCreditLedger({
         path: { projectId: id },
-        query: { page, pageSize: pageSize.value },
+        query: { limit: CREDITS_PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
       })
-      if (!current(id, generation)) return
+      if (!current(id, generation) || request !== ledgerRequest) return
       if (result.error) throw result.error
       const pageData = result.data
-      ledger.value = pageData.items.length || pageData.page > 1
+      ledgerTrail.value = trail
+      ledger.value = pageData.items.length || trail.length
         ? { kind: 'success', data: pageData }
         : { kind: 'empty' }
-      ledgerPage.value = pageData.page
     } catch (error) {
-      if (!current(id, generation)) return
+      if (!current(id, generation) || request !== ledgerRequest) return
+      ledgerTrail.value = trail
       ledger.value = {
         kind: 'error',
         diagnostic: diagnosticFromError(error, 'CREDITS_LEDGER_LOAD_FAILED', '无法加载 Credits 账目。'),
@@ -208,22 +229,25 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
     }
   }
 
-  async function loadHoldsPage(id: string, page: number, generation: number) {
+  async function loadHoldsPage(id: string, trail: string[], generation: number) {
+    const request = ++holdsRequest
     holds.value = { kind: 'loading', message: '加载 Credits 预占…' }
+    const cursor = trail[trail.length - 1]
     try {
       const result = await listProjectCreditHolds({
         path: { projectId: id },
-        query: { page, pageSize: pageSize.value },
+        query: { limit: CREDITS_PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
       })
-      if (!current(id, generation)) return
+      if (!current(id, generation) || request !== holdsRequest) return
       if (result.error) throw result.error
       const pageData = result.data
-      holds.value = pageData.items.length || pageData.page > 1
+      holdsTrail.value = trail
+      holds.value = pageData.items.length || trail.length
         ? { kind: 'success', data: pageData }
         : { kind: 'empty' }
-      holdsPage.value = pageData.page
     } catch (error) {
-      if (!current(id, generation)) return
+      if (!current(id, generation) || request !== holdsRequest) return
+      holdsTrail.value = trail
       holds.value = {
         kind: 'error',
         diagnostic: diagnosticFromError(error, 'CREDITS_HOLDS_LOAD_FAILED', '无法加载 Credits 预占。'),
@@ -235,17 +259,19 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
     const id = projectId.value
     const generation = ++loadGeneration
     if (options.clearOutcome !== false) outcome.value = null
+    // A cursor belongs to the project that issued it; every (re)load starts at page 1.
+    ledgerTrail.value = []
+    holdsTrail.value = []
     if (!id) {
       account.value = { kind: 'idle' }
       ledger.value = { kind: 'idle' }
       holds.value = { kind: 'idle' }
-      ledgerPage.value = 1
-      holdsPage.value = 1
       return
     }
     account.value = { kind: 'loading', message: '加载 Credits 账户…' }
-    ledgerPage.value = 1
-    holdsPage.value = 1
+    // The previous page's nextCursor must not be followed against the reset trail.
+    ledger.value = { kind: 'loading', message: '加载 Credits 账目…' }
+    holds.value = { kind: 'loading', message: '加载 Credits 预占…' }
     try {
       const result = await getProjectCredits({ path: { projectId: id } })
       if (!current(id, generation)) return
@@ -259,21 +285,23 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
       }
     }
     await Promise.all([
-      loadLedgerPage(id, 1, generation),
-      loadHoldsPage(id, 1, generation),
+      loadLedgerPage(id, [], generation),
+      loadHoldsPage(id, [], generation),
     ])
   }
 
-  async function loadLedger(page: number) {
+  async function loadLedger(move: CreditsPageMove) {
     const id = projectId.value
     if (!id) return
-    await loadLedgerPage(id, page, loadGeneration)
+    const trail = moveTrail(ledgerTrail.value, ledger.value, move)
+    if (trail) await loadLedgerPage(id, trail, loadGeneration)
   }
 
-  async function loadHolds(page: number) {
+  async function loadHolds(move: CreditsPageMove) {
     const id = projectId.value
     if (!id) return
-    await loadHoldsPage(id, page, loadGeneration)
+    const trail = moveTrail(holdsTrail.value, holds.value, move)
+    if (trail) await loadHoldsPage(id, trail, loadGeneration)
   }
 
   async function submitAdminOperation(input: CreditAdminFormInput): Promise<CreditAdminSubmitResult> {
@@ -402,7 +430,6 @@ export function useProjectCredits(projectId: Ref<string | null>, actorId: Ref<st
     holds,
     ledgerPage,
     holdsPage,
-    pageSize,
     acting,
     outcome,
     pendingOperations,

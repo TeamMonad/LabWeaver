@@ -165,8 +165,8 @@ async fn exact_one_hour_boundary_releases_once_preserves_unknown_and_never_reset
     assert_eq!(account.available, amount("10.000000"));
     assert_eq!(account.reserved, FixedDecimal::zero());
     assert_eq!(account.unknown_count, 1);
-    let hold = credits
-        .holds(project, 1, 100, 0)
+    let hold = resource_service::store::PgResourceStore::new(pool.clone())
+        .list_credit_holds(project, &contracts::http::ResourceListQuery::default())
         .await?
         .items
         .into_iter()
@@ -293,8 +293,8 @@ async fn migration_recovers_the_first_immutable_unknown_fact_instead_of_the_last
     ))
     .execute(&pool)
     .await?;
-    let recovered = credits
-        .holds(project, 1, 100, 0)
+    let recovered = resource_service::store::PgResourceStore::new(pool.clone())
+        .list_credit_holds(project, &contracts::http::ResourceListQuery::default())
         .await?
         .items
         .into_iter()

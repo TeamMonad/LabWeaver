@@ -1,9 +1,10 @@
 import { onScopeDispose, reactive, ref } from 'vue'
-import { createResourceRate, endResourceRate, listResourceRates } from '@/generated/contracts'
+import { createResourceRate, endResourceRate } from '@/generated/contracts'
 import type { CreateResourceRateRequestSchema, EndResourceRateRequestSchema, ResourceRateSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey } from '@/utils/format'
 import { billingUnitLabel } from '@/composables/useProjectResourceCostEstimate'
+import { fetchAllResourceRates } from '@/utils/resourceLists'
 
 export interface ResourceRateMutationOutcome {
   kind: 'success' | 'error'
@@ -56,15 +57,10 @@ export function useResourceRates() {
 
   async function fetchRates(currentGeneration: number): Promise<boolean> {
     try {
-      const result = await listResourceRates()
+      const items = await fetchAllResourceRates()
       if (disposed || currentGeneration !== generation) return false
-      if (result.error) {
-        rates.value = { kind: 'error', diagnostic: diagnostic(result.error, 'RESOURCE_RATES_LOAD_FAILED', '加载资源费率失败。') }
-        return false
-      } else {
-        rates.value = result.data.length > 0 ? { kind: 'success', data: result.data } : { kind: 'empty' }
-        return true
-      }
+      rates.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
+      return true
     } catch (error) {
       if (disposed || currentGeneration !== generation) return false
       rates.value = { kind: 'error', diagnostic: diagnostic(error, 'RESOURCE_RATES_LOAD_FAILED', '加载资源费率失败。') }

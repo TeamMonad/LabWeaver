@@ -1,7 +1,7 @@
 //! Credits handlers share the existing Access and workload authentication layers.
 use super::{
-    DiagnosticCode, Extension, HeaderMap, IntoResponse, Json, PageQuery, Path, ProblemDetails,
-    ProjectId, Query, ResourceApiState, ResourceCallerPrincipal, Response, Router, State,
+    DiagnosticCode, Extension, HeaderMap, IntoResponse, Json, Path, ProblemDetails, ProjectId,
+    Query, ResourceApiState, ResourceCallerPrincipal, ResourceListQuery, Response, Router, State,
     StatusCode, authorize_project_access, get, header, post, require_admin, required_header,
 };
 use crate::credits::{CreditError, PgCreditStore};
@@ -43,29 +43,19 @@ async fn ledger(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project): Path<ProjectId>,
-    Query(query): Query<PageQuery>,
-) -> Result<Json<CreditLedgerPage>, CreditApiError> {
-    authorize_project_access(&principal, project).map_err(|_| CreditError::Denied)?;
-    let (page, size, offset) = query.normalized().map_err(|_| CreditError::Invalid)?;
-    Ok(Json(
-        PgCreditStore::new(state.store.pool())
-            .ledger(project, page, size, offset)
-            .await?,
-    ))
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<CreditLedgerPage>, super::ResourceApiError> {
+    authorize_project_access(&principal, project)?;
+    Ok(Json(state.store.list_credit_ledger(project, &query).await?))
 }
 async fn holds(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project): Path<ProjectId>,
-    Query(query): Query<PageQuery>,
-) -> Result<Json<contracts::resource::credits::CreditHoldPage>, CreditApiError> {
-    authorize_project_access(&principal, project).map_err(|_| CreditError::Denied)?;
-    let (page, size, offset) = query.normalized().map_err(|_| CreditError::Invalid)?;
-    Ok(Json(
-        PgCreditStore::new(state.store.pool())
-            .holds(project, page, size, offset)
-            .await?,
-    ))
+    Query(query): Query<ResourceListQuery>,
+) -> Result<Json<contracts::resource::credits::CreditHoldPage>, super::ResourceApiError> {
+    authorize_project_access(&principal, project)?;
+    Ok(Json(state.store.list_credit_holds(project, &query).await?))
 }
 async fn admin(
     State(state): State<ResourceApiState>,

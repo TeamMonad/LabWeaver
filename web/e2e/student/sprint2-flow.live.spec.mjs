@@ -9,6 +9,7 @@ import {
   expectJson,
   navigateFromHomeByUi,
   pollEnvironmentCandidate,
+  pollCursorPages,
   pollJson,
   selectProjectByUi,
   uuidv7,
@@ -25,6 +26,8 @@ import {
   realWorkResumeConfig,
   realWorkVmConfig,
   readResumablePublishedWork,
+  readProjectResourceLeases,
+  readProjectResourceRequests,
   readResourceRates,
   selectRealWorkFinanceAdjustmentCharge,
   selectPendingWorkTaskResourceRequest,
@@ -224,11 +227,7 @@ async function assertExistingProjectWorkResourcesReleased(request, projectId) {
     }
   }
 
-  const requests = await expectJson(
-    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-requests`),
-    'REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUESTS_READ_FAILED',
-  )
-  if (!Array.isArray(requests)) throw new Error('REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUESTS_INVALID')
+  const requests = await readProjectResourceRequests(request, projectId, 'REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUESTS_READ_FAILED')
 
   for (const resourceRequest of requests) {
     if (resourceRequest?.projectId !== projectId) {
@@ -241,11 +240,7 @@ async function assertExistingProjectWorkResourcesReleased(request, projectId) {
     throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUEST_STATE_INVALID:${resourceRequest.id}:${resourceRequest.state}`)
   }
 
-  const leases = await expectJson(
-    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-leases`),
-    'REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASES_READ_FAILED',
-  )
-  if (!Array.isArray(leases)) throw new Error('REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASES_INVALID')
+  const leases = await readProjectResourceLeases(request, projectId, 'REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASES_READ_FAILED')
   for (const lease of leases) {
     if (WORK_RESOURCE_LEASE_TERMINAL_STATES.has(lease.state)) continue
     if (WORK_RESOURCE_LEASE_ACTIVE_STATES.has(lease.state)) {
@@ -326,10 +321,7 @@ async function approvePendingAgentTaskResourceByUi(adminPage, {
   }
   const activeAttempt = activeAttempts[0]
 
-  const requests = await expectJson(
-    await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`),
-    'WORK_TASK_RESOURCE_REQUESTS_READ_FAILED',
-  )
+  const requests = await readProjectResourceRequests(adminPage.request, projectId, 'WORK_TASK_RESOURCE_REQUESTS_READ_FAILED')
   const request = selectPendingWorkTaskResourceRequest(requests, {
     projectId,
     runId,
@@ -545,10 +537,10 @@ async function publishWorkTemplate(page, project, packageCopy = null, { adminPag
 }
 
 async function waitForResourceRequest(request, projectId, requestId) {
-  const snapshot = await pollJson(
+  const snapshot = await pollCursorPages(
     request,
     `/api/v1/projects/${projectId}/resource-requests`,
-    (value) => Array.isArray(value) && value.some((item) => item.id === requestId && ['active', 'rejected', 'cancelled'].includes(item.state)),
+    (value) => value.some((item) => item.id === requestId && ['active', 'rejected', 'cancelled'].includes(item.state)),
     'RESOURCE_REQUEST_STATUS_FAILED',
     240_000,
   )
@@ -558,10 +550,10 @@ async function waitForResourceRequest(request, projectId, requestId) {
 }
 
 async function waitForLease(request, projectId, requestId) {
-  const snapshot = await pollJson(
+  const snapshot = await pollCursorPages(
     request,
     `/api/v1/projects/${projectId}/resource-leases`,
-    (value) => Array.isArray(value) && value.some((item) => item.requestId === requestId && ['active', 'revoked', 'expired'].includes(item.state)),
+    (value) => value.some((item) => item.requestId === requestId && ['active', 'revoked', 'expired'].includes(item.state)),
     'RESOURCE_LEASE_STATUS_FAILED',
     240_000,
   )

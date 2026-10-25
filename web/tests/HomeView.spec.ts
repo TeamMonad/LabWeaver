@@ -113,6 +113,7 @@ describe('HomeView (current project in progress)', () => {
         environment('env-failed', 'failed'),
         environment('env-starting', 'provisioning', { currentOperation: { kind: 'start', state: 'running' } }),
       ],
+      nextCursor: null,
     }))
     const { wrapper } = await createWrapper()
     const section = wrapper.get('[data-home-section="environments"]')

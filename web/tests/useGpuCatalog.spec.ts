@@ -32,7 +32,7 @@ function problem(diagnosticCode: string, detail: string) {
 describe('useGpuCatalog', () => {
   beforeEach(() => {
     vi.resetAllMocks()
-    vi.mocked(listResourceGpuCatalog).mockResolvedValue({ data: [entry], error: undefined as never })
+    vi.mocked(listResourceGpuCatalog).mockResolvedValue({ data: { items: [entry], nextCursor: null }, error: undefined as never })
   })
 
   it('renders the server catalog projection after load', async () => {
@@ -40,9 +40,42 @@ describe('useGpuCatalog', () => {
 
     await catalog.load()
 
-    expect(listResourceGpuCatalog).toHaveBeenCalledWith()
+    expect(listResourceGpuCatalog).toHaveBeenCalledWith({ query: { limit: 100 } })
     expect(catalog.state).toEqual({ kind: 'ready' })
     expect(catalog.entries).toEqual([entry])
+  })
+
+  it('follows every catalog page so inactive revisions on later pages stay visible', async () => {
+    const retired = { ...entry, id: '0197f0e0-0000-7000-8000-0000000000a2', revision: 1, active: false }
+    vi.mocked(listResourceGpuCatalog)
+      .mockResolvedValueOnce({ data: { items: [entry], nextCursor: 'catalog-2' }, error: undefined as never })
+      .mockResolvedValueOnce({ data: { items: [retired], nextCursor: null }, error: undefined as never })
+    const catalog = useGpuCatalog()
+
+    await catalog.load()
+
+    expect(vi.mocked(listResourceGpuCatalog).mock.calls).toEqual([
+      [{ query: { limit: 100 } }],
+      [{ query: { limit: 100, cursor: 'catalog-2' } }],
+    ])
+    expect(catalog.entries).toEqual([entry, retired])
+    expect(catalog.state).toEqual({ kind: 'ready' })
+  })
+
+  it('fails closed on a repeated catalog cursor instead of looping or showing a partial list', async () => {
+    vi.mocked(listResourceGpuCatalog)
+      .mockResolvedValueOnce({ data: { items: [entry], nextCursor: 'catalog-2' }, error: undefined as never })
+      .mockResolvedValueOnce({ data: { items: [{ ...entry, id: '0197f0e0-0000-7000-8000-0000000000a3' }], nextCursor: 'catalog-2' }, error: undefined as never })
+    const catalog = useGpuCatalog()
+
+    await catalog.load()
+
+    expect(listResourceGpuCatalog).toHaveBeenCalledTimes(2)
+    expect(catalog.entries).toEqual([])
+    expect(catalog.state).toMatchObject({
+      kind: 'error',
+      diagnostic: { code: 'GPU_CATALOG_LOAD_FAILED', message: '加载 GPU 目录失败。' },
+    })
   })
 
   it('creates a client-identified active revision and reloads the catalog', async () => {

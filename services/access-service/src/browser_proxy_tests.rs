@@ -1803,7 +1803,7 @@ async fn project_usage_reaches_resource_with_session_auth() -> Result<(), Box<dy
     }));
     let client = reqwest::Client::builder().no_proxy().build()?;
     let project_id = Uuid::now_v7();
-    let path = format!("/api/v1/projects/{project_id}/usage?page=1&pageSize=1");
+    let path = format!("/api/v1/projects/{project_id}/usage?limit=1");
 
     assert_eq!(
         client.get(format!("{base}{path}")).send().await?.status(),
@@ -1835,7 +1835,7 @@ async fn project_usage_reaches_resource_with_session_auth() -> Result<(), Box<dy
         requests[0]["path"],
         format!("/api/v1/projects/{project_id}/usage")
     );
-    assert_eq!(requests[0]["query"], "page=1&pageSize=1");
+    assert_eq!(requests[0]["query"], "limit=1");
     assert_eq!(requests[0]["method"], "GET");
     assert_eq!(requests[0]["actor"], admin.to_string());
     assert_eq!(requests[0]["upstream"], "resource");

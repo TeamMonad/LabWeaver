@@ -245,7 +245,9 @@ async fn settlement_replays_unknown_and_out_of_order_release_never_overdraw()
     assert_eq!(account.spent, amount("2.000000"));
     assert_eq!(account.reserved, amount("0.000000"));
     assert_eq!(account.platform_absorbed, amount("9.000000"));
-    let ledger = store.ledger(project, 1, 100, 0).await?;
+    let ledger = PgResourceStore::new(pool.clone())
+        .list_credit_ledger(project, &contracts::http::ResourceListQuery::default())
+        .await?;
     assert_eq!(
         ledger.items.iter().filter(|e| e.kind == "settle").count(),
         2
