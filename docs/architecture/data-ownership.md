@@ -39,6 +39,10 @@ Resource 与 Environment Outbox 用短数据库语句领取带 UUID 的持久发
 
 Environment 的 `run_backend` 及 Agent 模型网关的转发、读取和结算 continuation 归属具体 runtime 的 `JoinSet`，不归属最初的 HTTP handler。HTTP 已返回或客户端已断开，进程仍等待这些任务及其已接受的子任务；20 秒期限到达后由 runtime 所持 guard 终止任务集合，保留原有执行回执、未知用量和幂等记录供恢复。模型调用结果未知时不伪造零用量或重新发送上游请求。
 
+Control 的通知投影与可选 SMTP worker 消费同一个 `service_runtime` shutdown receiver，不另注册信号处理器，也不另起排空计时。已取得的通知事件完成原 PostgreSQL 事务和 JetStream ACK 后退出；未处理的事件由同一持久 consumer 重投，`notification_inbox` 仍按原 event ID 防重。SMTP 已领取的发送在共享 20 秒收尾窗口内完成，停领检查同时覆盖过期记录扫描结束后的下一条邮件领取。
+
+SMTP 不采用 Outbox 的可重复发送语义。进程丢失、断连或发送结果不确定时，过期 `sending` 归为 `delivery_unknown`，不恢复成可重发任务；只有既有规则允许的明确临时拒绝可以重试。重启不会再次发送结果未知的邮件，也不会由通知 worker 重复触发资源、租约或资金操作。
+
 恢复时先恢复 PostgreSQL 与 NATS 可达性，再启动替代 worker；不要删除待发布行或手工清空 claim。Outbox 传输故障由下一轮重试，数据库时钟上的到期租约允许接管；无法校验的事件身份/契约仍明确报错，不伪造发布成功。重复副作用的防护依赖领域条件更新和消费者业务事务内防重，而不是进程排空或消息代理的精确一次保证。
 
 空数据库通过显式迁移初始化。服务启动仅校验配置和所需结构，不隐式重建旧 Schema。本次无外部消费者允许全仓接口硬切，但不形成永久数据删除政策；远端数据切换不属于本轮实施。
