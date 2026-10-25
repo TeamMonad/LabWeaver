@@ -850,7 +850,7 @@ async fn get_environment(
     };
     let connection = connection_readiness(&instance, vm_ready_at);
     instance_response(contracts::environment::EnvironmentDetail {
-        instance,
+        instance: instance.into(),
         connection,
     })
 }

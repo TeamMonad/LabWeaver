@@ -46,7 +46,7 @@ mod rubric_rules_proxy_tests;
 #[path = "runtime_origin_tests.rs"]
 mod runtime_origin_tests;
 #[path = "../tests/support/mod.rs"]
-mod support;
+pub(super) mod support;
 
 const ORIGIN: &str = "https://portal.example.invalid";
 const AUDIENCE: &str = "labweaver-control";
@@ -442,7 +442,7 @@ async fn control(
         if method == Method::GET && uri.path() == format!("/api/v1/environments/{}", environment.id)
         {
             return Json(contracts::environment::EnvironmentDetail {
-                instance: environment.clone(),
+                instance: environment.clone().into(),
                 connection: contracts::environment::EnvironmentConnectionReadiness {
                     instance_ready: false,
                     state: contracts::environment::EnvironmentConnectionState::Preparing,
@@ -2254,6 +2254,10 @@ async fn owned_environment_requests_use_current_control_actions_and_reject_remov
             accepted_at: timestamp,
             deadline_at: "2026-10-12T00:10:00.000Z".parse()?,
             cleanup_started_at: None,
+            cleanup_protocol_version: Some(
+                contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
+            ),
+            cleanup_target: None,
             diagnostic_code: None,
             preserve_mutable_disk: false,
             access_revocation_revision: None,

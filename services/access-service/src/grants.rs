@@ -9,6 +9,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use contracts::{
     AccessGrantId, ActorId, ConsoleSessionId, CourseId, EndpointGrantId, EndpointId, EventId,
     GatewaySessionId, PlatformRole, ProjectId, Revision, Sequence, SshPublicKeyId, StreamSequence,
@@ -30,8 +31,9 @@ use contracts::{
         subjects,
     },
     http::{
-        CreateAccessGrantRequest, CreateSshPublicKeyRequest, EnvironmentAccessGrantListQuery,
-        IdempotencyKey, RenewAccessGrantRequest, RevokeAccessGrantRequest, StrongEtag,
+        CreateAccessGrantRequest, CreateSshPublicKeyRequest, CursorPage,
+        EnvironmentAccessGrantListQuery, IdempotencyKey, RenewAccessGrantRequest,
+        RevokeAccessGrantRequest, StrongEtag,
     },
 };
 use futures_util::StreamExt;
@@ -52,6 +54,10 @@ use super::{
 
 const TERMINATION_SECONDS: i64 =
     contracts::object_authorization::MEMBER_REVOCATION_BOUND_SECONDS.cast_signed();
+
+#[cfg(test)]
+#[path = "grants_pagination_tests.rs"]
+mod pagination_tests;
 
 fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
     contracts::parse_strict_json(body)
@@ -294,33 +300,113 @@ pub async fn create_ssh_key(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KeyListQuery {
+    cursor: Option<String>,
     limit: Option<u16>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AccessListCursor {
+    created_at: OffsetDateTime,
+    id: Uuid,
+    scope: Sha256Digest,
+}
+
+fn list_scope(value: &impl Serialize) -> Result<Sha256Digest, ApiError> {
+    Sha256Digest::of_canonical(value).map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
+}
+
+fn decode_list_cursor(
+    value: Option<&str>,
+    scope: Sha256Digest,
+) -> Result<Option<AccessListCursor>, ApiError> {
+    value
+        .map(|value| {
+            if value.is_empty() || value.len() > contracts::http::MAX_CURSOR_LENGTH {
+                return Err(ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"));
+            }
+            let bytes = URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let cursor: AccessListCursor = serde_json::from_slice(&bytes)
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            if URL_SAFE_NO_PAD.encode(&bytes) != value || cursor.scope != scope {
+                return Err(ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"));
+            }
+            Ok(cursor)
+        })
+        .transpose()
+}
+
+fn encode_list_cursor(cursor: &AccessListCursor) -> Result<String, ApiError> {
+    serde_json::to_vec(cursor)
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
+}
+
+fn list_limit(limit: Option<u16>) -> Result<u16, ApiError> {
+    let limit = limit.unwrap_or(contracts::http::DEFAULT_PAGE_LIMIT);
+    if !(1..=contracts::http::MAX_PAGE_LIMIT).contains(&limit) {
+        return Err(ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"));
+    }
+    Ok(limit)
 }
 
 pub async fn list_ssh_keys(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<KeyListQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<CursorPage<SshPublicKey>>, ApiError> {
     let identity = authenticated_identity(&state, &headers).await?;
-    let actor = actor_uuid(identity.actor.actor_id)?;
-    let limit = i64::from(query.limit.unwrap_or(50).clamp(1, 100));
-    let rows = sqlx::query(
+    Ok(Json(
+        ssh_keys_page(&state.pool, identity.actor.actor_id, &query).await?,
+    ))
+}
+
+async fn ssh_keys_page(
+    pool: &PgPool,
+    actor_id: ActorId,
+    query: &KeyListQuery,
+) -> Result<CursorPage<SshPublicKey>, ApiError> {
+    let actor = actor_uuid(actor_id)?;
+    let scope = list_scope(&json!({"kind":"sshKeys","actorId":actor}))?;
+    let cursor = decode_list_cursor(query.cursor.as_deref(), scope)?;
+    let limit = list_limit(query.limit)?;
+    let mut rows = sqlx::query(
         "SELECT key_id,fingerprint_sha256,algorithm,rsa_bits,revision,created_at \
          FROM access.ssh_public_keys WHERE actor_id=$1 AND revoked_at IS NULL \
-         ORDER BY created_at,key_id LIMIT $2",
+           AND ($2::timestamptz IS NULL OR (created_at,key_id)>($2,$3)) \
+         ORDER BY created_at,key_id LIMIT $4",
     )
     .bind(actor)
-    .bind(limit)
-    .fetch_all(&state.pool)
+    .bind(cursor.as_ref().map(|cursor| cursor.created_at))
+    .bind(cursor.as_ref().map(|cursor| cursor.id))
+    .bind(i64::from(limit) + 1)
+    .fetch_all(pool)
     .await
     .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        items.push(ssh_key_from_row(&row, identity.actor.actor_id)?);
-    }
-    Ok(Json(json!({"items": items, "nextCursor": null})))
+    let has_more = rows.len() > usize::from(limit);
+    rows.truncate(usize::from(limit));
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_list_cursor(&AccessListCursor {
+                    created_at: row.get("created_at"),
+                    id: row.get("key_id"),
+                    scope,
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let items = rows
+        .iter()
+        .map(|row| ssh_key_from_row(row, actor_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CursorPage { items, next_cursor })
 }
 
 pub async fn delete_ssh_key(
@@ -533,38 +619,72 @@ pub async fn list_access_grants(
     Path(environment_id): Path<contracts::EnvironmentId>,
     headers: HeaderMap,
     Query(query): Query<EnvironmentAccessGrantListQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<CursorPage<AccessGrantSnapshot>>, ApiError> {
+    let identity = authenticated_identity(&state, &headers).await?;
+    let page =
+        access_grant_ids_page(&state.pool, identity.actor.actor_id, environment_id, &query).await?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for id in page.items {
+        items.push(load_grant_snapshot(&state.pool, typed_id(id)?, identity.actor.actor_id).await?);
+    }
+    Ok(Json(CursorPage {
+        items,
+        next_cursor: page.next_cursor,
+    }))
+}
+
+async fn access_grant_ids_page(
+    pool: &PgPool,
+    actor_id: ActorId,
+    environment_id: contracts::EnvironmentId,
+    query: &EnvironmentAccessGrantListQuery,
+) -> Result<CursorPage<Uuid>, ApiError> {
     query
         .validate()
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-    let identity = authenticated_identity(&state, &headers).await?;
-    let rows = sqlx::query(
-        "SELECT grant_id FROM access.access_grants WHERE actor_id=$1 AND environment_id=$2 \
-         AND ($3::text IS NULL OR state=$3) AND ($4 OR state IN ('requested','active')) \
-         ORDER BY created_at DESC LIMIT $5",
+    let scope = list_scope(&json!({
+        "kind":"accessGrants", "actorId":actor_id, "environmentId":environment_id,
+        "state":query.state, "includeTerminal":query.include_terminal, "endpointId":query.endpoint_id,
+    }))?;
+    let cursor = decode_list_cursor(query.cursor.as_deref(), scope)?;
+    let limit = list_limit(query.limit)?;
+    let mut rows = sqlx::query(
+        "SELECT g.grant_id,g.created_at FROM access.access_grants g \
+         WHERE g.actor_id=$1 AND g.environment_id=$2 \
+           AND ($3::text IS NULL OR g.state=$3) AND ($4 OR g.state IN ('requested','active')) \
+           AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM access.endpoint_grants e \
+                WHERE e.grant_id=g.grant_id AND e.endpoint_id=$5)) \
+           AND ($6::timestamptz IS NULL OR (g.created_at,g.grant_id)<($6,$7)) \
+         ORDER BY g.created_at DESC,g.grant_id DESC LIMIT $8",
     )
-    .bind(actor_uuid(identity.actor.actor_id)?)
+    .bind(actor_uuid(actor_id)?)
     .bind(environment_id.as_uuid())
     .bind(query.state.map(grant_state_str))
     .bind(query.include_terminal)
-    .bind(i64::from(query.limit.unwrap_or(50).clamp(1, 100)))
-    .fetch_all(&state.pool)
+    .bind(query.endpoint_id.map(EndpointId::as_uuid))
+    .bind(cursor.as_ref().map(|cursor| cursor.created_at))
+    .bind(cursor.as_ref().map(|cursor| cursor.id))
+    .bind(i64::from(limit) + 1)
+    .fetch_all(pool)
     .await
     .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id = typed_id::<AccessGrantId>(row.get::<Uuid, _>("grant_id"))?;
-        let snapshot = load_grant_snapshot(&state.pool, id, identity.actor.actor_id).await?;
-        if query.endpoint_id.is_none_or(|endpoint_id| {
-            snapshot
-                .endpoint_grants
-                .iter()
-                .any(|endpoint| endpoint.endpoint_id == endpoint_id)
-        }) {
-            items.push(snapshot);
-        }
-    }
-    Ok(Json(json!({"items": items, "nextCursor": null})))
+    let has_more = rows.len() > usize::from(limit);
+    rows.truncate(usize::from(limit));
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_list_cursor(&AccessListCursor {
+                    created_at: row.get("created_at"),
+                    id: row.get("grant_id"),
+                    scope,
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let items = rows.iter().map(|row| row.get("grant_id")).collect();
+    Ok(CursorPage { items, next_cursor })
 }
 
 pub async fn renew_access_grant(

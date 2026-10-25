@@ -177,6 +177,10 @@ pub fn ready_instance() -> EnvironmentInstance {
             accepted_at,
             deadline_at: timestamp("2026-07-14T00:10:00.000Z"),
             cleanup_started_at: None,
+            cleanup_protocol_version: Some(
+                contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
+            ),
+            cleanup_target: None,
             diagnostic_code: None,
             preserve_mutable_disk: false,
             access_revocation_revision: None,
@@ -242,6 +246,10 @@ pub fn requested_instance() -> EnvironmentInstance {
             accepted_at,
             deadline_at: timestamp("2026-07-14T00:10:00.000Z"),
             cleanup_started_at: None,
+            cleanup_protocol_version: Some(
+                contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
+            ),
+            cleanup_target: None,
             diagnostic_code: None,
             preserve_mutable_disk: false,
             access_revocation_revision: None,

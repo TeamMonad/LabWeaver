@@ -12,6 +12,7 @@
     reason = "the transaction fences and state derivation are intentionally colocated"
 )]
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use persistence_sqlx::Sha256Digest;
 use std::{collections::BTreeSet, str::FromStr, time::Duration}; // internal persistence hash, not contract hash
 
@@ -50,6 +51,55 @@ const CANCEL_RUN_OPERATION: &str = "cancel_evaluation_run_v1";
 const RETRY_STEP_OPERATION: &str = "retry_evaluation_step_v1";
 const VERIFY_STEP_CLEANUP_OPERATION: &str = "verify_evaluation_step_cleanup_v1";
 const FROZEN_SUBMISSION_SCHEMA_VERSION: &str = "evaluation.labweaver.io/frozen-submission/v1";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluationListCursor {
+    timestamp: time::OffsetDateTime,
+    id: Uuid,
+    scope: Sha256Digest,
+}
+
+fn decode_list_cursor(
+    cursor: Option<&str>,
+    scope: Sha256Digest,
+) -> Result<Option<EvaluationListCursor>, EvaluationControlStoreError> {
+    cursor
+        .map(|value| {
+            if value.is_empty() || value.len() > contracts::http::MAX_CURSOR_LENGTH {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+            let bytes = URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+            let cursor: EvaluationListCursor = serde_json::from_slice(&bytes)
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+            if URL_SAFE_NO_PAD.encode(&bytes) != value || cursor.scope != scope {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+            Ok(cursor)
+        })
+        .transpose()
+}
+
+fn next_list_cursor(
+    rows: &[sqlx::postgres::PgRow],
+    limit: u16,
+    scope: Sha256Digest,
+) -> Result<Option<String>, EvaluationControlStoreError> {
+    if rows.len() <= usize::from(limit) {
+        return Ok(None);
+    }
+    let row = &rows[usize::from(limit) - 1];
+    let cursor = EvaluationListCursor {
+        timestamp: row.try_get("cursor_timestamp")?,
+        id: row.try_get("cursor_id")?,
+        scope,
+    };
+    let bytes =
+        serde_json::to_vec(&cursor).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+    Ok(Some(URL_SAFE_NO_PAD.encode(bytes)))
+}
 
 /// Result of publishing a release through the idempotency ledger.
 #[derive(Clone, Debug, PartialEq)]
@@ -502,53 +552,35 @@ impl PgEvaluationControlStore {
         &self,
         project_id: ProjectId,
         course_id: Option<CourseId>,
-        cursor: Option<EvaluationReleaseId>,
+        cursor: Option<&str>,
         limit: u16,
     ) -> Result<CursorPage<EvaluationRelease>, EvaluationControlStoreError> {
         if !(1..=100).contains(&limit) {
             return Err(EvaluationControlStoreError::ContractInvalid);
         }
-        if let Some(cursor) = cursor {
-            let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM evaluation.evaluation_releases \
-                 WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) \
-                   AND state='active' AND release_id=$3)",
-            )
-            .bind(project_id.as_uuid())
-            .bind(course_id.map(CourseId::as_uuid))
-            .bind(cursor.as_uuid())
-            .fetch_one(&self.pool)
-            .await?;
-            if !exists {
-                return Err(EvaluationControlStoreError::ContractInvalid);
-            }
-        }
-        let values = sqlx::query_scalar::<_, Value>(
-            "SELECT contract FROM evaluation.evaluation_releases \
+        let scope = Sha256Digest::of_canonical(&("releases", project_id, course_id))
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let cursor = decode_list_cursor(cursor, scope)?;
+        let rows = sqlx::query(
+            "SELECT contract,published_at AS cursor_timestamp,release_id AS cursor_id \
+             FROM evaluation.evaluation_releases \
              WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) AND state='active' \
-               AND ($3::uuid IS NULL OR (published_at,release_id) < \
-               (SELECT published_at,release_id FROM evaluation.evaluation_releases \
-                WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) \
-                  AND state='active' AND release_id=$3)) \
-             ORDER BY published_at DESC,release_id DESC LIMIT $4",
+               AND ($3::timestamptz IS NULL OR (published_at,release_id)<($3,$4)) \
+             ORDER BY published_at DESC,release_id DESC LIMIT $5",
         )
         .bind(project_id.as_uuid())
         .bind(course_id.map(CourseId::as_uuid))
-        .bind(cursor.map(contracts::EvaluationReleaseId::as_uuid))
+        .bind(cursor.as_ref().map(|cursor| cursor.timestamp))
+        .bind(cursor.as_ref().map(|cursor| cursor.id))
         .bind(i64::from(limit) + 1)
         .fetch_all(&self.pool)
         .await?;
-        let mut items = values
+        let next_cursor = next_list_cursor(&rows, limit, scope)?;
+        let items = rows
             .into_iter()
-            .map(decode_release)
+            .take(usize::from(limit))
+            .map(|row| decode_release(row.try_get("contract")?))
             .collect::<Result<Vec<_>, _>>()?;
-        let has_more = items.len() > usize::from(limit);
-        items.truncate(usize::from(limit));
-        let next_cursor = if has_more {
-            items.last().map(|release| release.id.to_string())
-        } else {
-            None
-        };
         Ok(CursorPage { items, next_cursor })
     }
 
@@ -1481,62 +1513,44 @@ impl PgEvaluationControlStore {
         project_id: ProjectId,
         course_id: Option<CourseId>,
         actor_id: ActorId,
-        cursor: Option<EvaluationRunId>,
+        cursor: Option<&str>,
         limit: u16,
     ) -> Result<CursorPage<StudentEvaluationResult>, EvaluationControlStoreError> {
         if !(1..=100).contains(&limit) {
             return Err(EvaluationControlStoreError::ContractInvalid);
         }
-        if let Some(cursor) = cursor {
-            let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM evaluation.evaluation_runs \
-                 WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) AND actor_id=$3 AND run_id=$4 \
-                   AND state IN ('succeeded','failed','cancelled'))",
-            )
-            .bind(project_id.as_uuid())
-            .bind(course_id.map(CourseId::as_uuid))
-            .bind(actor_id.as_uuid())
-            .bind(cursor.as_uuid())
-            .fetch_one(&self.pool)
-            .await?;
-            if !exists {
-                return Err(EvaluationControlStoreError::ContractInvalid);
-            }
-        }
-        let values = sqlx::query_scalar::<_, Value>(
-            "SELECT runs.contract FROM evaluation.evaluation_runs runs \
+        let scope =
+            Sha256Digest::of_canonical(&("studentResults", project_id, course_id, actor_id))
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let cursor = decode_list_cursor(cursor, scope)?;
+        let rows = sqlx::query(
+            "SELECT runs.contract,runs.created_at AS cursor_timestamp,runs.run_id AS cursor_id \
+             FROM evaluation.evaluation_runs runs \
              JOIN evaluation.evaluation_releases releases ON releases.release_id=runs.release_id \
              WHERE runs.project_id=$1 AND ($2::uuid IS NULL OR runs.course_id=$2) AND runs.actor_id=$3 \
                AND runs.state IN ('succeeded','failed','cancelled') \
-               AND ($4::uuid IS NULL OR (runs.updated_at,runs.run_id) < \
-                 (SELECT updated_at,run_id FROM evaluation.evaluation_runs \
-                  WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) AND actor_id=$3 AND run_id=$4 \
-                    AND state IN ('succeeded','failed','cancelled'))) \
-             ORDER BY runs.updated_at DESC,runs.run_id DESC LIMIT $5",
+               AND ($4::timestamptz IS NULL OR (runs.created_at,runs.run_id)<($4,$5)) \
+             ORDER BY runs.created_at DESC,runs.run_id DESC LIMIT $6",
         )
         .bind(project_id.as_uuid())
         .bind(course_id.map(CourseId::as_uuid))
         .bind(actor_id.as_uuid())
-        .bind(cursor.map(EvaluationRunId::as_uuid))
+        .bind(cursor.as_ref().map(|cursor| cursor.timestamp))
+        .bind(cursor.as_ref().map(|cursor| cursor.id))
         .bind(i64::from(limit) + 1)
         .fetch_all(&self.pool)
         .await?;
-        let mut items = values
+        let next_cursor = next_list_cursor(&rows, limit, scope)?;
+        let items = rows
             .into_iter()
-            .map(decode_run)
+            .take(usize::from(limit))
+            .map(|row| decode_run(row.try_get("contract")?))
             .map(|run| {
                 run.and_then(|value| {
                     StudentEvaluationResult::from_terminal(&value).map_err(Into::into)
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let has_more = items.len() > usize::from(limit);
-        items.truncate(usize::from(limit));
-        let next_cursor = if has_more {
-            items.last().map(|result| result.run_id.to_string())
-        } else {
-            None
-        };
         Ok(CursorPage { items, next_cursor })
     }
 

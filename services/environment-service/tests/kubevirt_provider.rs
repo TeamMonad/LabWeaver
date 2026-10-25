@@ -274,6 +274,7 @@ impl KubeVirtProviderBackend for FixtureBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
+        _target: Option<&contracts::environment::EnvironmentCleanupTarget>,
     ) -> Result<environment_service::ProviderOutcome<ArtifactRef>, ProviderFailure> {
         async {
             self.record("delete", fence);

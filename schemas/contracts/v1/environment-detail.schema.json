@@ -277,139 +277,6 @@
       ],
       "type": "object"
     },
-    "EnvironmentOperation": {
-      "additionalProperties": false,
-      "description": "Idempotent accepted environment operation.",
-      "properties": {
-        "acceptedAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "acceptedRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "accessRevocationRevision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Revision"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "actorId": {
-          "$ref": "#/$defs/ActorId"
-        },
-        "attempt": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "cleanupStartedAt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcTimestamp"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "deadlineAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "diagnosticCode": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "id": {
-          "$ref": "#/$defs/OperationId"
-        },
-        "kind": {
-          "$ref": "#/$defs/EnvironmentOperationKind"
-        },
-        "leaseAuthorization": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EnvironmentLeaseAuthorization"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "maxAttempts": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "nextAttemptAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "preserveMutableDisk": {
-          "type": "boolean"
-        },
-        "providerStep": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "resetTarget": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EnvironmentResetTarget"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "retryFromPhase": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ObservedEnvironmentState"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "state": {
-          "$ref": "#/$defs/OperationState"
-        },
-        "templateUpgrade": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EnvironmentTemplateUpgrade"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "traceId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "kind",
-        "state",
-        "acceptedRevision",
-        "attempt",
-        "providerStep",
-        "maxAttempts",
-        "nextAttemptAt",
-        "actorId",
-        "traceId",
-        "acceptedAt",
-        "deadlineAt",
-        "preserveMutableDisk"
-      ],
-      "type": "object"
-    },
     "EnvironmentOperationKind": {
       "description": "Explicit operation kind; restart and destructive reset are never aliases.",
       "enum": [
@@ -727,6 +594,139 @@
     "ProjectId": {
       "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
+    },
+    "PublicEnvironmentOperation": {
+      "additionalProperties": false,
+      "description": "Public operation fields. Cleanup targets and protocol markers remain owner-internal.",
+      "properties": {
+        "acceptedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "acceptedRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "accessRevocationRevision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cleanupStartedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deadlineAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "diagnosticCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "kind": {
+          "$ref": "#/$defs/EnvironmentOperationKind"
+        },
+        "leaseAuthorization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentLeaseAuthorization"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxAttempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nextAttemptAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "preserveMutableDisk": {
+          "type": "boolean"
+        },
+        "providerStep": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resetTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentResetTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryFromPhase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservedEnvironmentState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/OperationState"
+        },
+        "templateUpgrade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentTemplateUpgrade"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "traceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "state",
+        "acceptedRevision",
+        "attempt",
+        "providerStep",
+        "maxAttempts",
+        "nextAttemptAt",
+        "actorId",
+        "traceId",
+        "acceptedAt",
+        "deadlineAt",
+        "preserveMutableDisk"
+      ],
+      "type": "object"
     },
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
@@ -1137,8 +1137,7 @@
         {
           "type": "null"
         }
-      ],
-      "description": "Resource-resolved Experiment GPU allocation held while this instance exists, when present.\n\nWork environments never use this field; their allocation remains on the Lease\nauthorization. A present value is validated against the immutable instance identity."
+      ]
     },
     "id": {
       "$ref": "#/$defs/EnvironmentId"
@@ -1168,7 +1167,7 @@
       "$ref": "#/$defs/ObservedEnvironmentState"
     },
     "operation": {
-      "$ref": "#/$defs/EnvironmentOperation"
+      "$ref": "#/$defs/PublicEnvironmentOperation"
     },
     "ownerId": {
       "$ref": "#/$defs/ActorId"
@@ -1189,7 +1188,6 @@
     },
     "resourceReservationReleased": {
       "default": false,
-      "description": "Set only after Environment has released its Resource reservation at terminal deletion.",
       "type": "boolean"
     },
     "revision": {
@@ -1203,8 +1201,7 @@
         {
           "type": "null"
         }
-      ],
-      "description": "Read-only receipt of the original Resource approval, refreshed before new compute."
+      ]
     },
     "runtimeKind": {
       "$ref": "#/$defs/RuntimeKind"

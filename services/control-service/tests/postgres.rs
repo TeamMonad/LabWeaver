@@ -1000,12 +1000,14 @@ async fn candidate_publication_fixture(
     // The funded Work journey also publishes real upgrade targets in this course.
     assert_eq!(
         listed
+            .items
             .iter()
             .filter(|view| view.release.id == release.id)
             .count(),
         1
     );
     let original = listed
+        .items
         .iter()
         .find(|view| view.release.id == release.id)
         .ok_or("original release missing")?;
@@ -2897,6 +2899,7 @@ async fn project_release_reads_are_project_scoped_and_course_filtered()
         service
             .project_releases(project_id, None, 0, 10, non_owner)
             .await?
+            .items
             .is_empty()
     );
 
@@ -2904,7 +2907,10 @@ async fn project_release_reads_are_project_scoped_and_course_filtered()
         .project_releases(project_id, None, 0, 10, project_owner)
         .await?;
     assert_eq!(
-        all.iter().map(|view| view.release.id).collect::<Vec<_>>(),
+        all.items
+            .iter()
+            .map(|view| view.release.id)
+            .collect::<Vec<_>>(),
         vec![project_release.id, project_work_release.id]
     );
     let teaching = service
@@ -2912,15 +2918,32 @@ async fn project_release_reads_are_project_scoped_and_course_filtered()
         .await?;
     assert_eq!(
         teaching
+            .items
             .iter()
             .map(|view| view.release.id)
             .collect::<Vec<_>>(),
         vec![project_release.id]
     );
+    assert!(all.next_cursor.is_none());
+    assert!(teaching.next_cursor.is_none());
+    let first_page = service
+        .project_releases(project_id, None, 0, 1, project_owner)
+        .await?;
+    assert_eq!(first_page.items.len(), 1);
+    let next_version = first_page
+        .next_cursor
+        .ok_or("missing release continuation")?
+        .parse()?;
+    let final_page = service
+        .project_releases(project_id, None, next_version, 1, project_owner)
+        .await?;
+    assert_eq!(final_page.items.len(), 1);
+    assert!(final_page.next_cursor.is_none());
     assert!(
         service
             .project_releases(project_id, Some(CourseId::new()), 0, 10, project_owner)
             .await?
+            .items
             .is_empty()
     );
     assert!(matches!(

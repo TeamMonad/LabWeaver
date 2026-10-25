@@ -2171,7 +2171,7 @@ impl ContainerExecutorBackend for CountingContainerExecutor {
     ) -> ContainerExecutorResponse {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match request {
-            ContainerExecutorRequest::DeleteNamespace { plan } => {
+            ContainerExecutorRequest::DeleteNamespace { plan, .. } => {
                 ContainerExecutorResponse::Deleted {
                     plan_sha256: plan.plan_sha256,
                     cleanup_evidence: ArtifactRef {
@@ -2370,7 +2370,9 @@ fn container_executor_envelope(
         ReconcileAction::Provision | ReconcileAction::Reset => {
             ContainerExecutorRequest::Apply { plan }
         }
-        ReconcileAction::Cleanup => ContainerExecutorRequest::DeleteNamespace { plan },
+        ReconcileAction::Cleanup => {
+            ContainerExecutorRequest::DeleteNamespace { plan, target: None }
+        }
         _ => return Err("unsupported executor fixture action".into()),
     };
     let request_id = Sha256Digest::of_canonical(&serde_json::json!({
@@ -2407,7 +2409,7 @@ const fn container_request_plan(request: &ContainerExecutorRequest) -> &Containe
         | ContainerExecutorRequest::Observe { plan }
         | ContainerExecutorRequest::Scale { plan, .. }
         | ContainerExecutorRequest::Restart { plan, .. }
-        | ContainerExecutorRequest::DeleteNamespace { plan } => plan,
+        | ContainerExecutorRequest::DeleteNamespace { plan, .. } => plan,
     }
 }
 
@@ -2453,7 +2455,7 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
                     observed_at: self.observed_at,
                 },
             },
-            KubeVirtExecutorRequest::DeleteNamespace { plan } => {
+            KubeVirtExecutorRequest::DeleteNamespace { plan, .. } => {
                 KubeVirtExecutorResponse::Deleted {
                     plan_sha256: plan.plan_sha256,
                     cleanup_evidence: ArtifactRef {
@@ -2595,6 +2597,7 @@ fn kubevirt_executor_envelope(
     let request = match action {
         ReconcileAction::Provision => KubeVirtExecutorRequest::Apply { plan },
         ReconcileAction::Cleanup => KubeVirtExecutorRequest::DeleteNamespace {
+            target: None,
             plan: KubeVirtCleanupPlan {
                 environment_id: plan.environment_id,
                 project_id: contracts::ProjectId::new(),
@@ -2640,7 +2643,7 @@ const fn environment_id_for_kubevirt_request(request: &KubeVirtExecutorRequest) 
         | KubeVirtExecutorRequest::Start { plan }
         | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
         KubeVirtExecutorRequest::Stop { plan }
-        | KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+        | KubeVirtExecutorRequest::DeleteNamespace { plan, .. } => plan.environment_id,
     }
 }
 

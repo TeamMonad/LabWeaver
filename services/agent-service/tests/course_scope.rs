@@ -117,7 +117,8 @@ async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn 
             "INSERT INTO agent.agent_runs \
              (run_id,project_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256, \
               policy_revision,purpose,contract,created_at,updated_at) \
-             VALUES ($1,$2,$3,$4,1,'requested',$5,$6,1,$7,$8,now()-($9 * interval '1 minute'),now()-($9 * interval '1 minute'))",
+             VALUES ($1,$2,$3,$4,1,'requested',$5,$6,1,$7,$8, \
+                '2026-01-01T00:00:00.123999Z'::timestamptz-($9 * interval '1 microsecond'),now())",
         )
         .bind(run.id.as_uuid())
         .bind(project_id.as_uuid())
@@ -255,6 +256,11 @@ async fn project_run_history_is_scoped_sorted_and_paged() -> Result<(), Box<dyn 
     .bind(inserted_contract)
     .execute(&pool)
     .await?;
+    // Removing the row that issued a cursor must not invalidate the seek boundary.
+    sqlx::query("DELETE FROM agent.agent_runs WHERE run_id=$1")
+        .bind(first.items[1].id.as_uuid())
+        .execute(&pool)
+        .await?;
     let second_again = store
         .list_project_runs_filtered(
             project,

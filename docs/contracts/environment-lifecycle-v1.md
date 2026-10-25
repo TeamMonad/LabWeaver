@@ -297,3 +297,56 @@ compute/storage effect also checks the current operation and generation (and the
 Container plan's project). Existing completed responses can replay if current funds
 are unavailable; a new effect cannot begin. Cleanup keeps its existing ownership,
 UID, generation and tombstone checks and does not depend on a new credit grant.
+
+## Kubernetes orphan inventory and recovery
+
+Both runtime executors inspect Kubernetes inventory in pages of at most 100 objects. A nonempty
+apiserver continuation advances immediately; only a completed sweep waits 60 seconds. Expired
+tokens use the apiserver's replacement continuation when supplied; other list errors start a
+fresh sweep after the error backoff. Dedicated placement
+scans namespaces labeled `labweaver.io/managed=true`; existing-namespace container placement
+first verifies the configured namespace UID, then scans the managed runtime Deployments.
+The runtime ServiceAccount needs `list` on those already managed resource kinds. The scan
+never treats a label selector as ownership proof: it checks object UID, exact name, labels,
+project and the durable Environment aggregate before deciding what to do.
+
+The scan does not delete objects directly. A durable failed deletion with desired state
+`Deleted`, no active lifecycle operation, no endpoints, a persisted Access revocation receipt
+and no mutable-disk preservation re-enters the existing revisioned `Cleanup` pipeline.
+It preserves that receipt. Its original owner and current revision come from the database;
+the scanner does not invent a user principal, Access revocation receipt,
+compute grant or cleanup-complete receipt. Concurrent lifecycle changes invalidate admission.
+The ordinary worker and provider keep their lease, attempt, generation and UID protections.
+Before the first DELETE, the executor only reads identities and returns a `cleanupTarget`.
+The original ReconcileWorker saves it on `environment_operations.contract` and the aggregate
+through the existing revision/lease-token CAS, then advances `provider_step`. A lost lease
+cannot commit this checkpoint and cannot proceed to DELETE. Only the next provider request
+uses that durable namespace UID; shared-namespace Work cleanup also uses the exact saved object
+UIDs, and must not adopt objects absent from its checkpoint. Namespace DELETE conflicts,
+worker restarts, retries and newly issued Cleanup operations retain the same binding.
+Orphan recovery copies the original binding instead of observing a replacement as a new intent.
+A failed old operation with no saved binding stays diagnostic-only. Nothing is written to an
+idempotency ledger to represent this domain fact, and no additional database table is required.
+
+Freshly accepted operations persist `cleanupProtocolVersion=1` before execution. A missing
+marker is not permission to capture: legacy Accepted/Running/Cancelling cleanup and scheduled
+retries can be reclaimed without command admission, so the shared worker diagnoses them before
+any Kubernetes request when no original binding exists. The checkpoint helper and lease/CAS
+store independently reject inventing that marker or the missing target. Existing proven targets
+remain immutable. This rule applies to both native Container and KubeVirt execution paths.
+Public owner detail uses an explicit safe projection and operation snapshots keep their existing
+read model; neither discloses the target, namespace/object UIDs, or the internal protocol marker.
+
+Objects with unknown, malformed or conflicting ownership stay untouched and are reported as
+unverified. Live/stopped workloads and active operations remain referenced. An object found
+after a durable `Deleted` result is reported as inconsistent; it is not automatically removed
+or used to release capacity again. Workloads with retained disks or endpoints requiring a
+real Access revocation remain diagnostic-only. Operators must resolve those inconsistencies
+through the owning lifecycle and storage procedures, not by removing arbitrary finalizers.
+
+Evaluation's existing orphan Job reconciler separately checks manager, namespace, run, step,
+attempt and checkpoint UID. A running attempt is recovered by its scheduler, not removed by
+the scan. Terminal cleanup uses the existing executor and UID/resourceVersion preconditions;
+another manager, attempt or UID is not cleanup authority. List and database failures retain
+objects for a later pass, and neither scanner fabricates Resource release or accounting.
+

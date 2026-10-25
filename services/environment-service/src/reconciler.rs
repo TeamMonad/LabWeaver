@@ -24,6 +24,8 @@ pub type ProviderObservation = crate::lifecycle::AppliedProviderObservation;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderOutcome<T> {
     Pending,
+    /// Read-only Kubernetes identity observation; the worker must durably pin it before deletion.
+    CleanupTarget(contracts::environment::EnvironmentCleanupTarget),
     Completed(T),
 }
 
@@ -31,7 +33,7 @@ impl<T> ProviderOutcome<T> {
     #[must_use]
     pub fn completed(self) -> Option<T> {
         match self {
-            Self::Pending => None,
+            Self::Pending | Self::CleanupTarget(_) => None,
             Self::Completed(value) => Some(value),
         }
     }
@@ -221,6 +223,15 @@ impl ReconcileWorker {
                 if !self.persist_reconciled(&lease, &updated).await? {
                     return Ok(ReconcileWorkerOutcome::LeaseLost);
                 }
+                Ok(ReconcileWorkerOutcome::Pending)
+            }
+            Ok(ProviderOutcome::CleanupTarget(target)) => {
+                let updated = crate::lifecycle::pin_cleanup_target(&lease.instance, target)?;
+                if !self.persist_reconciled(&lease, &updated).await? {
+                    return Ok(ReconcileWorkerOutcome::LeaseLost);
+                }
+                // The advanced provider_step separates the next destructive request from
+                // the cached read-only response. No DELETE happens in this call.
                 Ok(ReconcileWorkerOutcome::Pending)
             }
             Ok(ProviderOutcome::Completed(observation)) => {
@@ -462,6 +473,22 @@ impl Reconciler {
         now: UtcTimestamp,
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
+        if action == ReconcileAction::Cleanup
+            && instance.operation.cleanup_target.is_none()
+            && instance.operation.cleanup_protocol_version
+                != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
+        {
+            // Old active/retry rows bypass command acceptance when claim_due takes over.
+            // Without a pre-delete protocol marker they must never establish a new binding.
+            tracing::warn!(event = "environment.cleanup.identity_unverified",
+                environment_id = %instance.id, operation_id = %instance.operation.id,
+                diagnostic_code = "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID",
+                "legacy cleanup has no pre-delete protocol marker; leaving Kubernetes untouched");
+            return Err(ReconcileError::Provider(ProviderFailure {
+                code: ProviderFailureCode::ObservationInvalid,
+                retryable: false,
+            }));
+        }
         let authorized = if matches!(
             action,
             ReconcileAction::Provision
@@ -815,6 +842,10 @@ mod tests {
                 accepted_at,
                 deadline_at: timestamp("2026-07-22T00:10:00.000Z"),
                 cleanup_started_at: None,
+                cleanup_protocol_version: Some(
+                    contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
+                ),
+                cleanup_target: None,
                 diagnostic_code: None,
                 preserve_mutable_disk: false,
                 access_revocation_revision: None,

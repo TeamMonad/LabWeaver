@@ -30,7 +30,7 @@ Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；�
 
 进度读取不返回命令、凭据、评分输入、分数或 Kubernetes 对象。Resource 绑定缺失或暂时不可用返回 503 / `LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE`，不返回旧失败作为新进度。读取时 owner 改变则有界重读，仍不稳定时返回 409 / `LW_TASK_PROGRESS_CHANGED`。响应使用 `Cache-Control: no-store`，事件用于提示刷新，不能替代权威查询。
 
-这两个接口读取指定任务，不新增全项目任务聚合。项目 Agent 列表仍只支持 `page`/`pageSize`；Resource 项目申请列表仍为按调用者可见范围返回的数组。客户端不能把第一页或可见数组当作全项目完整任务数。
+这两个接口读取指定任务，不新增全项目任务聚合。项目 AgentRun 与 Resource 项目申请列表使用下文的稳定游标，并保留各领域的权威状态。客户端不能把单页或可见项数量当作全项目完整任务数。
 
 ## 格式与错误
 
@@ -55,3 +55,36 @@ AgentRun 游标绑定项目和状态过滤；ResourceRequest 游标另外绑定�
 只返回当前会话 actor 自己提交的申请，管理员才可读取项目内全部申请。非法、篡改或跨范围游标返回
 `LW_AGENT_RUN_HISTORY_CURSOR_INVALID` 或 `LW_RESOURCE_REQUEST_CURSOR_INVALID`；项目权限失败仍返回
 `LW_ACCESS_DENIED`。
+
+## Access 与 Evaluation 列表续页
+
+Access 的 SSH 公钥列表和环境 AccessGrant 列表复用 `{items, nextCursor}`。
+`limit` 范围为 1–100，默认 50。把响应中的非空 `nextCursor` 原样传给下一次请求；
+`nextCursor=null` 表示本次读取没有后续记录。不要从公开的毫秒时间戳自行构造游标。
+SSH 公钥按数据库 `created_at ASC, key_id ASC` 排序；AccessGrant 按
+`created_at DESC, grant_id DESC` 排序。数据库先限制当前 actor、环境、状态与 endpoint，
+再取页，因此其他用户的记录和不匹配 endpoint 的记录不占页容量。
+游标绑定 actor 及过滤条件，不能跨用户、环境或过滤条件重用。非法游标返回
+`LW_CONTRACT_DOCUMENT_INVALID`。这两类游标不是新的授权凭据；每次查询仍应用真实会话权限。
+
+Evaluation release 列表按 `published_at DESC, release_id DESC` 排序；学生结果列表按
+不可变的 `created_at DESC, run_id DESC` 排序，而不是会随重评、清理更新的 `updated_at`。
+游标保存完整的数据库排序键和查询范围，不依赖签发游标的那条记录继续存在或仍为 active。
+原 release 被撤回后，后续页仍可继续。学生结果游标不能跨 actor 复用。
+
+这些续页是 keyset 读取，不是跨 HTTP 请求保持的数据库事务快照。并发删除的记录不再返回；
+新增记录若排在已访问边界之前，需要刷新列表才能看到。并发新增/删除不会移动既有记录的排序键，
+也不会因为删除上一页末项而重复或跳过仍符合过滤条件的记录。状态或权限改变后，每页采用当前权限，
+不承诺重放已失效的记录。Agent 历史游标同样保留 PostgreSQL 微秒精度，公开 DTO 仍使用毫秒。
+
+## Environment 清理身份检查点
+
+持久化及内部 NATS 使用的 `EnvironmentOperation` 包含可选 `cleanupTarget`：namespace、原 UID
+及 shared namespace 待删 Work 对象的 `ExecutionObjectRef`。新接受的操作持久写入
+`cleanupProtocolVersion=1`，证明首次 DELETE 必须先观察、经 owner lease/CAS 保存身份。
+缺少标记且没有绑定的旧 Accepted/Running/Cancelling 操作和已排定重试只诊断，不得接管后重新捕获。
+这两个字段不属于客户端清理授权参数，也不会出现在公开环境详情或公开操作快照中。
+详情使用显式 `PublicEnvironmentInstance`/`PublicEnvironmentOperation` 投影；Access 对公开字段
+继续复用权威 aggregate 的校验，不重建或推导私有清理身份。Schema/SDK 从 Rust 真源生成，
+列表接口、分页响应及操作状态枚举不变，前端继续使用公开快照与已有诊断。
+

@@ -107,6 +107,7 @@ impl environment_service::KubeVirtProviderBackend for Cluster {
         &self,
         _: &KubeVirtBackendFence,
         _: &KubeVirtCleanupPlan,
+        _: Option<&contracts::environment::EnvironmentCleanupTarget>,
     ) -> Result<ProviderOutcome<contracts::ArtifactRef>, ProviderFailure> {
         Ok(ProviderOutcome::Completed(super::cleanup_evidence()))
     }

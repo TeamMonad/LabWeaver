@@ -96,6 +96,9 @@ pub fn classify_orphan(
     job_uid: Option<&str>,
     attempt: Option<&EvaluationOrphanAttempt>,
 ) -> OrphanDecision {
+    if job_uid.is_none_or(str::is_empty) {
+        return OrphanDecision::ReportUnverified;
+    }
     let Some(attempt) = attempt else {
         return OrphanDecision::ReportUnverified;
     };
@@ -122,13 +125,15 @@ pub fn classify_orphan(
     if job_name != expected_name {
         return OrphanDecision::ReportUnverified;
     }
-    if let Some(job) = resources
-        .objects
-        .iter()
-        .find(|object| object.resource == "jobs")
-        && job_uid != Some(job.uid.as_str())
-    {
-        return OrphanDecision::ReportUnverified;
+    if !resources.objects.is_empty() {
+        let Some(job) = resources.objects.iter().find(|object| {
+            object.resource == "jobs" && object.api_version == "batch/v1" && object.name == job_name
+        }) else {
+            return OrphanDecision::ReportUnverified;
+        };
+        if job_uid != Some(job.uid.as_str()) {
+            return OrphanDecision::ReportUnverified;
+        }
     }
     if attempt.cleanup_verified {
         return OrphanDecision::ReportInconsistent;
@@ -237,6 +242,18 @@ impl OrphanReconciler {
         for job in jobs {
             report.scanned = report.scanned.saturating_add(1);
             self.detected.fetch_add(1, Ordering::Relaxed);
+            // Check returned objects independently of the list selector. An unexpected API
+            // response must never promote a foreign namespace or manager to cleanup authority.
+            if job.pointer("/metadata/namespace").and_then(Value::as_str)
+                != Some(self.namespace.as_str())
+                || job
+                    .pointer("/metadata/labels/labweaver.io~1managed-by")
+                    .and_then(Value::as_str)
+                    != Some(MANAGED_BY)
+            {
+                report.unverified = report.unverified.saturating_add(1);
+                continue;
+            }
             let Some(job_name) = job.pointer("/metadata/name").and_then(Value::as_str) else {
                 report.unverified = report.unverified.saturating_add(1);
                 continue;
@@ -275,7 +292,8 @@ impl OrphanReconciler {
             if let Some(resources) = attempt
                 .as_ref()
                 .and_then(|attempt| attempt.execution_resources.as_ref())
-                && (resources.run_id != run_id
+                && (resources.namespace != self.namespace
+                    || resources.run_id != run_id
                     || resources.step_run_id != step_run_id
                     || resources.task_run_id != task_run_id)
             {
@@ -512,6 +530,14 @@ mod tests {
         let attempt = attempt(EvaluationAttemptState::Failed, false, Some(resources));
         assert_eq!(
             classify_orphan(&name, Some("replacement-uid"), Some(&attempt)),
+            OrphanDecision::ReportUnverified
+        );
+        assert_eq!(
+            classify_orphan(&name, None, Some(&attempt)),
+            OrphanDecision::ReportUnverified
+        );
+        assert_eq!(
+            classify_orphan(&name, Some(""), Some(&attempt)),
             OrphanDecision::ReportUnverified
         );
         assert_eq!(

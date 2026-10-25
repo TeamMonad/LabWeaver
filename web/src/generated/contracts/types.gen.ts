@@ -2466,32 +2466,20 @@ export type EnvironmentDetailSchema = {
     endpoints: Array<EnvironmentEndpoint>;
     failedPhase?: ObservedEnvironmentState | null;
     generation: number;
-    /**
-     * Resource-resolved Experiment GPU allocation held while this instance exists, when present.
-     *
-     * Work environments never use this field; their allocation remains on the Lease
-     * authorization. A present value is validated against the immutable instance identity.
-     */
     gpuAllocation?: GpuAllocation | null;
     id: EnvironmentDetailSchemaEnvironmentId;
     lastDiagnosticCode?: string | null;
     leaseId?: EnvironmentDetailSchemaLeaseId | null;
     observedGeneration: number;
     observedState: ObservedEnvironmentState;
-    operation: EnvironmentOperation;
+    operation: PublicEnvironmentOperation;
     ownerId: EnvironmentDetailSchemaActorId;
     projectId: EnvironmentDetailSchemaProjectId;
     providerBinding: string;
     releaseId: EnvironmentDetailSchemaReleaseId;
     releaseVersion: number;
-    /**
-     * Set only after Environment has released its Resource reservation at terminal deletion.
-     */
     resourceReservationReleased?: boolean;
     revision: EnvironmentDetailSchemaRevision;
-    /**
-     * Read-only receipt of the original Resource approval, refreshed before new compute.
-     */
     runtimeAuthorization?: EnvironmentRuntimeAuthorizationResolution | null;
     runtimeKind: EnvironmentDetailSchemaRuntimeKind;
 };
@@ -2640,32 +2628,6 @@ export type EnvironmentLeaseAuthorization = {
 };
 
 /**
- * Idempotent accepted environment operation.
- */
-export type EnvironmentOperation = {
-    acceptedAt: EnvironmentDetailSchemaUtcTimestamp;
-    acceptedRevision: EnvironmentDetailSchemaRevision;
-    accessRevocationRevision?: EnvironmentDetailSchemaRevision | null;
-    actorId: EnvironmentDetailSchemaActorId;
-    attempt: number;
-    cleanupStartedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
-    deadlineAt: EnvironmentDetailSchemaUtcTimestamp;
-    diagnosticCode?: string | null;
-    id: OperationId;
-    kind: EnvironmentOperationKind;
-    leaseAuthorization?: EnvironmentLeaseAuthorization | null;
-    maxAttempts: number;
-    nextAttemptAt: EnvironmentDetailSchemaUtcTimestamp;
-    preserveMutableDisk: boolean;
-    providerStep: number;
-    resetTarget?: EnvironmentResetTarget | null;
-    retryFromPhase?: ObservedEnvironmentState | null;
-    state: OperationState;
-    templateUpgrade?: EnvironmentTemplateUpgrade | null;
-    traceId: string;
-};
-
-/**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
 export type EnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
@@ -2779,6 +2741,32 @@ export type OperationState = 'accepted' | 'running' | 'cancelling' | 'succeeded'
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type EnvironmentDetailSchemaProjectId = string;
+
+/**
+ * Public operation fields. Cleanup targets and protocol markers remain owner-internal.
+ */
+export type PublicEnvironmentOperation = {
+    acceptedAt: EnvironmentDetailSchemaUtcTimestamp;
+    acceptedRevision: EnvironmentDetailSchemaRevision;
+    accessRevocationRevision?: EnvironmentDetailSchemaRevision | null;
+    actorId: EnvironmentDetailSchemaActorId;
+    attempt: number;
+    cleanupStartedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
+    deadlineAt: EnvironmentDetailSchemaUtcTimestamp;
+    diagnosticCode?: string | null;
+    id: OperationId;
+    kind: EnvironmentOperationKind;
+    leaseAuthorization?: EnvironmentLeaseAuthorization | null;
+    maxAttempts: number;
+    nextAttemptAt: EnvironmentDetailSchemaUtcTimestamp;
+    preserveMutableDisk: boolean;
+    providerStep: number;
+    resetTarget?: EnvironmentResetTarget | null;
+    retryFromPhase?: ObservedEnvironmentState | null;
+    state: OperationState;
+    templateUpgrade?: EnvironmentTemplateUpgrade | null;
+    traceId: string;
+};
 
 /**
  * Strongly typed UUIDv7 identifier for `ReleaseId`.
@@ -2961,7 +2949,7 @@ export type EnvironmentInstanceSchema = {
     leaseId?: EnvironmentInstanceSchemaLeaseId | null;
     observedGeneration: number;
     observedState: EnvironmentInstanceSchemaObservedEnvironmentState;
-    operation: EnvironmentInstanceSchemaEnvironmentOperation;
+    operation: EnvironmentOperation;
     ownerId: EnvironmentInstanceSchemaActorId;
     projectId: EnvironmentInstanceSchemaProjectId;
     providerBinding: string;
@@ -3060,6 +3048,18 @@ export type EnvironmentInstanceSchemaEndpointProtocol = 'http' | 'https' | 'ssh'
 export type EnvironmentInstanceSchemaEnvironmentClass = 'experiment' | 'work';
 
 /**
+ * Kubernetes identities captured before the first destructive cleanup request.
+ */
+export type EnvironmentCleanupTarget = {
+    namespace: string;
+    /**
+     * Existing-namespace Work objects; an absent entry must never be adopted later.
+     */
+    objects?: Array<ExecutionObjectRef>;
+    uid: string;
+};
+
+/**
  * Sanitized Environment-owned endpoint metadata.
  */
 export type EnvironmentInstanceSchemaEnvironmentEndpoint = {
@@ -3109,13 +3109,18 @@ export type EnvironmentInstanceSchemaEnvironmentLeaseAuthorization = {
 /**
  * Idempotent accepted environment operation.
  */
-export type EnvironmentInstanceSchemaEnvironmentOperation = {
+export type EnvironmentOperation = {
     acceptedAt: EnvironmentInstanceSchemaUtcTimestamp;
     acceptedRevision: EnvironmentInstanceSchemaRevision;
     accessRevocationRevision?: EnvironmentInstanceSchemaRevision | null;
     actorId: EnvironmentInstanceSchemaActorId;
     attempt: number;
+    /**
+     * Missing on legacy operations; absence never authorizes a first UID capture.
+     */
+    cleanupProtocolVersion?: number | null;
     cleanupStartedAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
+    cleanupTarget?: EnvironmentCleanupTarget | null;
     deadlineAt: EnvironmentInstanceSchemaUtcTimestamp;
     diagnosticCode?: string | null;
     id: EnvironmentInstanceSchemaOperationId;
@@ -3178,6 +3183,25 @@ export type EnvironmentInstanceSchemaEnvironmentTemplateUpgrade = {
     sourceReleaseVersion: number;
     targetReleaseId: EnvironmentInstanceSchemaReleaseId;
     targetReleaseVersion: number;
+};
+
+/**
+ * One Kubernetes object owned by an execution generation.
+ */
+export type ExecutionObjectRef = {
+    /**
+     * Exact API version used to address the object, such as `batch/v1`.
+     */
+    apiVersion: string;
+    name: string;
+    /**
+     * Kubernetes collection name, such as `jobs` or `configmaps`.
+     */
+    resource: string;
+    /**
+     * Server-assigned UID proving ownership; never reused after deletion.
+     */
+    uid: string;
 };
 
 /**

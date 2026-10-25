@@ -50,6 +50,32 @@ pub enum LifecycleError {
     Contract(#[from] EnvironmentError),
 }
 
+/// Pins the first read-only cleanup observation under the existing worker persistence CAS.
+pub(crate) fn pin_cleanup_target(
+    current: &EnvironmentInstance,
+    target: contracts::environment::EnvironmentCleanupTarget,
+) -> Result<EnvironmentInstance, LifecycleError> {
+    target.validate()?;
+    if current.operation.cleanup_target.is_some()
+        || current.operation.cleanup_protocol_version
+            != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
+        || current.desired_state != DesiredEnvironmentState::Deleted
+        || current.observed_state != ObservedEnvironmentState::Deleting
+    {
+        return Err(LifecycleError::ProviderObservationInvalid);
+    }
+    let mut updated = current.clone();
+    updated.revision = next_revision(current.revision)?;
+    updated.operation.provider_step = current
+        .operation
+        .provider_step
+        .checked_add(1)
+        .ok_or(LifecycleError::ProviderStepOverflow)?;
+    updated.operation.cleanup_target = Some(target);
+    updated.validate()?;
+    Ok(updated)
+}
+
 /// Accepts a command without performing Provider I/O.
 pub fn plan_command(
     current: &EnvironmentInstance,
@@ -74,6 +100,17 @@ pub fn plan_command_authorized(
     current.validate()?;
     if current.id != command.environment_id || current.revision != command.expected_revision {
         return Err(LifecycleError::RevisionConflict);
+    }
+    if current.desired_state == DesiredEnvironmentState::Deleted
+        && current.operation.cleanup_target.is_none()
+        && current.operation.cleanup_protocol_version
+            != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
+        && (current.observed_state == ObservedEnvironmentState::Deleting
+            || current.failed_phase == Some(ObservedEnvironmentState::Deleting))
+    {
+        // The legacy destructive phase cannot prove its original object. A pre-cleanup
+        // Stop/Expire failure may still resume and establish its first read-only checkpoint.
+        return Err(LifecycleError::ProviderObservationInvalid);
     }
     if !(1..=100).contains(&command.max_attempts)
         || command.deadline_at <= command.accepted_at
@@ -207,6 +244,14 @@ pub fn plan_command_authorized(
         accepted_at: command.accepted_at,
         deadline_at: command.deadline_at,
         cleanup_started_at: None,
+        cleanup_protocol_version: Some(
+            contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
+        ),
+        cleanup_target: if current.desired_state == DesiredEnvironmentState::Deleted {
+            current.operation.cleanup_target.clone()
+        } else {
+            None
+        },
         diagnostic_code: None,
         preserve_mutable_disk: command.preserve_mutable_disk || preserving_upgrade_cancel,
         access_revocation_revision: command.access_revocation_revision,

@@ -349,18 +349,12 @@ async fn list_evaluation_releases(
     query
         .validate()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
-    let cursor = query
-        .cursor
-        .as_deref()
-        .map(str::parse)
-        .transpose()
-        .map_err(|_| EvaluationApiError::RequestInvalid)?;
     let page = state
         .control
         .list_releases(
             project_id,
             course_id,
-            cursor,
+            query.cursor.as_deref(),
             query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
         )
         .await?;
@@ -412,19 +406,13 @@ async fn list_student_results(
     query
         .validate()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
-    let cursor = query
-        .cursor
-        .as_deref()
-        .map(str::parse)
-        .transpose()
-        .map_err(|_| EvaluationApiError::RequestInvalid)?;
     let page = state
         .control
         .student_results(
             project_id,
             None,
             actor_id,
-            cursor,
+            query.cursor.as_deref(),
             query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
         )
         .await?;
