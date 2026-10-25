@@ -199,6 +199,8 @@ pub(super) async fn real_oidc_fixture_with(
     .with_exposed_port(8443.tcp())
     .with_wait_for(WaitFor::message_on_stdout("Listening on:"))
     .with_env_var("JAVA_OPTS_KC_HEAP", "-Xms128m -Xmx512m")
+    .with_env_var("KC_BOOTSTRAP_ADMIN_USERNAME", "notification-test-admin")
+    .with_env_var("KC_BOOTSTRAP_ADMIN_PASSWORD", "notification-test-password")
     .with_copy_to(
         "/opt/keycloak/conf/test.crt",
         provider_ca.as_bytes().to_vec(),
@@ -450,3 +452,139 @@ async fn real_keycloak_binds_two_browsers_and_preserves_tabs_replay_expiry_and_l
     );
     Ok(())
 }
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real Keycloak login sequence proves verified, withdrawn and private recipient state"
+)]
+#[tokio::test]
+async fn real_oidc_verified_email_is_private_and_cleared_when_provider_withdraws_claims()
+-> Result<(), Box<dyn Error>> {
+    let fixture=real_oidc_fixture_with("localhost",|realm| {
+        let mappers=realm["clients"][0]["protocolMappers"].as_array_mut().ok_or("mappers")?;
+        for (name,property,kind) in [("notification email","email","String"),("notification verified","emailVerified","boolean")] {
+            mappers.push(json!({"name":name,"protocol":"openid-connect","protocolMapper":"oidc-usermodel-property-mapper","config":{"user.attribute":property,"claim.name":if property=="emailVerified" {"email_verified"}else{"email"},"jsonType.label":kind,"id.token.claim":"true","access.token.claim":"false","userinfo.token.claim":"false"}}));
+        }
+        Ok(())
+    },async |_,_,_|Ok(()),Router::new()).await?;
+    let admin = browser_client(&fixture.portal_ca, &fixture.provider_ca)?;
+    let issuer = &fixture.app.deployment.oidc.issuer;
+    let origin = Url::parse(issuer)?.origin().ascii_serialization();
+    let token: Value = admin
+        .post(format!(
+            "{origin}/realms/master/protocol/openid-connect/token"
+        ))
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "admin-cli"),
+            ("username", "notification-test-admin"),
+            ("password", "notification-test-password"),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let token = token["access_token"].as_str().ok_or("admin token")?;
+    let users: Vec<Value> = admin
+        .get(format!(
+            "{origin}/admin/realms/labweaver-test/users?username=teacher&exact=true"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let user_id = users
+        .first()
+        .and_then(|user| user["id"].as_str())
+        .ok_or("teacher id")?;
+    // Each iteration is a real signed-token exchange and production callback, not a
+    // client-supplied recipient. A fresh browser avoids carrying a previous IdP session.
+    for (verified, email, expected) in [
+        (
+            true,
+            Some("teacher@example.invalid"),
+            Some("teacher@example.invalid"),
+        ),
+        (false, Some("unverified@example.invalid"), None),
+        (
+            true,
+            Some("restored@example.invalid"),
+            Some("restored@example.invalid"),
+        ),
+        (false, None, None),
+    ] {
+        admin
+            .put(format!(
+                "{origin}/admin/realms/labweaver-test/users/{user_id}"
+            ))
+            .bearer_auth(token)
+            .json(&json!({"email":email,"emailVerified":verified}))
+            .send()
+            .await?
+            .error_for_status()?;
+        let browser = browser_client(&fixture.portal_ca, &fixture.provider_ca)?;
+        let login = browser
+            .get(format!("{}/auth/login", fixture.base))
+            .send()
+            .await?;
+        let authorization = login
+            .headers()
+            .get(header::LOCATION)
+            .ok_or("authorization URL")?
+            .to_str()?;
+        let callback = provider_callback(&browser, authorization, &fixture.callback_uri).await?;
+        let response = browser.get(callback).send().await?;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT verified_email FROM access.actor_notification_emails")
+                .fetch_one(&fixture.app.pool)
+                .await?;
+        assert_eq!(stored.as_deref(), expected);
+        let session: Value = browser
+            .get(format!("{}/api/v1/auth/session", fixture.base))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(!serde_json::to_string(&session)?.contains("@example.invalid"));
+    }
+    let mut connection = fixture.app.pool.acquire().await?;
+    sqlx::query("SET ROLE lw_control_runtime")
+        .execute(&mut *connection)
+        .await?;
+    let _: Option<String> =
+        sqlx::query_scalar("SELECT verified_email FROM access.notification_recipients")
+            .fetch_one(&mut *connection)
+            .await?;
+    assert!(
+        sqlx::query("SELECT verified_email FROM access.actor_notification_emails")
+            .fetch_all(&mut *connection)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE access.notification_recipients SET verified_email='forged@example.invalid'"
+        )
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    );
+    sqlx::query("RESET ROLE").execute(&mut *connection).await?;
+    sqlx::raw_sql("CREATE ROLE unrelated_notification_reader NOLOGIN;GRANT USAGE ON SCHEMA access TO unrelated_notification_reader;SET ROLE unrelated_notification_reader").execute(&mut *connection).await?;
+    assert!(
+        sqlx::query("SELECT verified_email FROM access.notification_recipients")
+            .fetch_all(&mut *connection)
+            .await
+            .is_err()
+    );
+    sqlx::query("RESET ROLE").execute(&mut *connection).await?;
+    Ok(())
+}
+
+#[path = "notification_browser_tests.rs"]
+mod notification_browser_tests;

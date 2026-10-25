@@ -44,6 +44,10 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+control-service = { path = "../control-service" }
+artifact-store = { path = "../../crates/artifact-store", features = ["test-support"] }
+serde_yaml.workspace = true
+tempfile.workspace = true
 environment-service = { path = "../environment-service" }
 scraper.workspace = true
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }

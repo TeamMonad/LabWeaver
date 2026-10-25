@@ -162,6 +162,9 @@ async fn complete_login(
     )
     .await
     .map_err(ApiError::from)?;
+    auth::update_notification_email(&state.pool, actor.actor_id, &identity.claims)
+        .await
+        .map_err(ApiError::from)?;
     let expires_at = auth::configured_session_expiry(
         now,
         deployment_duration(state.config.session_ttl_seconds)?,

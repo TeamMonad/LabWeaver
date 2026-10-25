@@ -7,6 +7,7 @@
 
 pub mod event_stream;
 mod membership_governance;
+mod notifications;
 mod object_actions;
 
 use sha2::Digest;
@@ -95,6 +96,7 @@ pub struct GatewayPrincipal {
 pub fn router(state: Arc<ApiState>) -> Router {
     let router = Router::new()
         .merge(membership_governance::routes())
+        .merge(notifications::routes())
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route(
             "/api/v1/projects/{project_id}",

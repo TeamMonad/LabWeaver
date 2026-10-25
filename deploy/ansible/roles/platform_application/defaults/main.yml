@@ -100,6 +100,19 @@ platform_application_nats_streams:
       - labweaver.resource.request.rejected.v1
       - labweaver.resource.request.cancelled.v1
       - labweaver.resource.request.state_changed.v1
+      - labweaver.resource.lease.created.v1
+      - labweaver.resource.lease.fenced.v1
+      - labweaver.resource.lease.activated.v1
+      - labweaver.resource.lease.renewed.v1
+      - labweaver.resource.lease.revoked.v1
+      - labweaver.resource.lease.expiring.v1
+      - labweaver.resource.lease.expired.v1
+    retained_subjects:
+      - labweaver.resource.request.submitted.v1
+      - labweaver.resource.request.approved.v1
+      - labweaver.resource.request.rejected.v1
+      - labweaver.resource.request.cancelled.v1
+      - labweaver.resource.request.state_changed.v1
       - labweaver.resource.lease.activated.v1
       - labweaver.resource.lease.renewed.v1
       - labweaver.resource.lease.revoked.v1
@@ -107,6 +120,9 @@ platform_application_nats_streams:
       - labweaver.resource.lease.expired.v1
     max_age: 168h
 platform_application_nats_consumers:
+  - name: control-notifications-v1
+    stream: LABWEAVER_RESOURCE_EVENTS
+    filters: [labweaver.resource.>]
   - name: control-agent-run-projection-v1
     stream: LABWEAVER_AGENT_EVENTS
     filters: ["labweaver.agent.run.>"]

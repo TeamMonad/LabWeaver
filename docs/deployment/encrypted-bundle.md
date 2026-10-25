@@ -16,6 +16,36 @@
 
 可选 infrastructure profile 将静态 inventory 和凭据文件引用纳入同一目录。xtask 使用派生 inventory，缺少 infrastructure 时明确失败，不从另一份环境配置补值。旧凭据签发工具继续签发，Bundle 不另写 CA、NATS 或身份签发器。服务启动时仍执行现有配置类型的业务校验。本工具复用两个现有对象渲染器，校验输入、版本和各服务的既有 NATS 权限。
 
+## 可选通知 SMTP
+
+站内通知无需邮件配置。在 `config/bundle.yaml` 顶层加入下列可选段后，由同一个 Bundle 派生 Control 的 `notifications.json`、SMTP Secret 文件与 Helm 出站规则；不要另设 Control deployment SMTP 段、Helm SMTP 副本或收件人映射。
+
+```yaml
+notifications:
+  smtp:
+    host: smtp.example.edu
+    port: 465
+    tls: tls                    # tls 或 starttls；拒绝明文与隐式降级
+    username: labweaver-notifier
+    passwordFile: secrets/smtp-password
+    caFile: secrets/smtp-ca.pem
+    from: labweaver@example.edu
+    portalBaseUrl: https://lab.example.edu
+    egressCidrs: [192.0.2.10/32] # 替换为实际 SMTP relay 的受限网段
+```
+
+1. 将 relay 密码与 PEM CA 放入同一个受限 Bundle 目录的 `secrets/` 中，文件权限使用 `0600`。这些字段是文件引用，不是密码内容；缺文件、空内容、非法端口、未知 TLS 模式、错误门户 origin 或非法 CIDR 均在 Bundle 校验阶段报 `LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.<字段>`。
+2. 设置 relay 真实 DNS 名、端口及 TLS 模式。`starttls` 强制升级，失败不会降级明文。`portalBaseUrl` 必须为不含用户名、路径、query 或 fragment 的 HTTPS origin。
+3. 在 `egressCidrs` 列出实际 relay 的 CIDR；Helm 仅为 Control 添加对应 TCP 端口出站规则。该派生字段不能从 `application.helmValues.notificationSmtpEgress` 覆盖。DNS 地址变更时同步核对管理员批准的网段。
+4. 在 Keycloak/OIDC 客户端映射 ID token 的 `email` 和布尔 `email_verified` claim；Access 请求 `email` scope。只有验证为真的邮箱用于发送。每次真实 OIDC 登录刷新地址，IdP 不再给出已验证地址时清空旧值。不要将 username 当邮箱。
+5. 通过既有 Bundle 校验、加密、批准部署流程应用。Control 只读 `/etc/labweaver/config/notifications.json`；派生文件由既有 ConfigMap 挂载，密码与 CA 由既有 Control Secret 挂载。`LABWEAVER_NOTIFICATIONS_FILE` 由 Bundle 派生，不得在 `workloadInputs` 覆盖。未配置 SMTP 时派生 `smtp: null`，不请求邮件出站权限。
+
+平台应用角色同时建立 `LABWEAVER_RESOURCE_EVENTS` / `control-notifications-v1` durable consumer（`filter_subjects: [labweaver.resource.>]`、显式 ACK、最多 10 次交付）。Control 的既有 NATS 身份需允许读取该 stream/consumer、pull、ACK 和 inbox 回复；沿用现有 NATS 用户签发与凭据校验，不新增身份签发器。已有 stream 需要纳入 `lease.created`、`lease.fenced` 两个 Owner 已有 subject，再启动新 Control。
+
+Resource 发布权限的唯一列表为 `tools/prepare_platform_foundation.py::NATS_USERS["resource-service"]`；基础设施签发、Resource 专用签发和 Bundle 精确校验均复用该列表。升级前重新签发包含 `lease.created.v1` 与 `lease.fenced.v1` 的受限 Resource 凭据。缺少任一权限或增加未审核 subject 都会在 Bundle 阶段拒绝；不得改成 `labweaver.resource.>` 的发布通配符或移除精确校验来绕过。
+
+用户和运维从通知 API 查看 `emailState`、`emailAttempts`、`emailDiagnostic` 与 `emailDetail`。邮件采用 at-most-once：仅明确 4xx 临时拒绝最多重试 5 次；5xx 永久拒绝立即 `failed`；超时、连接断开、过期 sending claim 一律 `delivery_unknown`，不自动重发。未知文案为“邮件可能已送达，系统无法确认”。核对 relay 日志，不要重置队列或重复资源/账务操作来重发。`no_verified_email` 不重试、不算故障。完整状态与 PII 边界见[通知契约](../contracts/notifications.md)。不记录完整邮箱或 SMTP 密码。
+
 ## 前提
 
 - 使用支持 POSIX 文件权限的 Linux 或 macOS 控制器。Windows 使用受限的 Linux 控制器或 WSL。

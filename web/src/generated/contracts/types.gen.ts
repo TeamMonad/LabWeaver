@@ -12041,6 +12041,106 @@ export type MembershipInvitationSchemaRevision = number;
 export type MembershipInvitationSchemaUtcTimestamp = string;
 
 /**
+ * CursorPage
+ */
+export type NotificationPageSchema = {
+    items: Array<Notification>;
+    nextCursor?: string | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type NotificationPageSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EventId`.
+ */
+export type NotificationPageSchemaEventId = string;
+
+export type Notification = {
+    courseId?: NotificationPageSchemaCourseId | null;
+    deadline?: NotificationPageSchemaUtcTimestamp | null;
+    emailAttempts: number;
+    emailDetail?: string | null;
+    emailDiagnostic?: string | null;
+    emailState: NotificationEmailState;
+    eventId: NotificationPageSchemaEventId;
+    id: NotificationPageSchemaEventId;
+    kind: NotificationKind;
+    objectUrl: string;
+    observedAt: NotificationPageSchemaUtcTimestamp;
+    projectId: NotificationPageSchemaProjectId;
+    readAt?: NotificationPageSchemaUtcTimestamp | null;
+    summary: string;
+};
+
+export type NotificationEmailState = 'disabled' | 'pending' | 'sent' | 'failed' | 'exhausted' | 'no_verified_email' | 'delivery_unknown';
+
+export type NotificationKind = 'resource_decision' | 'lease_changed' | 'lease_expiry_reminder' | 'short_lease';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type NotificationPageSchemaProjectId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type NotificationPageSchemaUtcTimestamp = string;
+
+/**
+ * NotificationUnreadCount
+ */
+export type NotificationUnreadCountSchema = {
+    unreadCount: number;
+};
+
+/**
+ * Notification
+ */
+export type NotificationSchema = {
+    courseId?: NotificationSchemaCourseId | null;
+    deadline?: NotificationSchemaUtcTimestamp | null;
+    emailAttempts: number;
+    emailDetail?: string | null;
+    emailDiagnostic?: string | null;
+    emailState: NotificationSchemaNotificationEmailState;
+    eventId: NotificationSchemaEventId;
+    id: NotificationSchemaEventId;
+    kind: NotificationSchemaNotificationKind;
+    objectUrl: string;
+    observedAt: NotificationSchemaUtcTimestamp;
+    projectId: NotificationSchemaProjectId;
+    readAt?: NotificationSchemaUtcTimestamp | null;
+    summary: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type NotificationSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EventId`.
+ */
+export type NotificationSchemaEventId = string;
+
+export type NotificationSchemaNotificationEmailState = 'disabled' | 'pending' | 'sent' | 'failed' | 'exhausted' | 'no_verified_email' | 'delivery_unknown';
+
+export type NotificationSchemaNotificationKind = 'resource_decision' | 'lease_changed' | 'lease_expiry_reminder' | 'short_lease';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type NotificationSchemaProjectId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type NotificationSchemaUtcTimestamp = string;
+
+/**
  * OrganizationUserPage
  *
  * Bounded organization-directory search result.
@@ -17971,6 +18071,206 @@ export type RevokeMembershipInvitationResponses = {
 };
 
 export type RevokeMembershipInvitationResponse = RevokeMembershipInvitationResponses[keyof RevokeMembershipInvitationResponses];
+
+export type ListNotificationsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/api/v1/notifications';
+};
+
+export type ListNotificationsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListNotificationsError = ListNotificationsErrors[keyof ListNotificationsErrors];
+
+export type ListNotificationsResponses = {
+    /**
+     * Successful response
+     */
+    200: NotificationPageSchema;
+};
+
+export type ListNotificationsResponse = ListNotificationsResponses[keyof ListNotificationsResponses];
+
+export type GetNotificationUnreadCountData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/notifications/unread-count';
+};
+
+export type GetNotificationUnreadCountErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetNotificationUnreadCountError = GetNotificationUnreadCountErrors[keyof GetNotificationUnreadCountErrors];
+
+export type GetNotificationUnreadCountResponses = {
+    /**
+     * Successful response
+     */
+    200: NotificationUnreadCountSchema;
+};
+
+export type GetNotificationUnreadCountResponse = GetNotificationUnreadCountResponses[keyof GetNotificationUnreadCountResponses];
+
+export type MarkNotificationReadData = {
+    body?: never;
+    path: {
+        notificationId: string;
+    };
+    query?: never;
+    url: '/api/v1/notifications/{notificationId}/read';
+};
+
+export type MarkNotificationReadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type MarkNotificationReadError = MarkNotificationReadErrors[keyof MarkNotificationReadErrors];
+
+export type MarkNotificationReadResponses = {
+    /**
+     * Successful response
+     */
+    200: NotificationSchema;
+};
+
+export type MarkNotificationReadResponse = MarkNotificationReadResponses[keyof MarkNotificationReadResponses];
 
 export type ListProjectsData = {
     body?: never;

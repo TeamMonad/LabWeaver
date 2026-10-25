@@ -543,6 +543,7 @@ def _workload_inputs(
         "LABWEAVER_PLATFORM_CONFIGURATION_RUNTIME_DIR",
         "LABWEAVER_PLATFORM_CONFIGURATION_PROJECTED_SHA256",
         "LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE",
+        "LABWEAVER_NOTIFICATIONS_FILE",
     }
     result = {}
     for name, defaults in workloads.items():
@@ -907,6 +908,72 @@ def _resource_model(
         raise BundleError("LW_BUNDLE_VERSIONS_INVALID")
 
 
+def _notifications(model: dict[str, Any], files: dict[str, bytes], references: set[str]) -> dict[str, Any]:
+    """Validate optional delivery settings before deriving any workload input."""
+    if "notifications" not in model:
+        return {"smtp": None}
+    notification = _exact(model["notifications"], {"smtp"})
+    required = {"host", "port", "tls", "username", "passwordFile", "caFile", "from", "portalBaseUrl", "egressCidrs"}
+    smtp = notification["smtp"]
+    if not isinstance(smtp, dict):
+        raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp")
+    mismatch = set(smtp) ^ required
+    if mismatch:
+        raise BundleError(f"LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.{sorted(mismatch)[0]}")
+    for field in ("host", "username", "from", "portalBaseUrl"):
+        value = smtp[field]
+        if not isinstance(value, str) or not value or len(value) > 1024 or any(ord(char) < 32 for char in value):
+            raise BundleError(f"LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.{field}")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", smtp["host"]):
+        raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.host")
+    if type(smtp["port"]) is not int or not 1 <= smtp["port"] <= 65535:
+        raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.port")
+    if not isinstance(smtp["tls"], str) or smtp["tls"] not in {"tls", "starttls"}:
+        raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.tls")
+    import ipaddress
+    cidrs = smtp["egressCidrs"]
+    try:
+        if not isinstance(cidrs, list) or not 1 <= len(cidrs) <= 16:
+            raise ValueError("CIDR list required")
+        for cidr in cidrs:
+            if not isinstance(cidr, str):
+                raise ValueError("CIDR string required")
+            ipaddress.ip_network(cidr, strict=True)
+    except (ValueError, TypeError) as error:
+        raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.egressCidrs") from error
+    if not re.fullmatch(r"[^\s<>@]+@[^\s<>@]+", smtp["from"]):
+        raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.from")
+    try:
+        url = urlsplit(smtp["portalBaseUrl"])
+        valid_origin = url.scheme == "https" and url.hostname and not url.username and not url.password and url.path in {"", "/"} and not url.query and not url.fragment and url.port != 0
+    except ValueError:
+        valid_origin = False
+    if not valid_origin:
+        raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.portalBaseUrl")
+    result = {key: value for key, value in smtp.items() if key != "egressCidrs"}
+    for field, key in (("passwordFile", "smtp-password"), ("caFile", "smtp-ca.pem")):
+        try:
+            ref = _relative(smtp[field], "secrets")
+        except BundleError as error:
+            raise BundleError(f"LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.{field}") from error
+        if ref not in files or not files[ref].strip() or len(files[ref]) > 16384:
+            raise BundleError(f"LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.{field}")
+        if field == "passwordFile":
+            try:
+                files[ref].decode("utf-8")
+            except UnicodeError as error:
+                raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.passwordFile") from error
+        if field == "caFile":
+            import ssl
+            try:
+                ssl.create_default_context(cadata=files[ref].decode("ascii"))
+            except (ValueError, UnicodeError, ssl.SSLError) as error:
+                raise BundleError("LW_BUNDLE_NOTIFICATION_INVALID:notifications.smtp.caFile") from error
+        references.add(ref)
+        result[field] = f"/etc/labweaver/secrets/{key}"
+    return {"smtp": result}
+
+
 def load_bundle(
     root: Path, manifest_path: Path = DEFAULT_MANIFEST
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -915,7 +982,7 @@ def load_bundle(
     if MODEL_FILE not in files:
         raise BundleError("LW_BUNDLE_MODEL_MISSING")
     document = _document(files[MODEL_FILE])
-    optional = {"resource", "configurationMode", "infrastructure"}
+    optional = {"resource", "configurationMode", "infrastructure", "notifications"}
     model = _exact(
         document,
         {
@@ -977,6 +1044,7 @@ def load_bundle(
         "environmentExecutorAuthority",
         "platformConfigurationPolicy",
         "containerPlacementProfileConfigMap",
+        "notificationSmtpEgress",
     } & set(application["helmValues"]):
         raise BundleError("LW_BUNDLE_DERIVED_OVERRIDE_FORBIDDEN")
     for key in application["ansibleVariables"]:
@@ -1002,6 +1070,7 @@ def load_bundle(
         _resource_model(model, files, references)
     if "infrastructure" in model:
         _infrastructure_model(model, files, references)
+    _notifications(model, files, references)
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _configuration_policy(_settings(model, files))
@@ -1094,6 +1163,13 @@ def derive_bundle(
     workload_inputs, executor_configs, executor_authority = (
         environment_executor_bindings(model, files, _workload_inputs(application, manifest))
     )
+    notification = _notifications(model, files, set())
+    version = _settings(model, files)
+    notification["expiryReminderSeconds"] = version["configuration"]["lifecycle"]["expiryReminderSeconds"]
+    manifest["configMaps"]["control-service-config"].append("notifications.json")
+    workload_inputs["control-service"]["env"]["LABWEAVER_NOTIFICATIONS_FILE"] = "/etc/labweaver/config/notifications.json"
+    if notification["smtp"]:
+        manifest["secrets"]["control-service-secrets"].extend(["smtp-password", "smtp-ca.pem"])
     manifest["namespace"] = model["target"]["namespace"]
     manifest_output = output / "object-manifest.json"
     _write(manifest_output, json.dumps(manifest, sort_keys=True).encode())
@@ -1105,6 +1181,10 @@ def derive_bundle(
                     inputs / directory / name / key,
                     executor_configs.get(ref, files[ref]),
                 )
+    _write(inputs / "configmaps/control-service-config/notifications.json", json.dumps(notification, sort_keys=True).encode())
+    if notification["smtp"]:
+        for field, key in (("passwordFile", "smtp-password"), ("caFile", "smtp-ca.pem")):
+            _write(inputs / "secrets/control-service-secrets" / key, files[model["notifications"]["smtp"][field]])
     payload = objects.render_bundle(manifest_output, inputs)
     object_output = output / "application.yaml"
     _write(object_output, payload)
@@ -1113,6 +1193,7 @@ def derive_bundle(
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     values = dict(application["helmValues"])
     values["workloadInputs"] = workload_inputs
+    values["notificationSmtpEgress"] = ({"cidrs": model["notifications"]["smtp"]["egressCidrs"], "port": notification["smtp"]["port"]} if notification["smtp"] else None)
     if "container-placement-config" in application["configMaps"]:
         values["containerPlacementProfileConfigMap"] = "container-placement-config"
     if executor_authority:
@@ -1123,7 +1204,6 @@ def derive_bundle(
         for image in package["images"]
     }
     values["deploymentIdentity"] = {"configurationBundleSha256": digest}
-    version = _settings(model, files)
     policy = _configuration_policy(version)
     policy_payload = json.dumps(policy, sort_keys=True).encode()
     _write(output / "platform-configuration-policy.json", policy_payload)

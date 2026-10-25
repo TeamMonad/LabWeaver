@@ -2329,6 +2329,7 @@ fn valid_control_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     (path.starts_with("/api/v1/courses/")
         || super::membership_governance::valid_invitation_path(path)
+        || valid_notification_path(path)
         || path == "/api/v1/projects"
         || path.starts_with("/api/v1/projects/")
         || valid_admin_image_path(path)
@@ -2340,6 +2341,18 @@ fn valid_control_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|segment| segment != "." && segment != "..")
+}
+
+fn valid_notification_path(path: &str) -> bool {
+    if matches!(
+        path,
+        "/api/v1/notifications" | "/api/v1/notifications/unread-count"
+    ) {
+        return true;
+    }
+    path.strip_prefix("/api/v1/notifications/")
+        .and_then(|rest| rest.strip_suffix("/read"))
+        .is_some_and(|id| id.parse::<contracts::EventId>().is_ok())
 }
 
 fn valid_platform_configuration_path(path: &str) -> bool {

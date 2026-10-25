@@ -67,6 +67,9 @@ domains:
       - id: 20
         file: control/0020_manual_work_templates.sql
         sha256: 984124941db34315b203bce850f32e2e77a5614da905c14749180add5d3e110e
+      - id: 21
+        file: control/0021_notifications.sql
+        sha256: cd3f1faa0f5a230a229279a69b9896ab7f3967e95f601c5df176c130a36d9e6c
   - name: access
     migrations:
       - id: 1
@@ -96,6 +99,9 @@ domains:
       - id: 9
         file: access/0009_runtime_capabilities.sql
         sha256: d5817df7f14eceacb56a6861dacde81e5d07a9bc2f7e56ee1dbbe3a0dac797f9
+      - id: 10
+        file: access/0010_notification_recipients.sql
+        sha256: 4114de0788d016e0d80f56772fd04bada057c1d32c9e150a3c76da0738745bdd
   - name: environment
     migrations:
       - id: 1

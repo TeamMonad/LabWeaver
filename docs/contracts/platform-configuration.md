@@ -68,7 +68,7 @@ JSON 使用 `application/json`。高级 YAML 使用 `application/yaml`。两个�
 
 默认值为 7 天只读保留、30 天详细日志、24h/1h 到期提醒和 60 秒抢占宽限。留存与提醒必须在 1 秒到 365 天之间。提醒最多 16 个且不能重复。抢占宽限必须在 1 到 300 秒之间。
 
-生命周期值目前作为配置保存；对应的数据清理、通知和抢占消费者尚未接入。保存配置不会删除文件、发送提醒、收取费用或停止 Work。普通容器运行策略的当前消费者见下文：实际执行依赖同一 verified applied 版本、原对象授权与资金覆盖；builder 的执行能力不随 runtime 策略开放。未实现的生命周期与特权执行边界仍需后续消费者及部署验收，不能从保存成功推定。
+Control 通知消费者从实际加载的 Bundle 快照读取 `expiryReminderSeconds`，默认 `[86400,3600]`；初装自定义 lifecycle 同样派生通知输入。管理版本同时加载时两处派生值必须相等，否则启动失败。保存 desired 不替换进程快照或既有提醒。通知不执行数据清理、费用扣收或抢占，详见[通知契约](notifications.md)。普通容器策略继续消费同一 verified applied 版本、原对象授权与资金覆盖；builder 能力不随 runtime 策略开放。尚未实现的清理、抢占与特权边界仍须相应消费者和部署验收，不能从保存成功推定。
 
 普通容器 capabilities 使用 [Linux UAPI 名称](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h)，且必须属于 `LinuxCapability::supported_in_container` 的当前可执行集合；例如 `NET_ADMIN`、`NET_RAW` 可配置，`ALL`、未知名称和 `SYS_ADMIN`、`SYS_MODULE`、`BPF`、`PERFMON` 等广泛内核能力拒绝。项目/课程预授权不能超过平台允许清单，同一 scope 不能重复，普通预授权不能声明 privileged。`defaultContainerUid` 支持 `0..4294967294`，默认 `0`；`4294967295` 是保留 UID，拒绝保存。运行 spec 的 `runAsUser=null` 消费同一 verified applied receipt 的默认值，显式 UID 不被管理员默认值覆盖。
 

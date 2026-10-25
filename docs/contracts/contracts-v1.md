@@ -40,6 +40,7 @@ Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；�
 
 材料上传的查询、取消、恢复和限额见[材料上传与内容身份](material-uploads.md)。学生冻结提交继续使用[Collector 契约](submission-collector-v1.md)。
 项目 Credits 账户、预占与不可变账目接口见 [项目 Credits](project-credits.md)。Rust 真源位于 `resource::credits`，Schema/OpenAPI 与 Web SDK 从此真源生成。
+当前用户通知、已读状态、提醒与邮件投递边界见 [通知契约](notifications.md)。
 
 ## 项目进行中列表
 

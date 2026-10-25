@@ -106,6 +106,7 @@ impl OidcProvider {
                 move || Nonce::new(nonce),
             )
             .add_scope(Scope::new("openid".to_owned()))
+            .add_scope(Scope::new("email".to_owned()))
             .set_pkce_challenge(PkceCodeChallenge::from_code_verifier_sha256(&verifier))
             .url();
         Ok(url)
