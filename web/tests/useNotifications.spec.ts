@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { effectScope, nextTick, ref } from 'vue'
+import { effectScope, nextTick, ref, type EffectScope } from 'vue'
+import { LabWeaverApiError } from '@/api/client'
+import { advanceSessionEpoch } from '@/api/session'
 import { getNotificationUnreadCount, listNotifications, markNotificationRead, type Notification } from '@/generated/contracts'
 import {
   MARK_READ_TIMEOUT_MS,
@@ -111,7 +113,7 @@ describe('useNotificationList open', () => {
     write.resolve({ data: notification('n1', { readAt: '2026-10-20T08:05:00.000Z' }), error: undefined })
     expect(await first).toBe('/researcher/resources?projectId=project-1&requestId=request-n1')
     expect(markNotificationRead).toHaveBeenCalledTimes(1)
-    expect(markNotificationRead).toHaveBeenCalledWith({ path: { notificationId: 'n1' }, timeout: MARK_READ_TIMEOUT_MS })
+    expect(markNotificationRead).toHaveBeenCalledWith({ path: { notificationId: 'n1' }, signal: expect.any(AbortSignal) })
     expect(list.items[0]!.readAt).toBe('2026-10-20T08:05:00.000Z')
     expect(getNotificationUnreadCount).toHaveBeenCalled()
 
@@ -157,6 +159,93 @@ describe('useNotificationList open', () => {
     expect(await list.open(list.items[0]!)).toBeNull()
     expect(markNotificationRead).not.toHaveBeenCalled()
     expect(list.actionFailure?.diagnostic.code).toBe('NOTIFICATION_LINK_INVALID')
+  })
+
+  /** The SDK hands an error back as the result object itself, with `error` set. */
+  const sessionDiscarded = () => Object.assign(
+    new LabWeaverApiError('LW_SDK_SESSION_CHANGED', 'The signed-in session changed.'),
+    { error: {} },
+  )
+  const answers = {
+    success: () => ({ data: notification('n1', { readAt: '2026-10-20T08:05:00.000Z' }), error: undefined }),
+    'withdrawn access': () => problem(404, 'LW_NOTIFICATION_NOT_FOUND', 'req-404'),
+    'transient failure': () => problem(503, 'LW_NOTIFICATION_PERSISTENCE_FAILED', 'req-503'),
+    'session discard': sessionDiscarded,
+  }
+
+  describe.each(Object.entries(answers))('a late %s answer', (_, answer) => {
+    /**
+     * Opens n1 and ends the open's validity with `invalidate` while its write
+     * is pending. The write answers either after that (the open already
+     * stopped) or just before it, in the same tick, so the answer is in hand
+     * when the open resumes and has to be dropped by the validity check.
+     */
+    async function expectDropped(invalidate: (scope: EffectScope) => void, answerFirst: boolean) {
+      vi.mocked(listNotifications).mockResolvedValueOnce(page([notification('n1'), notification('n2')], null))
+      const write = deferred<unknown>()
+      vi.mocked(markNotificationRead).mockReturnValueOnce(write.promise as never)
+      const scope = effectScope()
+      const list = scope.run(() => useNotificationList())!
+      await list.load()
+      const opened = list.open(list.items[0]!)
+      const signal = vi.mocked(markNotificationRead).mock.calls[0]![0].signal!
+      vi.mocked(getNotificationUnreadCount).mockClear()
+
+      if (answerFirst) write.resolve(answer())
+      invalidate(scope)
+      expect(signal.aborted).toBe(true)
+      expect(await opened).toBeNull()
+      if (!answerFirst) write.resolve(answer())
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      // Nothing of the answer is published, refreshed or navigated to.
+      expect(list.items.map((item) => item.id)).toEqual(['n1', 'n2'])
+      expect(list.items[0]!.readAt).toBeUndefined()
+      expect(list.actionFailure).toBeNull()
+      expect(list.opening).toBeNull()
+      expect(getNotificationUnreadCount).not.toHaveBeenCalled()
+      scope.stop()
+    }
+
+    it.each([false, true])('is dropped once the page that opened the notification is gone (answered first: %s)', async (answerFirst) => {
+      await expectDropped((scope) => scope.stop(), answerFirst)
+    })
+
+    it.each([false, true])('is dropped once the session epoch the write started in ends (answered first: %s)', async (answerFirst) => {
+      await expectDropped(() => advanceSessionEpoch(), answerFirst)
+    })
+  })
+
+  it('does not treat a write the transport discarded for another actor as a transient failure', async () => {
+    vi.mocked(listNotifications).mockResolvedValueOnce(page([notification('n1')], null))
+    vi.mocked(markNotificationRead).mockResolvedValueOnce(sessionDiscarded() as never)
+    const list = useNotificationList()
+    await list.load()
+
+    expect(await list.open(list.items[0]!)).toBeNull()
+    expect(list.items[0]!.readAt).toBeUndefined()
+    expect(list.actionFailure?.diagnostic.code).toBe('LW_SDK_SESSION_CHANGED')
+    expect(list.actionFailure?.diagnostic.message).toBe('登录账号已变化，这次操作属于之前的账号，没有执行或结果已丢弃。')
+  })
+
+  it('opens the object after the deadline and cancels the write still in flight', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(listNotifications).mockResolvedValueOnce(page([notification('n1')], null))
+      vi.mocked(markNotificationRead).mockReturnValueOnce(new Promise(() => {}) as never)
+      const list = useNotificationList()
+      await list.load()
+
+      const opened = list.open(list.items[0]!)
+      await vi.advanceTimersByTimeAsync(MARK_READ_TIMEOUT_MS - 1)
+      expect(list.opening).toBe('n1')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await opened).toBe('/researcher/resources?projectId=project-1&requestId=request-n1')
+      expect(vi.mocked(markNotificationRead).mock.calls[0]![0].signal!.aborted).toBe(true)
+      expect(list.items[0]!.readAt).toBeUndefined()
+      expect(list.opening).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

@@ -101,6 +101,8 @@ function reload() {
 }
 
 async function openNotification(notification: Notification) {
+  // open() answers null once this page is gone or the session changed, so a
+  // late mark-read never navigates the next page or the next account.
   const location = await list.open(notification)
   if (location) await router.push(location)
 }

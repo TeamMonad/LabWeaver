@@ -1,11 +1,11 @@
-import { reactive, ref, watch, type Ref } from 'vue'
+import { getCurrentScope, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import {
   getNotificationUnreadCount,
   listNotifications,
   markNotificationRead,
   type Notification,
 } from '@/generated/contracts'
-import { sessionEpoch } from '@/api/session'
+import { sessionEpoch, sessionEpochSignal } from '@/api/session'
 import { useVisiblePolling } from '@/composables/useVisiblePolling'
 import { diagnosticFromError, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { notificationObjectLocation } from '@/utils/notifications'
@@ -13,7 +13,12 @@ import { notificationObjectLocation } from '@/utils/notifications'
 /** Unread count cadence while the tab is visible; a hidden tab does not poll. */
 export const UNREAD_POLL_INTERVAL_MS = 60_000
 export const NOTIFICATION_PAGE_SIZE = 20
-/** A slow mark-read write must not hold the reader on the list; marking is idempotent. */
+/**
+ * How long opening a notification waits for its mark-read write, including the
+ * CSRF token the write needs first. Afterwards the object opens, the write is
+ * cancelled before it is sent or while it is in flight, and the notification
+ * may stay unread; marking is idempotent, so opening it again is safe.
+ */
 export const MARK_READ_TIMEOUT_MS = 5_000
 
 // One unread count per tab: the top bar polls it and the list page refreshes
@@ -75,6 +80,16 @@ export function useNotificationList() {
   const actionFailure = ref<NotificationActionFailure | null>(null)
   const opening = ref<string | null>(null)
   let generation = 0
+  // Set once the page using this list goes away; the open in progress is cancelled.
+  let disposed = false
+  let pendingOpen: AbortController | null = null
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      disposed = true
+      generation += 1
+      pendingOpen?.abort()
+    })
+  }
 
   function publish() {
     state.value = items.value.length > 0 ? { kind: 'success', data: items.value } : { kind: 'empty' }
@@ -123,9 +138,12 @@ export function useNotificationList() {
    * Mark the notification read, then return where to go; null keeps the
    * reader here with the reason in `actionFailure`. Only Control's answer that
    * the reader can no longer see the notification stops the link. Any other
-   * mark-read failure still opens the object: the notification simply stays
-   * unread. An already read notification opens without another write, and a
-   * click while a write is in flight sends nothing.
+   * mark-read failure, or no answer within MARK_READ_TIMEOUT_MS, still opens
+   * the object: the notification simply stays unread. An already read
+   * notification opens without another write, and a click while a write is in
+   * flight sends nothing. Once the page is left or the session epoch the write
+   * started in ends, its outcome is dropped: nothing is published, the unread
+   * count is not refreshed and no location is returned.
    */
   async function open(notification: Notification): Promise<string | null> {
     if (opening.value) return null
@@ -140,11 +158,42 @@ export function useNotificationList() {
     actionFailure.value = null
     if (notification.readAt) return location
     opening.value = notification.id
-    const current = generation
+    const startedEpoch = sessionEpoch.value
+    const epochEnded = sessionEpochSignal()
+    const controller = new AbortController()
+    pendingOpen = controller
+    const stop = () => controller.abort()
+    epochEnded.addEventListener('abort', stop)
+    let timedOut = false
+    // One deadline for the CSRF token and the write: Axios checks the signal
+    // before it dispatches the write, so a write is never sent after it.
+    const deadline = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, MARK_READ_TIMEOUT_MS)
+    // Promise.withResolvers is outside the project's ES2020 lib.
+    const stopped = new Promise<'stopped'>((resolve) => {
+      controller.signal.addEventListener('abort', () => resolve('stopped'))
+    })
     try {
-      const result = await markNotificationRead({ path: { notificationId: notification.id }, timeout: MARK_READ_TIMEOUT_MS })
-      if (current !== generation) return null
+      const result = await Promise.race([
+        markNotificationRead({ path: { notificationId: notification.id }, signal: controller.signal }),
+        stopped,
+      ])
+      // Left page or another session: drop the outcome, whatever it was.
+      if (disposed || startedEpoch !== sessionEpoch.value) return null
+      if (result === 'stopped') return timedOut ? location : null
       if (result.error) {
+        // The transport discarded the write for another actor than the one it
+        // started with (the SDK hands back its LabWeaverApiError, whose `error`
+        // is empty): it is not a mark-read failure and opens nothing.
+        if ('diagnosticCode' in result && result.diagnosticCode === 'LW_SDK_SESSION_CHANGED') {
+          actionFailure.value = {
+            notificationId: notification.id,
+            diagnostic: makeDiagnostic('LW_SDK_SESSION_CHANGED', '', false),
+          }
+          return null
+        }
         const diagnostic = diagnosticFromError(result.error, 'NOTIFICATION_MARK_READ_FAILED', '暂时无法把这条通知标记为已读。')
         if (diagnostic.status !== 404) return location
         // Control rechecks recipient and membership on every read: 404 means
@@ -168,6 +217,9 @@ export function useNotificationList() {
       void refreshUnreadCount()
       return location
     } finally {
+      clearTimeout(deadline)
+      epochEnded.removeEventListener('abort', stop)
+      if (pendingOpen === controller) pendingOpen = null
       opening.value = null
     }
   }
