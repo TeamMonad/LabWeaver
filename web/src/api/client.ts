@@ -286,17 +286,27 @@ function writeWaits(config: { timeout?: number; signal?: unknown }, startedAt: n
   const until = <T>(work: () => Promise<T>): Promise<T> => {
     if (stopped.signal.aborted) return Promise.reject(interrupted())
     return new Promise<T>((resolve, reject) => {
-      const onStop = () => reject(interrupted())
+      let settled = false
+      // The one way out (result, failure, stop or a synchronous throw): the
+      // stop listener goes at once, and a late answer of `work` changes nothing.
+      const settle = (outcome: () => void) => {
+        if (settled) return
+        settled = true
+        stopped.signal.removeEventListener('abort', onStop)
+        outcome()
+      }
+      const onStop = () => settle(() => reject(interrupted()))
       stopped.signal.addEventListener('abort', onStop)
-      work().then(
-        (value) => {
-          stopped.signal.removeEventListener('abort', onStop)
-          resolve(value)
-        },
-        (error: unknown) => {
-          stopped.signal.removeEventListener('abort', onStop)
-          reject(stopped.signal.aborted || error instanceof IdentityWaitInterrupted ? interrupted() : error)
-        },
+      let pending: Promise<T>
+      try {
+        pending = work()
+      } catch (error) {
+        settle(() => reject(error))
+        return
+      }
+      pending.then(
+        (value) => settle(() => resolve(value)),
+        (error: unknown) => settle(() => reject(stopped.signal.aborted || error instanceof IdentityWaitInterrupted ? interrupted() : error)),
       )
     })
   }

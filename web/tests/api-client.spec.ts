@@ -563,6 +563,94 @@ describe('browser session changes (#198)', () => {
       expect(adapter).toHaveBeenCalledOnce()
       expect(JSON.parse(String(adapter.mock.calls[0][0].data))).toEqual({ name: '保留' })
     })
+
+    describe('a wait that ends leaves no listener behind', () => {
+      /** Net 'abort' listeners per signal, counted from every add and remove. */
+      function abortListeners() {
+        const added = vi.spyOn(EventTarget.prototype, 'addEventListener')
+        const removed = vi.spyOn(EventTarget.prototype, 'removeEventListener')
+        const count = (spy: typeof added, target: unknown) =>
+          spy.mock.calls.filter(([type], index) => type === 'abort' && spy.mock.contexts[index] === target).length
+        return {
+          on: (target: unknown) => count(added, target) - count(removed, target),
+          restore() {
+            added.mockRestore()
+            removed.mockRestore()
+          },
+        }
+      }
+
+      /** A write whose custom CSRF provider is `provide`; the signal it was given is kept. */
+      async function writeWithProvider(provide: () => Promise<never>, options: { timeoutMilliseconds?: number; signal?: AbortSignal } = {}) {
+        const { session, client } = await freshTransport()
+        session.recordSessionActor('actor-a')
+        const signals: AbortSignal[] = []
+        const api = client.createLabWeaverApiClient({
+          baseUrl: '/',
+          authentication: {
+            mode: 'bff',
+            csrfToken: ({ signal }) => {
+              signals.push(signal)
+              return provide()
+            },
+          },
+          ...(options.timeoutMilliseconds ? { timeoutMilliseconds: options.timeoutMilliseconds } : {}),
+        })
+        const adapter = installSuccessfulAdapter(api)
+        const write = api.post({ url: '/api/v1/projects', body: { name: '项目' }, ...(options.signal ? { signal: options.signal } : {}) })
+        return { adapter, signals, write }
+      }
+
+      it('removes its listener when the deadline wins over a provider that never settles', async () => {
+        const listeners = abortListeners()
+        try {
+          const { adapter, signals, write } = await writeWithProvider(() => new Promise<never>(() => undefined), { timeoutMilliseconds: 20 })
+
+          expect(await write).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_TIMEOUT' })
+          expect(adapter).toHaveBeenCalledTimes(0)
+          expect(signals).toHaveLength(1)
+          expect(listeners.on(signals[0])).toBe(0)
+        } finally {
+          listeners.restore()
+        }
+      })
+
+      it('removes its listeners when the caller cancels a provider that never settles', async () => {
+        const listeners = abortListeners()
+        try {
+          const caller = new AbortController()
+          const { adapter, signals, write } = await writeWithProvider(() => new Promise<never>(() => undefined), { signal: caller.signal })
+          await vi.waitFor(() => expect(signals).toHaveLength(1))
+          caller.abort()
+
+          expect(await write).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_CANCELLED' })
+          expect(adapter).toHaveBeenCalledTimes(0)
+          expect(listeners.on(signals[0])).toBe(0)
+          expect(listeners.on(caller.signal)).toBe(0)
+        } finally {
+          listeners.restore()
+        }
+      })
+
+      it('removes its listener and refuses the write readably when the provider throws synchronously', async () => {
+        const listeners = abortListeners()
+        try {
+          const { adapter, signals, write } = await writeWithProvider(() => {
+            throw new Error('provider broke')
+          })
+
+          const result = await write
+          expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_TRANSPORT_FAILED' })
+          const diagnostic = diagnosticFromError(result, 'PROJECT_CREATE_FAILED', '创建项目失败')
+          expect(diagnostic.code).toBe('LW_SDK_TRANSPORT_FAILED')
+          expect(diagnostic.message).toBe('创建项目失败')
+          expect(adapter).toHaveBeenCalledTimes(0)
+          expect(listeners.on(signals[0])).toBe(0)
+        } finally {
+          listeners.restore()
+        }
+      })
+    })
   })
 
   it('refuses queued and new writes unsent while the actor stays unknown, and keeps reading', async () => {
