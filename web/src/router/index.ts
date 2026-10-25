@@ -12,6 +12,7 @@ import {
   type NavigationItemId,
   type PlatformRole,
 } from '@/utils/navigation'
+import { trackPendingNavigation } from '@/utils/pendingNavigation'
 
 /** Roles that come from the authenticated platform identity. Work is project-scoped. */
 export type AppRole = PlatformRole
@@ -160,6 +161,9 @@ const router = createRouter({
     return window.innerWidth <= 760 ? { left: 0, top: 0 } : false
   },
 })
+
+// First, so a navigation is known as pending while the session guard below waits.
+trackPendingNavigation(router)
 
 router.beforeEach(async (to) => {
   const requiredRoles = collectRequiredRoles(to)

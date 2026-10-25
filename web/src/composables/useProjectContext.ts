@@ -1,8 +1,10 @@
 import { computed, shallowRef, toRaw, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { getProject, type ProjectSchema } from '@/generated/contracts'
+import { useAuth } from '@/composables/useAuth'
 import { useProjects } from '@/composables/useProjects'
 import { diagnosticFromError, type AsyncState, type DiagnosticViewModel } from '@/types/async'
+import { navigationPending } from '@/utils/pendingNavigation'
 
 /**
  * The browser-wide project context.
@@ -65,8 +67,17 @@ function routeProjectIdOf(value: unknown): string | null {
 export function useProjectContext() {
   const route = useRoute()
   const projects = useProjects()
+  const auth = useAuth()
 
-  const scoped = computed(() => Boolean(route.meta.projectScoped))
+  // The project context belongs to the signed-in actor. A public page (the
+  // home page: no role requirement) read without one renders its own sign-in
+  // entry. A role-protected page stays behind the project gate even after the
+  // session is gone, so no page renders before its actor's list is known.
+  const publicRoute = computed(() => !route.matched.some((record) => {
+    const roles: unknown = record.meta.requiredRoles
+    return Array.isArray(roles) && roles.length > 0
+  }))
+  const scoped = computed(() => Boolean(route.meta.projectScoped) && (auth.isAuthenticated.value || !publicRoute.value))
   const routeProjectId = computed(() => routeProjectIdOf(route.query.projectId))
 
   const fallbackProject = computed<ProjectSchema | null>(() => {
@@ -149,7 +160,9 @@ export function useProjectContextSync() {
   const context = useProjectContext()
 
   watch(
-    [() => context.scoped.value, () => context.routeProjectId.value, () => projects.settledProjects],
+    // The path re-runs the sync once a navigation commits: an address write
+    // skipped while it was pending is made on the page it landed on.
+    [() => context.scoped.value, () => context.routeProjectId.value, () => projects.settledProjects, () => route.path],
     ([scoped, requested, settled]) => {
       if (!scoped || (settled.kind !== 'success' && settled.kind !== 'empty')) return
       const items = settled.kind === 'success' ? settled.data : []
@@ -173,6 +186,10 @@ export function useProjectContextSync() {
       listRefreshedFor = null
       const selected = projects.selectedProjectId
       if (!selected || !items.some((project) => project.id === selected)) return
+      // A replace now would cancel a navigation the user already started (its
+      // guards may still be reading the session); the page it lands on is
+      // synchronized when it commits.
+      if (navigationPending(router)) return
       const query: LocationQueryRaw = { ...route.query, projectId: selected }
       void router.replace({ path: route.path, query, hash: route.hash })
     },

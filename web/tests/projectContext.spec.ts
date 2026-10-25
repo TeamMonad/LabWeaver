@@ -17,6 +17,16 @@ vi.mock('@/generated/contracts', () => ({ listProjects, getProject }))
 const projectA = { id: 'project-a', name: '项目 A', state: 'active', revision: 1, ownerActorId: 'u', createdAt: '', updatedAt: '' }
 const projectB = { id: 'project-b', name: '项目 B', state: 'active', revision: 1, ownerActorId: 'u', createdAt: '', updatedAt: '' }
 
+function sessionResponse(signedIn: boolean) {
+  if (!signedIn) return new Response(JSON.stringify({ status: 401 }), { status: 401, headers: { 'content-type': 'application/problem+json' } })
+  return new Response(JSON.stringify({
+    actor: { actorId: '01900000-0000-7000-8000-00000000000a', roles: ['teacher'], expiresAt: '2099-01-01T00:00:00.000Z' },
+    authorizationRevision: 1,
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    scopes: [{ kind: 'global' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+}
+
 let mounts = 0
 const ScopedPage = defineComponent({
   name: 'ScopedPage',
@@ -28,19 +38,26 @@ const ScopedPage = defineComponent({
 
 const routes: RouteRecordRaw[] = [
   { path: '/', component: ScopedPage, meta: { title: '进行中', projectScoped: true } },
-  { path: '/researcher/environments', component: ScopedPage, meta: { title: 'Work 环境', projectScoped: true } },
-  { path: '/researcher/workspaces', component: ScopedPage, meta: { title: '项目与工作空间', projectScoped: true } },
+  { path: '/researcher/environments', component: ScopedPage, meta: { title: 'Work 环境', projectScoped: true, requiredRoles: ['teacher'] } },
+  { path: '/researcher/workspaces', component: ScopedPage, meta: { title: '项目与工作空间', projectScoped: true, requiredRoles: ['teacher'] } },
   { path: '/admin/gpu-catalog', component: ScopedPage, meta: { title: 'GPU 目录' } },
 ]
 
 enableAutoUnmount(afterEach)
 
-async function mountShell(path: string) {
+/** Mounts the shell the way App.vue does: the session is read, then the shell renders. */
+async function mountShell(path: string, { signedIn = true, awaitList = true } = {}) {
   vi.resetModules()
+  vi.stubGlobal('fetch', vi.fn(async () => sessionResponse(signedIn)))
   const { default: AppShell } = await import('@/components/layout/AppShell.vue')
+  const { useAuth } = await import('@/composables/useAuth')
+  const { trackPendingNavigation } = await import('@/utils/pendingNavigation')
   const router = createRouter({ history: createMemoryHistory(), routes })
+  // As in the app router: installed before any guard that waits.
+  trackPendingNavigation(router)
   await router.push(path)
   await router.isReady()
+  await useAuth().loadUser()
   const wrapper = mount(AppShell, {
     global: {
       plugins: [router],
@@ -49,7 +66,8 @@ async function mountShell(path: string) {
   })
   const { useProjects } = await import('@/composables/useProjects')
   // The real shell loads the catalog through the top bar selector.
-  await useProjects().load()
+  const load = useProjects().load()
+  if (awaitList) await load
   await flushPromises()
   return { wrapper, router, projects: useProjects() }
 }
@@ -67,6 +85,95 @@ describe('AppShell project context', () => {
     listProjects.mockReset()
     getProject.mockReset()
     listProjects.mockResolvedValue({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('shows the public home instead of the project gate when nobody is signed in', async () => {
+    listProjects.mockResolvedValue(problem(401, 'LW_AUTH_SESSION_REJECTED'))
+    const { wrapper, router } = await mountShell('/', { signedIn: false })
+
+    // The home page renders its own sign-in entry; there is no project to confirm.
+    expect(wrapper.find('.scoped-page').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="project-context-list-error"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('正在确认项目…')
+    expect(router.currentRoute.value.query.projectId).toBeUndefined()
+    expect(getProject).not.toHaveBeenCalled()
+    expect(document.title).toBe('进行中 · LabWeaver')
+  })
+
+  it('keeps a role-protected project page behind the gate once the session is gone', async () => {
+    listProjects.mockResolvedValue(problem(401, 'LW_AUTH_SESSION_REJECTED'))
+    const { wrapper } = await mountShell('/researcher/environments?projectId=project-a', { signedIn: false })
+
+    expect(wrapper.find('[data-testid="project-context-list-error"]').exists()).toBe(true)
+    expect(wrapper.find('.scoped-page').exists()).toBe(false)
+    expect(mounts).toBe(0)
+  })
+
+  it('scopes the home page to the current project once the actor is signed in', async () => {
+    localStorage.setItem('labweaver_project_id', 'project-b')
+    const { wrapper, router } = await mountShell('/')
+
+    expect(router.currentRoute.value.query.projectId).toBe('project-b')
+    expect(wrapper.find('.scoped-page').exists()).toBe(true)
+    expect(document.title).toBe('进行中 · 项目 B · LabWeaver')
+  })
+
+  it('lets a navigation still resolving its guards win over writing the project into the address', async () => {
+    let answerList!: (value: unknown) => void
+    listProjects.mockReturnValue(new Promise((resolve) => { answerList = resolve }))
+    const { router } = await mountShell('/', { awaitList: false })
+    // Role-protected routes read the session before they resolve; hold that read open.
+    let guardEntered!: () => void
+    const waiting = new Promise<void>((resolve) => { guardEntered = resolve })
+    let releaseGuard!: () => void
+    const sessionRead = new Promise<void>((resolve) => { releaseGuard = resolve })
+    router.beforeEach(async (to) => {
+      if (to.path !== '/admin/gpu-catalog') return
+      guardEntered()
+      await sessionRead
+    })
+
+    const navigation = router.push('/admin/gpu-catalog')
+    await waiting
+    // The list settles while the user's navigation is still reading the session.
+    answerList({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
+    await flushPromises()
+    releaseGuard()
+    await navigation
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/admin/gpu-catalog')
+  })
+
+  it('writes the project into the address of the page a pending navigation lands on', async () => {
+    let answerList!: (value: unknown) => void
+    listProjects.mockReturnValue(new Promise((resolve) => { answerList = resolve }))
+    localStorage.setItem('labweaver_project_id', 'project-b')
+    const { router } = await mountShell('/', { awaitList: false })
+    let guardEntered!: () => void
+    const waiting = new Promise<void>((resolve) => { guardEntered = resolve })
+    let releaseGuard!: () => void
+    const sessionRead = new Promise<void>((resolve) => { releaseGuard = resolve })
+    router.beforeEach(async (to) => {
+      if (to.path !== '/researcher/environments') return
+      guardEntered()
+      await sessionRead
+    })
+
+    const navigation = router.push('/researcher/environments')
+    await waiting
+    answerList({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
+    await flushPromises()
+    releaseGuard()
+    await navigation
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/researcher/environments')
+    expect(router.currentRoute.value.query.projectId).toBe('project-b')
   })
 
   it('writes the selected project into the address of a scoped page', async () => {
