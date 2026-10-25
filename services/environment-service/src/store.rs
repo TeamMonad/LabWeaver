@@ -33,7 +33,9 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::lifecycle::{LifecycleCommand, LifecycleError, plan_command_authorized};
+use crate::lifecycle::{
+    LifecycleCommand, LifecycleError, plan_command_authorized, validate_cleanup_identity,
+};
 
 /// Verifies the worker-persisted target instead of trusting identities supplied over NATS.
 pub(crate) async fn cleanup_target_matches(
@@ -2126,6 +2128,7 @@ fn public_operation_snapshot(
         && record.operation.attempt < record.operation.max_attempts
         && instance.observed_state == ObservedEnvironmentState::Failed
         && instance.failed_phase.is_some()
+        && validate_cleanup_identity(instance).is_ok()
         && instance
             .eligibility_expires_at
             .is_none_or(|deadline| deadline > snapshot_at)

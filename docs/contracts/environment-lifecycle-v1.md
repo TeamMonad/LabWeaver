@@ -334,6 +334,10 @@ retries can be reclaimed without command admission, so the shared worker diagnos
 any Kubernetes request when no original binding exists. The checkpoint helper and lease/CAS
 store independently reject inventing that marker or the missing target. Existing proven targets
 remain immutable. This rule applies to both native Container and KubeVirt execution paths.
+Operation snapshots apply the same cleanup-identity admission guard to `retryEligible`: a failed
+legacy destructive cleanup without its original binding is not retryable. A new-protocol cleanup
+with a saved target remains eligible when the other retry limits and authorization checks pass;
+retry and recovery retain that target rather than adopting a replacement.
 Public owner detail uses an explicit safe projection and operation snapshots keep their existing
 read model; neither discloses the target, namespace/object UIDs, or the internal protocol marker.
 

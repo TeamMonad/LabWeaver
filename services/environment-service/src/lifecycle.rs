@@ -76,6 +76,23 @@ pub(crate) fn pin_cleanup_target(
     Ok(updated)
 }
 
+/// Rejects legacy destructive cleanup that cannot prove its original object identity.
+pub(crate) fn validate_cleanup_identity(
+    current: &EnvironmentInstance,
+) -> Result<(), LifecycleError> {
+    if current.desired_state == DesiredEnvironmentState::Deleted
+        && current.operation.cleanup_target.is_none()
+        && current.operation.cleanup_protocol_version
+            != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
+        && (current.observed_state == ObservedEnvironmentState::Deleting
+            || current.failed_phase == Some(ObservedEnvironmentState::Deleting))
+    {
+        // A pre-cleanup Stop/Expire failure may still establish its first checkpoint.
+        return Err(LifecycleError::ProviderObservationInvalid);
+    }
+    Ok(())
+}
+
 /// Accepts a command without performing Provider I/O.
 pub fn plan_command(
     current: &EnvironmentInstance,
@@ -101,17 +118,7 @@ pub fn plan_command_authorized(
     if current.id != command.environment_id || current.revision != command.expected_revision {
         return Err(LifecycleError::RevisionConflict);
     }
-    if current.desired_state == DesiredEnvironmentState::Deleted
-        && current.operation.cleanup_target.is_none()
-        && current.operation.cleanup_protocol_version
-            != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
-        && (current.observed_state == ObservedEnvironmentState::Deleting
-            || current.failed_phase == Some(ObservedEnvironmentState::Deleting))
-    {
-        // The legacy destructive phase cannot prove its original object. A pre-cleanup
-        // Stop/Expire failure may still resume and establish its first read-only checkpoint.
-        return Err(LifecycleError::ProviderObservationInvalid);
-    }
+    validate_cleanup_identity(current)?;
     if !(1..=100).contains(&command.max_attempts)
         || command.deadline_at <= command.accepted_at
         || command.trace_id.is_empty()
