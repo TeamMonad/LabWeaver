@@ -58,6 +58,29 @@ platform_foundation_ha:
     userDataRetentionDays: 30
 ```
 
+身份库不复用业务库的 Cluster、应用凭据或备份对象前缀。在同一个 inventory 的 `all.vars` 增加：
+
+```yaml
+identity_foundation_enabled: true
+identity_foundation_ha:
+  failureDomain: production-site-a
+  productionObjectEndpoint: https://objects.example.edu
+  backup:
+    endpoint: https://independent-backup.example.net
+    destination: s3://labweaver-identity-backups/keycloak/
+    failureDomain: backup-site-b
+    credentialsSecret: identity-backup-secrets
+    caSecret: identity-backup-secrets
+    archiveTimeoutSeconds: 300
+    baseBackupSchedule: '0 0 2 * * *'
+    retentionDays: 30
+```
+
+身份备份可使用同一个独立备份站点，但必须使用独立 bucket 或互不包含的对象前缀与受限凭据；不能与业务库共用归档目录。`infrastructure.identitySecretFile` 指向现有 `identity-bootstrap.v2` YAML，保留 `database_password`、`bootstrap_admin_password`、`service_client_secrets`、`revision`，另提供 `backup_access_key`、`backup_secret_key`、`backup_ca_crt`。这些秘密仅在加密 Bundle/受限 locator 内保存，由角色在身份 namespace 创建独立 `identity-backup-secrets`；不要复制业务库 Secret。`labweaver-keycloak-database` 使用 `kubernetes.io/basic-auth`，用户名固定为 `keycloak`。CNPG 自行管理身份库的 CA、服务与复制证书，不复用业务库或 Keycloak HTTP 证书。
+
+生产 HA Bundle 或启用了身份 foundation 的 Bundle 均要求该身份备份配置和凭据；缺少目标、故障域、凭据或非法频率/保留期时，以 `LW_BUNDLE_HA_INVALID:identity_foundation_ha.<字段>` 在执行前拒绝。身份 profile 不接受用户卷备份计划。非 Bundle 全量身份入口也校验同样的目标规则，并要求有效的备份 CA 材料。默认 `identity_postgres_storage=20Gi`，存储类固定 `ceph-rbd`，不再提供身份库单副本/local-path 分支。
+
+
 生产 HA profile 不接受未配置的独立备份。缺失/非法字段以 `LW_BUNDLE_HA_INVALID:platform_foundation_ha.<字段>` 阻止 Bundle 校验。目的地址必须是 HTTPS，主机名不能与生产对象端点相同，声明的故障域也必须不同。域名不同不能证明物理独立：部署者必须核对备份目标的电源、主机、磁盘、网络与站点；同一生产 RGW 上的另一个 bucket 不合格。
 
 在同一 foundation 私有 render-input 的 `secrets/postgres-secrets/` 放入 `backup-access-key`、`backup-secret-key`、`backup-ca.crt`；用已有 `tools/render_platform_bundle.py` 和 foundation manifest 生成 Bundle 引用的基础设施对象。HA renderer 从这三个受控字段派生 `independent-backup-secrets`；不生成假凭据。缺材料时不会启动没有归档目的地的生产 CNPG。更新 CA、NATS TLS 服务证书时，用现有 `tools/prepare_platform_foundation.py` 重新生成；NATS 路由证书需要 serverAuth/clientAuth 与三个成员的 DNS SAN。
@@ -82,7 +105,7 @@ Resource 在批准、Task claim、新 capacity shell 前读取 CephCluster；Env
 
 这个健康门不替代 Ceph 写入层安全：现有 I/O 的 quorum/满盘拒写由 Ceph 的 pool 最小副本与 full 阈值执行。Kubernetes 状态不是线性一致的物理存储探测，观测到分区存在至多一个采样/新鲜度窗口；不能由一次 `HEALTH_OK` 宣称未来写入绝对成功。已有授权也不能绕过存储的实际拒写。
 
-**身份库仍有单点：** 本切片只把六服务业务库切到 CNPG，不改 `identity_foundation`。Keycloak 的 `identity-postgres` 仍为单副本，其节点故障期间无法登录；不宣称认证链或整个平台已具备单节点 HA。身份库迁往独立 CNPG Cluster、独立 Secret/备份目标及 Keycloak 启动顺序属于 #205 的另一个 PR。#205 保持 Open，验收项 1、硬件和全链验收不得因本切片通过而勾选。
+**身份链的 HA 边界：** `identity_foundation` 创建独立 `identity-postgres` CNPG Cluster（三实例、host 必须反亲和、required synchronous/quorum、PDB）及独立 ObjectStore/ScheduledBackup。Keycloak 至少两个副本并跨 host 调度；角色先等待身份 Cluster Ready，再启动 Keycloak。每次 Pod 启动的 init container 通过应用口令和 `verify-full` TLS 执行实际 `SELECT 1`；Keycloak JDBC 同样校验证书并连接 CNPG 管理的 `identity-postgres-rw`，不再访问旧 `identity-postgres` Service。CNPG operator 及 Barman 插件必须先由 platform foundation 安装；身份 namespace 的网络策略允许复制、operator、API、DNS 和指定独立备份 HTTPS 出口。此配置不等于真实节点故障、登录全链或站点恢复验收已经完成；#205 仍保持 Open。
 
 ## 站点灾难目标与独立备份
 
@@ -105,6 +128,8 @@ WAL、base backup 的 ObjectStore、插件和 ScheduledBackup 已渲染到独立
 3. 已有独立 `postgres` StatefulSet 会触发 `PLATFORM_FOUNDATION_HA_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION`。在获准的数据切换窗口处理它及旧 `postgres` Service；角色不自动删库、搬数据或清空 PV。HA 只消费实际 `postgres-rw` Service，不保留 ExternalName 或旧名称兼容路径。先完成同一 Bundle 的配置切换，再执行应用初始化/迁移。
 
    旧 NATS StatefulSet 的 `podManagementPolicy=OrderedReady` 也不能原地修改为 Parallel，会明确触发 `PLATFORM_FOUNDATION_HA_NATS_CUTOVER_REQUIRED_RETAIN_PVCS`。在同一获准窗口完成 StatefulSet 切换并保留原 PVC；角色不自动删除 stream 或卷。单节点开发保持原 OrderedReady，不受 HA 调度策略变更影响。
+
+   身份入口同样拒绝已有 `StatefulSet/identity-postgres` 或旧 `Service/identity-postgres`，返回 `IDENTITY_CNPG_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION`。在单独授权的身份数据切换窗口先保全已有账号/realm 数据，再处理旧对象并创建新 CNPG；角色不会删除 StatefulSet、PVC、旧 Service 或复制旧 PGDATA，也不会保留旧名称别名。未完成数据切换时不要执行新身份全量 reconcile，不能把空库初始化当作迁移。先执行 platform foundation（CNPG/Barman/Ceph），再执行 identity foundation，最后部署依赖身份的应用。
 4. 部署后核对三个 Ceph mon、pool size/min_size/host、CNPG 三实例与同步/quorum、NATS 三成员及每条 stream 副本。读探针或 manifests 渲染不能代替写入后故障恢复。
 5. 在独立 `labweaver-ha-*` Kind 中可以检查 CNPG/JetStream 调度与协议，不能以同一宿主的三容器证明物理三节点容灾。不要操作 `labweaver-local-*`。Ceph 需要真实块设备，本机没有为此授权的裸盘时不安装 Rook、不伪造 OSD。
 6. 在后续授权窗口记录实际确认写入、单节点故障、quorum 丢失、分区、接近满/满盘、旧节点 fencing、独立备份恢复、实际 RPO/RTO。未完成前 #205 的硬件故障和恢复验收保持未完成。
@@ -116,6 +141,8 @@ python tools/smoke_ha_foundation.py --name labweaver-ha-smoke --charts .tmp
 ```
 
 `.tmp` 中需先下载版本锁指定的 CNPG chart 归档；脚本校验归档 SHA-256。组件冒烟为 CNPG/JetStream 使用 Kind 的 `standard` 本地测试卷，不创建假的 Ceph/RBD、不连接生产备份；它不替代生产 profile 的原样渲染、硬件故障或恢复验收。
+
+身份组件可单独运行 `python tools/smoke_ha_foundation.py --name labweaver-ha-identity-smoke --charts .tmp --identity-only`。该入口渲染实际身份 Cluster/Keycloak 模板，临时仅把存储换成 Kind `standard` 并去掉外部备份插件；它验证三 host 上的三个 Ready 实例、同步确认写、两个 Keycloak Ready 副本及真实 realm 初始化/认证 TLS 连接，结束删除自己创建的集群。不安装 Cilium/Ceph，不执行任何备份或恢复演练，不证明生产网络策略或 RPO/RTO。
 
 ## RGW 兼容结论与切换条件
 

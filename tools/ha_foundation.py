@@ -55,6 +55,44 @@ def https_endpoint(value: str, field: str):
     return endpoint
 
 
+def validate_backup(config: dict, secret_name: str = "independent-backup-secrets") -> None:
+    production = https_endpoint(config.get("productionObjectEndpoint", ""), "productionObjectEndpoint")
+    backup = config.setdefault("backup", {})
+    require(isinstance(backup, dict), "backup")
+    allowed = {"endpoint", "destination", "failureDomain", "credentialsSecret", "caSecret", "archiveTimeoutSeconds", "baseBackupSchedule", "retentionDays", "userDataSchedule", "userDataRetentionDays"}
+    require(not set(backup) - allowed, "backup")
+    for field in ("credentialsSecret", "caSecret"):
+        require(backup.get(field) == secret_name, f"backup.{field}")
+    endpoint = https_endpoint(backup.get("endpoint", ""), "backup.endpoint")
+    require(endpoint.hostname != production.hostname, "backup.endpoint")
+    require(isinstance(backup.get("failureDomain"), str) and bool(backup["failureDomain"]) and backup["failureDomain"] != config["failureDomain"], "backup.failureDomain")
+    require(isinstance(backup.get("destination"), str) and bool(re.fullmatch(r"s3://[a-z0-9][a-z0-9.-]+/[A-Za-z0-9_./-]*", backup["destination"])), "backup.destination")
+    backup.setdefault("archiveTimeoutSeconds", 300)
+    require(type(backup["archiveTimeoutSeconds"]) is int and 1 <= backup["archiveTimeoutSeconds"] <= 300, "backup.archiveTimeoutSeconds")
+    # Six-field CNPG cron; daily schedules cannot silently exceed the RPO.
+    for field, default in (("baseBackupSchedule", "0 0 2 * * *"), ("userDataSchedule", "0 0 3 * * *")):
+        backup.setdefault(field, default)
+        require(isinstance(backup[field], str) and bool(re.fullmatch(r"[0-5]?\d [0-5]?\d (?:[01]?\d|2[0-3]) \* \* \*", backup[field])), f"backup.{field}")
+    for field in ("retentionDays", "userDataRetentionDays"):
+        backup.setdefault(field, 30)
+        require(type(backup[field]) is int and backup[field] >= 7, f"backup.{field}")
+
+
+def validate_identity(raw: dict) -> dict:
+    try:
+        require(isinstance(raw, dict), "profile")
+        config = copy.deepcopy(raw)
+        require(set(config) <= {"failureDomain", "productionObjectEndpoint", "backup"}, "profile")
+        require(isinstance(config.get("failureDomain"), str) and bool(config["failureDomain"]), "failureDomain")
+        validate_backup(config, "identity-backup-secrets")
+        require(not {"userDataSchedule", "userDataRetentionDays"} & set(raw.get("backup", {})), "backup")
+        config["backup"].pop("userDataSchedule")
+        config["backup"].pop("userDataRetentionDays")
+        return config
+    except HAError as error:
+        raise HAError(str(error).replace("platform_foundation_ha.", "identity_foundation_ha.")) from error
+
+
 def validate(raw: dict) -> dict:
     require(isinstance(raw, dict), "profile")
     config = copy.deepcopy(raw)
@@ -70,30 +108,7 @@ def validate(raw: dict) -> dict:
         require(isinstance(node["devices"], list) and bool(node["devices"]), "nodes.devices")
         require(all(isinstance(device, str) and bool(re.fullmatch(r"/dev/disk/by-id/[A-Za-z0-9_.:-]+", device)) for device in node["devices"]), "nodes.devices")
     require(isinstance(config.get("failureDomain"), str) and bool(config["failureDomain"]), "failureDomain")
-    production = https_endpoint(config.get("productionObjectEndpoint", ""), "productionObjectEndpoint")
-    backup = config.setdefault("backup", {})
-    require(isinstance(backup, dict), "backup")
-    allowed = {"endpoint", "destination", "failureDomain", "credentialsSecret", "caSecret", "archiveTimeoutSeconds", "baseBackupSchedule", "retentionDays", "userDataSchedule", "userDataRetentionDays"}
-    require(not set(backup) - allowed, "backup")
-    require(backup.get("credentialsSecret") == "independent-backup-secrets", "backup.credentialsSecret")
-    require(backup.get("caSecret") == "independent-backup-secrets", "backup.caSecret")
-    endpoint = https_endpoint(backup.get("endpoint", ""), "backup.endpoint")
-    require(endpoint.hostname != production.hostname, "backup.endpoint")
-    require(isinstance(backup.get("failureDomain"), str) and bool(backup["failureDomain"]) and backup["failureDomain"] != config["failureDomain"], "backup.failureDomain")
-    require(isinstance(backup.get("destination"), str) and bool(re.fullmatch(r"s3://[a-z0-9][a-z0-9.-]+/[A-Za-z0-9_./-]*", backup["destination"])), "backup.destination")
-    for field in ("credentialsSecret", "caSecret"):
-        require(isinstance(backup.get(field), str) and bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", backup[field])), f"backup.{field}")
-    backup.setdefault("archiveTimeoutSeconds", 300)
-    require(type(backup["archiveTimeoutSeconds"]) is int and 1 <= backup["archiveTimeoutSeconds"] <= 300, "backup.archiveTimeoutSeconds")
-    # Six-field CNPG cron: second, minute, hour, day, month, weekday. Restrict to
-    # daily schedules rather than accepting a cron that quietly exceeds the RPO.
-    backup.setdefault("baseBackupSchedule", "0 0 2 * * *")
-    backup.setdefault("userDataSchedule", "0 0 3 * * *")
-    for field in ("baseBackupSchedule", "userDataSchedule"):
-        require(isinstance(backup[field], str) and bool(re.fullmatch(r"[0-5]?\d [0-5]?\d (?:[01]?\d|2[0-3]) \* \* \*", backup[field])), f"backup.{field}")
-    for field in ("retentionDays", "userDataRetentionDays"):
-        backup.setdefault(field, 30)
-        require(type(backup[field]) is int and backup[field] >= 7, f"backup.{field}")
+    validate_backup(config)
     for field, default in (("postgresStorage", "100Gi"), ("natsStorage", "20Gi")):
         config.setdefault(field, default)
         require(isinstance(config[field], str) and bool(re.fullmatch(r"[1-9][0-9]*(Gi|Ti)", config[field])), field)
@@ -282,7 +297,10 @@ cluster {
 def main() -> int:
     try:
         value = json.load(sys.stdin)
-        print(json.dumps({"objects": resources(value["configuration"], value["lock"], value["foundation"], value["applicationNamespace"], value.get("resourceNamespace"), value["databaseName"], value["adminRole"], value["freezeCoordinator"]), "charts": chart_values(value["lock"]), "foundation": clustered_foundation(value["foundation"])}))
+        if sys.argv[1:] == ["identity"]:
+            print(json.dumps(validate_identity(value)))
+        else:
+            print(json.dumps({"objects": resources(value["configuration"], value["lock"], value["foundation"], value["applicationNamespace"], value.get("resourceNamespace"), value["databaseName"], value["adminRole"], value["freezeCoordinator"]), "charts": chart_values(value["lock"]), "foundation": clustered_foundation(value["foundation"])}))
     except (HAError, KeyError, TypeError, ValueError) as error:
         print(str(error) if isinstance(error, HAError) else "LW_BUNDLE_HA_RENDER_INVALID", file=sys.stderr)
         return 1

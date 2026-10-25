@@ -130,13 +130,15 @@ cargo xtask platform-harbor-route --env v1 --infra --yes
 
 生产三节点安装先配置[高可用基线](high-availability.md)中的 Bundle `platform_foundation_ha`、裸盘清单与独立备份目标，再运行相同入口。HA profile 的版本锁、CNPG 同步 quorum、JetStream 三副本与存储健康拒绝准入由同一 Bundle 派生；缺少独立备份字段时校验失败。已有独立数据库不得直接原地转换，必须先进入获准的数据切换窗口。目标 RPO/RTO 已决定，实际兑现待 #208 恢复验收；RGW 切换尚需兼容验收，不把渲染通过当成生产故障恢复通过。
 
-Keycloak foundation 使用受保护的 root-only locator；locator 由私有清单提供，不能把内容、固定 UUID 或口令写进文档：
+Keycloak foundation 依赖 platform foundation 先安装的 CNPG/Barman operator 和 `ceph-rbd`，身份库固定为独立三实例 CNPG；不再部署单副本 StatefulSet。先按[高可用基线](high-availability.md)配置 `identity_foundation_ha` 的独立备份目标、频率、保留期，并在受保护的 root-only `identity-bootstrap.v2` locator 提供 `backup_access_key`、`backup_secret_key`、`backup_ca_crt` 及原有身份凭据。加密 Bundle 缺少目标或凭据时 fail-closed。locator 由私有清单提供，不能把内容、固定 UUID 或口令写进文档：
 
 ```sh
 export LABWEAVER_IDENTITY_SECRET_LOCATOR="<private-identity-bootstrap-locator>"
 cargo xtask identity-foundation --env v1 --infra --yes --action deploy
 cargo xtask identity-foundation --env v1 --infra --yes --action verify
 ```
+
+角色等待 `Cluster/identity-postgres` Ready 后才部署 Keycloak；Keycloak 通过 `identity-postgres-rw` 和校验 CA 的 TLS 连接身份库。已有旧身份 StatefulSet/Service 时入口以 `IDENTITY_CNPG_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION` 停止，须在获准的数据切换窗口处理；旧 Opaque 数据库凭据 Secret 也须在该窗口保全口令后重新创建为 `kubernetes.io/basic-auth`（含 `username=keycloak`），不能原地修改 Secret 的不可变类型。角色不自动删除旧库、Secret、PVC 或账号数据。备份配置不代表备份执行或恢复目标已兑现，演练归 #208。
 
 身份基础层只 reconcile 需要的 realm、client、角色和用户，不删除已有身份。账号开通、角色授予和回收通过管理流程完成；普通用户从公共首页登录。
 

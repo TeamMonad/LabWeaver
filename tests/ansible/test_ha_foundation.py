@@ -179,6 +179,10 @@ class HAFoundationTests(unittest.TestCase):
         try:
             source = fixture.fixture
             fixture.inventory["all"]["vars"]["platform_foundation_ha"] = configuration()
+            identity = {key: value for key, value in configuration().items() if key != "nodes"}
+            identity["backup"].update(destination="s3://independent-backup/identity/", credentialsSecret="identity-backup-secrets", caSecret="identity-backup-secrets")
+            fixture.inventory["all"]["vars"]["identity_foundation_ha"] = identity
+            (source.root / "secrets/identity.yaml").write_text(yaml.safe_dump({"backup_access_key": "boundary-key", "backup_secret_key": "boundary-secret", "backup_ca_crt": "boundary-ca"}))
             source.model["application"]["helmValues"]["network"] = {
                 "kubernetesApiCidrs": ["192.0.2.7/32"], "kubernetesApiPorts": [443, 6443],
             }
