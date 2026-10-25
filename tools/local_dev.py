@@ -3044,6 +3044,21 @@ def start_build_executor_fixture(kubeconfig: Path, foundation: Path,
     wait_rollout(kubeconfig, "deployment", "local-dev-build-executor-fixture", DATA_NAMESPACE)
 
 
+def check_package_inputs() -> None:
+    """Verify package inputs without changing the checkout or using the network."""
+
+    result = run(["cargo", "xtask", "package-check"], capture=True, check=False)
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "").strip()[-4000:]
+        message = (
+            "镜像输入预检失败；请在干净工作树中显式运行 "
+            "cargo xtask package-prepare 后重试。"
+        )
+        if detail:
+            message += f"\n{detail}"
+        fail(message)
+
+
 def build_images(*, external_fixtures: bool) -> dict[str, str]:
     commit = run(["git","rev-parse","--short=12","HEAD"], capture=True).stdout.strip()
     epoch = run(["git", "show", "-s", "--format=%ct", "HEAD"], capture=True).stdout.strip()
@@ -3970,6 +3985,7 @@ def up(
             configure_local_harbor_dns(kubeconfig)
             configure_kind_harbor_trust(real_build_provider)
         info=json.loads(STATE_FILE.read_text()); info["phase"]="building"; write(STATE_FILE,json.dumps(info,indent=2)+"\n")
+        check_package_inputs()
         images=build_images(external_fixtures=external_fixtures)
         if external_fixtures:
             source_image = build_work_runtime_fixture()

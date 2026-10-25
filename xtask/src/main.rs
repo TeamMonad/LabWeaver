@@ -46,6 +46,8 @@ enum Command {
     /// Deploy the independently reviewed Resource authority profile.
     ResourceApplication(EnvironmentArgs),
     Package(PackageArgs),
+    /// Verify deterministic, offline image build inputs without network or writes.
+    PackageCheck,
     /// Prepare the deterministic, offline image build inputs without building images.
     PackagePrepare,
     PackageValidate(PackageValidateArgs),
@@ -354,6 +356,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::PlatformApplication(args) => platform_application(&args),
         Command::ResourceApplication(args) => resource_application(&args),
         Command::Package(args) => package_command(&args),
+        Command::PackageCheck => platform_images::check(&repository_root()),
         Command::PackagePrepare => platform_images::prepare(&repository_root()),
         Command::PackageValidate(args) => platform_images::validate(
             &args.manifest,
