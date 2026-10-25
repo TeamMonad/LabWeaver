@@ -252,6 +252,31 @@ describe('useProjectResourceOptions environments', () => {
     scope.stop()
   })
 
+  it.each([false, 0, true, undefined, {}, [], ''])('rejects malformed catalog continuation %j without offering partial options', async (nextCursor) => {
+    mocks.listEnvironments.mockResolvedValue(environmentPage([]))
+    mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({ items: [] })
+    mocks.listResourceRates
+      .mockResolvedValueOnce(cursorPage([rate({ id: 'rate-first' })], 'rates-2'))
+      .mockResolvedValueOnce({ data: { items: [rate({ id: 'rate-partial' })], nextCursor } })
+    mocks.listResourceGpuCatalog
+      .mockResolvedValueOnce(cursorPage([{ id: 'gpu-first', class: 'a100', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }], 'gpu-2'))
+      .mockResolvedValueOnce({ data: { items: [{ id: 'gpu-partial', class: 'a100', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }], nextCursor } })
+
+    const scope = effectScope()
+    const state = scope.run(() => useProjectResourceOptions(ref<string | null>('project-1'), ref<string | null>(null)))
+    if (!state) throw new Error('useProjectResourceOptions did not run in the effect scope')
+
+    await vi.waitFor(() => {
+      expect(state.rates).toMatchObject({ kind: 'error', diagnostic: { code: 'RESOURCE_RATES_LOAD_FAILED', message: '加载资源费率失败' } })
+      expect(state.catalog).toMatchObject({ kind: 'error', diagnostic: { code: 'GPU_CATALOG_LOAD_FAILED', message: '加载 GPU 目录失败' } })
+    })
+    expect(state.rates).not.toHaveProperty('data')
+    expect(state.catalog).not.toHaveProperty('data')
+    expect(mocks.listResourceRates).toHaveBeenCalledTimes(2)
+    expect(mocks.listResourceGpuCatalog).toHaveBeenCalledTimes(2)
+    scope.stop()
+  })
+
   it('fails rate and GPU options closed on a repeated cursor instead of offering a partial select', async () => {
     mocks.listEnvironments.mockResolvedValue(environmentPage([]))
     mocks.fetchEnvironmentTemplateReleases.mockResolvedValue({ items: [] })

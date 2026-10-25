@@ -13,15 +13,19 @@ export type CursorPageResponse<T> = {
 
 export type CursorPageFetcher<T> = (cursor?: string) => Promise<CursorPageResponse<T>>
 
-/** One validated page; `nextCursor` is null on the last page. */
+/** Only explicit null ends a list; a missing, empty or non-string cursor rejects the page. */
 export async function readCursorPage<T>(
   fetchPage: CursorPageFetcher<T>,
   cursor?: string,
 ): Promise<{ items: T[]; nextCursor: string | null }> {
   const result = await fetchPage(cursor)
   if (!result.data) throw result.error
-  if (!Array.isArray(result.data.items)) throw new Error('Cursor pagination returned a response without items')
-  return { items: result.data.items, nextCursor: result.data.nextCursor || null }
+  if (!Array.isArray(result.data.items)) throw new Error('分页响应无效：缺少记录数组，无法确认列表完整性。')
+  const nextCursor = result.data.nextCursor
+  if (nextCursor !== null && (typeof nextCursor !== 'string' || nextCursor.length === 0)) {
+    throw new Error('分页响应的续页游标无效，无法确认列表完整性。请刷新重试。')
+  }
+  return { items: result.data.items, nextCursor }
 }
 
 /**
@@ -42,8 +46,8 @@ async function readCursorPages<T>(
     const page = await readCursorPage(fetchPage, cursor)
     pages += 1
     items.push(...page.items)
-    if (!page.nextCursor) return { items, nextCursor: null, pages }
-    if (seen.has(page.nextCursor)) throw new Error('Cursor pagination returned a repeated cursor')
+    if (page.nextCursor === null) return { items, nextCursor: null, pages }
+    if (seen.has(page.nextCursor)) throw new Error('分页响应重复了续页游标，无法确认列表完整性。请刷新重试。')
     seen.add(page.nextCursor)
     if (maxPages !== undefined && pages >= maxPages) return { items, nextCursor: page.nextCursor, pages }
     cursor = page.nextCursor
