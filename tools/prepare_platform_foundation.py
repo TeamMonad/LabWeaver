@@ -498,8 +498,10 @@ def prepare(
                 f"DNS:{service}",
                 f"DNS:{service}.labweaver-data",
                 f"DNS:{service}.labweaver-data.svc",
+                *(["DNS:*.nats.labweaver-data.svc", "DNS:*.nats.labweaver-data.svc.cluster.local"] if service == "nats" else []),
+                *(["DNS:postgres-rw.labweaver-data.svc", "DNS:postgres-rw.labweaver-data.svc.cluster.local"] if service == "postgres" else []),
             ),
-            "serverAuth",
+            "serverAuth,clientAuth" if service == "nats" else "serverAuth",
             days,
         )
         secret_root = render_input / "secrets" / (
@@ -531,6 +533,15 @@ def prepare(
                 )
                 _copy(client_key, secret_root / "client.key")
                 _copy(client_certificate, secret_root / "client.crt")
+                replica_material = authority / "issued-postgres-replication"
+                replica_material.mkdir(mode=0o700)
+                replica_key, replica_certificate = _certificate(
+                    openssl, private_home, authority, replica_material,
+                    "streaming_replica", ("URI:spiffe://labweaver/streaming-replica",),
+                    "clientAuth", days,
+                )
+                _copy(replica_key, secret_root / "replication.key")
+                _copy(replica_certificate, secret_root / "replication.crt")
 
     _nsc(nsc, nsc_store, ["add", "operator", "--name", "LABWEAVER", "--sys", "--generate-signing-key", "--expiry", f"{days}d"], private_home)
     workloads_account_public = None

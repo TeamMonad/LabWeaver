@@ -66,6 +66,7 @@ LOGIN_REDIRECT_INVALID = "LW_ACCEPTANCE_LOGIN_REDIRECT_INVALID"
 CREDENTIALS_MISSING = "LW_ACCEPTANCE_CREDENTIALS_MISSING"
 MODEL_MISSING = "LW_ACCEPTANCE_MODEL_MISSING"
 AUTHORING_QUEUE_BUSY = "LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY"
+AUTHORING_QUEUE_UNAVAILABLE = "LW_ACCEPTANCE_AUTHORING_QUEUE_UNAVAILABLE"
 # The worker serves one reserved dispatch at a time, so a run waits for the
 # queue in front of it; see docs/deployment/runbook.md.
 QUEUE_WAIT_SECONDS = 3600.0
@@ -602,10 +603,55 @@ JOURNEY_TIMEOUT_SECONDS = 15_000.0
 JOURNEY_TIMEOUT = "LW_ACCEPTANCE_JOURNEY_TIMEOUT"
 JOURNEY_TIMEOUT_EXIT_CODE = 124
 
+def postgres_query_pod(
+    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
+) -> str | None:
+    """Resolve the current primary through the same deployed Service used by clients."""
+    base = ["kubectl", "--context", KUBECTL_CONTEXT, "-n", DATA_NAMESPACE]
+    code, stdout, _ = run_kubectl([*base, "get", "service", "-o", "json"])
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(stdout)
+        services = {item["metadata"]["name"]: item for item in payload["items"]}
+        # A deployed CNPG primary Service is authoritative, even when it has no
+        # available primary. Never fall back to the standalone database in that case.
+        service = services.get("postgres-rw", services.get("postgres"))
+        if not isinstance(service, dict):
+            return None
+        selector = service["spec"]["selector"]
+        if not isinstance(selector, dict) or not selector or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in selector.items()
+        ):
+            return None
+        code, stdout, _ = run_kubectl([
+            *base, "get", "pods", "-l",
+            ",".join(f"{key}={value}" for key, value in sorted(selector.items())),
+            "-o", "json",
+        ])
+        if code != 0:
+            return None
+        pods = json.loads(stdout)["items"]
+        ready = [pod for pod in pods
+                 if not pod["metadata"].get("deletionTimestamp")
+                 and pod.get("status", {}).get("phase") == "Running"
+                 and any(condition.get("type") == "Ready" and condition.get("status") == "True"
+                         for condition in pod.get("status", {}).get("conditions", []))]
+        if len(ready) != 1:
+            return None
+        name = ready[0]["metadata"]["name"]
+        return name if isinstance(name, str) and name else None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def queued_dispatch_count(
     run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
 ) -> int | None:
     """Number of reserved dispatches the agent worker has not finished yet."""
+    pod = postgres_query_pod(run_kubectl)
+    if pod is None:
+        return None
 
     query = (
         "select count(*) from agent.agent_run_dispatches "
@@ -619,7 +665,9 @@ def queued_dispatch_count(
             "-n",
             DATA_NAMESPACE,
             "exec",
-            "postgres-0",
+            pod,
+            "-c",
+            "postgres",
             "--",
             "psql",
             "-U",
@@ -665,7 +713,8 @@ def check_authoring_queue(
 
     pending = queued_dispatch_count(run_kubectl)
     if pending is None:
-        return Check("authoring_queue", True, None, "queue state unavailable")
+        return Check("authoring_queue", False, AUTHORING_QUEUE_UNAVAILABLE,
+                     "无法读取创作队列：数据库 primary 或查询不可用；队列状态未知。")
     return Check(
         "authoring_queue",
         True,
@@ -972,6 +1021,8 @@ def run_acceptance(
 
             if not getattr(args, "no_queue_wait", False):
                 pending = wait_for_authoring_queue(run_kubectl, QUEUE_WAIT_SECONDS)
+                if pending is None:
+                    raise AcceptanceError(AUTHORING_QUEUE_UNAVAILABLE, "authoring queue observation unavailable")
                 if pending:
                     print(f"authoring queue still busy: {pending} dispatch(es) after waiting")
             started_at = datetime.now(timezone.utc).isoformat()

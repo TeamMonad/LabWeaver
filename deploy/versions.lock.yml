@@ -77,6 +77,53 @@ gateway_api:
 metallb:
   chart: 0.16.1
 local_path_provisioner: v0.0.36
+# Three-host HA profile; upstream artifacts resolved by digest (linux/amd64).
+high_availability:
+  rook:
+    version: v1.19.12
+    chart: v1.19.12
+    repository: https://charts.rook.io/release
+    chart_url: https://charts.rook.io/release/rook-ceph-v1.19.12.tgz
+    chart_sha256: 92a930fdf98bef69ebe50307202708cc76237537361049a1d0c171cf1fe070c1
+    image: docker.io/rook/ceph:v1.19.12@sha256:002e39107860c3c5f7b6d8249584f29b830eab0aa4aa5dce34c297d8e06804a0
+    source: https://github.com/rook/rook/tree/v1.19.12
+  ceph:
+    version: v20.2.4
+    image: quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
+    source: https://docs.ceph.com/en/tentacle/releases/tentacle/
+  ceph_csi:
+    version: v3.18.1
+    source: https://github.com/ceph/ceph-csi/tree/v3.18.1
+    sidecar_source: https://github.com/rook/rook/blob/v1.19.12/deploy/charts/rook-ceph/values.yaml
+    images:
+      cephcsi: quay.io/cephcsi/cephcsi:v3.18.1@sha256:a8c0653a9565049ee7b36a585753e5e0e8fe2e4e5a67e9db3a5f8d9d7e890635
+      registrar: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.16.0@sha256:ab482308a4921e28a6df09a16ab99a457e9af9641ff44fb1be1a690d07ce8b70
+      provisioner: registry.k8s.io/sig-storage/csi-provisioner:v6.1.1@sha256:d992c36d4ddd6dfa37c81b487e5a673920e1360e2977eb779051df8da1c5787d
+      attacher: registry.k8s.io/sig-storage/csi-attacher:v4.11.0@sha256:b74b05b39501565022883fc128002b4cb857a7bb6c858606bcb3fdedba0b0b80
+      resizer: registry.k8s.io/sig-storage/csi-resizer:v2.1.0@sha256:589e525cddef6d768e68da1f0bc9ffd0a24bf3add3dd010648eb7189976fde79
+      snapshotter: registry.k8s.io/sig-storage/csi-snapshotter:v8.5.0@sha256:da081c27e8a6d91f36042c1942362d0515ced8d06e18c11b8f893e58c4d6d797
+  cnpg:
+    version: 1.30.1
+    chart: 0.29.1
+    repository: https://cloudnative-pg.github.io/charts
+    chart_url: https://github.com/cloudnative-pg/charts/releases/download/cloudnative-pg-v0.29.1/cloudnative-pg-0.29.1.tgz
+    chart_sha256: b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df
+    image: ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07
+    postgres_image: ghcr.io/cloudnative-pg/postgresql:17.6-standard-trixie@sha256:2114d9615a5c56004ff4f586032d0e61cbaca7c9449d3b57ea240630b28c37b8
+    source: https://cloudnative-pg.io/docs/1.30/supported_releases/
+  barman:
+    version: v0.15.1
+    chart: 0.8.1
+    repository: https://cloudnative-pg.github.io/charts
+    chart_url: https://github.com/cloudnative-pg/charts/releases/download/plugin-barman-cloud-v0.8.1/plugin-barman-cloud-0.8.1.tgz
+    chart_sha256: 9ad0b9e56da2777a1a0269feaf7215e18297e9c8b5730e04acb27b5d462e9456
+    image: ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.15.1@sha256:c75acad19a36e8176cfe2885761ff1b836c6ef977d7257e298c99a28b5c302ef
+    sidecar_image: ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar:v0.15.1@sha256:2287a793a804db751edd0d07d44cd549e357677e98a800eb12e2cf7c0d53f9b0
+    source: https://cloudnative-pg.io/plugin-barman-cloud/docs/installation/
+  jetstream:
+    version: 2.14.1
+    image_source: platform_foundation.nats
+    source: https://docs.nats.io/running-a-nats-service/configuration/clustering/jetstream_clustering
 nfs_csi:
   chart: 4.13.4
 cert_manager: v1.21.0

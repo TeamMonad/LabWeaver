@@ -1,29 +1,24 @@
-# 三节点存储版本与 CSI 观察矩阵（proposal）
+# CSI 能力与只读绑定观察边界
 
-这是 #205 的待验证能力矩阵，不是生产版本锁或支持声明。代码基线为 develop `cc39763ef3657833223a4e8dbfed9d6f2da7ac08`；只读检查器已封存在 `913f706fc9eff48bc8821bbe1123c213c0fe41dd`，本轮不修改该检查器或公共配置。
+组件版本、硬件要求、同步复制、健康准入和独立备份目标统一见[三节点持久化与高可用基线](high-availability.md)。版本真源是 `deploy/versions.lock.yml`，本文不维护第二份候选版本矩阵。下面保留只读检查器的能力边界；它不替代生产健康准入或硬件验收。
 
 ## 既定边界
 
-标准部署至少三个独立节点、host故障域、Ceph三副本、RBD Work盘已确定，不重新选架构。Environment唯一管理运行代次和磁盘挂载，停止/抢占保盘。删除/欠费默认七天只读；PR248已有 `readOnlyRetentionSeconds=604800`，Control不可变revision是唯一配置真源。
+标准部署至少三个独立节点、host 故障域、Ceph 三副本、RBD Work 盘。Environment 唯一管理运行代次和磁盘挂载，停止/抢占保盘。删除/欠费默认七天只读；`readOnlyRetentionSeconds=604800` 属于 Control 不可变 revision 的唯一配置真源。
 
-[配置owner的交接](https://github.com/TeamMonad/LabWeaver/issues/203#issuecomment-6188092719) 确认现有 `workspaceStorageClassName` / `workspaceAccessMode` 是权威provider输入，当前仅接受RWO/RWX；不新增平行开关。`cleanup_retention_seconds` 只控制清理证据保留，不是磁盘TTL。消费者采用哪个revision及如何报告观察，仍需原owner串行协调。
+`workspaceStorageClassName` / `workspaceAccessMode` 仍是权威 provider 输入；HA 选择 `ceph-rbd` / `ReadWriteOnce`，不新增平行开关。`cleanup_retention_seconds` 只控制清理证据保留，不是磁盘 TTL。
 
 ## 版本与能力核查
 
-| 组件/能力 | 已知来源 | 本轮结论与剩余验证 |
+| 能力 | 支持边界 | 剩余验证 |
 | --- | --- | --- |
-| Kubernetes v1.35.6 | 仓库 `deploy/versions.lock.yml` | 已锁；本地没有运行该集群 |
-| KubeVirt v1.8.4 / CDI v1.65.0 | 同一版本锁 | 已锁；CDI导入/克隆、VM盘重启及容量放大须在实际CSI组合验证 |
-| Rook | 未在当前版本锁固定；[v1.19前提](https://rook.io/docs/rook/v1.19/Getting-Started/Prerequisites/prerequisites/)列Kubernetes v1.30–v1.35 | v1.19系列可列为研究候选；具体patch、Ceph/CSI打包组合、镜像摘要和节点内核未知，不据此修改锁文件 |
-| Ceph | 三副本、host故障域及RBD方向已定，具体版本未锁 | 需与Rook正式支持组合、磁盘/网络容量、quorum及近满拒写策略一起定稿 |
-| Ceph-CSI v3.18.1 | [该tag的README](https://github.com/ceph/ceph-csi/blob/v3.18.1/README.md)列测试Kubernetes v1.34/v1.35/v1.36 | 仅为候选，不能从minor交集推导完整Rook/Ceph/CDI组合通过；未获取镜像或安装 |
-| RBD Filesystem RWO | 同一Ceph-CSI矩阵列GA | 本地绑定检查不能证明单Pod独占或旧节点停止写盘，仍需fencing |
-| RBD Block RWX | 同一Ceph-CSI矩阵列GA | 不能推导共享可写Filesystem支持，也不能把Work盘改成多writer；不更改现有accessMode |
-| RWOP | [Kubernetes访问模式说明](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)列v1.29起稳定且要求CSI及sidecar最低版本；Ceph-CSI v3.18.1矩阵仍列Alpha | 上游各层声明不能互相代替。当前LabWeaver契约还不接受RWOP；须逐层确认支持状态、固定sidecar版本并由owner修改唯一真源，不能以Kubernetes稳定就宣称已支持 |
-| PV回收与七天只读保留 | 业务规则已定；具体回收及CSI生命周期未定 | `Retain`或`Delete`字段不等于业务磁盘TTL，也不证明旧节点fencing；本轮不选择或改写策略 |
-| 失联节点单写fencing | Sprint5要求已定，具体机制/证据未定 | Pod/VMI消失、Bound、VolumeAttachment消失或单一accessMode都不能独立证明旧节点无写入；明确证据来源、身份和新挂载前的门禁后再实施 |
+| RBD Filesystem RWO | 三副本、host、Retain，版本与 CSI sidecar 全部固定在同一锁中 | 实际 I/O、旧节点失联与重新挂载的单写 fencing |
+| RBD Block RWX | 上游矩阵不能外推为 LabWeaver 支持共享可写 Work 盘 | 本基线不启用 |
+| RWOP | Kubernetes 稳定声明不能代替 Ceph-CSI 与业务契约支持 | 本基线不启用 |
+| PV 回收与七天只读保留 | `Retain` 防止误回收，但不是业务 TTL 或只读保留实现 | #207 的授权、导出与删除行为 |
+| 失联节点单写 fencing | Pod/VMI 或 VolumeAttachment 消失都不是旧节点无写入的证明 | #207 门禁与获准硬件故障验收 |
 
-动态网页和tag文档只供方案核对，不能替代部署时固定版本/摘要及硬件验证。RGW版本/保留/Harbor兼容、CloudNativePG同步持久性、NATS三副本、独立备份与站点RPO/RTO也仍未由本矩阵验证。
+RGW 兼容仍是明确缺口；CNPG/JetStream 与独立备份配置的部署代码不等于三节点故障恢复通过。站点灾难目标已定，兑现待 #208 恢复验收。
 
 ## 合成快照的诊断与反例
 
@@ -44,4 +39,4 @@
 python -B -m unittest discover -s tests/storage_observation -p test_diagnostic_boundary.py -v
 ```
 
-下一步先由#203/#207/#205 owner固定Rook/Ceph/CSI组合、accessMode/回收与fencing证据，绑定配置采用revision；再在获准三节点环境验证旧节点失联、重挂单写、持久写恢复、近满/quorum降级和独立备份。未完成前，不把此矩阵或合成快照当作HA验收。
+在获准三节点环境验证旧节点失联、重挂单写、持久写恢复、近满/quorum 降级和独立备份。未完成前，不把绑定一致、渲染或合成输入测试当作 HA 硬件验收。

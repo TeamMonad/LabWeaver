@@ -794,7 +794,7 @@
     group: root
     mode: "0700"
 
-- name: Resolve retained headless data-service endpoints
+- name: Resolve actual primary and retained data-service endpoints
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kubectl }}"
@@ -826,7 +826,7 @@
 - name: Canonicalize retained data-service host mappings
   ansible.builtin.replace:
     path: /etc/hosts
-    regexp: '^[0-9.]+\s+(?:postgres|nats|minio)\.labweaver-data\.svc\s*$\n?'
+    regexp: '^[0-9.]+\s+(?:postgres(?:-rw)?|nats|minio)\.labweaver-data\.svc\s*$\n?'
     replace: ''
 
 - name: Bind controller tools to retained service identities
@@ -925,16 +925,13 @@
     content: >-
       {{ (platform_application_postgres_service_source.content | b64decode)
          | regex_replace('(?m)^hostaddr=.*$\n?', '')
-         | regex_replace('(?m)^port=.*$', 'port=' ~ (platform_application_postgres_forward_port | string))
-         | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\n' ~
+         | regex_replace('(?m)^port=.*$', 'port=' ~
+             ((platform_application_postgres_forward_port if platform_application_postgres_forward_enabled | bool else 5432) | string))
+         | regex_replace('(?m)^host=.*$',
+             (('hostaddr=127.0.0.1' ~ '\n') if platform_application_postgres_forward_enabled | bool else '') ~
              'host=' ~ platform_application_postgres_forward_hostname) }}
-  when: platform_application_postgres_forward_enabled | bool
   no_log: true
 
-- name: Bind PostgreSQL service without a controller forward
-  ansible.builtin.set_fact:
-    platform_application_postgres_effective_service_file: "{{ platform_application_postgres_service_file }}"
-  when: not (platform_application_postgres_forward_enabled | bool)
 
 - name: Probe retained PostgreSQL database identity
   ansible.builtin.command:
@@ -1113,6 +1110,8 @@
       - "{{ item.item.subjects | join(',') }}"
       - --storage
       - file
+      - --replicas
+      - "{{ 3 if platform_foundation_ha | default({}) | length > 0 else 1 }}"
       - --retention
       - limits
       - --max-age
@@ -1122,6 +1121,33 @@
       - --defaults
   loop: "{{ platform_application_stream_info_before.results }}"
   when: item.rc != 0
+  changed_when: true
+
+- name: Reconcile existing streams to the HA replication factor
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_nats }}"
+      - --server
+      - "{{ platform_application_nats_probe_server }}"
+      - --creds
+      - "{{ platform_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ platform_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ platform_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ platform_application_nats_client_private_key_file }}"
+      - stream
+      - edit
+      - "{{ item.item.name }}"
+      - --replicas
+      - "3"
+      - --force
+  loop: "{{ platform_application_stream_info_before.results }}"
+  when:
+    - platform_foundation_ha | default({}) | length > 0
+    - item.rc == 0
+    - (item.stdout | from_json).config.num_replicas | int != 3
   changed_when: true
 
 - name: Expand only the explicitly retained Environment lifecycle stream
@@ -1191,6 +1217,7 @@
       - (item.stdout | from_json).config.storage == 'file'
       - (item.stdout | from_json).config.retention == 'limits'
       - (item.stdout | from_json).config.discard == 'old'
+      - (item.stdout | from_json).config.num_replicas | int == (3 if platform_foundation_ha | default({}) | length > 0 else 1)
     fail_msg: PLATFORM_APPLICATION_STREAM_CONFLICT
   loop: "{{ platform_application_stream_info_after.results }}"
   when: item.rc == 0

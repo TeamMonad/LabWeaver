@@ -1600,11 +1600,14 @@ impl IntoResponse for ResourceApiError {
                 ),
             ) => StatusCode::BAD_REQUEST,
             Self::ServiceConfiguration
-            | Self::Store(ResourceStoreError::Credits(
-                crate::credits::CreditError::Storage(_)
-                | crate::credits::CreditError::Persistence(_)
-                | crate::credits::CreditError::Wire(_),
-            )) => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::Store(
+                ResourceStoreError::StorageHealth(_)
+                | ResourceStoreError::Credits(
+                    crate::credits::CreditError::Storage(_)
+                    | crate::credits::CreditError::Persistence(_)
+                    | crate::credits::CreditError::Wire(_),
+                ),
+            ) => StatusCode::SERVICE_UNAVAILABLE,
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
             Self::Store(
                 ResourceStoreError::NotFound
@@ -1619,6 +1622,7 @@ impl IntoResponse for ResourceApiError {
             Self::Store(
                 ResourceStoreError::Persistence(_)
                     | ResourceStoreError::Database(_)
+                    | ResourceStoreError::StorageHealth(_)
                     | ResourceStoreError::RuntimeBinding(
                         RuntimeBindingError::Unavailable
                             | RuntimeBindingError::Authorization(
@@ -1635,6 +1639,7 @@ impl IntoResponse for ResourceApiError {
             .unwrap_or_else(telemetry::RequestContext::generate);
         let request_id = context.request_id().to_owned();
         let detail = match &self {
+            Self::Store(ResourceStoreError::StorageHealth(error)) => error.detail(),
             Self::Store(ResourceStoreError::RuntimeBinding(error)) => {
                 runtime_authorization::detail(error)
             }

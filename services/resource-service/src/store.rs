@@ -225,6 +225,7 @@ pub struct PgResourceStore {
     cursor_signing_key_current: Arc<Vec<u8>>,
     cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
     environment_credit_owner: Option<String>,
+    storage_health: crate::storage_health::StorageHealthGate,
 }
 
 enum LeaseRenewalIntent<'a> {
@@ -391,6 +392,7 @@ impl PgResourceStore {
             cursor_signing_key_current: Arc::new(b"labweaver-test-cursor-key".to_vec()),
             cursor_signing_key_previous: None,
             environment_credit_owner: None,
+            storage_health: crate::storage_health::StorageHealthGate::from_env(),
         }
     }
 
@@ -2914,6 +2916,7 @@ impl PgResourceStore {
     ) -> Result<ResourceOperationAccepted, ResourceStoreError> {
         IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
         validate_trace(trace_id)?;
+        self.storage_health.check().await?;
         let mut transaction = self.pool.begin().await?;
         let outcome = async {
             let request = load_locked(&mut transaction, request_id).await?;
@@ -3256,6 +3259,7 @@ impl PgResourceStore {
     ) -> Result<TaskResourceStatus, ResourceStoreError> {
         validate_trace(trace_id)?;
         self.expire_task_resource(task_run_id).await?;
+        self.storage_health.check().await?;
         let mut transaction = self.pool.begin().await?;
         let outcome = async {
         let row = sqlx::query(
@@ -4055,6 +4059,7 @@ impl PgResourceStore {
     pub async fn claim_next_capacity_shell(
         &self,
     ) -> Result<Option<ProvisioningCapacityClaim>, ResourceStoreError> {
+        self.storage_health.check().await?;
         let mut transaction = self.pool.begin().await?;
         let outcome = async {
         let row = sqlx::query(
@@ -6535,6 +6540,8 @@ fn safe_sqlstate_value(code: Option<&str>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceStoreError {
+    #[error(transparent)]
+    StorageHealth(#[from] crate::storage_health::StorageHealthError),
     #[error("LW_RESOURCE_ESTIMATE_CHANGED")]
     EstimateChanged,
     #[error(transparent)]

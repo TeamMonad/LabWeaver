@@ -60,6 +60,7 @@ impl EnvironmentRuntimeAuthority for crate::metering::ResourceUsageClient {
 pub struct EnvironmentRuntimeAdmission {
     releases: Arc<dyn ContainerReleaseResolver>,
     authority: Arc<dyn EnvironmentRuntimeAuthority>,
+    storage_health: crate::storage_health::StorageHealthGate,
 }
 
 impl EnvironmentRuntimeAdmission {
@@ -78,6 +79,7 @@ impl EnvironmentRuntimeAdmission {
         Self {
             releases: Arc::new(releases),
             authority,
+            storage_health: crate::storage_health::StorageHealthGate::from_env(),
         }
     }
 
@@ -85,6 +87,7 @@ impl EnvironmentRuntimeAdmission {
         &self,
         request: &ResolveEnvironmentRuntimeAuthorizationRequest,
     ) -> Result<EnvironmentRuntimeAuthorizationResolution, RuntimeAdmissionError> {
+        self.storage_health.check().await?;
         let release = self
             .releases
             .resolve(request.release_id, request.release_version)
@@ -199,6 +202,8 @@ impl EnvironmentRuntimeAdmission {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeAdmissionError {
+    #[error(transparent)]
+    StorageHealth(#[from] crate::storage_health::StorageHealthError),
     #[error("LW_RUNTIME_AUTHORITY_UNAVAILABLE")]
     Unavailable,
     #[error("LW_RUNTIME_EXECUTION_DEADLINE_EXCEEDED")]
@@ -223,6 +228,7 @@ impl RuntimeAdmissionError {
     #[must_use]
     pub fn diagnostic_code(&self) -> &str {
         match self {
+            Self::StorageHealth(error) => error.diagnostic_code(),
             Self::Unavailable => "LW_RUNTIME_AUTHORITY_UNAVAILABLE",
             Self::Deadline => "LW_RUNTIME_EXECUTION_DEADLINE_EXCEEDED",
             Self::Store(_) => "LW_RUNTIME_AUTHORITY_READ_FAILED",
@@ -249,7 +255,7 @@ impl RuntimeAdmissionError {
         match self {
             Self::Store(error) => error.retryable(),
             Self::Resource(error) => error.retryable(),
-            Self::FundingChanged => true,
+            Self::FundingChanged | Self::StorageHealth(_) => true,
             Self::Unavailable
             | Self::Deadline
             | Self::FundingInactive

@@ -53,6 +53,12 @@ def ok_http(url: str) -> tuple[int, str | None]:
 
 
 def ok_kubectl(argv: list[str]) -> tuple[int, str, str]:
+    if "service" in argv and "get" in argv:
+        return 0, json.dumps({"items": [{"metadata": {"name": "postgres"}, "spec": {"selector": {"app": "postgres"}}}]}), ""
+    if "pods" in argv and "get" in argv:
+        return 0, json.dumps({"items": [{"metadata": {"name": "postgres-0"}, "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}]}), ""
+    if "exec" in argv:
+        return 0, "0\n", ""
     return 0, "", ""
 
 
@@ -270,7 +276,79 @@ class AcceptanceHarnessTest(unittest.TestCase):
         self.assertEqual(code, MODULE.JOURNEY_TIMEOUT_EXIT_CODE)
 
 
+class AuthoringQueueTest(unittest.TestCase):
+    def boundary(self, primary="postgres-1", *, query_error=False, services_error=False, ready=True):
+        calls = []
+        def execute(argv):
+            calls.append(list(argv))
+            if "service" in argv:
+                if services_error:
+                    return 1, "", "API unavailable"
+                return 0, json.dumps({"items": [{"metadata": {"name": "postgres-rw"}, "spec": {"selector": {
+                    "cnpg.io/cluster": "postgres", "cnpg.io/instanceRole": "primary"}}}]}), ""
+            if "pods" in argv:
+                return 0, json.dumps({"items": [{"metadata": {"name": primary}, "status": {
+                    "phase": "Running", "conditions": [{"type": "Ready", "status": "True" if ready else "False"}]}}]}), ""
+            if "exec" in argv:
+                return (1, "", "query unavailable") if query_error else (0, "2\n", "")
+            raise AssertionError(argv)
+        return execute, calls
+
+    def test_primary_switch_is_resolved_for_each_observation(self):
+        first, first_calls = self.boundary("postgres-1")
+        second, second_calls = self.boundary("postgres-3")
+        self.assertEqual(MODULE.queued_dispatch_count(first), 2)
+        self.assertEqual(MODULE.queued_dispatch_count(second), 2)
+        for calls, expected in ((first_calls, "postgres-1"), (second_calls, "postgres-3")):
+            query = next(call for call in calls if "exec" in call)
+            self.assertEqual(query[query.index("exec") + 1], expected)
+            selector = next(call for call in calls if "pods" in call)
+            self.assertIn("cnpg.io/instanceRole=primary", selector[selector.index("-l") + 1])
+
+    def test_unavailable_query_or_primary_is_unknown_and_blocks_preflight(self):
+        for options in ({"query_error": True}, {"services_error": True}, {"ready": False}):
+            execute, calls = self.boundary(**options)
+            with self.subTest(options=options):
+                check = MODULE.check_authoring_queue(execute)
+                self.assertFalse(check.ok)
+                self.assertEqual(check.code, MODULE.AUTHORING_QUEUE_UNAVAILABLE)
+                self.assertIn(MODULE.AUTHORING_QUEUE_UNAVAILABLE, MODULE.PreflightResult([check], 1).diagnostics)
+                self.assertIsNone(MODULE.wait_for_authoring_queue(execute, 0))
+                if not options.get("query_error"):
+                    self.assertFalse(any("exec" in call for call in calls))
+
+    def test_standalone_development_still_queries_its_existing_pod(self):
+        calls = []
+        def execute(argv):
+            calls.append(list(argv))
+            return ok_kubectl(argv)
+        self.assertEqual(MODULE.queued_dispatch_count(execute), 0)
+        query = next(call for call in calls if "exec" in call)
+        self.assertEqual(query[query.index("exec") + 1], "postgres-0")
+
+
 class PreflightTest(unittest.TestCase):
+    def test_unavailable_queue_causes_nonzero_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = make_repo_root(Path(temporary) / "repo")
+            browsers = Path(temporary) / "browsers"
+            (browsers / "chromium").mkdir(parents=True)
+            credentials = make_credentials(Path(temporary) / "credentials")
+            args = MODULE.build_parser().parse_args([
+                "preflight", "--base-url", "https://portal.example.test",
+                "--credentials-dir", str(credentials), "--model", "glm-5.3",
+            ])
+            def unavailable_query(argv):
+                if "exec" in argv:
+                    return 1, "", "database query unavailable"
+                return ok_kubectl(argv)
+            result = MODULE.run_preflight(
+                args, environ={"PLAYWRIGHT_BROWSERS_PATH": str(browsers)},
+                http=ok_http, run_kubectl=unavailable_query, run_version=ok_version, repo_root=root,
+            )
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn(MODULE.AUTHORING_QUEUE_UNAVAILABLE, result.diagnostics)
+
     def test_preflight_passes_with_explicit_model_and_private_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = make_repo_root(Path(temporary) / "repo")

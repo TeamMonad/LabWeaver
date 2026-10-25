@@ -8,6 +8,7 @@ resource_application_access_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEA
 resource_application_psql: /usr/bin/psql
 resource_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') }}"
 resource_application_postgres_service_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE_FILE') }}"
+resource_application_postgres_kubernetes_service: "{{ 'postgres-rw' if platform_foundation_ha | default({}) | length > 0 else 'postgres' }}"
 resource_application_configuration_manifest: "{{ playbook_dir }}/../../config/resource-bundle-manifest.json"
 # Reviewed GPU classes the deployment renders into
 # `resource-service-config/capacity.json` (`gpuCatalogSeed`). The rendered

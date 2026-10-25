@@ -28,6 +28,8 @@ mod resolver;
 mod runtime;
 mod runtime_admission;
 mod runtime_executor;
+#[path = "../../storage_health.rs"]
+pub mod storage_health;
 mod store;
 mod terminal_bridge;
 mod terminal_executor;

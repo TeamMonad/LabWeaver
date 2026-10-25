@@ -31,6 +31,8 @@ pub mod outbox;
 mod pricing;
 pub mod process;
 pub mod runtime_authorization;
+#[path = "../../storage_health.rs"]
+pub mod storage_health;
 pub mod store;
 
 pub use process::{ResourceProcessRuntime, ResourceProcessRuntimeError};

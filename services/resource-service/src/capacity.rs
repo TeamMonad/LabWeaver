@@ -1039,14 +1039,21 @@ impl CapacityReconcileWorker {
         if *shutdown.borrow() {
             return Ok(did_work);
         }
-        if let Some(item) = self.store.claim_next_capacity_shell().await? {
-            did_work = true;
-            self.reconcile_provisioning(item).await?;
-        }
+        // Unsafe storage pauses allocation, not the cleanup that can recover capacity.
+        let storage_error = match self.store.claim_next_capacity_shell().await {
+            Ok(Some(item)) => {
+                did_work = true;
+                self.reconcile_provisioning(item).await?;
+                None
+            }
+            Ok(None) => None,
+            Err(error @ crate::store::ResourceStoreError::StorageHealth(_)) => Some(error),
+            Err(error) => return Err(error),
+        };
         if *shutdown.borrow() {
             return Ok(did_work);
         }
-        if self.reconcile_handoff().await? {
+        if storage_error.is_none() && self.reconcile_handoff().await? {
             did_work = true;
         }
         if *shutdown.borrow() {
@@ -1066,6 +1073,9 @@ impl CapacityReconcileWorker {
         }
         if self.reconcile_active_environment_cleanup(shutdown).await? {
             did_work = true;
+        }
+        if let Some(error) = storage_error {
+            return Err(error);
         }
         Ok(did_work)
     }
