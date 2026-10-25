@@ -93,7 +93,11 @@ async fn send_tool(app: &Router, capability: &str) -> Result<StatusCode> {
 async fn settled(billing: &BuildBillingFixture, project: ProjectId, count: usize) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let holds = billing.credits.holds(project, 1, 100, 0).await?.items;
+            let holds = billing
+                .store
+                .list_credit_holds(project, &contracts::http::ResourceListQuery::default())
+                .await?
+                .items;
             if holds.len() == count
                 && holds
                     .iter()
@@ -180,8 +184,11 @@ async fn sandbox_tools_and_each_model_request_recheck_original_authority() -> Re
         assert!(captured.lock().await.is_empty());
         assert!(
             billing
-                .credits
-                .holds(authority.project, 1, 100, 0)
+                .store
+                .list_credit_holds(
+                    authority.project,
+                    &contracts::http::ResourceListQuery::default()
+                )
                 .await?
                 .items
                 .is_empty()
@@ -236,8 +243,11 @@ async fn sandbox_tools_and_each_model_request_recheck_original_authority() -> Re
     }
     assert!(
         billing
-            .credits
-            .holds(authority.project, 1, 100, 0)
+            .store
+            .list_credit_holds(
+                authority.project,
+                &contracts::http::ResourceListQuery::default()
+            )
             .await?
             .items
             .is_empty()
@@ -320,8 +330,11 @@ async fn sandbox_tools_and_each_model_request_recheck_original_authority() -> Re
     assert_eq!(captured.lock().await.len(), 2);
     assert_eq!(
         billing
-            .credits
-            .holds(authority.project, 1, 100, 0)
+            .store
+            .list_credit_holds(
+                authority.project,
+                &contracts::http::ResourceListQuery::default()
+            )
             .await?
             .items
             .len(),

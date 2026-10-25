@@ -100,7 +100,7 @@
       </div>
 
       <p class="filter-hint">
-        可按申请标识、账号、课程、项目或目标筛选。名称来自当前已加载的真实数据，内部标识也支持搜索。结果只来自服务端返回的真实字段。
+        可按申请标识、账号、课程、项目或目标筛选。名称来自当前已加载的真实数据，内部标识也支持搜索。结果只来自服务端返回的真实字段。筛选只作用于已加载的申请；列表底部仍有"加载更多申请"时，请先加载后再筛选。
       </p>
 
       <DiagnosticBanner
@@ -148,6 +148,35 @@
           >—</span>
         </template>
       </DataTable>
+
+      <div
+        v-if="approval.requests.kind === 'success'"
+        class="list-more"
+      >
+        <button
+          v-if="approval.requestsNextCursor"
+          type="button"
+          class="outlined-button"
+          :disabled="approval.loadingMore !== null"
+          @click="approval.loadMoreRequests()"
+        >
+          {{ approval.loadingMore === 'requests' ? '加载中…' : '加载更多申请' }}
+        </button>
+        <span
+          v-else
+          class="list-more-end"
+        >已显示全部 {{ approval.requests.data.length }} 条申请</span>
+      </div>
+      <DiagnosticBanner
+        v-if="approval.loadMoreDiagnostic?.list === 'requests'"
+        :code="approval.loadMoreDiagnostic.diagnostic.code"
+        :request-id="approval.loadMoreDiagnostic.diagnostic.requestId"
+        :next-step="approval.loadMoreDiagnostic.diagnostic.nextStep"
+        :message="approval.loadMoreDiagnostic.diagnostic.message"
+        :retryable="approval.loadMoreDiagnostic.diagnostic.retryable"
+        severity="warning"
+        @retry="approval.loadMoreRequests()"
+      />
 
       <div
         v-if="hasNoResourceRequests"
@@ -622,6 +651,34 @@
           />
         </template>
       </DataTable>
+      <div
+        v-if="approval.leases.kind === 'success'"
+        class="list-more"
+      >
+        <button
+          v-if="approval.leasesNextCursor"
+          type="button"
+          class="outlined-button"
+          :disabled="approval.loadingMore !== null"
+          @click="approval.loadMoreLeases()"
+        >
+          {{ approval.loadingMore === 'leases' ? '加载中…' : '加载更多授权' }}
+        </button>
+        <span
+          v-else
+          class="list-more-end"
+        >已显示全部 {{ approval.leases.data.length }} 条授权</span>
+      </div>
+      <DiagnosticBanner
+        v-if="approval.loadMoreDiagnostic?.list === 'leases'"
+        :code="approval.loadMoreDiagnostic.diagnostic.code"
+        :request-id="approval.loadMoreDiagnostic.diagnostic.requestId"
+        :next-step="approval.loadMoreDiagnostic.diagnostic.nextStep"
+        :message="approval.loadMoreDiagnostic.diagnostic.message"
+        :retryable="approval.loadMoreDiagnostic.diagnostic.retryable"
+        severity="warning"
+        @retry="approval.loadMoreLeases()"
+      />
 
       <div
         v-if="approval.selectedLease"
@@ -1416,6 +1473,18 @@ async function onLeaseConfirmed() {
 
 .filter-hint {
   margin: -4px 0 var(--space-3);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.list-more {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.list-more-end {
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }

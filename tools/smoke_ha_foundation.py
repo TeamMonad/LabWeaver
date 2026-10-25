@@ -29,7 +29,46 @@ def run(arguments, *, environment, payload=None, capture=False, timeout=600):
                           env=environment, capture_output=capture, timeout=timeout)
 
 
-def smoke(name: str, charts: Path) -> None:
+def smoke_identity(kubectl: list[str], lock: dict, environment: dict) -> None:
+    import secrets
+    role = ROOT / "deploy/ansible/roles/identity_foundation"
+    context = yaml.safe_load((role / "defaults/main.yml").read_text())
+    context.update(identity_lock=lock["identity_foundation"], identity_ha_lock=lock["high_availability"],
+                   identity_foundation_ha=ha.validate_identity({"failureDomain": "kind-test", "productionObjectEndpoint": "https://objects.invalid",
+                       "backup": {"endpoint": "https://backup.invalid", "destination": "s3://identity-smoke/keycloak/", "failureDomain": "external-test",
+                                  "credentialsSecret": "identity-backup-secrets", "caSecret": "identity-backup-secrets"}}))
+    renderer = Environment(undefined=StrictUndefined)
+    renderer.filters["to_json"] = json.dumps
+    database = next(item for item in yaml.safe_load_all(renderer.from_string((role / "templates/database.yml.j2").read_text()).render(**context)) if item["kind"] == "Cluster")
+    # This component smoke deliberately does not connect to an external backup
+    # target or execute backups (#208). Unit tests render the production plugin,
+    # ObjectStore and schedule unchanged. Kind has no Ceph block devices.
+    database["spec"].pop("plugins")
+    database["spec"]["storage"] = {"storageClass": "standard", "size": "1Gi"}
+    namespace = context["identity_namespace"]
+    run([*kubectl, "create", "namespace", namespace], environment=environment)
+    credentials = [{"apiVersion": "v1", "kind": "Secret", "metadata": {"name": name, "namespace": namespace}, "type": kind, "stringData": data}
+                   for name, kind, data in ((context["identity_database_secret_name"], "kubernetes.io/basic-auth", {"username": "keycloak", "password": secrets.token_urlsafe(36)}),
+                                            (context["identity_bootstrap_secret_name"], "Opaque", {"username": "platform-bootstrap", "password": secrets.token_urlsafe(36)}))]
+    run([*kubectl, "apply", "-f", "-"], environment=environment, payload=yaml.safe_dump_all([*credentials, database]))
+    run([*kubectl, "wait", "cluster/identity-postgres", "-n", namespace, "--for=condition=Ready", "--timeout=600s"], environment=environment)
+    status = json.loads(run([*kubectl, "get", "cluster/identity-postgres", "-n", namespace, "-o", "json"], environment=environment, capture=True).stdout)["status"]
+    pods = json.loads(run([*kubectl, "get", "pods", "-n", namespace, "-l", "cnpg.io/cluster=identity-postgres", "-o", "json"], environment=environment, capture=True).stdout)["items"]
+    if status["readyInstances"] != 3 or len({pod["spec"]["nodeName"] for pod in pods if pod.get("status", {}).get("phase") == "Running"}) != 3:
+        raise ValueError("identity CNPG must have three Ready instances on distinct hosts")
+    workloads = list(yaml.safe_load_all(renderer.from_string((role / "templates/workloads.yml.j2").read_text()).render(**context)))
+    run([*kubectl, "apply", "-f", "-"], environment=environment, payload=yaml.safe_dump_all(workloads))
+    run([*kubectl, "rollout", "status", "deployment/" + context["identity_name"], "-n", namespace, "--timeout=600s"], environment=environment)
+    output = run([*kubectl, "exec", "-n", namespace, status["currentPrimary"], "--", "psql", "-U", "postgres", "-d", "keycloak", "-v", "ON_ERROR_STOP=1", "-Atc",
+                  "SHOW synchronous_standby_names; SHOW synchronous_commit; CREATE TABLE public.identity_ha_smoke(value text); INSERT INTO public.identity_ha_smoke VALUES ('confirmed'); SELECT value FROM public.identity_ha_smoke; SELECT count(*) FROM realm WHERE name='workloads';"], environment=environment, capture=True).stdout
+    print(output, end="")
+    lines = output.splitlines()
+    if not lines[0].startswith("ANY 1 (") or lines[1] != "on" or lines[-2:] != ["confirmed", "1"]:
+        raise ValueError("identity synchronous write or actual Keycloak realm initialization failed")
+    print("Identity CNPG: three Ready hosts, synchronous confirmed write, two Ready Keycloak replicas using authenticated verify-full TLS and imported realm. No Ceph, Cilium, node failure, backup or RPO/RTO verification.")
+
+
+def smoke(name: str, charts: Path, *, identity_only: bool = False) -> None:
     if not re.fullmatch(r"labweaver-ha-[a-z0-9-]+", name):
         raise ValueError("cluster name must start with labweaver-ha-")
     lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text())
@@ -57,7 +96,9 @@ def smoke(name: str, charts: Path) -> None:
             if any(taint["key"] == "node-role.kubernetes.io/control-plane" for taint in node["spec"].get("taints", [])):
                 run([*kubectl, "taint", "nodes", f"{name}-control-plane", "node-role.kubernetes.io/control-plane-"], environment=environment)
             nodes = run(["kind", "get", "nodes", "--name", name], environment=environment, capture=True).stdout.splitlines()
-            for image in (lock["high_availability"]["cnpg"]["image"], lock["high_availability"]["cnpg"]["postgres_image"], lock["platform_foundation"]["nats"], lock["platform_foundation"]["nats_box"]):
+            images = [lock["high_availability"]["cnpg"]["image"], lock["high_availability"]["cnpg"]["postgres_image"]]
+            images.extend(lock["identity_foundation"]["images"].values() if identity_only else (lock["platform_foundation"]["nats"], lock["platform_foundation"]["nats_box"]))
+            for image in images:
                 for owned_node in nodes:
                     # Follow local_dev.py's digest-preserving CRI pull, not Docker's partial
                     # multi-platform image archive (kind load --all-platforms rejects it).
@@ -69,6 +110,9 @@ def smoke(name: str, charts: Path) -> None:
             if hashlib.sha256(archive.read_bytes()).hexdigest() != lock["high_availability"]["cnpg"]["chart_sha256"]:
                 raise ValueError("CNPG chart checksum mismatch")
             run(["helm", "upgrade", "--install", "cnpg", str(archive), "--kubeconfig", environment["KUBECONFIG"], "--namespace", "cnpg-system", "--create-namespace", "--values", str(values), "--wait", "--timeout", "300s"], environment=environment)
+            if identity_only:
+                smoke_identity(kubectl, lock, environment)
+                return
             private = directory / ".private"
             private.mkdir(mode=0o700)
             material = private / "foundation"
@@ -138,5 +182,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--name", default="labweaver-ha-smoke")
     parser.add_argument("--charts", type=Path, required=True)
+    parser.add_argument("--identity-only", action="store_true", help="Smoke the actual identity CNPG and Keycloak templates; no backups")
     arguments = parser.parse_args()
-    smoke(arguments.name, arguments.charts.resolve())
+    smoke(arguments.name, arguments.charts.resolve(), identity_only=arguments.identity_only)

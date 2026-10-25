@@ -251,7 +251,7 @@ import { RouterLink } from 'vue-router'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SubmissionProgress from '@/components/evaluation/SubmissionProgress.vue'
 import SubmissionTaskNotes from '@/components/evaluation/SubmissionTaskNotes.vue'
-import type { EnvironmentInstanceSchema } from '@/generated/contracts'
+import type { EnvironmentDetailSchema } from '@/generated/contracts'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 import { useSubmissionTasks } from '@/composables/useEvaluationTasks'
 import { useEvaluationResult } from '@/composables/useEvaluationResults'
@@ -263,7 +263,7 @@ import { isTerminalRun, readEvaluationTask, submissionStages } from '@/utils/eva
 import { formatTimestamp } from '@/utils/format'
 
 /** 实验提交与凭据：确认清单后冻结提交，显示提交凭据和最近一次提交的评测进度。 */
-const props = defineProps<{ data: EnvironmentInstanceSchema }>()
+const props = defineProps<{ data: EnvironmentDetailSchema }>()
 
 const {
   freezeState,

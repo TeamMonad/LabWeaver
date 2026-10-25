@@ -146,8 +146,11 @@ identity_service_realm_role_assignments: # noqa: var-naming[no-role-prefix]
     roles: [query-users, view-users]
 identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256 # noqa: var-naming[no-role-prefix]
 identity_secret_locator_controller: false # noqa: var-naming[no-role-prefix]
-identity_storage_class: local-path # noqa: var-naming[no-role-prefix]
+# Required independent backup profile; validated by the same rules as business CNPG.
+identity_foundation_ha: {}
 identity_postgres_storage: 20Gi # noqa: var-naming[no-role-prefix]
+# Two replicas allow one unavailable Pod to be replaced on two schedulable hosts.
+# Three-replica rollouts during a node drain are intentionally unsupported.
 identity_keycloak_replicas: 2 # noqa: var-naming[no-role-prefix]
 identity_manifest_directory: /var/lib/labweaver/identity/manifests # noqa: var-naming[no-role-prefix]
 identity_kubeconfig_path: /etc/kubernetes/admin.conf # noqa: var-naming[no-role-prefix]

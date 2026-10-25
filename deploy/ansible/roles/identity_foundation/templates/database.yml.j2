@@ -1,0 +1,57 @@
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata: {name: identity-independent-backup, namespace: {{ identity_namespace }}}
+spec:
+  configuration:
+    destinationPath: {{ identity_foundation_ha.backup.destination | to_json }}
+    endpointURL: {{ identity_foundation_ha.backup.endpoint | to_json }}
+    endpointCA: {name: identity-backup-secrets, key: ca.crt}
+    s3Credentials:
+      accessKeyId: {name: identity-backup-secrets, key: access-key}
+      secretAccessKey: {name: identity-backup-secrets, key: secret-key}
+    wal: {compression: gzip}
+    data: {compression: gzip}
+  retentionPolicy: {{ (identity_foundation_ha.backup.retentionDays | string ~ 'd') | to_json }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata: {name: identity-postgres, namespace: {{ identity_namespace }}}
+spec:
+  instances: 3
+  imageName: {{ identity_ha_lock.cnpg.postgres_image }}
+  enableSuperuserAccess: false
+  bootstrap:
+    initdb:
+      database: keycloak
+      owner: keycloak
+      secret: {name: {{ identity_database_secret_name }}}
+  storage: {storageClass: ceph-rbd, size: {{ identity_postgres_storage }}}
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+  enablePDB: true
+  smartShutdownTimeout: 0
+  failoverDelay: 0
+  postgresql:
+    synchronous: {method: any, number: 1, dataDurability: required, failoverQuorum: true}
+    parameters:
+      synchronous_commit: 'on'
+      archive_timeout: {{ (identity_foundation_ha.backup.archiveTimeoutSeconds | string ~ 's') | to_json }}
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters: {barmanObjectName: identity-independent-backup}
+  resources:
+    requests: {cpu: '1', memory: 2Gi}
+    limits: {memory: 4Gi}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata: {name: identity-postgres-daily, namespace: {{ identity_namespace }}}
+spec:
+  schedule: {{ identity_foundation_ha.backup.baseBackupSchedule | to_json }}
+  backupOwnerReference: cluster
+  cluster: {name: identity-postgres}
+  method: plugin
+  pluginConfiguration: {name: barman-cloud.cloudnative-pg.io}

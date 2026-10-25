@@ -275,13 +275,13 @@ describe('EnvironmentEntryView', () => {
       },
       error: undefined,
     } as never)
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null }, error: undefined as never })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
     vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['xterm']), error: undefined as never } as never)
     vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue({
       data: undefined,
@@ -303,7 +303,7 @@ describe('EnvironmentEntryView', () => {
 
   it('shows blocked diagnostic when no project context is available', async () => {
     vi.mocked(listProjects).mockResolvedValue({
-      data: [],
+      data: { items: [], nextCursor: null },
       error: undefined as never,
     })
     const { wrapper } = await mountAt()
@@ -348,7 +348,7 @@ describe('EnvironmentEntryView', () => {
     await Promise.resolve()
     expect(router.currentRoute.value.path).toBe('/')
 
-    resolveProjects({ data: [mockProject], error: undefined as never })
+    resolveProjects({ data: { items: [mockProject], nextCursor: null }, error: undefined as never })
     await Promise.resolve()
     releaseGuard()
     await navigation
@@ -473,7 +473,7 @@ describe('EnvironmentEntryView', () => {
         }], nextCursor: null },
       } as never)
       vi.mocked(listProjectResourceLeases).mockResolvedValue({
-        data: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }],
+        data: { items: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }], nextCursor: null },
         error: undefined as never,
       } as never)
       const { wrapper } = await mountAt(
@@ -510,7 +510,7 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
     expect(wrapper.text()).not.toContain('环境正在准备')
     expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
-    expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
     expect(getEnvironment).toHaveBeenCalledTimes(1)
   })
 
@@ -528,7 +528,7 @@ describe('EnvironmentEntryView', () => {
       }], nextCursor: null },
     } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({
-      data: [{ id: 'lease-other-project', requestId: 'request-other-project', state: 'active' }],
+      data: { items: [{ id: 'lease-other-project', requestId: 'request-other-project', state: 'active' }], nextCursor: null },
       error: undefined as never,
     } as never)
     const { wrapper } = await mountAt(
@@ -557,7 +557,7 @@ describe('EnvironmentEntryView', () => {
         state: 'rejected',
       }], nextCursor: null },
     } as never)
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
     const { wrapper } = await mountAt(
       { environmentId: 'env-1', projectId: 'project-1' },
       false,
@@ -585,7 +585,7 @@ describe('EnvironmentEntryView', () => {
       }], nextCursor: null },
     } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({
-      data: [{ id: 'lease-1', requestId: 'request-1', state: 'revoked', revokeReasonCode: 'task_owner_release' }],
+      data: { items: [{ id: 'lease-1', requestId: 'request-1', state: 'revoked', revokeReasonCode: 'task_owner_release' }], nextCursor: null },
       error: undefined as never,
     } as never)
     const { wrapper } = await mountAt(
@@ -871,6 +871,185 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.findAll('button').filter((button) => button.text() === '重试')).toHaveLength(0)
   })
 
+  describe('unknown restart outcome (#229)', () => {
+    const unknownRestart = { kind: 'restart', diagnosticCode: 'LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN', operationId: 'op-restart' }
+    const eligibleNextStep = '使用顶部操作栏的“重试失败的操作”手动恢复'
+
+    function mockUnknownRestart(retryEligible: boolean) {
+      mockEnvironmentInstance({
+        observedState: 'failed',
+        failedPhase: 'provisioning',
+        operation: { ...mockOperation('failed', unknownRestart), id: 'op-restart' },
+      })
+      vi.mocked(listEnvironmentOperations).mockResolvedValue({
+        data: { items: [mockOperation('failed', { ...unknownRestart, retryEligible })] },
+        error: undefined as never,
+      } as never)
+    }
+
+    async function failedPanel(wrapper: VueWrapper) {
+      await openTab(wrapper, '异步操作与诊断')
+      return vi.waitFor(() => wrapper.get('.env-failed-panel'))
+    }
+
+    function expectNothingSentOnItsOwn() {
+      expect(retryEnvironment).not.toHaveBeenCalled()
+      expect(restartEnvironment).not.toHaveBeenCalled()
+      expect(startEnvironment).not.toHaveBeenCalled()
+    }
+
+    it('explains the unknown outcome before the code and sends nothing on its own', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        mockUnknownRestart(true)
+        const { wrapper } = await mountAt({ environmentId: 'env-1' })
+        await vi.waitFor(() => expect(wrapper.text()).toContain('上次重启结果未知，平台不会自动重试'))
+        await openTab(wrapper, '异步操作与诊断')
+        const panel = await vi.waitFor(() => wrapper.get('.env-failed-panel'))
+
+        expect(panel.get('.diagnostic-message').text()).toBe('无法确认上次重启是否完成，请检查环境状态后手动选择恢复。')
+        expect(panel.get('.diagnostic-next-step').text()).toContain('使用顶部操作栏的“重试失败的操作”手动恢复')
+        expect(panel.get('.diagnostic-code').text()).toBe('LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN')
+        // The reason comes before the code, in the panel and in the timeline.
+        expect(panel.text().indexOf('无法确认上次重启')).toBeLessThan(panel.text().indexOf('LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN'))
+        const timeline = wrapper.text()
+        expect(timeline.indexOf('无法确认上次重启是否完成')).toBeLessThan(timeline.indexOf('诊断码：LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN'))
+        expect(panel.find('.diagnostic-retry').exists()).toBe(false)
+
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushPromises()
+        expect(retryEnvironment).not.toHaveBeenCalled()
+        expect(restartEnvironment).not.toHaveBeenCalled()
+        expect(startEnvironment).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('recovers only through the explicit toolbar entry, once per click', async () => {
+      mockUnknownRestart(true)
+      vi.mocked(retryEnvironment).mockResolvedValue({
+        data: { environmentId: 'env-1', operationId: 'op-recover', revision: 12, statusUrl: '/api/v1/environments/env-1' },
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      const recover = await vi.waitFor(() => {
+        const button = wrapper.findAll('button').find((candidate) => candidate.text() === '重试失败的操作')
+        expect(button).toBeDefined()
+        return button!
+      })
+      expect(retryEnvironment).not.toHaveBeenCalled()
+
+      await recover.trigger('click')
+      await vi.waitFor(() => expect(retryEnvironment).toHaveBeenCalledTimes(1))
+      expect(retryEnvironment).toHaveBeenCalledWith({
+        path: { environmentId: 'env-1' },
+        headers: { 'If-Match': '"rev-11"', 'Idempotency-Key': expect.any(String) },
+      })
+      expect(restartEnvironment).not.toHaveBeenCalled()
+    })
+
+    it('says no recovery is available only when the server declined it for this operation', async () => {
+      mockUnknownRestart(false)
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect(wrapper.text()).toContain('上次重启结果未知'))
+      const panel = await failedPanel(wrapper)
+
+      expect(panel.get('.diagnostic-message').text()).toBe('无法确认上次重启是否完成，请检查环境状态后手动选择恢复。')
+      expect(panel.get('.diagnostic-next-step').text()).toContain('平台对这次操作没有提供恢复')
+      expect(panel.find('[data-testid="reread-operation-history"]').exists()).toBe(false)
+      expect(wrapper.findAll('button').some((button) => button.text() === '重试失败的操作')).toBe(false)
+      expect(retryEnvironment).not.toHaveBeenCalled()
+    })
+
+    it('follows a running restart into the unknown outcome, waiting for the delayed history instead of guessing', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const running = { ...unknownRestart, diagnosticCode: null }
+        mockEnvironmentInstance({ observedState: 'provisioning', operation: { ...mockOperation('running', running), id: 'op-restart' } })
+        vi.mocked(listEnvironmentOperations).mockResolvedValue({
+          data: { items: [mockOperation('running', running)] },
+          error: undefined as never,
+        } as never)
+        const { wrapper } = await mountAt({ environmentId: 'env-1' })
+        await vi.waitFor(() => expect(wrapper.text()).toContain('当前正在'))
+        await openTab(wrapper, '异步操作与诊断')
+        await vi.waitFor(() => expect(wrapper.find('.operation-current-panel').exists()).toBe(true))
+        expect(listEnvironmentOperations).toHaveBeenCalledTimes(1)
+
+        // The next detail poll reports the restart failed with an unknown outcome; its history read is slow.
+        mockUnknownRestart(true)
+        // `Promise.withResolvers` is outside the project's ES2020 lib, so the executor form captures the resolver.
+        let resolveHistory!: (value: unknown) => void
+        vi.mocked(listEnvironmentOperations).mockImplementationOnce(() => new Promise((resolve) => { resolveHistory = resolve }) as never)
+        await vi.advanceTimersByTimeAsync(3000)
+        await flushPromises()
+
+        await vi.waitFor(() => expect(listEnvironmentOperations).toHaveBeenCalledTimes(2))
+        const panel = await vi.waitFor(() => wrapper.get('.env-failed-panel'))
+        expect(panel.get('.diagnostic-next-step').text()).toContain('正在读取操作历史以确认能否恢复')
+        expect(panel.text()).not.toContain('没有提供恢复')
+        expect(panel.find('[data-testid="reread-operation-history"]').exists()).toBe(false)
+        expect(wrapper.find('.operation-current-panel').exists()).toBe(false)
+        expect(wrapper.text()).not.toContain('当前正在')
+
+        resolveHistory({ data: { items: [mockOperation('failed', { ...unknownRestart, retryEligible: true })] }, error: undefined })
+        await flushPromises()
+        await vi.waitFor(() => expect(panel.get('.diagnostic-next-step').text()).toContain(eligibleNextStep))
+        expect(panel.find('.diagnostic-retry').exists()).toBe(false)
+
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushPromises()
+        expect(listEnvironmentOperations).toHaveBeenCalledTimes(2)
+        expectNothingSentOnItsOwn()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('reports an unreadable history as unknown eligibility with a re-read entry', async () => {
+      mockUnknownRestart(true)
+      vi.mocked(listEnvironmentOperations).mockResolvedValueOnce({
+        error: { diagnosticCode: 'LW_OPERATION_LIST_UNAVAILABLE', detail: '操作历史服务暂时不可用', status: 503, retryable: true },
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect(wrapper.text()).toContain('上次重启结果未知'))
+      const panel = await failedPanel(wrapper)
+
+      const nextStep = panel.get('.diagnostic-next-step').text()
+      expect(nextStep).toContain('操作历史读取失败（操作历史服务暂时不可用）')
+      expect(nextStep).not.toContain('没有提供恢复')
+      expect(nextStep).not.toContain(eligibleNextStep)
+      expect(panel.find('.diagnostic-retry').exists()).toBe(false)
+
+      await panel.get('[data-testid="reread-operation-history"]').trigger('click')
+      await vi.waitFor(() => expect(panel.get('.diagnostic-next-step').text()).toContain(eligibleNextStep))
+      expect(listEnvironmentOperations).toHaveBeenCalledTimes(2)
+      expect(panel.find('[data-testid="reread-operation-history"]').exists()).toBe(false)
+      expectNothingSentOnItsOwn()
+    })
+
+    it('does not trust a history snapshot that still shows the restart running', async () => {
+      mockUnknownRestart(true)
+      vi.mocked(listEnvironmentOperations).mockResolvedValueOnce({
+        data: { items: [mockOperation('running', { ...unknownRestart, diagnosticCode: null })] },
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect(wrapper.text()).toContain('上次重启结果未知'))
+      const panel = await failedPanel(wrapper)
+
+      expect(panel.get('.diagnostic-next-step').text()).toContain('操作历史还没有这次操作的最新结果')
+      expect(panel.text()).not.toContain('没有提供恢复')
+      expect(wrapper.find('.operation-current-panel').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('当前正在')
+
+      await panel.get('[data-testid="reread-operation-history"]').trigger('click')
+      await vi.waitFor(() => expect(panel.get('.diagnostic-next-step').text()).toContain(eligibleNextStep))
+      expectNothingSentOnItsOwn()
+    })
+  })
+
   it.each([
     ['ready', 'running', true, '', '运行中'],
     ['stopped', 'stopped', false, '环境已停止，启动后才能签发访问授权。', '已停止'],
@@ -1105,7 +1284,7 @@ describe('EnvironmentEntryView', () => {
   })
 
   it('uses an explicit URL project over the shared context and preserves a linked environment', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject, mockProjectB], nextCursor: null }, error: undefined as never })
     mockEnvironmentInstance()
     const { wrapper, router } = await mountAt({ environmentId: 'env-1' }, true)
 
@@ -1121,7 +1300,7 @@ describe('EnvironmentEntryView', () => {
   })
 
   it('clears the environment and opens its tools when the shared project changes', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject, mockProjectB], nextCursor: null }, error: undefined as never })
     mockEnvironmentInstance()
     const { wrapper, router } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, true)
 
@@ -1299,7 +1478,7 @@ describe('EnvironmentEntryView', () => {
   })
 
   it('shows the freeze operation state and explains the temporary console disconnect', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject, mockProjectB], nextCursor: null }, error: undefined as never })
     mockEnvironmentInstance({ projectId: 'project-2' })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
       data: { items: [{ ...mockRelease, projectId: 'project-2', submissionManifest: mockSubmissionManifest }] },

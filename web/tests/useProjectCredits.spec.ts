@@ -41,7 +41,7 @@ const account = {
   platformAbsorbed: '0.000000',
   revision: 2,
 }
-const emptyPage = { data: { items: [], page: 1, pageSize: 25, hasMore: false }, error: undefined }
+const emptyPage = { data: { items: [], nextCursor: null }, error: undefined }
 const grant = { action: 'grant' as const, amount: '10.000000', reason: '补发额度', destinationProjectId: '', entryId: '' }
 
 function mockReads() {
@@ -112,9 +112,7 @@ describe('useProjectCredits', () => {
           id: 'entry-1', kind: 'grant', operationId: 'op-1', reason: '课程额度', balanceDelta: '20.000000', reservedDelta: '0.000000',
           spentDelta: '0.000000', platformAbsorbed: '0.000000', createdAt: '2026-10-12T08:00:00.000Z', rateSnapshots: [],
         }],
-        page: 1,
-        pageSize: 25,
-        hasMore: false,
+        nextCursor: null,
       },
       error: undefined,
     } as never)
@@ -126,6 +124,63 @@ describe('useProjectCredits', () => {
     expect(credits.account.value.kind).toBe('success')
     expect(credits.ledger.value.kind).toBe('success')
     expect(credits.holds.value.kind).toBe('empty')
+  })
+
+  it('follows the ledger cursor forward and back, and ends at the last page', async () => {
+    mockReads()
+    const entry = (id: string) => ({
+      id, kind: 'grant', operationId: `op-${id}`, reason: '课程额度', balanceDelta: '1.000000', reservedDelta: '0.000000',
+      spentDelta: '0.000000', platformAbsorbed: '0.000000', createdAt: '2026-10-12T08:00:00.000Z', rateSnapshots: [],
+    })
+    vi.mocked(listProjectCreditLedger).mockImplementation((async ({ query }: { query?: { cursor?: string } }) => ({
+      data: query?.cursor === 'ledger-2'
+        ? { items: [entry('entry-2')], nextCursor: null }
+        : { items: [entry('entry-1')], nextCursor: 'ledger-2' },
+      error: undefined,
+    })) as never)
+
+    const { credits } = setup()
+    await flushPromises()
+    expect(listProjectCreditLedger).toHaveBeenLastCalledWith({ path: { projectId: 'project-new' }, query: { limit: 25 } })
+    expect(credits.ledgerPage.value).toBe(1)
+
+    await credits.loadLedger('next')
+    expect(listProjectCreditLedger).toHaveBeenLastCalledWith({ path: { projectId: 'project-new' }, query: { limit: 25, cursor: 'ledger-2' } })
+    expect(credits.ledgerPage.value).toBe(2)
+    expect(credits.ledger.value).toMatchObject({ kind: 'success', data: { items: [{ id: 'entry-2' }], nextCursor: null } })
+
+    // The last page has no cursor, so "next" does not request again.
+    const calls = vi.mocked(listProjectCreditLedger).mock.calls.length
+    await credits.loadLedger('next')
+    expect(vi.mocked(listProjectCreditLedger).mock.calls.length).toBe(calls)
+    expect(credits.ledgerPage.value).toBe(2)
+
+    await credits.loadLedger('previous')
+    expect(listProjectCreditLedger).toHaveBeenLastCalledWith({ path: { projectId: 'project-new' }, query: { limit: 25 } })
+    expect(credits.ledgerPage.value).toBe(1)
+  })
+
+  it('drops ledger and hold cursors when the project changes', async () => {
+    mockReads()
+    const hold = {
+      id: 'hold-1', state: 'active', amount: '1.000000', ownerKind: 'resource_lease', ownerId: 'lease-1',
+      createdAt: '2026-10-12T08:00:00.000Z', updatedAt: '2026-10-12T08:00:00.000Z',
+    }
+    vi.mocked(listProjectCreditHolds).mockImplementation((async ({ path, query }: { path: { projectId: string }; query?: { cursor?: string } }) => ({
+      data: { items: [hold], nextCursor: path.projectId === 'project-new' && !query?.cursor ? 'holds-2' : null },
+      error: undefined,
+    })) as never)
+    const { credits, projectId } = setup()
+    await flushPromises()
+    await credits.loadHolds('next')
+    expect(credits.holdsPage.value).toBe(2)
+
+    projectId.value = 'project-other'
+    await flushPromises()
+    expect(credits.holdsPage.value).toBe(1)
+    expect(credits.ledgerPage.value).toBe(1)
+    expect(listProjectCreditHolds).toHaveBeenLastCalledWith({ path: { projectId: 'project-other' }, query: { limit: 25 } })
+    expect(listProjectCreditLedger).toHaveBeenLastCalledWith({ path: { projectId: 'project-other' }, query: { limit: 25 } })
   })
 
   it('keeps the request ID and Chinese reason of a denied read', async () => {

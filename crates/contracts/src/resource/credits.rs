@@ -168,16 +168,12 @@ pub struct CreditLedgerEntry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreditLedgerPage {
     pub items: Vec<CreditLedgerEntry>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreditHoldPage {
     pub items: Vec<CreditHold>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }

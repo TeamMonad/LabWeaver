@@ -62,7 +62,7 @@ describe('GCP Console Components', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.resetAllMocks()
-    vi.mocked(listProjects).mockResolvedValue({ data: projects, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: projects, nextCursor: null }, error: undefined as never })
     window.localStorage.clear()
   })
 
@@ -331,7 +331,7 @@ describe('GCP Console Components', () => {
         id: 'project-created',
         name: 'New project',
       }
-      vi.mocked(listProjects).mockImplementation(async () => ({ data: catalog, error: undefined as never }))
+      vi.mocked(listProjects).mockImplementation(async () => ({ data: { items: catalog, nextCursor: null }, error: undefined as never }))
       vi.mocked(createProject).mockImplementation(async () => {
         catalog = [...catalog, createdProject]
         return { data: createdProject, error: undefined as never }
@@ -351,6 +351,81 @@ describe('GCP Console Components', () => {
         if (!wrapper.find('.selector-menu').exists()) await wrapper.find('.selector-trigger').trigger('click')
         await vi.waitFor(() => expect(wrapper.findAll('.selector-menu .project-item')).toHaveLength(3))
         expect(wrapper.find('.trigger-primary').text()).toBe('New project')
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
+    it('loads the next cursor page on request so projects beyond the first page can be selected', async () => {
+      const laterProject = { ...projects[0], id: 'project-later', name: 'Later page project' }
+      vi.mocked(listProjects).mockImplementation(async (options) => (
+        options?.query?.cursor === 'cursor-2'
+          ? { data: { items: [laterProject], nextCursor: null }, error: undefined as never }
+          : { data: { items: projects, nextCursor: 'cursor-2' }, error: undefined as never }
+      ) as never)
+      // The catalog is module state; start from a first-page project so earlier tests' selection does not page ahead.
+      useProjects().select('project-cs101')
+      const wrapper = mount(GcpProjectSelector)
+      try {
+        await wrapper.find('.selector-trigger').trigger('click')
+        await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+        expect(listProjects).toHaveBeenCalledWith({ query: { limit: 50 } })
+        await wrapper.get('.search-input').setValue('Later')
+        expect(wrapper.text()).toContain('已加载的项目中未找到匹配项')
+
+        await wrapper.get('[data-testid="project-selector-load-more"]').trigger('click')
+        await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(1))
+        expect(listProjects).toHaveBeenLastCalledWith({ query: { limit: 50, cursor: 'cursor-2' } })
+        // The last page has no cursor, so the selector stops offering more.
+        expect(wrapper.find('[data-testid="project-selector-load-more"]').exists()).toBe(false)
+
+        await wrapper.get('.project-item').trigger('click')
+        expect(wrapper.find('.trigger-primary').text()).toBe('Later page project')
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
+    it('keeps a stored project that is not on the first page instead of switching to the first listed one', async () => {
+      window.localStorage.setItem('labweaver_project_id', 'project-later')
+      const laterProject = { ...projects[0], id: 'project-later', name: 'Later page project' }
+      vi.mocked(listProjects).mockImplementation(async (options) => (
+        options?.query?.cursor === 'cursor-2'
+          ? { data: { items: [laterProject], nextCursor: 'cursor-3' }, error: undefined as never }
+          : { data: { items: projects, nextCursor: 'cursor-2' }, error: undefined as never }
+      ) as never)
+      useProjects().select('project-later')
+      const wrapper = mount(GcpProjectSelector)
+      try {
+        // The same project can still be cached from the previous mount; wait for this load's second page.
+        await vi.waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2))
+        await vi.waitFor(() => expect(wrapper.find('.trigger-primary').text()).toBe('Later page project'))
+        // Paging stops once the current project is listed; the rest stays behind the cursor.
+        expect(listProjects).toHaveBeenCalledTimes(2)
+        await wrapper.find('.selector-trigger').trigger('click')
+        expect(wrapper.findAll('.project-item')).toHaveLength(3)
+        expect(wrapper.find('[data-testid="project-selector-load-more"]').exists()).toBe(true)
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
+    it('keeps the loaded projects and offers a retry when the next page fails', async () => {
+      vi.mocked(listProjects).mockImplementation(async (options) => (
+        options?.query?.cursor === 'cursor-2'
+          ? { data: undefined, error: { status: 503, diagnosticCode: 'LW_HTTP_SERVICE_UNAVAILABLE', detail: '项目服务暂时不可用', retryable: true } }
+          : { data: { items: projects, nextCursor: 'cursor-2' }, error: undefined }
+      ) as never)
+      useProjects().select('project-cs101')
+      const wrapper = mount(GcpProjectSelector)
+      try {
+        await wrapper.find('.selector-trigger').trigger('click')
+        await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+        await wrapper.get('[data-testid="project-selector-load-more"]').trigger('click')
+        await vi.waitFor(() => expect(wrapper.text()).toContain('项目服务暂时不可用'))
+        expect(wrapper.findAll('.project-item')).toHaveLength(2)
+        expect(wrapper.text()).toContain('LW_HTTP_SERVICE_UNAVAILABLE')
+        expect(wrapper.find('[data-testid="project-selector-load-more"]').exists()).toBe(true)
       } finally {
         wrapper.unmount()
       }

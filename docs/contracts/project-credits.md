@@ -30,7 +30,7 @@ Resource 保存项目账户、预占和不可变账目。金额使用现有 Fixe
 | listProjectCreditHolds | GET /api/v1/projects/{projectId}/credits/holds | 同上 |
 | createCreditAdminOperation | POST /api/v1/resource/credits/operations | 平台管理员 |
 
-两个列表使用 `page` 与 `pageSize`。默认 25，最大 100。响应含 `hasMore`。账目按创建时间和 ID 倒序排列。预占含真实业务目标、付款项目、业务键和调用服务身份。
+两个列表使用 `cursor` 与 `limit`（默认 50，范围 1–100），响应为 `{items, nextCursor}`，不再支持 offset、`page`、`pageSize` 或 `hasMore`。账目与预占按数据库不可变唯一 `ordinal DESC` 排序，不依赖公开毫秒时间或仍存在的上一页末项。`nextCursor=null` 表示没有后续页；非空值原样续传，不自行解析或修改。游标签名绑定账目/预占集合和项目范围，换项目或集合须重新从首页读取，否则返回 `400/LW_RESOURCE_REQUEST_CURSOR_INVALID`。每页重新检查当前项目权限；游标不授予访问权。并发新增不挤动已访问边界，删除上一页末项不阻断续页；这不是跨请求事务快照，新增记录需刷新才能看到。预占含真实业务目标、付款项目、业务键和调用服务身份。
 
 管理员写操作必须提供 `Idempotency-Key` 和非空 reason。角色由签名身份提供，不从请求体读取。
 

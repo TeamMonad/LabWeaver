@@ -2,7 +2,7 @@ import { computed, inject, onMounted, provide, ref, watch, type InjectionKey, ty
 import { onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
-import { useEnvironmentLifecycle, useEnvironmentLifecycleControls } from '@/composables/useEnvironmentLifecycle'
+import { useEnvironmentLifecycle, useEnvironmentLifecycleControls, type OperationRecovery } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
 import { useConnectionWatch } from '@/composables/useConnectionWatch'
@@ -11,13 +11,22 @@ import { useEnvironmentSubmission } from '@/composables/useEnvironmentSubmission
 import { useProjects } from '@/composables/useProjects'
 import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import type { TimelineEvent } from '@/components/common/EventTimeline.vue'
-import type { ConsoleKind, EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema } from '@/generated/contracts'
+import type { ConsoleKind, EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, OperationState } from '@/generated/contracts'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { accessGrantBlockReason, canIssueAccessGrant, operationTimelineDescription } from '@/utils/environmentLifecycle'
 import { grantIsUsable } from '@/utils/environmentConnection'
 import { environmentOperationKindLabel, environmentOperationStateLabel } from '@/utils/stateLabels'
 
 export type EnvironmentEntryTab = 'overview' | 'terminal' | 'operations' | 'freeze'
+
+const OPERATION_STATE_ACTIVE: Record<OperationState, boolean> = {
+  accepted: true,
+  running: true,
+  cancelling: true,
+  succeeded: false,
+  failed: false,
+  cancelled: false,
+}
 
 function latest(items: EnvironmentOperationSnapshotSchema[], keep: (op: EnvironmentOperationSnapshotSchema) => boolean) {
   return items.filter(keep).sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0] ?? null
@@ -176,13 +185,28 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     timestamp: op.terminalAt ?? op.acceptedAt,
     description: operationTimelineDescription(op),
   })))
-  const activeOperation = computed(() => latest(operationItems.value, (op) => op.state === 'accepted' || op.state === 'running' || op.state === 'cancelling'))
+  // The detail is polled; the history is read on demand. Once the detail reports its current
+  // operation finished, an older history snapshot of that operation no longer describes it.
+  const currentOperationFinished = computed(() => instance.value !== null && !OPERATION_STATE_ACTIVE[instance.value.operation.state])
+  const activeOperation = computed(() => latest(operationItems.value, (op) => OPERATION_STATE_ACTIVE[op.state]
+    && !(currentOperationFinished.value && op.operationId === instance.value?.operation.id)))
   const failedOperation = computed(() => latest(operationItems.value, (op) => op.state === 'failed'))
   const retryableOperation = computed(() => instance.value?.desiredState === 'deleted'
     ? null
     : latest(operationItems.value, (op) => op.state === 'failed' && op.retryEligible))
+  // Recovery eligibility of the operation the detail shows, settled only by a history snapshot of
+  // that same operation in that same state.
+  const currentOperationRecovery = computed<OperationRecovery>(() => {
+    if (operations.operations.kind === 'error') return { kind: 'unreadable', diagnostic: operations.operations.diagnostic }
+    const current = instance.value?.operation
+    const snapshot = current && operationItems.value.find((op) => op.operationId === current.id)
+    if (!current || !snapshot || snapshot.state !== current.state) {
+      return { kind: 'pending', reading: operations.operations.kind === 'loading' || operations.operations.kind === 'idle' }
+    }
+    return { kind: snapshot.retryEligible ? 'eligible' : 'ineligible' }
+  })
 
-  const controls = useEnvironmentLifecycleControls({ env, operations, lifecycle, activeOperation, retryableOperation, permissions })
+  const controls = useEnvironmentLifecycleControls({ env, operations, lifecycle, activeOperation, retryableOperation, currentOperationRecovery, permissions })
   const submission = useEnvironmentSubmission({ env, operations, releases, selectedEnvironmentId, isWorkConnection, permissions })
 
   async function refreshAll() {
@@ -300,6 +324,19 @@ export function useEnvironmentEntry(teacherMode: Ref<boolean>) {
     () => instance.value ? `${instance.value.id}:${instance.value.revision}:${instance.value.observedState}` : null,
     (identity, previousIdentity) => {
       if (identity && identity !== previousIdentity) void Promise.all([access.loadEndpoints(), access.loadCurrentGrant()])
+    },
+  )
+
+  // When polling shows the current operation reaching a terminal state, re-read the history so the
+  // current-operation panel and recovery eligibility follow it instead of the snapshot read earlier.
+  watch(
+    () => instance.value ? { environmentId: instance.value.id, operationId: instance.value.operation.id, state: instance.value.operation.state } : null,
+    (current, previous) => {
+      if (!current || !previous || current.environmentId !== previous.environmentId) return
+      if (current.operationId === previous.operationId && current.state === previous.state) return
+      if (OPERATION_STATE_ACTIVE[current.state]) return
+      if (operationItems.value.some((op) => op.operationId === current.operationId && op.state === current.state)) return
+      void operations.load()
     },
   )
 

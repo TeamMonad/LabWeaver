@@ -145,33 +145,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "hasMore": {
-      "type": "boolean"
-    },
     "items": {
       "items": {
         "$ref": "#/$defs/CourseMembershipView"
       },
       "type": "array"
     },
-    "page": {
-      "format": "uint32",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "pageSize": {
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0,
-      "type": "integer"
+    "nextCursor": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
-    "items",
-    "page",
-    "pageSize",
-    "hasMore"
+    "items"
   ],
-  "title": "CourseMembershipPage",
+  "title": "CursorPage",
   "type": "object"
 }

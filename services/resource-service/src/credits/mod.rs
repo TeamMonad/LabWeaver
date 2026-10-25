@@ -1,8 +1,7 @@
 //! Transactional Credits authority. All rows belong to Resource.
 use contracts::resource::credits::{
     CreditAccount, CreditAdminOperation, CreditHold, CreditHoldRequest,
-    CreditHoldResolutionRequest, CreditHoldState, CreditLedgerEntry, CreditLedgerPage,
-    CreditRateSnapshot,
+    CreditHoldResolutionRequest, CreditHoldState, CreditLedgerEntry, CreditRateSnapshot,
 };
 use contracts::resource::{FixedDecimal, ResourceCharge};
 use contracts::{ActorId, EventId, PlatformRole, ProjectId, Revision, UtcTimestamp};
@@ -70,50 +69,6 @@ impl PgCreditStore {
                     .map_err(|_| CreditError::Invalid)?,
             )
             .map_err(|_| CreditError::Invalid)?,
-        })
-    }
-
-    pub async fn ledger(
-        &self,
-        project: ProjectId,
-        page: u32,
-        page_size: u16,
-        offset: u32,
-    ) -> Result<CreditLedgerPage, CreditError> {
-        let rows = sqlx::query("SELECT contract FROM resource.credit_ledger_entries WHERE project_id=$1 ORDER BY created_at DESC,entry_id DESC LIMIT $2 OFFSET $3").bind(project.as_uuid()).bind(i64::from(page_size)+1).bind(i64::from(offset)).fetch_all(&self.pool).await?;
-        let has_more = rows.len() > usize::from(page_size);
-        let items = rows
-            .into_iter()
-            .take(usize::from(page_size))
-            .map(|r| Ok(serde_json::from_value(r.try_get("contract")?)?))
-            .collect::<Result<Vec<_>, CreditError>>()?;
-        Ok(CreditLedgerPage {
-            items,
-            page,
-            page_size,
-            has_more,
-        })
-    }
-
-    pub async fn holds(
-        &self,
-        project: ProjectId,
-        page: u32,
-        page_size: u16,
-        offset: u32,
-    ) -> Result<contracts::resource::credits::CreditHoldPage, CreditError> {
-        let rows=sqlx::query("SELECT *,amount::text AS amount_scaled,remaining::text AS remaining_scaled FROM resource.credit_holds WHERE project_id=$1 ORDER BY created_at DESC,hold_id DESC LIMIT $2 OFFSET $3").bind(project.as_uuid()).bind(i64::from(page_size)+1).bind(i64::from(offset)).fetch_all(&self.pool).await?;
-        let has_more = rows.len() > usize::from(page_size);
-        let items = rows
-            .iter()
-            .take(usize::from(page_size))
-            .map(decode_hold)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(contracts::resource::credits::CreditHoldPage {
-            items,
-            page,
-            page_size,
-            has_more,
         })
     }
 

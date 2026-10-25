@@ -186,10 +186,22 @@
 
         <section class="status-section" aria-labelledby="requests-heading">
           <h4 id="requests-heading">资源申请</h4>
+          <p v-if="routeRequestMissing" class="request-locate-note" role="status" data-testid="resource-request-not-found">
+            通知指向的资源申请不在当前项目的申请列表中：它可能属于其他项目，或你已不能查看它。页面不会显示该申请的内容。
+          </p>
           <AsyncStateView :state="resources.requests" empty-text="该项目暂无资源申请。" @retry="resources.load">
             <template #success="{ data }">
               <ul class="resource-list">
-                <li v-for="request in data" :key="request.id" class="resource-row">
+                <li
+                  v-for="request in data"
+                  :id="`resource-request-${request.id}`"
+                  :key="request.id"
+                  class="resource-row"
+                  :class="{ 'resource-row--located': request.id === routeRequestId }"
+                  :aria-current="request.id === routeRequestId ? 'true' : undefined"
+                  :tabindex="request.id === routeRequestId ? -1 : undefined"
+                  :data-testid="request.id === routeRequestId ? 'resource-request-located' : undefined"
+                >
                   <div class="resource-row__main"><strong>资源申请</strong><small>{{ request.requestKey }} · {{ resourceTargetLabel(request) }} · {{ resourceSummary(request.requestedResources) }}</small><small>更新于 {{ formatTimestamp(request.updatedAt) }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>申请 ID：{{ request.id }}</small></details></div>
                   <p
                     v-if="resourceAllocationFailureMessage(request.diagnosticCode)"
@@ -236,7 +248,7 @@
 
 <script setup lang="ts">
 import AppSelect from '@/components/form/AppSelect.vue'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -292,6 +304,27 @@ const routeReleaseVersion = computed(() => {
   const value = typeof route.query.releaseVersion === 'string' ? Number(route.query.releaseVersion) : NaN
   return Number.isSafeInteger(value) ? value : 0
 })
+// A notification opens this page with `requestId`; the row is located only
+// among requests the project list already returned to this reader.
+const routeRequestId = computed(() => typeof route.query.requestId === 'string' ? route.query.requestId.trim() : '')
+const routeRequestMissing = computed(() => {
+  if (!routeRequestId.value) return false
+  if (resources.requests.kind === 'empty') return true
+  return resources.requests.kind === 'success' && !resources.requests.data.some((request) => request.id === routeRequestId.value)
+})
+watch(
+  () => resources.requests.kind === 'success' && resources.requests.data.some((request) => request.id === routeRequestId.value)
+    ? routeRequestId.value
+    : '',
+  async (id) => {
+    if (!id) return
+    await nextTick()
+    const row = document.getElementById(`resource-request-${id}`)
+    row?.scrollIntoView?.({ block: 'center' })
+    row?.focus({ preventScroll: true })
+  },
+  { immediate: true },
+)
 const cpuMillicores = ref(2000)
 const memoryGiB = ref(4)
 const storageGiB = ref(20)
@@ -557,6 +590,8 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .status-section { display: grid; gap: var(--space-3); padding-top: var(--space-5); border-top: 1px solid var(--md-sys-color-outline-variant); }
 .resource-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .resource-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.resource-row--located { outline: 2px solid var(--md-sys-color-primary); outline-offset: -2px; background: var(--md-sys-color-primary-container); }
+.request-locate-note { margin: 0 0 var(--space-2); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .resource-row__main { display: grid; gap: var(--space-1); min-width: 0; }
 .resource-row__main strong { overflow-wrap: anywhere; }
 .resource-row__main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }

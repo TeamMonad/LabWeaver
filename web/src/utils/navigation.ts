@@ -303,6 +303,12 @@ export const NAVIGATION_DETAIL_ROUTES: readonly NavigationDetailRoute[] = [
   { parentId: 'student-results', path: '/student/results/:runId', title: '评测详情' },
 ]
 
+/**
+ * The reader's own notifications across all projects. It is reached from the
+ * top bar for every signed-in role and is not scoped to one project.
+ */
+export const NOTIFICATION_CENTER_PATH = '/notifications'
+
 /** The navigation item whose path owns `path` (exact match or a nested detail path). */
 export function navigationItemForPath(path: string): AuthorizedNavigationItem | null {
   for (const group of NAVIGATION_GROUPS) {

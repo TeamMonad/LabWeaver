@@ -130,7 +130,7 @@ cargo xtask platform-harbor-route --env v1 --infra --yes
 
 生产三节点安装先配置[高可用基线](high-availability.md)中的 Bundle `platform_foundation_ha`、裸盘清单与独立备份目标，再运行相同入口。HA profile 的版本锁、CNPG 同步 quorum、JetStream 三副本与存储健康拒绝准入由同一 Bundle 派生；缺少独立备份字段时校验失败。已有独立数据库不得直接原地转换，必须先进入获准的数据切换窗口。目标 RPO/RTO 已决定，实际兑现待 #208 恢复验收；RGW 切换尚需兼容验收，不把渲染通过当成生产故障恢复通过。
 
-Keycloak foundation 使用受保护的 root-only locator；locator 由私有清单提供，不能把内容、固定 UUID 或口令写进文档：
+Keycloak foundation 依赖 platform foundation 先安装的 CNPG/Barman operator 和 `ceph-rbd`，身份库固定为独立三实例 CNPG；不再部署单副本 StatefulSet。先按[高可用基线](high-availability.md)配置 `identity_foundation_ha` 的独立备份目标、频率、保留期，并在受保护的 root-only `identity-bootstrap.v2` locator 提供 `backup_access_key`、`backup_secret_key`、`backup_ca_crt` 及原有身份凭据。加密 Bundle 缺少目标或凭据时 fail-closed。locator 由私有清单提供，不能把内容、固定 UUID 或口令写进文档：
 
 ```sh
 export LABWEAVER_IDENTITY_SECRET_LOCATOR="<private-identity-bootstrap-locator>"
@@ -138,9 +138,136 @@ cargo xtask identity-foundation --env v1 --infra --yes --action deploy
 cargo xtask identity-foundation --env v1 --infra --yes --action verify
 ```
 
+角色等待 `Cluster/identity-postgres` Ready 后才部署 Keycloak；Keycloak 通过 `identity-postgres-rw` 和校验 CA 的 TLS 连接身份库，应用卷仅投影 `ca.crt`，不投影 CNPG 的 `ca.key`。三主机基线仅支持整数 `identity_keycloak_replicas=2`，其他值在入口以 `IDENTITY_CONFIGURATION_INVALID` 拒绝。滚动更新采用 `maxSurge=0/maxUnavailable=1`、PDB 至少一个 Ready 副本；仅当至少两台 host 可调度时支持维护期间更新，不承诺“三副本只剩两台 host”可继续更新。已有旧身份 StatefulSet/Service 时按下节执行另行授权的空数据切换，角色不自动删除旧库、Secret、PVC 或账号数据。备份配置不代表备份执行或恢复目标已兑现，演练归 #208。
+
 身份基础层只 reconcile 需要的 realm、client、角色和用户，不删除已有身份。账号开通、角色授予和回收通过管理流程完成；普通用户从公共首页登录。
 
 教师按姓名或用户名搜索组织账号，依赖 Access 服务账户在 `realm-management` 下的 `query-users`、`view-users` 角色及对应 client scope 映射。应用镜像部署不会自动更新身份基础层。已有环境升级涉及服务权限时，应执行已审核的身份配置 reconcile；目录查询不需要 `manage-users` 或 realm 管理员权限。页面出现 `LW_ACCESS_DIRECTORY_UNAVAILABLE` 时检查这两项映射及服务令牌刷新，再从教师页面重试搜索，不能直接写项目成员记录来跳过故障。
+
+#### Keycloak 副本与节点维护
+
+身份数据库仍为三个 CNPG 实例；Keycloak 应用固定两个副本，以便单节点维护期间在剩余两个 host 上替换一个 Pod。`identity_keycloak_replicas` 是受校验的部署输入，不支持用 3、字符串或其他值覆盖。不要在三副本部署失去第三台 host 后靠反复 reconcile 推进更新；该输入明确被拒绝，而不是将它静默降为两个副本。
+
+1. 排空节点前核对 inventory 和实际 Deployment 均为两个副本、两个副本 Ready，且排空后仍有两台满足反亲和和资源要求的 Ready、可调度 host。使用目标集群 kubeconfig，暂停并发的身份发布。若旧配置曾运行三个副本，先在批准的维护窗口把 inventory 改为整数 2，在第三台 host 仍可用时显式缩容并等待收敛：
+
+   ```sh
+   kubectl -n keycloak-system scale deployment labweaver-keycloak --replicas=2
+   kubectl -n keycloak-system rollout status deployment/labweaver-keycloak --timeout=900s
+   kubectl -n keycloak-system get deployment labweaver-keycloak -o json |
+     jq -e '.spec.replicas == 2 and .status.replicas == 2 and .status.readyReplicas == 2'
+   kubectl -n keycloak-system get pods -l app.kubernetes.io/name=labweaver-keycloak -o wide
+   kubectl get nodes
+   ```
+
+2. 完成上述核对后才执行已授权的节点排空。维护期间只有一台 host 可调度或无法维持至少一个 Ready Keycloak 时，停止发布，先恢复调度容量；不要放宽硬反亲和、增加 surge 或绕过 PDB。节点排空本身还受 CNPG/Ceph 等组件的维护约束，本节不授权强制驱逐数据库或强制挂盘。
+3. 维护期间如需更新，仅使用整数 2 的配置执行身份入口并等待 rollout 完成。第三台节点恢复后仍保持 Keycloak 两副本，不自动升回三副本；数据库按其三实例状态单独核对。
+
+
+#### 身份库空数据切换（仅限另行授权窗口）
+
+**影响与前提：** 本流程仅适用于已明确批准丢弃当前身份数据、重新初始化身份的新环境切换窗口，不是日常升级或数据迁移。旧账号、realm 内容、密码、会话与授权不会自动进入新库；新库仅由角色导入基础 realm 并 provision 服务客户端/角色及 bootstrap 管理员。需要保留任何旧身份数据时停止本流程，先另行审核人工迁移方案。下列删除操作由获准操作者手工执行，本角色不会代为执行。先确认 platform foundation 的 Ceph、CNPG/Barman 正常，独立身份备份目标和 locator 输入已通过 Bundle 校验；不要在未授权的生产窗口运行这些命令。
+
+1. **固定范围并暂停写入入口。** 通知所有依赖身份的应用进入维护，暂停身份自动 reconcile/GitOps 和人工管理操作；窗口内不得启动新的 identity provisioning Job。使用目标集群的私有 kubeconfig，不使用开发集群默认 context。以下变量使用本角色默认对象名，若 inventory 已改名须同步替换：
+
+   ```sh
+   set -euo pipefail
+   export KUBECONFIG="<目标集群的私有 kubeconfig>"
+   NS=keycloak-system
+   KC=labweaver-keycloak
+   DB_SECRET=labweaver-keycloak-database
+   CUTOVER="$PWD/.private/identity-cutover-$(date -u +%Y%m%dT%H%M%SZ)"
+   umask 077
+   mkdir -p "$CUTOVER"
+   kubectl config current-context
+   kubectl -n "$NS" get "deployment/$KC" statefulset/identity-postgres service/identity-postgres
+   kubectl -n "$NS" get jobs -l app.kubernetes.io/part-of=labweaver-identity
+   ```
+
+   最后一条中若有未完成的 provisioning Job，先等待它完成；失败或卡住时中止切换、排障，不与它并发清理旧库。
+
+2. **保全可回退的对象与旧卷身份，再停写。** 将旧 Deployment、StatefulSet、Service、数据库 Secret 保存到上述 `0700` 私有目录；Secret 只落 `0600` 文件，不输出到终端、工单或 Git。下列 `jq` 删除服务端元数据，保存文件可用于后面的重新创建；保留旧 PVC/PV 和数据，不执行卷删除或清空。
+
+   ```sh
+   for object in "deployment/$KC" statefulset/identity-postgres service/identity-postgres "secret/$DB_SECRET"; do
+     kubectl -n "$NS" get "$object" -o json |
+       jq 'del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"], .status)' \
+       > "$CUTOVER/${object%%/*}.json"
+   done
+   kubectl -n "$NS" get pvc -o yaml > "$CUTOVER/old-pvcs.yaml"
+   kubectl -n "$NS" scale deployment "$KC" --replicas=0
+   kubectl -n "$NS" wait pod -l "app.kubernetes.io/name=$KC" --for=delete --timeout=300s
+   kubectl -n "$NS" get jobs -l app.kubernetes.io/part-of=labweaver-identity
+   ```
+
+   再次确认没有 active provisioning Job 或其他身份库客户端后才继续；不要仅因 scale 命令成功就认定写入停止。核对私有 locator 的 `database_password` 与保存的旧 Secret 一致，便于本窗口失败时回退；不得把口令放入命令参数或日志。
+
+3. **停止旧数据库并解除旧对象保护，保留旧 PVC。** 先确认 StatefulSet 的 PVC 自动删除策略为 Retain（未设置时默认 Retain）；若原部署显式设了 Delete，必须先修改为 Retain 并核对结果，再缩容。保存原策略在上一步的对象快照中。
+
+   ```sh
+   kubectl -n "$NS" patch statefulset identity-postgres --type=merge \
+     -p '{"spec":{"persistentVolumeClaimRetentionPolicy":{"whenDeleted":"Retain","whenScaled":"Retain"}}}'
+   kubectl -n "$NS" get statefulset identity-postgres -o jsonpath='{.spec.persistentVolumeClaimRetentionPolicy}'
+   kubectl -n "$NS" scale statefulset identity-postgres --replicas=0
+   kubectl -n "$NS" wait pod -l app.kubernetes.io/name=identity-postgres --for=delete --timeout=300s
+   kubectl -n "$NS" delete statefulset identity-postgres --cascade=orphan
+   kubectl -n "$NS" delete service identity-postgres
+   kubectl -n "$NS" get pvc
+   ```
+
+   对比旧 PVC 清单，确认旧卷仍 Bound 且未被新 Cluster 引用。不要删除旧 PVC/PV，不强制解除盘锁或挂载。
+
+4. **按顺序重建凭据类型并初始化新库。** 旧 `Opaque` Secret 的类型不能原地改为 `kubernetes.io/basic-auth`。仅在旧库和全部 Keycloak Pod 已停止、上述私有快照可用后，删除旧数据库凭据 Secret；随即执行已经过校验的身份部署入口，由角色从 locator 重新创建 basic-auth Secret（`username=keycloak`、原 `database_password`），然后创建 CNPG 并启动 Keycloak：
+
+   ```sh
+   kubectl -n "$NS" delete secret "$DB_SECRET"
+   export LABWEAVER_IDENTITY_SECRET_LOCATOR="<已校验的私有 identity-bootstrap.v2 locator>"
+   cargo xtask identity-foundation --env v1 --infra --yes --action deploy
+   ```
+
+   **这一步的 `bootstrap.initdb` 是全新的 `keycloak` 数据库，不是迁移/恢复。** 旧 StatefulSet 的 PGDATA/PVC 完全不参与新库初始化。不得为了让新库出现旧账号而把旧 PGDATA 挂进 CNPG，或在没有迁移方案时并行启用两个写入口。
+
+5. **验证后才开放入口。** 三个数据库实例须全部 Ready 且分别位于三个 host，确认 `identity-postgres-rw` 指向实际 primary、Keycloak 固定两个副本 Ready、init container 无认证/TLS 失败、CA 卷只有 `ca.crt`，并验证公共 HTTPS 登录、服务账户 token 和六服务鉴权。新库中找不到旧账号/旧会话是本次获准空数据切换的预期结果，不是“迁移成功”；按账号管理流程重新开通所需用户。任何验证失败均保持维护入口，不启用应用新写入。
+
+   ```sh
+   kubectl -n "$NS" wait cluster/identity-postgres --for=condition=Ready --timeout=900s
+   kubectl -n "$NS" get cluster identity-postgres -o jsonpath='{.status.readyInstances}'
+   kubectl -n "$NS" get pods -l cnpg.io/cluster=identity-postgres -o wide
+   kubectl -n "$NS" get service identity-postgres-rw
+   kubectl -n "$NS" rollout status "deployment/$KC" --timeout=900s
+   cargo xtask identity-foundation --env v1 --infra --yes --action verify
+   ```
+
+6. **失败回退仍在同一停写窗口内执行。** 不先开放新库再决定回退；一旦接受新身份写入，回到旧库会丢弃这些新事实，必须重新取得数据处置授权。保持所有入口维护，暂停自动 reconcile，将新 Keycloak 缩为零并等待全部新 Pod 删除，然后删除已停用的 Deployment。保留新 CNPG/PVC 用于诊断，不删除任何数据卷。恢复旧 Opaque Secret、旧 Service 和 StatefulSet，等待旧库就绪，最后从快照 `create` 旧 Deployment。必须完整删除/重建 Deployment，不能用 strategic merge 或 `kubectl apply` 旧快照代替，否则 CNPG 专用环境变量和挂载可能残留。
+
+   ```sh
+   kubectl -n "$NS" scale deployment "$KC" --replicas=0
+   kubectl -n "$NS" wait pod -l "app.kubernetes.io/name=$KC" --for=delete --timeout=300s
+   kubectl -n "$NS" delete "deployment/$KC" --cascade=foreground --wait=true
+   kubectl -n "$NS" delete secret "$DB_SECRET" --ignore-not-found
+   kubectl -n "$NS" create -f "$CUTOVER/secret.json"
+   kubectl -n "$NS" apply -f "$CUTOVER/service.json" -f "$CUTOVER/statefulset.json"
+   kubectl -n "$NS" rollout status statefulset/identity-postgres --timeout=900s
+   kubectl -n "$NS" create -f "$CUTOVER/deployment.json"
+   kubectl -n "$NS" rollout status "deployment/$KC" --timeout=900s
+   ```
+
+   恢复后、开放登录入口前，核对数据库 host 已回到旧 `identity-postgres`，init container 与原快照一致，并确认 `KC_DB_URL_PROPERTIES`、`PGSSLMODE`、`PGSSLROOTCERT` 和 CNPG CA 卷/挂载已经移除。下面的检查有任何失败均保持维护，不继续登录验收：
+
+   ```sh
+   kubectl -n "$NS" get deployment "$KC" -o json |
+     jq -e --slurpfile old "$CUTOVER/deployment.json" '
+       .spec.template.spec as $pod |
+       ([$pod.containers[].env[]? | select(.name == "KC_DB_URL_HOST") | .value] == ["identity-postgres"]) and
+       ($pod.initContainers == $old[0].spec.template.spec.initContainers) and
+       ([$pod.containers[], $pod.initContainers[] | .env[]? |
+          select(.name == "KC_DB_URL_PROPERTIES" or .name == "PGSSLMODE" or .name == "PGSSLROOTCERT")] | length == 0) and
+       ([$pod.volumes[]? | select(.name == "database-ca")] | length == 0) and
+       ([$pod.containers[], $pod.initContainers[] | .volumeMounts[]? |
+          select(.name == "database-ca")] | length == 0)'
+   ```
+
+   回退后的唯一生产写路径是旧 Keycloak/旧数据库；新 CNPG 不接业务流量，仅保留诊断，不作为平行生产存储。恢复旧客户端配置并从公共入口验证原账号登录和服务鉴权，确认成功后才撤销维护。新角色会再次拒绝旧 StatefulSet/Service，回退后不要重跑其全量 reconcile；新库及窗口材料的后续保留/删除另行审批。回退失败则继续维护、保全两侧卷并升级处理，禁止用删卷重装代替恢复。
+
 
 ## 3. 配置 bundle、镜像和迁移
 

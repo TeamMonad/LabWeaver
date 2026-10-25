@@ -187,7 +187,7 @@ describe('WorkEnvironmentsView', () => {
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [workSummary], nextCursor: null }, error: undefined } as never)
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [containerRelease, vmRelease, withdrawnRelease, experimentRelease], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectTemplateImages).mockResolvedValue({ data: { entries: [containerImage, vmImage, disabledImage] }, error: undefined } as never)
   })
 

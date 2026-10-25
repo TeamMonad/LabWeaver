@@ -2474,12 +2474,27 @@ impl ResourceRequestListQuery {
     }
 }
 
-/// Cursor page of project-scoped Resource requests.
+/// Cursor page of global or project-scoped Resource requests.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceRequestPage {
     pub items: Vec<crate::resource::ResourceRequest>,
     pub next_cursor: Option<String>,
+}
+
+/// Stable Resource catalog and finance pagination. Scope is authenticated on every page.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceListQuery {
+    pub course_id: Option<CourseId>,
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl ResourceListQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
 }
 
 /// Page parameters for bounded offset-list endpoints.
@@ -2617,7 +2632,10 @@ impl EnvironmentAccessGrantListQuery {
     }
 }
 
-fn validate_cursor_page(cursor: Option<&str>, limit: Option<u16>) -> Result<(), HttpContractError> {
+pub(crate) fn validate_cursor_page(
+    cursor: Option<&str>,
+    limit: Option<u16>,
+) -> Result<(), HttpContractError> {
     if cursor.is_some_and(|value| {
         value.is_empty()
             || value.len() > MAX_CURSOR_LENGTH

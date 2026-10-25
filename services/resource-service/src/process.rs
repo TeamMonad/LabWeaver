@@ -231,13 +231,22 @@ async fn seed_reviewed_gpu_catalog(
     if seeds.is_empty() {
         return Ok(());
     }
-    let existing: BTreeSet<String> = store
-        .list_gpu_catalog()
-        .await
-        .map_err(ResourceProcessRuntimeError::Store)?
-        .into_iter()
-        .map(|entry| entry.class)
-        .collect();
+    let mut existing = BTreeSet::<String>::new();
+    let mut query = contracts::http::ResourceListQuery {
+        limit: Some(100),
+        ..Default::default()
+    };
+    loop {
+        let page = store
+            .list_gpu_catalog(&query)
+            .await
+            .map_err(ResourceProcessRuntimeError::Store)?;
+        existing.extend(page.items.into_iter().map(|entry| entry.class));
+        query.cursor = page.next_cursor;
+        if query.cursor.is_none() {
+            break;
+        }
+    }
     let created = seeds
         .iter()
         .filter(|seed| !existing.contains(&seed.class))

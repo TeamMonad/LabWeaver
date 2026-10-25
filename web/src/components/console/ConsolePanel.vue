@@ -102,7 +102,7 @@ import type {
   AccessGrantSchema,
   ConsoleCapabilitySchema,
   ConsoleKind,
-  EnvironmentInstanceSchema,
+  EnvironmentDetailSchema,
 } from '@/generated/contracts'
 import { useConsoleCapability } from '@/composables/useConsoleCapability'
 import { useConsoleSession } from '@/composables/useConsoleSession'
@@ -116,7 +116,7 @@ import type { DiagnosticViewModel } from '@/types/async'
 interface Props {
   kind: ConsoleKind
   grant: AccessGrantSchema
-  environment: EnvironmentInstanceSchema
+  environment: EnvironmentDetailSchema
 }
 
 const props = defineProps<Props>()

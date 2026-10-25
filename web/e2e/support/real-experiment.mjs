@@ -7,6 +7,7 @@ import { expect } from '@playwright/test'
 import {
   expectJson,
   pollJson,
+  readAllCursorPages,
   selectProjectByUi,
 } from './live.mjs'
 import { approveResourceRequestByUi } from './real-resource.mjs'
@@ -544,10 +545,7 @@ export async function freezeStudentSourceByUi(page, projectId, environmentId) {
 }
 
 async function readResourceRequests(request) {
-  const response = await request.get('/api/v1/resource-requests')
-  const body = await expectJson(response, 'REAL_EXPERIMENT_RESOURCE_REQUESTS_READ_FAILED')
-  if (!Array.isArray(body)) throw new Error('REAL_EXPERIMENT_RESOURCE_REQUESTS_INVALID')
-  return body
+  return await readAllCursorPages(request, '/api/v1/resource-requests', 'REAL_EXPERIMENT_RESOURCE_REQUESTS_READ_FAILED')
 }
 
 function isEvaluationTaskResourceRequest(request, projectId, studentActorId) {

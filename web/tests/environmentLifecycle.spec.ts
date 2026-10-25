@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
-import type { EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, ObjectAction } from '@/generated/contracts'
-import { useEnvironmentLifecycleControls, type ObjectActionPermissions } from '@/composables/useEnvironmentLifecycle'
+import type { EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, ObjectAction } from '@/generated/contracts'
+import { useEnvironmentLifecycleControls, type ObjectActionPermissions, type OperationRecovery } from '@/composables/useEnvironmentLifecycle'
 import {
   accessGrantBlockReason,
   canIssueAccessGrant,
@@ -10,7 +10,7 @@ import {
   lifecycleConfirmationText,
 } from '@/utils/environmentLifecycle'
 
-function instance(patch: Partial<EnvironmentInstanceSchema> = {}): EnvironmentInstanceSchema {
+function instance(patch: Partial<EnvironmentDetailSchema> = {}): EnvironmentDetailSchema {
   return {
     id: 'env-1',
     displayLabel: '光学实验',
@@ -19,7 +19,7 @@ function instance(patch: Partial<EnvironmentInstanceSchema> = {}): EnvironmentIn
     observedState: 'ready',
     operation: { kind: 'start', state: 'succeeded' },
     ...patch,
-  } as unknown as EnvironmentInstanceSchema
+  } as unknown as EnvironmentDetailSchema
 }
 
 const ALL_ACTIONS: ObjectAction[] = ['browse', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs']
@@ -36,7 +36,7 @@ function permissionsFor(actions: ObjectAction[]): ObjectActionPermissions {
 }
 
 function controls(
-  data: EnvironmentInstanceSchema,
+  data: EnvironmentDetailSchema,
   act = vi.fn(async () => ({ ok: true as const, accepted: {} })),
   permissions = permissionsFor(ALL_ACTIONS),
 ) {
@@ -53,6 +53,7 @@ function controls(
       lifecycle: lifecycle as never,
       activeOperation: ref<EnvironmentOperationSnapshotSchema | null>(null),
       retryableOperation: ref<EnvironmentOperationSnapshotSchema | null>(null),
+      currentOperationRecovery: ref<OperationRecovery>({ kind: 'pending', reading: false }),
       permissions,
     }),
   }

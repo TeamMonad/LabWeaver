@@ -74,7 +74,7 @@
     <AsyncStateView
       :state="credits.ledger"
       empty-text="该项目还没有 Credits 账目。"
-      @retry="credits.loadLedger(credits.ledgerPage)"
+      @retry="credits.loadLedger('current')"
     >
       <template #success="{ data }">
         <ul
@@ -119,17 +119,17 @@
           <button
             type="button"
             class="outlined-button small"
-            :disabled="data.page <= 1 || credits.acting !== null"
-            @click="credits.loadLedger(data.page - 1)"
+            :disabled="credits.ledgerPage <= 1 || credits.acting !== null"
+            @click="credits.loadLedger('previous')"
           >
             上一页
           </button>
-          <span>第 {{ data.page }} 页</span>
+          <span>第 {{ credits.ledgerPage }} 页</span>
           <button
             type="button"
             class="outlined-button small"
-            :disabled="!data.hasMore || credits.acting !== null"
-            @click="credits.loadLedger(data.page + 1)"
+            :disabled="!data.nextCursor || credits.acting !== null"
+            @click="credits.loadLedger('next')"
           >
             下一页
           </button>
@@ -146,7 +146,7 @@
     <AsyncStateView
       :state="credits.holds"
       empty-text="该项目暂无 Credits 预占。"
-      @retry="credits.loadHolds(credits.holdsPage)"
+      @retry="credits.loadHolds('current')"
     >
       <template #success="{ data }">
         <ul
@@ -193,17 +193,17 @@
           <button
             type="button"
             class="outlined-button small"
-            :disabled="data.page <= 1 || credits.acting !== null"
-            @click="credits.loadHolds(data.page - 1)"
+            :disabled="credits.holdsPage <= 1 || credits.acting !== null"
+            @click="credits.loadHolds('previous')"
           >
             上一页
           </button>
-          <span>第 {{ data.page }} 页</span>
+          <span>第 {{ credits.holdsPage }} 页</span>
           <button
             type="button"
             class="outlined-button small"
-            :disabled="!data.hasMore || credits.acting !== null"
-            @click="credits.loadHolds(data.page + 1)"
+            :disabled="!data.nextCursor || credits.acting !== null"
+            @click="credits.loadHolds('next')"
           >
             下一页
           </button>
@@ -295,6 +295,22 @@
               :value="project.id"
             >{{ project.name }}</option>
           </AppSelect>
+          <button
+            v-if="projects.hasMore"
+            type="button"
+            class="text-button small destination-load-more"
+            data-testid="credits-destination-load-more"
+            :disabled="projects.loadingMore"
+            @click="projects.loadMore()"
+          >
+            {{ projects.loadingMore ? '加载中…' : '加载更多项目' }}
+          </button>
+          <DiagnosticBanner
+            v-if="projects.loadMoreError"
+            :diagnostic="projects.loadMoreError"
+            severity="warning"
+            @retry="projects.loadMore()"
+          />
         </label>
         <label v-if="adminAction === 'reverse'">
           <span>原账目条目 ID</span>
@@ -572,6 +588,7 @@ defineExpose({ reload: () => credits.load({ clearOutcome: true }) })
 .two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .credit-admin-form label { display: grid; gap: var(--space-1); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .form-actions { display: flex; justify-content: flex-end; }
+.destination-load-more { justify-self: start; }
 .pending-operations { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); font: var(--md-sys-body-small); }
 .pending-operations ul { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .pending-operations li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); overflow-wrap: anywhere; }

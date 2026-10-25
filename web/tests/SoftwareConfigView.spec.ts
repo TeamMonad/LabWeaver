@@ -210,7 +210,7 @@ describe('SoftwareConfigView', () => {
       this.setPackage(id)
       return true
     })
-    vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [project], nextCursor: null } as never, error: undefined as never })
     vi.mocked(listProjectAgentRuns).mockResolvedValue({ data: { items: [], nextCursor: null } as never, error: undefined as never })
     vi.mocked(listEnvironments).mockResolvedValue({
       data: { items: [environment], nextCursor: null } as never,
@@ -605,7 +605,7 @@ describe('SoftwareConfigView', () => {
 
   it('does not let a late approval plan response overwrite a switched project', async () => {
     const project2 = { ...project, id: 'project-2', name: 'Second Work project' }
-    vi.mocked(listProjects).mockResolvedValue({ data: [project, project2] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [project, project2], nextCursor: null } as never, error: undefined as never })
     let resolvePlan!: (value: { data: typeof planView; error: never }) => void
     vi.mocked(getProjectWorkConfigurationPlan).mockReturnValue(new Promise((resolve) => { resolvePlan = resolve }) as never)
 
@@ -703,7 +703,7 @@ describe('SoftwareConfigView', () => {
 
   it('ignores a late history page after switching projects', async () => {
     const project2 = { ...project, id: 'project-2', name: 'Second Work project' }
-    vi.mocked(listProjects).mockResolvedValue({ data: [project, project2] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [project, project2], nextCursor: null } as never, error: undefined as never })
     let resolveFirst!: (value: unknown) => void
     vi.mocked(listProjectAgentRuns).mockImplementation((options) => {
       const projectId = (options as { path: { projectId: string } }).path.projectId
@@ -725,7 +725,7 @@ describe('SoftwareConfigView', () => {
 
   it('ignores a late route-run response after the project changes', async () => {
     const project2 = { ...project, id: 'project-2', name: 'Second Work project' }
-    vi.mocked(listProjects).mockResolvedValue({ data: [project, project2] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [project, project2], nextCursor: null } as never, error: undefined as never })
     let resolveRun!: (value: { data: typeof run; error: never }) => void
     vi.mocked(getProjectAgentRun).mockReturnValue(new Promise((resolve) => { resolveRun = resolve }) as never)
 
@@ -750,8 +750,8 @@ describe('SoftwareConfigView', () => {
   })
 
   it('keeps a route project while the shared project list is loading', async () => {
-    let resolveProjects: ((value: { data: typeof project[]; error: never }) => void) | undefined
-    const projectsResponse = new Promise<{ data: typeof project[]; error: never }>((resolve) => {
+    let resolveProjects: ((value: { data: { items: typeof project[]; nextCursor: null }; error: never }) => void) | undefined
+    const projectsResponse = new Promise<{ data: { items: typeof project[]; nextCursor: null }; error: never }>((resolve) => {
       resolveProjects = resolve
     })
     vi.mocked(listProjects).mockReturnValue(projectsResponse as never)
@@ -772,12 +772,12 @@ describe('SoftwareConfigView', () => {
       [expect.objectContaining({ query: expect.objectContaining({ projectId: undefined }) })],
     ]))
 
-    resolveProjects?.({ data: [project], error: undefined as never })
+    resolveProjects?.({ data: { items: [project], nextCursor: null }, error: undefined as never })
     await vi.waitFor(() => expect((wrapper.find('select').element as HTMLSelectElement).value).toBe(project.id))
   })
 
   it('replaces an invalid route project with a project returned by the list', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [project], nextCursor: null } as never, error: undefined as never })
     const replace = vi.fn()
     const wrapper = mount(SoftwareConfigView, {
       global: {
@@ -795,7 +795,7 @@ describe('SoftwareConfigView', () => {
   })
 
   it('clears a route project when the confirmed project list is empty', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [], nextCursor: null } as never, error: undefined as never })
     const replace = vi.fn()
     const wrapper = mount(SoftwareConfigView, {
       global: {

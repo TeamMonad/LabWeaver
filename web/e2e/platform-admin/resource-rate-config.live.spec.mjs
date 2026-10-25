@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { navigateFromHomeByUi } from '../support/live.mjs'
+import { navigateFromHomeByUi, readAllCursorPages } from '../support/live.mjs'
 
 const INPUT_ENV = Object.freeze({
   gpuClass: 'LABWEAVER_E2E_RESOURCE_RATE_GPU_CLASS',
@@ -88,11 +88,7 @@ function rateMatchesInput(rate, input) {
 }
 
 async function readCurrentRates(page) {
-  const response = await page.request.get('/api/v1/resource/rates')
-  if (!response.ok()) throw new Error(`LW_RESOURCE_RATE_LIST_FAILED:status-${response.status()}`)
-  const rates = await response.json()
-  if (!Array.isArray(rates)) throw new Error('LW_RESOURCE_RATE_LIST_INVALID')
-  return rates
+  return await readAllCursorPages(page.request, '/api/v1/resource/rates', 'LW_RESOURCE_RATE_LIST_FAILED')
 }
 
 async function readRateRows(page) {

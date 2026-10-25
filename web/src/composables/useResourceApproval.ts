@@ -16,9 +16,10 @@ import type {
   ResourceRequestSchema,
   WorkloadResources,
 } from '@/generated/contracts'
-import { apiClient } from '@/api/client'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
+import { readCursorPage, readCursorWindow } from '@/utils/cursorPagination'
+import { fetchAllGpuCatalogEntries, resourcePageQuery } from '@/utils/resourceLists'
 
 function errorDiagnostic(err: unknown, fallbackCode: string, fallbackDetail: string): DiagnosticViewModel {
   const problem = extractProblemDetails(err)
@@ -61,14 +62,16 @@ export interface BatchActionOutcome {
   items: BatchActionItemOutcome[]
 }
 
+/** Rows per page of the platform-wide request and lease lists. */
+export const APPROVAL_PAGE_LIMIT = 50
+
 export interface ResourceProviderOption {
   providerBinding: string
   catalogEntryCount: number
   gpuClasses: string[]
 }
 
-function parseProviderOptions(value: unknown): ResourceProviderOption[] {
-  if (!Array.isArray(value)) throw new Error('GPU catalog response must be an array')
+function parseProviderOptions(value: unknown[]): ResourceProviderOption[] {
   const providers = new Map<string, { count: number; classes: Set<string> }>()
   for (const item of value) {
     if (!item || typeof item !== 'object') throw new Error('GPU catalog entry must be an object')
@@ -133,46 +136,116 @@ export function useResourceApproval() {
   const batchOutcome = ref<BatchActionOutcome | null>(null)
   const refreshDiagnostic = ref<DiagnosticViewModel | null>(null)
 
+  /**
+   * Both lists are cursor pages read from the start. `requestPages` and
+   * `leasePages` count the pages currently shown; a reload or poll re-reads
+   * that many pages so rows already shown neither vanish nor silently grow.
+   * The total size of either list is never known.
+   */
+  const requestsNextCursor = ref<string | null>(null)
+  const leasesNextCursor = ref<string | null>(null)
+  const loadingMore = ref<'requests' | 'leases' | null>(null)
+  const loadMoreDiagnostic = ref<{ list: 'requests' | 'leases'; diagnostic: DiagnosticViewModel } | null>(null)
+  let requestPages = 1
+  let leasePages = 1
+  /** Counts started "load more" reads so a poll that raced one can drop its shorter window. */
+  let loadMoreCount = 0
+  /** Bumped by every full read; an older read or a load-more racing it is dropped. */
+  let listGeneration = 0
+
+  const fetchRequestPage = (cursor?: string) => listResourceRequests({ query: resourcePageQuery(cursor, APPROVAL_PAGE_LIMIT) })
+  const fetchLeasePage = (cursor?: string) => listResourceLeases({ query: resourcePageQuery(cursor, APPROVAL_PAGE_LIMIT) })
+
+  function applyRequestWindow(window: { items: ResourceRequestSchema[]; nextCursor: string | null; pages: number }) {
+    requestPages = window.pages
+    requestsNextCursor.value = window.nextCursor
+    requests.value = window.items.length > 0 ? { kind: 'success', data: window.items } : { kind: 'empty' }
+  }
+
+  function applyLeaseWindow(window: { items: ResourceLeaseSchema[]; nextCursor: string | null; pages: number }) {
+    leasePages = window.pages
+    leasesNextCursor.value = window.nextCursor
+    leases.value = window.items.length > 0 ? { kind: 'success', data: window.items } : { kind: 'empty' }
+  }
+
   async function load() {
+    const generation = ++listGeneration
     refreshDiagnostic.value = null
+    loadMoreDiagnostic.value = null
+    loadingMore.value = null
     requests.value = { kind: 'loading', message: '加载资源申请…' }
     leases.value = { kind: 'loading', message: '加载 Lease…' }
     providerOptions.value = { kind: 'loading', message: '加载 Resource 容量目录…' }
     const [requestResult, leaseResult, providerResult] = await Promise.allSettled([
-      listResourceRequests({}),
-      listResourceLeases({}),
-      apiClient.get<unknown[], unknown>({ url: '/api/v1/resource/gpu-catalog' }),
+      readCursorWindow(fetchRequestPage, requestPages),
+      readCursorWindow(fetchLeasePage, leasePages),
+      fetchAllGpuCatalogEntries(),
     ])
+    if (generation !== listGeneration) return
     if (requestResult.status === 'rejected') {
+      requestsNextCursor.value = null
       requests.value = { kind: 'error', diagnostic: errorDiagnostic(requestResult.reason, 'RESOURCE_REQUEST_LIST_FAILED', '加载资源申请失败') }
-    } else if (requestResult.value.error) {
-      requests.value = { kind: 'error', diagnostic: errorDiagnostic(requestResult.value.error, 'RESOURCE_REQUEST_LIST_FAILED', '加载资源申请失败') }
-    } else if (requestResult.value.data.length === 0) {
-      requests.value = { kind: 'empty' }
     } else {
-      requests.value = { kind: 'success', data: requestResult.value.data }
+      applyRequestWindow(requestResult.value)
     }
     if (leaseResult.status === 'rejected') {
+      leasesNextCursor.value = null
       leases.value = { kind: 'error', diagnostic: errorDiagnostic(leaseResult.reason, 'RESOURCE_LEASE_LIST_FAILED', '加载 Lease 失败') }
-    } else if (leaseResult.value.error) {
-      leases.value = { kind: 'error', diagnostic: errorDiagnostic(leaseResult.value.error, 'RESOURCE_LEASE_LIST_FAILED', '加载 Lease 失败') }
-    } else if (leaseResult.value.data.length === 0) {
-      leases.value = { kind: 'empty' }
     } else {
-      leases.value = { kind: 'success', data: leaseResult.value.data }
+      applyLeaseWindow(leaseResult.value)
     }
     if (providerResult.status === 'rejected') {
-      providerOptions.value = { kind: 'error', diagnostic: errorDiagnostic(providerResult.reason, 'GPU_CATALOG_LOAD_FAILED', '加载 Resource 容量目录失败') }
-    } else if (providerResult.value.error) {
-      providerOptions.value = { kind: 'error', diagnostic: errorDiagnostic(providerResult.value.error, 'GPU_CATALOG_LOAD_FAILED', '加载 Resource 容量目录失败') }
+      providerOptions.value = {
+        kind: 'error',
+        diagnostic: errorDiagnostic(providerResult.reason, 'GPU_CATALOG_LOAD_FAILED', '加载 Resource 容量目录失败'),
+      }
     } else {
       try {
-        const options = parseProviderOptions(providerResult.value.data)
+        const options = parseProviderOptions(providerResult.value)
         providerOptions.value = options.length > 0 ? { kind: 'success', data: options } : { kind: 'empty' }
       } catch (error) {
         const diagnostic = makeDiagnostic('GPU_CATALOG_INVALID', error instanceof Error ? error.message : 'Resource 返回了无法识别的容量目录。', false)
         providerOptions.value = { kind: 'error', diagnostic }
       }
+    }
+  }
+
+  /** Append the next page of one list; the rows already shown stay. */
+  async function loadMore(list: 'requests' | 'leases') {
+    const cursor = list === 'requests' ? requestsNextCursor.value : leasesNextCursor.value
+    const state = list === 'requests' ? requests.value : leases.value
+    if (!cursor || loadingMore.value || state.kind !== 'success') return
+    const generation = listGeneration
+    loadingMore.value = list
+    loadMoreCount += 1
+    loadMoreDiagnostic.value = null
+    try {
+      if (list === 'requests') {
+        const page = await readCursorPage(fetchRequestPage, cursor)
+        if (generation !== listGeneration || requests.value.kind !== 'success') return
+        const shown = new Set(requests.value.data.map((request) => request.id))
+        requests.value = { kind: 'success', data: [...requests.value.data, ...page.items.filter((request) => !shown.has(request.id))] }
+        requestsNextCursor.value = page.nextCursor
+        requestPages += 1
+      } else {
+        const page = await readCursorPage(fetchLeasePage, cursor)
+        if (generation !== listGeneration || leases.value.kind !== 'success') return
+        const shown = new Set(leases.value.data.map((lease) => lease.id))
+        leases.value = { kind: 'success', data: [...leases.value.data, ...page.items.filter((lease) => !shown.has(lease.id))] }
+        leasesNextCursor.value = page.nextCursor
+        leasePages += 1
+      }
+      schedulePoll()
+    } catch (error) {
+      if (generation !== listGeneration) return
+      loadMoreDiagnostic.value = {
+        list,
+        diagnostic: list === 'requests'
+          ? errorDiagnostic(error, 'RESOURCE_REQUEST_LIST_MORE_FAILED', '加载更多资源申请失败，已显示的申请不受影响。')
+          : errorDiagnostic(error, 'RESOURCE_LEASE_LIST_MORE_FAILED', '加载更多资源使用授权失败，已显示的授权不受影响。'),
+      }
+    } finally {
+      if (generation === listGeneration) loadingMore.value = null
     }
   }
 
@@ -449,33 +522,38 @@ export function useResourceApproval() {
   }
 
   async function refreshSilently() {
+    // A poll re-reads the shown pages; wait for an in-flight "load more" so its page is counted.
+    if (loadingMore.value) {
+      schedulePoll()
+      return
+    }
+    const generation = ++listGeneration
+    const moreAtStart = loadMoreCount
     const [requestResult, leaseResult, providerResult] = await Promise.allSettled([
-      listResourceRequests({}),
-      listResourceLeases({}),
-      apiClient.get<unknown[], unknown>({ url: '/api/v1/resource/gpu-catalog' }),
+      readCursorWindow(fetchRequestPage, requestPages),
+      readCursorWindow(fetchLeasePage, leasePages),
+      fetchAllGpuCatalogEntries(),
     ])
+    if (generation !== listGeneration) return
+    // A "load more" started meanwhile changed the shown window; this read may be shorter than it.
+    if (moreAtStart !== loadMoreCount) {
+      schedulePoll()
+      return
+    }
     const failures: DiagnosticViewModel[] = []
-    if (requestResult.status === 'fulfilled' && !requestResult.value.error) {
-      requests.value = { kind: 'success', data: requestResult.value.data }
+    if (requestResult.status === 'fulfilled') {
+      applyRequestWindow(requestResult.value)
     } else {
-      failures.push(errorDiagnostic(
-        requestResult.status === 'rejected' ? requestResult.reason : requestResult.value.error,
-        'RESOURCE_REQUEST_REFRESH_FAILED',
-        '自动刷新资源申请失败',
-      ))
+      failures.push(errorDiagnostic(requestResult.reason, 'RESOURCE_REQUEST_REFRESH_FAILED', '自动刷新资源申请失败'))
     }
-    if (leaseResult.status === 'fulfilled' && !leaseResult.value.error) {
-      leases.value = { kind: 'success', data: leaseResult.value.data }
+    if (leaseResult.status === 'fulfilled') {
+      applyLeaseWindow(leaseResult.value)
     } else {
-      failures.push(errorDiagnostic(
-        leaseResult.status === 'rejected' ? leaseResult.reason : leaseResult.value.error,
-        'RESOURCE_LEASE_REFRESH_FAILED',
-        '自动刷新 Lease 失败',
-      ))
+      failures.push(errorDiagnostic(leaseResult.reason, 'RESOURCE_LEASE_REFRESH_FAILED', '自动刷新 Lease 失败'))
     }
-    if (providerResult.status === 'fulfilled' && !providerResult.value.error) {
+    if (providerResult.status === 'fulfilled') {
       try {
-        const options = parseProviderOptions(providerResult.value.data)
+        const options = parseProviderOptions(providerResult.value)
         providerOptions.value = options.length > 0 ? { kind: 'success', data: options } : { kind: 'empty' }
       } catch (error) {
         const diagnostic = makeDiagnostic('GPU_CATALOG_INVALID', error instanceof Error ? error.message : 'Resource 返回了无法识别的容量目录。', false)
@@ -483,11 +561,7 @@ export function useResourceApproval() {
         failures.push(diagnostic)
       }
     } else {
-      failures.push(errorDiagnostic(
-        providerResult.status === 'rejected' ? providerResult.reason : providerResult.value.error,
-        'GPU_CATALOG_REFRESH_FAILED',
-        '自动刷新 Resource 容量目录失败',
-      ))
+      failures.push(errorDiagnostic(providerResult.reason, 'GPU_CATALOG_REFRESH_FAILED', '自动刷新 Resource 容量目录失败'))
     }
     refreshDiagnostic.value = failures.length > 0
       ? makeDiagnostic(
@@ -536,6 +610,10 @@ export function useResourceApproval() {
   return reactive({
     requests,
     leases,
+    requestsNextCursor,
+    leasesNextCursor,
+    loadingMore,
+    loadMoreDiagnostic,
     providerOptions,
     selectedRequestId,
     selectedLeaseId,
@@ -547,6 +625,8 @@ export function useResourceApproval() {
     batchOutcome,
     refreshDiagnostic,
     load: loadWithPolling,
+    loadMoreRequests: () => loadMore('requests'),
+    loadMoreLeases: () => loadMore('leases'),
     selectRequest,
     selectLease,
     runRequestAction,

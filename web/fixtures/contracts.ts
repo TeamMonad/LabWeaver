@@ -13,8 +13,7 @@ import type {
   EnvironmentAccessGrantPageSchema,
   EnvironmentEndpointSchema,
   EnvironmentDetailSchema,
-  EnvironmentInstanceSchema,
-  EnvironmentOperation,
+  PublicEnvironmentOperation,
   EnvironmentOperationPageSchema,
   EnvironmentOperationSnapshot,
   GpuCatalogEntrySchema,
@@ -22,7 +21,11 @@ import type {
   EnvironmentSummary,
   EnvironmentSummaryPageSchema,
   EnvironmentTemplateReleaseViewSchema,
-  ProjectMembershipSchema,
+  Notification,
+  NotificationPageSchema,
+  NotificationUnreadCountSchema,
+  ProjectMembershipPageSchema,
+  ProjectPageSchema,
   ProjectSchema,
   OrganizationUserPageSchema,
   PlatformImageCatalogSchema,
@@ -32,6 +35,7 @@ import type {
   ProblemDetails,
   ResourceLeaseSchema,
   ResourceLeaseState,
+  ResourceChargeSchema,
   ResourceRateSchema,
   ResourceRequestPageSchema,
   ResourceRequestSchema,
@@ -46,6 +50,8 @@ import type {
 type FixtureSuccess<T> = { data: T; error: undefined }
 type FixtureError = { data: undefined; error: unknown }
 type FixtureResult<T> = FixtureSuccess<T> | FixtureError
+/** Resource list pages (#229): one page and the cursor of the next, null on the last. */
+type CursorPage<T> = { items: T[]; nextCursor: string | null }
 
 // Platform configuration (#203) preview facts live in their own module.
 export * from './platformConfiguration'
@@ -265,7 +271,7 @@ function makeLease(id: string, requestId: string, state: ResourceLeaseState, ext
   }
 }
 
-function currentEnvironmentState(): EnvironmentInstanceSchema['observedState'] | undefined {
+function currentEnvironmentState(): EnvironmentDetailSchema['observedState'] | undefined {
   const state = activeScene.value.environmentState
   switch (state) {
     case undefined:
@@ -288,14 +294,14 @@ function currentEnvironmentState(): EnvironmentInstanceSchema['observedState'] |
   }
 }
 
-const environmentLabels: Partial<Record<EnvironmentInstanceSchema['observedState'], string>> = {
+const environmentLabels: Partial<Record<EnvironmentDetailSchema['observedState'], string>> = {
   ready: '量子材料 · 交互实验环境',
   stopped: '量子材料 · 数据分析环境',
   deleted: '量子材料 · 历史实验环境',
   failed: '量子材料 · 置备诊断环境',
 }
 
-function environmentDisplayLabel(state: EnvironmentInstanceSchema['observedState']): string {
+function environmentDisplayLabel(state: EnvironmentDetailSchema['observedState']): string {
   return environmentLabels[state] ?? '量子材料 · 实验环境'
 }
 
@@ -306,7 +312,7 @@ const sceneEnvironmentIds: Partial<Record<string, string>> = {
   'work-launcher': 'env-workbench',
 }
 
-function environmentClassFor(id: string): EnvironmentInstanceSchema['class'] {
+function environmentClassFor(id: string): EnvironmentDetailSchema['class'] {
   return id === 'env-workbench' ? 'work' : 'experiment'
 }
 
@@ -316,7 +322,7 @@ function environmentInstance(id: string): EnvironmentDetailSchema {
   const deleted = state === 'deleted'
   const failed = state === 'failed'
   const stopped = state === 'stopped'
-  const operation: EnvironmentOperation = {
+  const operation: PublicEnvironmentOperation = {
     id: failed ? 'operation-provision-failed' : `operation-${state}`,
     kind: failed ? 'start' : state === 'stopped' ? 'stop' : state === 'deleted' ? 'delete' : 'start',
     state: failed ? 'failed' : 'succeeded',
@@ -613,11 +619,13 @@ interface FixtureOptions {
     query?: string
     page?: number
     pageSize?: number
+    cursor?: string
+    limit?: number
   }
 }
 
-export async function listProjects(): Promise<FixtureResult<ProjectSchema[]>> {
-  return fixtureResponse(projectsForScene())
+export async function listProjects(_options?: FixtureOptions): Promise<FixtureResult<ProjectPageSchema>> {
+  return fixtureResponse({ items: projectsForScene(), nextCursor: null })
 }
 
 export async function listOrganizationUsers(_options?: FixtureOptions): Promise<FixtureResult<OrganizationUserPageSchema>> {
@@ -700,15 +708,18 @@ function knownProject(projectId: string | undefined): ProjectSchema | undefined 
   return [project, archivedProject].find((candidate) => candidate.id === projectId)
 }
 
-export async function listProjectMemberships(options?: FixtureOptions): Promise<FixtureResult<ProjectMembershipSchema[]>> {
+export async function listProjectMemberships(options?: FixtureOptions): Promise<FixtureResult<ProjectMembershipPageSchema>> {
   const projectId = options?.path?.projectId
   const selectedProject = knownProject(projectId)
   if (!selectedProject) return notFoundResponse('读取项目成员', projectId)
-  if (selectedProject.state === 'archived') return fixtureResponse([])
-  return fixtureResponse(activeScene.value.id === 'workspace-members' || activeScene.value.id === 'workspace-viewer' ? [
-    { actorId: '周同学', projectId: fixtureProjectId, role: 'student', objectRole: 'operator', state: 'active', revision: 2, courseId: 'course-physics-2026', expiresAt: null },
-    { actorId: '助教·陈老师', projectId: fixtureProjectId, role: 'teacher', objectRole: 'manager', state: 'active', revision: 1, courseId: 'course-physics-2026', expiresAt: null },
-  ] : [])
+  if (selectedProject.state === 'archived') return fixtureResponse({ items: [], nextCursor: null })
+  return fixtureResponse({
+    items: activeScene.value.id === 'workspace-members' || activeScene.value.id === 'workspace-viewer' ? [
+      { actorId: '周同学', projectId: fixtureProjectId, role: 'student', objectRole: 'operator', state: 'active', revision: 2, courseId: 'course-physics-2026', expiresAt: null },
+      { actorId: '助教·陈老师', projectId: fixtureProjectId, role: 'teacher', objectRole: 'manager', state: 'active', revision: 1, courseId: 'course-physics-2026', expiresAt: null },
+    ] : [],
+    nextCursor: null,
+  })
 }
 
 const OWNER_ACTIONS: ObjectAction[] = ['browse', 'archive', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs', 'request_runtime_permissions']
@@ -836,10 +847,10 @@ export async function listProjectResourceRequests(options?: FixtureOptions): Pro
   if (projectId && projectId !== fixtureProjectId) return notFoundResponse('读取项目资源申请', projectId)
   return fixtureResponse({ items: projectRequests(), nextCursor: null })
 }
-export async function listProjectResourceLeases(options?: FixtureOptions): Promise<FixtureResult<ResourceLeaseSchema[]>> {
+export async function listProjectResourceLeases(options?: FixtureOptions): Promise<FixtureResult<CursorPage<ResourceLeaseSchema>>> {
   const projectId = options?.path?.projectId
   if (projectId && projectId !== fixtureProjectId) return notFoundResponse('读取项目资源授权', projectId)
-  return fixtureResponse(projectLeases())
+  return fixtureResponse({ items: projectLeases(), nextCursor: null })
 }
 
 export async function getResourceRequest(options?: FixtureOptions): Promise<FixtureResult<ResourceRequestSchema>> {
@@ -856,8 +867,8 @@ export async function getResourceLease(options?: FixtureOptions): Promise<Fixtur
   return item ? fixtureResponse(item) : notFoundResponse('读取资源授权', leaseId)
 }
 
-export async function listResourceRequests(): Promise<FixtureResult<ResourceRequestSchema[]>> { return fixtureResponse(approvalRequests()) }
-export async function listResourceLeases(): Promise<FixtureResult<ResourceLeaseSchema[]>> { return fixtureResponse(approvalLeases()) }
+export async function listResourceRequests(): Promise<FixtureResult<ResourceRequestPageSchema>> { return fixtureResponse({ items: approvalRequests(), nextCursor: null }) }
+export async function listResourceLeases(): Promise<FixtureResult<CursorPage<ResourceLeaseSchema>>> { return fixtureResponse({ items: approvalLeases(), nextCursor: null }) }
 export async function listSshPublicKeys(): Promise<FixtureResult<{ items: SshPublicKeySchema[]; nextCursor?: string | null }>> {
   return fixtureResponse({ items: [], nextCursor: null })
 }
@@ -1014,8 +1025,35 @@ export async function getProjectAgentCapability(options?: FixtureOptions): Promi
 
 export async function upgradeEnvironmentTemplate(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('升级 Work 模板') }
 
-export async function listResourceGpuCatalog(): Promise<FixtureResult<GpuCatalogEntrySchema[]>> { return fixtureResponse(gpuCatalogFixture) }
-export async function listResourceRates(_options?: FixtureOptions): Promise<FixtureResult<ResourceRateSchema[]>> { return unsupportedResponse('读取资源费率') }
+export async function listResourceGpuCatalog(): Promise<FixtureResult<CursorPage<GpuCatalogEntrySchema>>> { return fixtureResponse({ items: gpuCatalogFixture, nextCursor: null }) }
+
+const resourceRatesFixture = [
+  { id: 'rate-cpu-fixture', revision: 1, unit: 'cpu_millicore_second', unitQuantity: 1000, gpuClass: null, gpuMode: null, unitPrice: { currency: 'USD', amount: '0.000010' }, effectiveFrom: '2026-01-01T00:00:00.000Z', effectiveUntil: null },
+  { id: 'rate-gpu-fixture', revision: 1, unit: 'gpu_unit_second', unitQuantity: 1, gpuClass: 'nvidia-a10', gpuMode: 'exclusive', unitPrice: { currency: 'USD', amount: '0.000800' }, effectiveFrom: '2026-01-01T00:00:00.000Z', effectiveUntil: null },
+] satisfies ResourceRateSchema[]
+
+export async function listResourceRates(_options?: FixtureOptions): Promise<FixtureResult<CursorPage<ResourceRateSchema>>> {
+  return fixtureResponse({ items: resourceRatesFixture, nextCursor: null })
+}
+
+const resourceChargesFixture = [{
+  id: 'charge-physics-september',
+  usageRecordId: 'usage-physics-september',
+  projectId: fixtureProjectId,
+  lines: [
+    { rateId: 'rate-cpu-fixture', rateRevision: 1, unit: 'cpu_millicore_second', quantity: 720000000000, unitQuantity: 1000, unitPrice: { currency: 'USD', amount: '0.000010' }, amount: { currency: 'USD', amount: '7200.000000' } },
+    { rateId: 'rate-gpu-fixture', rateRevision: 1, unit: 'gpu_unit_second', quantity: 216000, unitQuantity: 1, unitPrice: { currency: 'USD', amount: '0.000800' }, amount: { currency: 'USD', amount: '172.800000' } },
+  ],
+  total: { currency: 'USD', amount: '7372.800000' },
+  settlement: 'pending',
+  createdAt: now,
+}] satisfies ResourceChargeSchema[]
+
+export async function listProjectResourceCharges(options?: FixtureOptions): Promise<FixtureResult<CursorPage<ResourceChargeSchema>>> {
+  const projectId = options?.path?.projectId
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取项目费用明细', projectId)
+  return fixtureResponse({ items: activeScene.value.id === 'budget-large' ? resourceChargesFixture : [], nextCursor: null })
+}
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
 export async function createResourceRate() { return unsupportedResponse('创建资源费率') }
 export async function endResourceRate() { return unsupportedResponse('结束资源费率') }
@@ -1138,9 +1176,7 @@ export async function listProjectCreditHolds(options?: FixtureOptions): Promise<
       reconciliationDueAt: '2026-10-12T10:00:00.000Z',
       expiredUnknownAt: '2026-10-12T10:00:00.000Z',
     }],
-    page: 1,
-    pageSize: 25,
-    hasMore: false,
+    nextCursor: null,
   })
 }
 
@@ -1161,12 +1197,51 @@ export async function listProjectCreditLedger(options?: FixtureOptions): Promise
       rateSnapshots: [],
       createdAt: '2026-10-12T07:00:00.000Z',
     }],
-    page: 1,
-    pageSize: 25,
-    hasMore: false,
+    nextCursor: null,
   })
 }
 
 export async function createCreditAdminOperation(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('Credits 管理员操作') }
 export async function estimateProjectResourceCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('资源费用估价') }
 export async function estimateProjectBuildCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('镜像构建费用估价') }
+
+// Notification center (#224) preview: one unread approval and one read reminder
+// whose email delivery could not be confirmed. Marking read is a real write, so the preview refuses it.
+function notificationsForPreview(): Notification[] {
+  return [
+    {
+      id: '01900000-0000-7000-8000-00000000e001',
+      eventId: '01900000-0000-7000-8000-00000000e101',
+      projectId: fixtureProjectId,
+      kind: 'resource_decision',
+      objectUrl: `/researcher/resources?projectId=${fixtureProjectId}&requestId=request-authorized`,
+      observedAt: now,
+      summary: '资源申请已批准；请打开对象查看当前分配进度和实际可用期限。',
+      emailState: 'disabled',
+      emailAttempts: 0,
+    },
+    {
+      id: '01900000-0000-7000-8000-00000000e002',
+      eventId: '01900000-0000-7000-8000-00000000e102',
+      projectId: fixtureProjectId,
+      kind: 'lease_expiry_reminder',
+      objectUrl: `/researcher/resources?projectId=${fixtureProjectId}&requestId=request-authorized`,
+      observedAt: now,
+      deadline: later,
+      readAt: now,
+      summary: '资源使用授权将在 1 小时后到期；到期后环境会停止，请及时保存数据。',
+      emailState: 'delivery_unknown',
+      emailAttempts: 1,
+      emailDetail: '邮件可能已送达，系统无法确认；为避免重复发送，不会自动重发。',
+      emailDiagnostic: 'LW_NOTIFICATION_SMTP_DELIVERY_UNKNOWN',
+    },
+  ]
+}
+
+export async function listNotifications(_options?: unknown): Promise<FixtureResult<NotificationPageSchema>> {
+  return fixtureResponse({ items: notificationsForPreview(), nextCursor: null })
+}
+export async function getNotificationUnreadCount(_options?: unknown): Promise<FixtureResult<NotificationUnreadCountSchema>> {
+  return fixtureResponse({ unreadCount: notificationsForPreview().filter((item) => !item.readAt).length })
+}
+export async function markNotificationRead(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('标记通知已读') }

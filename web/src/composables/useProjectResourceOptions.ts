@@ -5,7 +5,7 @@ import type {
   ResourceBillingUnit,
   ResourceRateSchema,
 } from '@/generated/contracts'
-import { apiClient } from '@/api/client'
+import { fetchAllGpuCatalogEntries, fetchAllResourceRates } from '@/utils/resourceLists'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { fetchEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { formatTimestamp } from '@/utils/format'
@@ -103,6 +103,12 @@ function stateFromItems<T>(items: T[]): AsyncState<T[]> {
   return items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
 }
 
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }))
+}
+
 function isCatalogOption(value: unknown): value is ResourceGpuCatalogOption {
   if (!value || typeof value !== 'object') return false
   const item = value as Record<string, unknown>
@@ -167,8 +173,8 @@ export function useProjectResourceOptions(
     const releasePromise = fetchEnvironmentTemplateReleases(id, courseId.value ?? undefined)
     const [releaseResult, catalogResult, rateResult] = await Promise.all([
       releasePromise,
-      apiClient.get<unknown[], unknown>({ url: '/api/v1/resource/gpu-catalog' }),
-      apiClient.get<ResourceRateSchema[], unknown>({ url: '/api/v1/resource/rates' }),
+      settle(fetchAllGpuCatalogEntries()),
+      settle(fetchAllResourceRates()),
     ])
     if (generation !== loadGeneration) return
 
@@ -193,28 +199,25 @@ export function useProjectResourceOptions(
       )
     }
 
-    if (catalogResult.error) {
+    if (!catalogResult.ok) {
       catalog.value = { kind: 'error', diagnostic: diagnostic(catalogResult.error, 'GPU_CATALOG_LOAD_FAILED', '加载 GPU 目录失败') }
-    } else if (!Array.isArray(catalogResult.data)) {
-      catalog.value = { kind: 'error', diagnostic: makeDiagnostic('GPU_CATALOG_INVALID', 'Resource 返回了无法识别的 GPU 目录响应。', false) }
     } else {
       // Validate the complete response before removing inactive historical
       // revisions.  Inactive entries are valid server data and must not turn a
       // normal catalog response into a client-side error.
-      const validItems = catalogResult.data.filter(isCatalogOption)
-      if (validItems.length !== catalogResult.data.length) {
+      const entries: unknown[] = catalogResult.value
+      const validItems = entries.filter(isCatalogOption)
+      if (validItems.length !== entries.length) {
         catalog.value = { kind: 'error', diagnostic: makeDiagnostic('GPU_CATALOG_INVALID', 'Resource 返回了无法识别的 GPU 目录项。', false) }
       } else {
         catalog.value = stateFromItems(validItems.filter((item) => item.active))
       }
     }
 
-    if (rateResult.error) {
+    if (!rateResult.ok) {
       rates.value = { kind: 'error', diagnostic: diagnostic(rateResult.error, 'RESOURCE_RATES_LOAD_FAILED', '加载资源费率失败') }
-    } else if (!Array.isArray(rateResult.data)) {
-      rates.value = { kind: 'error', diagnostic: makeDiagnostic('RESOURCE_RATES_INVALID', 'Resource 返回了无法识别的费率响应。', false) }
     } else {
-      rates.value = stateFromItems(rateResult.data.filter((rate) => RESOURCE_REQUEST_UNITS.includes(rate.unit)))
+      rates.value = stateFromItems(rateResult.value.filter((rate) => RESOURCE_REQUEST_UNITS.includes(rate.unit)))
     }
   }
 

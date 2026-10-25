@@ -1,9 +1,9 @@
 import { getCurrentScope, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
-import { getEnvironment, listProjectResourceLeases, listProjectResourceRequests } from '@/generated/contracts'
-import type { EnvironmentDetailSchema, ResourceRequestSchema } from '@/generated/contracts'
+import { getEnvironment } from '@/generated/contracts'
+import type { EnvironmentDetailSchema } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { resourceLeaseStateLabel, resourceRequestStateLabel } from '@/utils/stateLabels'
-import { collectCursorPages } from '@/utils/cursorPagination'
+import { fetchAllProjectResourceLeases, fetchAllProjectResourceRequests } from '@/utils/resourceLists'
 
 const ENVIRONMENT_HANDOFF_TIMEOUT_MS = 240_000
 const RESOURCE_HANDOFF_STATES = new Set(['allocating', 'active', 'expiring'])
@@ -22,11 +22,8 @@ function resourceReadDiagnostic(error: unknown, code: string, message: string): 
 
 async function readHandoffResourceState(projectId: string, environmentId: string): Promise<HandoffResourceState> {
   const [requestResult, leaseResult] = await Promise.allSettled([
-    collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({
-      path: { projectId },
-      query: { limit: 100, ...(cursor ? { cursor } : {}) },
-    })),
-    listProjectResourceLeases({ path: { projectId } }),
+    fetchAllProjectResourceRequests(projectId),
+    fetchAllProjectResourceLeases(projectId),
   ])
   if (requestResult.status === 'rejected') {
     return {
@@ -40,13 +37,7 @@ async function readHandoffResourceState(projectId: string, environmentId: string
       diagnostic: resourceReadDiagnostic(leaseResult.reason, 'ENVIRONMENT_RESOURCE_LEASES_READ_FAILED', '无法核对资源授权状态，请返回资源申请页检查。'),
     }
   }
-  if (leaseResult.value.error) {
-    return {
-      kind: 'error',
-      diagnostic: resourceReadDiagnostic(leaseResult.value.error, 'ENVIRONMENT_RESOURCE_LEASES_READ_FAILED', '无法核对资源授权状态，请返回资源申请页检查。'),
-    }
-  }
-  const matchingRequests = requestResult.value.items.filter((request) => (
+  const matchingRequests = requestResult.value.filter((request) => (
     request.projectId === projectId
     && request.target?.kind === 'environment'
     && request.target.environmentId === environmentId
@@ -60,7 +51,7 @@ async function readHandoffResourceState(projectId: string, environmentId: string
       continue
     }
     if (!RESOURCE_HANDOFF_STATES.has(request.state)) continue
-    const lease = leaseResult.value.data.find((item) => item.requestId === request.id)
+    const lease = leaseResult.value.find((item) => item.requestId === request.id)
     if (!lease) continue
     if (TERMINAL_LEASE_STATES.has(lease.state)) {
       return {

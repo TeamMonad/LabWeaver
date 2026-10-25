@@ -1926,13 +1926,11 @@ export type ConsoleCapabilitySchemaRevision = number;
 export type ConsoleCapabilitySchemaUtcTimestamp = string;
 
 /**
- * CourseMembershipPage
+ * CursorPage
  */
 export type CourseMembershipPageSchema = {
-    hasMore: boolean;
     items: Array<CourseMembershipView>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -2162,10 +2160,8 @@ export type CreditAdminOperationSchemaProjectId = string;
  * CreditHoldPage
  */
 export type CreditHoldPageSchema = {
-    hasMore: boolean;
     items: Array<CreditHoldPageSchemaCreditHold>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -2330,10 +2326,8 @@ export type CreditLedgerEntrySchemaUtcTimestamp = string;
  * CreditLedgerPage
  */
 export type CreditLedgerPageSchema = {
-    hasMore: boolean;
     items: Array<CreditLedgerEntry>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -11916,13 +11910,11 @@ export type LogoutBrowserSessionResponseSchema = {
 };
 
 /**
- * MembershipInvitationPage
+ * CursorPage
  */
 export type MembershipInvitationPageSchema = {
-    hasMore: boolean;
     items: Array<MembershipInvitation>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -12877,6 +12869,101 @@ export type ProjectLlmPolicyModelOption = {
 };
 
 /**
+ * CursorPage
+ */
+export type ProjectMembershipPageSchema = {
+    items: Array<ProjectMembership>;
+    nextCursor?: string | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type ProjectMembershipPageSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type ProjectMembershipPageSchemaCourseId = string;
+
+/**
+ * Authoritative membership state owned by Control Service.
+ */
+export type ProjectMembershipPageSchemaMembershipState = 'active' | 'suspended' | 'revoked';
+
+/**
+ * Base role asserted by the configured OIDC issuer.
+ */
+export type ProjectMembershipPageSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ProjectMembershipPageSchemaProjectId = string;
+
+/**
+ * Project-local scope. A project may optionally be associated with teaching.
+ */
+export type ProjectMembership = {
+    /**
+     * Actor scope.
+     */
+    actorId: ProjectMembershipPageSchemaActorId;
+    /**
+     * Optional teaching course association.
+     */
+    courseId?: ProjectMembershipPageSchemaCourseId | null;
+    /**
+     * Human-readable issuer name, present on project membership views.
+     */
+    displayName?: string | null;
+    /**
+     * Optional hard expiry.
+     */
+    expiresAt?: ProjectMembershipPageSchemaUtcTimestamp | null;
+    /**
+     * Project action responsibilities, independent of the verified platform role.
+     */
+    objectRole?: ProjectMembershipPageSchemaProjectObjectRole;
+    /**
+     * Project scope.
+     */
+    projectId: ProjectMembershipPageSchemaProjectId;
+    /**
+     * Monotonic authorization revision.
+     */
+    revision: ProjectMembershipPageSchemaRevision;
+    /**
+     * Role permitted by this project.
+     */
+    role: ProjectMembershipPageSchemaPlatformRole;
+    /**
+     * Current lifecycle state.
+     */
+    state: ProjectMembershipPageSchemaMembershipState;
+    /**
+     * Issuer username, present on project membership views when identity
+     * metadata is available.  Authorization snapshots leave this unset.
+     */
+    username?: string | null;
+};
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type ProjectMembershipPageSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ProjectMembershipPageSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ProjectMembershipPageSchemaUtcTimestamp = string;
+
+/**
  * ProjectMembership
  *
  * Project-local scope. A project may optionally be associated with teaching.
@@ -12966,6 +13053,59 @@ export type ProjectMembershipSchemaRevision = number;
 export type ProjectMembershipSchemaUtcTimestamp = string;
 
 /**
+ * CursorPage
+ */
+export type ProjectPageSchema = {
+    items: Array<Project>;
+    nextCursor?: string | null;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type ProjectPageSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type ProjectPageSchemaCourseId = string;
+
+/**
+ * Control-owned project aggregate and the single source of project metadata.
+ */
+export type Project = {
+    courseId?: ProjectPageSchemaCourseId | null;
+    createdAt: ProjectPageSchemaUtcTimestamp;
+    description?: string | null;
+    id: ProjectPageSchemaProjectId;
+    name: string;
+    ownerActorId: ProjectPageSchemaActorId;
+    revision: ProjectPageSchemaRevision;
+    state: ProjectState;
+    updatedAt: ProjectPageSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type ProjectPageSchemaProjectId = string;
+
+/**
+ * Durable lifecycle of a project. Archiving preserves independent research work.
+ */
+export type ProjectState = 'active' | 'archived';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ProjectPageSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type ProjectPageSchemaUtcTimestamp = string;
+
+/**
  * Project
  *
  * Control-owned project aggregate and the single source of project metadata.
@@ -12978,7 +13118,7 @@ export type ProjectSchema = {
     name: string;
     ownerActorId: ProjectSchemaActorId;
     revision: ProjectSchemaRevision;
-    state: ProjectState;
+    state: ProjectSchemaProjectState;
     updatedAt: ProjectSchemaUtcTimestamp;
 };
 
@@ -13000,7 +13140,7 @@ export type ProjectSchemaProjectId = string;
 /**
  * Durable lifecycle of a project. Archiving preserves independent research work.
  */
-export type ProjectState = 'active' | 'archived';
+export type ProjectSchemaProjectState = 'active' | 'archived';
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -13467,7 +13607,7 @@ export type ResourceRateSchemaUtcTimestamp = string;
 /**
  * ResourceRequestPage
  *
- * Cursor page of project-scoped Resource requests.
+ * Cursor page of global or project-scoped Resource requests.
  */
 export type ResourceRequestPageSchema = {
     items: Array<ResourceRequest>;
@@ -13681,14 +13821,11 @@ export type ResourceRequestSchemaWorkloadResources = {
 /**
  * ResourceUsagePage
  *
- * Bounded project usage view. `has_more` is true when another page exists;
- * callers never need an unbounded usage query.
+ * Stable project usage history; continue with `next_cursor` until it is absent.
  */
 export type ResourceUsagePageSchema = {
-    hasMore: boolean;
     items: Array<ResourceUsageRecord>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -16028,8 +16165,8 @@ export type ListCourseMembershipInvitationsData = {
         courseId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/courses/{courseId}/member-invitations';
 };
@@ -16168,8 +16305,8 @@ export type ListCourseMembershipsData = {
         courseId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/courses/{courseId}/members';
 };
@@ -17823,8 +17960,8 @@ export type ListIncomingMembershipInvitationsData = {
     body?: never;
     path?: never;
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/member-invitations';
 };
@@ -18299,7 +18436,10 @@ export type MarkNotificationReadResponse = MarkNotificationReadResponses[keyof M
 export type ListProjectsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/projects';
 };
 
@@ -18356,7 +18496,7 @@ export type ListProjectsResponses = {
     /**
      * Successful response
      */
-    200: Array<ProjectSchema>;
+    200: ProjectPageSchema;
 };
 
 export type ListProjectsResponse = ListProjectsResponses[keyof ListProjectsResponses];
@@ -19826,7 +19966,10 @@ export type ListProjectResourceChargesData = {
     path: {
         projectId: string;
     };
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/projects/{projectId}/charges';
 };
 
@@ -19883,7 +20026,10 @@ export type ListProjectResourceChargesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceChargeSchema>;
+    200: {
+        items: Array<ResourceChargeSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListProjectResourceChargesResponse = ListProjectResourceChargesResponses[keyof ListProjectResourceChargesResponses];
@@ -20034,8 +20180,8 @@ export type ListProjectCreditHoldsData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/credits/holds';
 };
@@ -20104,8 +20250,8 @@ export type ListProjectCreditLedgerData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/credits/ledger';
 };
@@ -21494,8 +21640,8 @@ export type ListProjectMembershipInvitationsData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/member-invitations';
 };
@@ -21633,7 +21779,10 @@ export type ListProjectMembershipsData = {
     path: {
         projectId: string;
     };
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/projects/{projectId}/members';
 };
 
@@ -21690,7 +21839,7 @@ export type ListProjectMembershipsResponses = {
     /**
      * Successful response
      */
-    200: Array<ProjectMembershipSchema>;
+    200: ProjectMembershipPageSchema;
 };
 
 export type ListProjectMembershipsResponse = ListProjectMembershipsResponses[keyof ListProjectMembershipsResponses];
@@ -22399,6 +22548,8 @@ export type ListProjectResourceLeasesData = {
         projectId: string;
     };
     query?: {
+        cursor?: string;
+        limit?: number;
         courseId?: string;
     };
     url: '/api/v1/projects/{projectId}/resource-leases';
@@ -22457,7 +22608,10 @@ export type ListProjectResourceLeasesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceLeaseSchema>;
+    200: {
+        items: Array<ResourceLeaseSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListProjectResourceLeasesResponse = ListProjectResourceLeasesResponses[keyof ListProjectResourceLeasesResponses];
@@ -22679,8 +22833,8 @@ export type ListProjectResourceUsageData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/usage';
 };
@@ -22816,7 +22970,10 @@ export type CreateProjectWorkConfigurationRunResponse = CreateProjectWorkConfigu
 export type ListResourceLeasesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource-leases';
 };
 
@@ -22873,7 +23030,10 @@ export type ListResourceLeasesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceLeaseSchema>;
+    200: {
+        items: Array<ResourceLeaseSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListResourceLeasesResponse = ListResourceLeasesResponses[keyof ListResourceLeasesResponses];
@@ -23094,7 +23254,10 @@ export type RevokeResourceLeaseResponse = RevokeResourceLeaseResponses[keyof Rev
 export type ListResourceRequestsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource-requests';
 };
 
@@ -23151,7 +23314,7 @@ export type ListResourceRequestsResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceRequestSchema>;
+    200: ResourceRequestPageSchema;
 };
 
 export type ListResourceRequestsResponse = ListResourceRequestsResponses[keyof ListResourceRequestsResponses];
@@ -23798,7 +23961,10 @@ export type CreateCreditAdminOperationResponse = CreateCreditAdminOperationRespo
 export type ListResourceGpuCatalogData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource/gpu-catalog';
 };
 
@@ -23855,7 +24021,10 @@ export type ListResourceGpuCatalogResponses = {
     /**
      * Successful response
      */
-    200: Array<GpuCatalogEntrySchema>;
+    200: {
+        items: Array<GpuCatalogEntrySchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListResourceGpuCatalogResponse = ListResourceGpuCatalogResponses[keyof ListResourceGpuCatalogResponses];
@@ -23933,7 +24102,10 @@ export type CreateResourceGpuCatalogEntryResponse = CreateResourceGpuCatalogEntr
 export type ListResourceRatesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource/rates';
 };
 
@@ -23990,7 +24162,10 @@ export type ListResourceRatesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceRateSchema>;
+    200: {
+        items: Array<ResourceRateSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListResourceRatesResponse = ListResourceRatesResponses[keyof ListResourceRatesResponses];

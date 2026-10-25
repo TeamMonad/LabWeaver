@@ -86,7 +86,7 @@ describe('AppShell after another actor takes over the browser session (#198)', (
   })
 
   it('drops the previous actor\'s page and draft and waits for the new actor\'s project list', async () => {
-    listProjects.mockResolvedValue({ data: [projectA], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA], nextCursor: null }, error: undefined })
     const { wrapper, auth } = await mountAsActorA('/student/ssh-keys?projectId=project-a')
     await wrapper.get('[data-testid="draft"]').setValue('ssh-ed25519 AAAA actor-a-draft')
     expect(mounts).toBe(1)
@@ -101,14 +101,14 @@ describe('AppShell after another actor takes over the browser session (#198)', (
     expect(wrapper.find('[data-testid="draft"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('正在确认项目…')
 
-    answerList({ data: [projectA, projectB], error: undefined })
+    answerList({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
     await flushPromises()
     expect(mounts).toBe(2)
     expect((wrapper.get('[data-testid="draft"]').element as HTMLInputElement).value).toBe('')
   })
 
   it('re-creates a page outside any project when the actor changes', async () => {
-    listProjects.mockResolvedValue({ data: [projectA], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA], nextCursor: null }, error: undefined })
     const { wrapper, auth } = await mountAsActorA('/admin/platform')
     await wrapper.get('[data-testid="draft"]').setValue('actor A unsaved setting')
 
@@ -120,11 +120,11 @@ describe('AppShell after another actor takes over the browser session (#198)', (
   })
 
   it('keeps the project context recovery when the new actor cannot open the linked project', async () => {
-    listProjects.mockResolvedValue({ data: [projectA], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA], nextCursor: null }, error: undefined })
     const { wrapper, auth } = await mountAsActorA('/student/ssh-keys?projectId=project-a')
     expect(mounts).toBe(1)
 
-    listProjects.mockResolvedValue({ data: [projectB], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectB], nextCursor: null }, error: undefined })
     getProject.mockResolvedValue({
       data: undefined,
       error: { status: 403, diagnosticCode: 'LW_ACCESS_FORBIDDEN', detail: 'denied', requestId: 'req-b', retryable: false, title: '', type: 'about:blank', instance: '/' },

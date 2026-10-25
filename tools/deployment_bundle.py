@@ -411,6 +411,7 @@ def _infrastructure_model(
         raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
     _inventory_group(inventory["all"], root=True)
     _ha_configuration(model, files)
+    _identity_ha_configuration(model, files)
     _inventory_references(inventory, references)
     for name in ("vaultPasswordFile", "identitySecretFile"):
         if infrastructure[name] is not None:
@@ -426,6 +427,30 @@ def _ha_configuration(model: dict, files: dict[str, bytes]) -> dict | None:
         return None
     try:
         return ha_foundation.validate(raw)
+    except ha_foundation.HAError as error:
+        raise BundleError(str(error)) from error
+
+
+def _identity_ha_configuration(model: dict, files: dict[str, bytes]) -> dict | None:
+    inventory = _document(files[model["infrastructure"]["inventoryFile"]])
+    variables = inventory["all"].get("vars", {})
+    if not (variables.get("identity_foundation_enabled") or variables.get("platform_foundation_ha") or "identity_foundation_ha" in variables):
+        return None
+    try:
+        config = ha_foundation.validate_identity(variables.get("identity_foundation_ha", {}))
+        business = variables.get("platform_foundation_ha", {}).get("backup", {})
+        destination = config["backup"]["destination"].rstrip("/") + "/"
+        business_destination = business.get("destination", "").rstrip("/") + "/"
+        if business.get("destination") and (destination.startswith(business_destination) or business_destination.startswith(destination)):
+            raise BundleError("LW_BUNDLE_HA_INVALID:identity_foundation_ha.backup.destination")
+        locator = model["infrastructure"]["identitySecretFile"]
+        if locator is None or locator not in files:
+            raise BundleError("LW_BUNDLE_HA_INVALID:identity_foundation_ha.backup.credentials")
+        secret = _document(files[locator])
+        for key in ("backup_access_key", "backup_secret_key", "backup_ca_crt"):
+            if not isinstance(secret, dict) or not isinstance(secret.get(key), str) or not secret[key].strip():
+                raise BundleError(f"LW_BUNDLE_HA_INVALID:identity_foundation_ha.backup.{key}")
+        return config
     except ha_foundation.HAError as error:
         raise BundleError(str(error)) from error
 
@@ -457,13 +482,13 @@ def _inventory_group(group: Any, *, root: bool = False) -> None:
             for name in entries
         ):
             raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
-    if not root and "platform_foundation_ha" in group.get("vars", {}):
-        raise BundleError("LW_BUNDLE_HA_INVALID:platform_foundation_ha.all.vars_required")
+    if not root and {"platform_foundation_ha", "identity_foundation_ha"} & group.get("vars", {}).keys():
+        raise BundleError("LW_BUNDLE_HA_INVALID:all.vars_required")
     for variables in group.get("hosts", {}).values():
         if variables is not None and not isinstance(variables, dict):
             raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
-        if variables and "platform_foundation_ha" in variables:
-            raise BundleError("LW_BUNDLE_HA_INVALID:platform_foundation_ha.all.vars_required")
+        if variables and {"platform_foundation_ha", "identity_foundation_ha"} & variables.keys():
+            raise BundleError("LW_BUNDLE_HA_INVALID:all.vars_required")
     for child in group.get("children", {}).values():
         _inventory_group(child)
 
@@ -1075,7 +1100,11 @@ def load_bundle(
         declared = dict(manifest[group], **optional)
         for name in bindings:
             keys = declared[name]
-            for ref in _exact(bindings[name], set(keys)).values():
+            binding = bindings[name]
+            optional_keys = set(manifest["optionalSecrets"].get(name, [])) if group == "secrets" else set()
+            if not isinstance(binding, dict) or not set(keys) <= set(binding) or set(binding) - set(keys) - optional_keys:
+                raise BundleError("LW_BUNDLE_MODEL_INVALID")
+            for ref in binding.values():
                 references.add(_relative(ref, prefix))
     if not isinstance(application["helmValues"], dict) or not isinstance(
         application["ansibleVariables"], dict
@@ -1132,7 +1161,7 @@ def load_bundle(
         or not isinstance(package.get("images"), list)
     ):
         raise BundleError("LW_BUNDLE_VERSIONS_INVALID")
-    if _ha_configuration(model, files) is not None:
+    if _ha_configuration(model, files) is not None or ("infrastructure" in model and _identity_ha_configuration(model, files) is not None):
         try:
             ha_foundation.validate_lock(lock)
         except ha_foundation.HAError as error:
@@ -1339,6 +1368,9 @@ def derive_bundle(
         inventory = _resolve_values(source_inventory, root, files)
         _derive_controller_locators(source_inventory, inventory, files, output)
         variables = inventory["all"].setdefault("vars", {})
+        identity_ha = _identity_ha_configuration(model, files)
+        if identity_ha is not None:
+            variables["identity_foundation_ha"] = identity_ha
         if _ha_configuration(model, files) is not None:
             variables["platform_foundation_application_namespace"] = model["target"]["namespace"]
             variables["platform_foundation_resource_namespace"] = model.get("resource", {}).get("target", model["target"])["namespace"]

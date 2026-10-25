@@ -16,6 +16,9 @@ import {
 import {
   cleanupWorkResources,
   inspectRealWorkFinanceByUi,
+  readProjectCharges,
+  readProjectResourceLeases,
+  readProjectResourceRequests,
   readPublishedWork,
   waitForSettledWorkUsageCharges,
   selectPendingWorkTaskResourceRequest,
@@ -56,16 +59,15 @@ function requireRecoveryIds() {
 
 async function assertProjectUsageReadAvailable(adminPage, projectId) {
   const response = await adminPage.request.get(
-    `/api/v1/projects/${encodeURIComponent(projectId)}/usage?page=1&pageSize=1`,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/usage?limit=1`,
   )
   if (response.status() === 404) throw new Error('LW_WORK_RECOVERY_PROJECT_USAGE_READ_UNAVAILABLE')
   const result = await expectJson(response, 'LW_WORK_RECOVERY_PROJECT_USAGE_READ_FAILED')
   if (
     !result
     || !Array.isArray(result.items)
-    || result.page !== 1
-    || result.pageSize !== 1
-    || typeof result.hasMore !== 'boolean'
+    || result.items.length > 1
+    || (result.nextCursor !== null && (typeof result.nextCursor !== 'string' || result.nextCursor === ''))
   ) {
     throw new Error('LW_WORK_RECOVERY_PROJECT_USAGE_READ_INVALID')
   }
@@ -175,11 +177,7 @@ async function readWorkEnvironmentsForRelease(request, projectId, releaseId) {
 }
 
 async function assertNoExistingPublishedReleaseResources(request, projectId, release) {
-  const requests = await expectJson(
-    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-requests`),
-    'LW_WORK_RECOVERY_RELEASE_RESOURCE_REQUESTS_READ_FAILED',
-  )
-  if (!Array.isArray(requests)) throw new Error('LW_WORK_RECOVERY_RELEASE_RESOURCE_REQUESTS_READ_INVALID')
+  const requests = await readProjectResourceRequests(request, projectId, 'LW_WORK_RECOVERY_RELEASE_RESOURCE_REQUESTS_READ_FAILED')
   const matchingRequests = requests.filter((item) => (
     item?.projectId === projectId
     && item.target?.kind === 'environment'
@@ -192,11 +190,7 @@ async function assertNoExistingPublishedReleaseResources(request, projectId, rel
     }
   }
   const requestIds = new Set(matchingRequests.map((item) => item.id))
-  const leases = await expectJson(
-    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-leases`),
-    'LW_WORK_RECOVERY_RELEASE_RESOURCE_LEASES_READ_FAILED',
-  )
-  if (!Array.isArray(leases)) throw new Error('LW_WORK_RECOVERY_RELEASE_RESOURCE_LEASES_READ_INVALID')
+  const leases = await readProjectResourceLeases(request, projectId, 'LW_WORK_RECOVERY_RELEASE_RESOURCE_LEASES_READ_FAILED')
   for (const lease of leases.filter((item) => requestIds.has(item.requestId))) {
     if (!TERMINAL_RESOURCE_LEASE_STATES.has(lease.state)) {
       throw new Error(`LW_WORK_RECOVERY_RELEASE_RESOURCE_LEASE_ACTIVE:${lease.id}:${lease.state}`)
@@ -249,10 +243,7 @@ async function approvePendingWorkAuthoringResourceByUi(adminPage, {
   if (activeAttempts.length === 0) return
   if (activeAttempts.length !== 1) throw new Error('LW_WORK_RECOVERY_ACTIVE_ATTEMPT_AMBIGUOUS')
 
-  const requests = await expectJson(
-    await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-requests`),
-    'LW_WORK_RECOVERY_AUTHORING_RESOURCE_REQUESTS_READ_FAILED',
-  )
+  const requests = await readProjectResourceRequests(adminPage.request, projectId, 'LW_WORK_RECOVERY_AUTHORING_RESOURCE_REQUESTS_READ_FAILED')
   const request = selectPendingWorkTaskResourceRequest(requests, {
     projectId,
     runId,
@@ -564,11 +555,7 @@ test('student retries or resumes the exact failed Work run and completes its nor
     // The recovery retry is single-use. Verify the real administrator session
     // can read the usage projection before any retry or resource write.
     await assertProjectUsageReadAvailable(adminPage, PROJECT_ID)
-    const baselineCharges = await expectJson(
-      await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(PROJECT_ID)}/charges`),
-      'LW_WORK_RECOVERY_BASELINE_CHARGES_READ_FAILED',
-    )
-    if (!Array.isArray(baselineCharges)) throw new Error('LW_WORK_RECOVERY_BASELINE_CHARGES_INVALID')
+    const baselineCharges = await readProjectCharges(adminPage.request, PROJECT_ID, 'LW_WORK_RECOVERY_BASELINE_CHARGES_READ_FAILED')
     baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
 
     const studentActorId = await readActorId(page.request)

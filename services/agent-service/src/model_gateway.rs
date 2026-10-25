@@ -1379,8 +1379,11 @@ async fn exercise_zero_settlement(fail_first: bool) -> Result<(), Box<dyn std::e
     assert_eq!(account.reserved, FixedDecimal::zero());
     assert_eq!(account.spent, FixedDecimal::zero());
     let holds = billing
-        .credits
-        .holds(authority.project, 1, 100, 0)
+        .store
+        .list_credit_holds(
+            authority.project,
+            &contracts::http::ResourceListQuery::default(),
+        )
         .await?
         .items;
     assert_eq!(holds.len(), 1);

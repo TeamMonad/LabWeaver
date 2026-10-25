@@ -1,7 +1,8 @@
-import { onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
+import { computed, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import { apiClient } from '@/api/client'
-import { listProjectResourceLeases, listProjectResourceRequests, listProjectResourceUsage } from '@/generated/contracts'
-import { collectCursorPages } from '@/utils/cursorPagination'
+import { listProjectResourceCharges, listProjectResourceUsage } from '@/generated/contracts'
+import { readCursorPage, readCursorWindow } from '@/utils/cursorPagination'
+import { fetchAllProjectResourceLeases, fetchAllProjectResourceRequests, resourcePageQuery } from '@/utils/resourceLists'
 import type {
   EnvironmentSummary,
   ResourceLeaseSchema,
@@ -12,6 +13,9 @@ import type {
 import { fetchProjectEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
+
+/** Rows per page of the project usage and charge lists. */
+export const FINANCE_PAGE_LIMIT = 25
 
 export interface ResourceMoney {
   currency: string
@@ -188,13 +192,7 @@ function asUsagePage(value: unknown): ResourceUsagePageSchema {
   if (!isRecord(value)
     || !Array.isArray(value.items)
     || !value.items.every(isUsageRecord)
-    || typeof value.page !== 'number'
-    || !Number.isSafeInteger(value.page)
-    || value.page < 1
-    || typeof value.pageSize !== 'number'
-    || !Number.isSafeInteger(value.pageSize)
-    || value.pageSize < 1
-    || typeof value.hasMore !== 'boolean') {
+    || (value.nextCursor !== undefined && value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !value.nextCursor))) {
     throw new Error('Resource usage response is not a valid page')
   }
   return value as ResourceUsagePageSchema
@@ -210,22 +208,15 @@ async function getFinanceResource(url: string): Promise<UntypedApiResult> {
   }
 }
 
-async function getUsagePage(projectId: string, page: number, pageSize: number): Promise<UntypedApiResult> {
+async function getUsagePage(projectId: string, cursor: string | undefined): Promise<UntypedApiResult> {
   try {
     return await listProjectResourceUsage({
       path: { projectId },
-      query: { page, pageSize },
+      query: resourcePageQuery(cursor, FINANCE_PAGE_LIMIT),
     })
   } catch (error) {
     return { error }
   }
-}
-
-function listData(result: unknown, message: string): unknown[] {
-  if (!isRecord(result)) throw new Error(message)
-  if (result.error) throw result.error
-  if (!Array.isArray(result.data)) throw new Error(message)
-  return result.data
 }
 
 function environmentData(result: unknown): EnvironmentSummary[] {
@@ -233,22 +224,26 @@ function environmentData(result: unknown): EnvironmentSummary[] {
   return result as EnvironmentSummary[]
 }
 
-function leaseData(result: unknown): ResourceLeaseSchema[] {
-  return listData(result, '资源租约列表返回了无法识别的数据。') as ResourceLeaseSchema[]
-}
-
 export function useProjectResourceFinance(projectId: Ref<string | null>) {
   const budget = ref<AsyncState<ResourceBudget>>({ kind: 'idle' })
   const charges = ref<AsyncState<ResourceCharge[]>>({ kind: 'idle' })
+  const chargesNextCursor = ref<string | null>(null)
+  const chargesLoadingMore = ref(false)
+  const chargesMoreDiagnostic = ref<DiagnosticViewModel | null>(null)
   const usage = ref<AsyncState<ResourceUsagePageSchema>>({ kind: 'idle' })
   const usageContext = ref<AsyncState<ResourceUsageContext>>({ kind: 'idle' })
+  /** 1-based number of the usage page shown, counted from the first page. */
   const usagePage = ref(1)
-  const usagePageSize = ref(25)
+  /** Cursor that opens each page reached so far; index 0 (the first page) has none. */
+  const usagePageCursors = ref<(string | undefined)[]>([undefined])
+  const usageHasNextPage = computed(() => usagePageCursors.value.length > usagePage.value)
   const usageRecordsById = ref<Record<string, ResourceUsageRecord>>({})
   const acting = ref<string | null>(null)
   const outcome = ref<{ kind: 'success' | 'error'; diagnostic: DiagnosticViewModel } | null>(null)
   let loadGeneration = 0
   let usageGeneration = 0
+  /** Number of charge pages shown; a reload re-reads that many. */
+  let chargePages = 1
 
   function usageRequestCurrent(id: string, generation: number, requestGeneration: number) {
     return projectId.value === id && generation === loadGeneration && requestGeneration === usageGeneration
@@ -263,8 +258,8 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
     usageContext.value = { kind: 'loading', message: '加载用量关联信息…' }
     const [environmentsResult, requestsResult, leasesResult] = await Promise.allSettled([
       fetchProjectEnvironments({ projectId: id, limit: 100 }),
-      needsRequestContext ? collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({ path: { projectId: id }, query: { limit: 100, ...(cursor ? { cursor } : {}) } })) : Promise.resolve({ items: [], nextCursor: null }),
-      needsRequestContext ? listProjectResourceLeases({ path: { projectId: id } }) : Promise.resolve({ data: [] }),
+      needsRequestContext ? fetchAllProjectResourceRequests(id) : Promise.resolve([]),
+      needsRequestContext ? fetchAllProjectResourceLeases(id) : Promise.resolve([]),
     ])
     if (!usageRequestCurrent(id, generation, requestGeneration)) return
     if (environmentsResult.status === 'rejected' || requestsResult.status === 'rejected' || leasesResult.status === 'rejected') {
@@ -279,8 +274,8 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
         kind: 'success',
         data: {
           environments: environmentData(environmentsResult.value),
-          requests: requestsResult.value.items,
-          leases: leaseData(leasesResult.value),
+          requests: requestsResult.value,
+          leases: leasesResult.value,
         },
       }
     } catch (error) {
@@ -291,7 +286,7 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
     }
   }
 
-  async function applyUsageResult(id: string, result: UntypedApiResult, generation: number, requestGeneration: number, resetCache: boolean) {
+  async function applyUsageResult(id: string, result: UntypedApiResult, page: number, generation: number, requestGeneration: number, resetCache: boolean) {
     if (!usageRequestCurrent(id, generation, requestGeneration)) return
     if (result.error) {
       usage.value = { kind: 'error', diagnostic: diagnostic(result.error, 'RESOURCE_USAGE_LOAD_FAILED', '加载项目用量失败') }
@@ -308,8 +303,9 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
       return
     }
     if (!usageRequestCurrent(id, generation, requestGeneration)) return
-    usagePage.value = data.page
-    usagePageSize.value = data.pageSize
+    // Keep the cursors of the pages walked so far; the page after this one is only known now.
+    usagePageCursors.value = [...usagePageCursors.value.slice(0, page), ...(data.nextCursor ? [data.nextCursor] : [])]
+    usagePage.value = page
     usage.value = { kind: 'success', data }
     if (resetCache) usageRecordsById.value = {}
     usageRecordsById.value = {
@@ -319,21 +315,36 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
     await loadUsageContext(id, data.items, generation, requestGeneration)
   }
 
+  /**
+   * Show usage page `page` (1-based). Only pages already reached by following
+   * `nextCursor` can be shown, so the next page is `usagePage + 1` while
+   * `usageHasNextPage` holds; the total page count is never known.
+   */
   async function loadUsagePage(page = 1) {
     const id = projectId.value
     const generation = loadGeneration
     const requestGeneration = ++usageGeneration
-    const requestedPage = Number.isSafeInteger(page) && page >= 1 ? page : 1
     if (!id) {
       usage.value = { kind: 'idle' }
       usageContext.value = { kind: 'idle' }
+      usagePageCursors.value = [undefined]
       usagePage.value = 1
       usageRecordsById.value = {}
       return
     }
+    const requestedPage = Number.isSafeInteger(page) && page >= 1 && page <= usagePageCursors.value.length ? page : 1
     usage.value = { kind: 'loading', message: '加载项目用量…' }
     usageContext.value = { kind: 'idle' }
-    await applyUsageResult(id, await getUsagePage(id, requestedPage, usagePageSize.value), generation, requestGeneration, requestedPage === 1)
+    const result = await getUsagePage(id, usagePageCursors.value[requestedPage - 1])
+    await applyUsageResult(id, result, requestedPage, generation, requestGeneration, requestedPage === 1)
+  }
+
+  /** Charges are a "load more" list; a reload re-reads the pages already shown. */
+  function readCharges(id: string) {
+    return readCursorWindow((cursor) => listProjectResourceCharges({
+      path: { projectId: id },
+      query: resourcePageQuery(cursor, FINANCE_PAGE_LIMIT),
+    }), chargePages)
   }
 
   async function load() {
@@ -341,12 +352,16 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
     const generation = ++loadGeneration
     const requestGeneration = ++usageGeneration
     outcome.value = null
+    chargesMoreDiagnostic.value = null
+    chargesLoadingMore.value = false
+    usagePageCursors.value = [undefined]
+    usagePage.value = 1
     if (!id) {
       budget.value = { kind: 'idle' }
       charges.value = { kind: 'idle' }
+      chargesNextCursor.value = null
       usage.value = { kind: 'idle' }
       usageContext.value = { kind: 'idle' }
-      usagePage.value = 1
       usageRecordsById.value = {}
       return
     }
@@ -354,12 +369,11 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
     charges.value = { kind: 'loading', message: '加载费用明细…' }
     usage.value = { kind: 'loading', message: '加载项目用量…' }
     usageContext.value = { kind: 'idle' }
-    usagePage.value = 1
     usageRecordsById.value = {}
     const [budgetResult, chargesResult, usageResult] = await Promise.all([
       getFinanceResource(`/api/v1/projects/${encodeURIComponent(id)}/resource-budget`),
-      getFinanceResource(`/api/v1/projects/${encodeURIComponent(id)}/charges`),
-      getUsagePage(id, 1, usagePageSize.value),
+      readCharges(id).then((value) => ({ value }), (error: unknown) => ({ error })),
+      getUsagePage(id, undefined),
     ])
     if (generation !== loadGeneration) return
     if (budgetResult.error && isBudgetNotFound(budgetResult.error)) {
@@ -373,17 +387,48 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
         budget.value = { kind: 'error', diagnostic: diagnostic(error, 'RESOURCE_BUDGET_INVALID', 'Resource 返回了无法识别的预算。') }
       }
     }
-    if (chargesResult.error) {
+    if ('error' in chargesResult) {
+      chargesNextCursor.value = null
       charges.value = { kind: 'error', diagnostic: diagnostic(chargesResult.error, 'RESOURCE_CHARGES_LOAD_FAILED', '加载费用明细失败') }
     } else {
       try {
-        const items = asCharges(chargesResult.data)
+        const items = asCharges(chargesResult.value.items)
+        chargePages = chargesResult.value.pages
+        chargesNextCursor.value = chargesResult.value.nextCursor
         charges.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
       } catch (error) {
+        chargesNextCursor.value = null
         charges.value = { kind: 'error', diagnostic: diagnostic(error, 'RESOURCE_CHARGES_INVALID', 'Resource 返回了无法识别的费用明细。') }
       }
     }
-    await applyUsageResult(id, usageResult, generation, requestGeneration, true)
+    await applyUsageResult(id, usageResult, 1, generation, requestGeneration, true)
+  }
+
+  /** Append the next page of charges; the charges already shown stay. */
+  async function loadMoreCharges() {
+    const id = projectId.value
+    const cursor = chargesNextCursor.value
+    if (!id || !cursor || chargesLoadingMore.value || charges.value.kind !== 'success') return
+    const generation = loadGeneration
+    chargesLoadingMore.value = true
+    chargesMoreDiagnostic.value = null
+    try {
+      const page = await readCursorPage((next) => listProjectResourceCharges({
+        path: { projectId: id },
+        query: resourcePageQuery(next, FINANCE_PAGE_LIMIT),
+      }), cursor)
+      const items = asCharges(page.items)
+      if (generation !== loadGeneration || projectId.value !== id || charges.value.kind !== 'success') return
+      const shown = new Set(charges.value.data.map((charge) => charge.id))
+      charges.value = { kind: 'success', data: [...charges.value.data, ...items.filter((charge) => !shown.has(charge.id))] }
+      chargesNextCursor.value = page.nextCursor
+      chargePages += 1
+    } catch (error) {
+      if (generation !== loadGeneration || projectId.value !== id) return
+      chargesMoreDiagnostic.value = diagnostic(error, 'RESOURCE_CHARGES_MORE_FAILED', '加载更多费用明细失败，已显示的费用不受影响。')
+    } finally {
+      if (generation === loadGeneration) chargesLoadingMore.value = false
+    }
   }
 
   async function saveBudget(input: ResourceBudgetInput): Promise<boolean> {
@@ -443,8 +488,30 @@ export function useProjectResourceFinance(projectId: Ref<string | null>) {
     }
   }
 
-  watch(projectId, () => void load(), { immediate: true })
+  watch(projectId, () => {
+    // A cursor belongs to one project's list; never continue it for another project.
+    chargePages = 1
+    void load()
+  }, { immediate: true })
   onScopeDispose(() => { loadGeneration += 1; usageGeneration += 1 })
 
-  return reactive({ budget, charges, usage, usageContext, usagePage, usagePageSize, usageRecordsById, acting, outcome, load, loadUsagePage, saveBudget, adjust })
+  return reactive({
+    budget,
+    charges,
+    chargesNextCursor,
+    chargesLoadingMore,
+    chargesMoreDiagnostic,
+    usage,
+    usageContext,
+    usagePage,
+    usageHasNextPage,
+    usageRecordsById,
+    acting,
+    outcome,
+    load,
+    loadUsagePage,
+    loadMoreCharges,
+    saveBudget,
+    adjust,
+  })
 }

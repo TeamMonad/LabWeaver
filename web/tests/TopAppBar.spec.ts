@@ -1,8 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
+import { getNotificationUnreadCount } from '@/generated/contracts'
 import { createPinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import TopAppBar from '@/components/layout/TopAppBar.vue'
+import { refreshUnreadCount } from '@/composables/useNotifications'
+
+vi.mock('@/generated/contracts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/generated/contracts')>()
+  return { ...actual, getNotificationUnreadCount: vi.fn() }
+})
 
 const authState = vi.hoisted(() => ({
   user: { value: null as { expired: boolean; profile: Record<string, unknown> } | null },
@@ -61,6 +68,7 @@ describe('TopAppBar', () => {
     authState.error.value = null
     authState.isAuthenticated.value = false
     projectsState.selectedProjectId = null
+    vi.mocked(getNotificationUnreadCount).mockReset().mockResolvedValue({ data: { unreadCount: 0 }, error: undefined } as never)
   })
 
   it('shows unauthenticated state and login button', async () => {
@@ -102,5 +110,57 @@ describe('TopAppBar', () => {
     const wrapper = await createWrapper()
     await wrapper.find('button[aria-label="打开导航"]').trigger('click')
     expect(wrapper.emitted('toggleDrawer')).toHaveLength(1)
+  })
+
+  it('shows the unread count as a badge and in the accessible name', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'] } }
+    authState.isAuthenticated.value = true
+    vi.mocked(getNotificationUnreadCount).mockResolvedValue({ data: { unreadCount: 3 }, error: undefined } as never)
+    const wrapper = await createWrapper()
+    await flushPromises()
+
+    const entry = wrapper.get('[data-testid="notification-entry"]')
+    expect(entry.attributes('href')).toBe('/notifications')
+    expect(entry.attributes('aria-label')).toBe('通知，3 条未读')
+    expect(wrapper.get('[data-testid="notification-unread-badge"]').text()).toBe('3')
+    wrapper.unmount()
+  })
+
+  it('shows no badge when nothing is unread', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'] } }
+    authState.isAuthenticated.value = true
+    const wrapper = await createWrapper()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="notification-unread-badge"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="notification-entry"]').attributes('aria-label')).toBe('通知，没有未读')
+    wrapper.unmount()
+  })
+
+  it('drops a stale count when the unread count cannot be read', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'] } }
+    authState.isAuthenticated.value = true
+    vi.mocked(getNotificationUnreadCount).mockResolvedValueOnce({ data: { unreadCount: 5 }, error: undefined } as never)
+    const wrapper = await createWrapper()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="notification-unread-badge"]').text()).toBe('5')
+
+    vi.mocked(getNotificationUnreadCount).mockResolvedValueOnce({
+      data: undefined,
+      error: { type: 'about:blank', title: 'error', status: 503, detail: 'down', diagnosticCode: 'LW_NOTIFICATION_PERSISTENCE_FAILED', requestId: 'req-1', retryable: true },
+    } as never)
+    await refreshUnreadCount()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="notification-unread-badge"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="notification-entry"]').attributes('aria-label')).toBe('通知，未读数暂时无法读取')
+    wrapper.unmount()
+  })
+
+  it('offers no notification entry while signed out', async () => {
+    const wrapper = await createWrapper()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="notification-entry"]').exists()).toBe(false)
+    expect(getNotificationUnreadCount).not.toHaveBeenCalled()
   })
 })

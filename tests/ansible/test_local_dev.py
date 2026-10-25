@@ -1816,6 +1816,10 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertEqual(env[variable], expected, variable)
         self.assertEqual(values["environmentExecutorAuthority"]["secretSources"][0]["name"], "environment-service-secrets")
         documents = list(yaml.safe_load_all(bundle.read_text()))
+        control_secret = next(item for item in documents if item["kind"] == "Secret" and item["metadata"]["name"] == "control-service-secrets")
+        signing_key = base64.b64decode(control_secret["data"]["cursor-signing-key-current"])
+        self.assertEqual(len(signing_key), 32)
+        self.assertNotEqual(signing_key, hashlib.sha256(b"labweaver:control-service:cursor-signing-key-current").digest())
         config = next(item for item in documents if item["kind"] == "ConfigMap" and item["metadata"]["name"] == "container-executor-config")
         startup = yaml.safe_load(config["data"]["config.yaml"])
         self.assertEqual(startup["databaseUrlFile"], "/etc/labweaver/environment-authority/database-url")
@@ -1860,6 +1864,9 @@ class LocalDevBundleTests(unittest.TestCase):
         rendered = subprocess.run(render_args, capture_output=True, text=True, check=False)
         self.assertEqual(rendered.returncode, 0, rendered.stderr)
         objects = [item for item in yaml.safe_load_all(rendered.stdout) if item]
+        control_deployment = next(item for item in objects if item["kind"] == "Deployment" and item["metadata"]["name"] == "control-service")
+        control_env = {item["name"]: item.get("value") for item in control_deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(control_env["LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE"], "/etc/labweaver/secrets/cursor-signing-key-current")
         resource_policy = next(item for item in objects if item.get("kind") == "NetworkPolicy" and item["metadata"]["name"] == "resource-service")
         for executor in ("container-executor", "kubevirt-executor"):
             rules = [rule for rule in resource_policy["spec"]["ingress"]

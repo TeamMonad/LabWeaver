@@ -9,7 +9,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use contracts::http::{PageQuery, RemoveProjectMembershipRequest};
+use contracts::http::RemoveProjectMembershipRequest;
+use contracts::membership_governance::ControlListQuery;
 use contracts::membership_governance::{
     AcceptMembershipInvitation, MembershipInvitationScope, ResolvedMembershipInvitation,
 };
@@ -21,7 +22,7 @@ pub(super) async fn list_project_invitations(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(project_id): Path<ProjectId>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<ControlListQuery>,
 ) -> Result<Response, ApiError> {
     let decision = authorize_project(
         &state,
@@ -52,7 +53,7 @@ pub(super) async fn list_course_invitations(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(course_id): Path<CourseId>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<ControlListQuery>,
 ) -> Result<Response, ApiError> {
     let decision = authorize_decision(
         &state,
@@ -142,7 +143,7 @@ pub(super) async fn incoming(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<ControlListQuery>,
 ) -> Result<Response, ApiError> {
     let decision = authorize_global(
         &state,
@@ -226,7 +227,7 @@ pub(super) async fn list_course_members(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(course_id): Path<CourseId>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<ControlListQuery>,
 ) -> Result<Response, ApiError> {
     let decision = authorize_decision(
         &state,

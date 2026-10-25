@@ -1,6 +1,7 @@
-import type { EnvironmentDetailSchema, EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, SubmissionManifest } from '@/generated/contracts'
+import type { EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, SubmissionManifest } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
 import { environmentOperationStateLabel, environmentStateLabel } from '@/utils/stateLabels'
+import { makeDiagnostic } from '@/types/async'
 
 export type EnvironmentLifecycleAction = 'start' | 'stop' | 'restart' | 'delete'
 export type ConfirmedLifecycleAction = 'stop' | 'restart'
@@ -14,18 +15,18 @@ type OperationState = EnvironmentOperationSnapshotSchema['state']
 export const STOP_IMPACT_NOTICE = '提交停止不代表已停止计量：环境实际停止后，计算用量才停止计量；保留的工作目录和磁盘会继续计入存储用量，直到删除。GPU 容量是否保留取决于环境类型和项目资源配置，请以资源与费用记录为准。'
 export const STOPPED_IMPACT_NOTICE = '保留的工作目录和磁盘会继续计入存储用量，直到删除。GPU 容量是否保留取决于环境类型和项目资源配置，请以资源与费用记录为准。'
 
-export function isTerminalEnvironment(data: EnvironmentInstanceSchema): boolean {
+export function isTerminalEnvironment(data: EnvironmentDetailSchema): boolean {
   return data.observedState === 'deleting' || data.observedState === 'deleted'
 }
 
-export function failedCleanup(data: EnvironmentInstanceSchema): boolean {
+export function failedCleanup(data: EnvironmentDetailSchema): boolean {
   return data.desiredState === 'deleted'
     && data.observedState === 'failed'
     && data.operation.state === 'failed'
     && ['delete', 'expire', 'cleanup', 'cancel'].includes(data.operation.kind)
 }
 
-export function lifecycleConfirmationText(data: EnvironmentInstanceSchema, action: ConfirmedLifecycleAction): string {
+export function lifecycleConfirmationText(data: EnvironmentDetailSchema, action: ConfirmedLifecycleAction): string {
   const name = `“${data.displayLabel}”`
   const sessions = '会断开当前终端、桌面和 Web 访问会话，环境中正在运行的程序会结束，未保存到磁盘的内容会丢失。'
   if (action === 'restart') {
@@ -36,7 +37,7 @@ export function lifecycleConfirmationText(data: EnvironmentInstanceSchema, actio
   return `停止${name}${sessions}工作目录和磁盘会保留，之后可以重新启动。${STOP_IMPACT_NOTICE}确定停止吗？`
 }
 
-export function deleteDialogCopy(data: EnvironmentInstanceSchema | null) {
+export function deleteDialogCopy(data: EnvironmentDetailSchema | null) {
   const retry = Boolean(data && failedCleanup(data))
   return {
     title: retry ? '重试回收环境' : '删除环境',
@@ -64,7 +65,7 @@ export function canIssueAccessGrant(data: Pick<EnvironmentDetailSchema, 'desired
   return data.desiredState === 'running' && data.connection.instanceReady
 }
 
-export function accessGrantBlockReason(data: EnvironmentInstanceSchema): string {
+export function accessGrantBlockReason(data: EnvironmentDetailSchema): string {
   if (data.observedState === 'stopped') return '环境已停止，启动后才能签发访问授权。'
   if (data.observedState === 'failed') return '环境处于失败状态，重试成功并恢复就绪后才能签发访问授权。'
   if (isTerminalEnvironment(data)) return '环境正在删除或已删除，不能签发访问授权。'
@@ -92,7 +93,12 @@ export function operationStatusDescription(state: OperationState): string {
 
 export function operationTimelineDescription(op: EnvironmentOperationSnapshotSchema): string {
   const details = [operationStatusDescription(op.state), `第 ${op.attempt}/${op.maxAttempts} 次尝试`]
-  if (op.diagnosticCode) details.push(`诊断码：${op.diagnosticCode}。`)
+  if (op.diagnosticCode) {
+    // The Chinese reason, when the code has one, comes before the code itself.
+    const reason = makeDiagnostic(op.diagnosticCode, '').message
+    if (reason) details.push(reason)
+    details.push(`诊断码：${op.diagnosticCode}。`)
+  }
   if (op.cleanupStartedAt) details.push(`资源清理已于 ${formatTimestamp(op.cleanupStartedAt)} 开始。`)
   return details.join(' ')
 }

@@ -824,16 +824,6 @@ pub(super) async fn forward_resource(
     bounded_resource_response(&state.resource_proxy, response, operation_id).await
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProjectLeaseListQuery {
-    course_id: Option<contracts::CourseId>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmptyResourceListQuery {}
-
 #[allow(
     clippy::too_many_lines,
     reason = "resource authorization keeps every public path, body identity, and scope fence together"
@@ -847,6 +837,44 @@ async fn authorize_resource_request(
 ) -> Result<&'static str, ApiError> {
     let path = uri.path();
     let segments = path.split('/').collect::<Vec<_>>();
+    if *method == Method::GET
+        && matches!(
+            segments.as_slice(),
+            ["", "api", "v1", "resource-requests" | "resource-leases"]
+                | ["", "api", "v1", "resource", "rates" | "gpu-catalog"]
+                | [
+                    "",
+                    "api",
+                    "v1",
+                    "projects",
+                    _,
+                    "resource-leases" | "charges" | "usage"
+                ]
+                | [
+                    "",
+                    "api",
+                    "v1",
+                    "projects",
+                    _,
+                    "credits",
+                    "ledger" | "holds"
+                ]
+        )
+    {
+        let Query(query) = Query::<contracts::http::ResourceListQuery>::try_from_uri(uri)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+        query
+            .validate()
+            .map_err(|_| ApiError::bad_request("LW_RESOURCE_REQUEST_CURSOR_INVALID"))?;
+        if query.course_id.is_some()
+            && !matches!(
+                segments.as_slice(),
+                ["", "api", "v1", "projects", _, "resource-leases"]
+            )
+        {
+            return Err(ApiError::bad_request("LW_RESOURCE_REQUEST_CURSOR_INVALID"));
+        }
+    }
     match segments.as_slice() {
         ["", "api", "v1", "projects", project_id, "resource-requests"] => {
             let project_id = project_id
@@ -893,9 +921,6 @@ async fn authorize_resource_request(
             let project_id = project_id
                 .parse()
                 .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-            let Query(query) = Query::<ProjectLeaseListQuery>::try_from_uri(uri)
-                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-            let _ = query.course_id;
             authorize_resource_scope(
                 state,
                 session,
@@ -1164,11 +1189,6 @@ async fn authorize_resource_request(
             let project_id = project_id
                 .parse()
                 .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-            let Query(query) = Query::<contracts::http::PageQuery>::try_from_uri(uri)
-                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-            query
-                .normalized()
-                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
             authorize_resource_scope(
                 state,
                 session,
@@ -1229,8 +1249,6 @@ async fn authorize_resource_request(
             "/api/v1/resource-requests" | "/api/v1/resource-leases"
         )
     {
-        let Query(_query) = Query::<EmptyResourceListQuery>::try_from_uri(uri)
-            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
         let operation = if path.ends_with("leases") {
             "listResourceLeases"
         } else {
