@@ -3,6 +3,7 @@ import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import type { AuthSession, CsrfTokenResponseSchema, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
 import {
+  identityReadPending,
   identityReadsSettled,
   markSessionActorUnknown,
   recordSessionActor,
@@ -80,9 +81,11 @@ function sessionExpiredError(diagnostic: string): Error {
   return error
 }
 
-// A refused logout sends nothing to the BFF; the message is shown as is.
-const LOGOUT_ACTOR_CHANGED = '登录账号已在其他页面变化，本次退出没有执行，以免退出另一个账号。请核对页面上的账号后再操作。'
+// A refused logout sends nothing to the BFF; the message is shown as is and
+// names no account.
+const LOGOUT_ACTOR_CHANGED = '此浏览器的登录账号已变化，未执行退出。请刷新页面后再操作。'
 const LOGOUT_ACTOR_UNKNOWN = '暂时无法确认当前登录账号，本次退出没有执行。请稍后重试或刷新页面。'
+const LOGOUT_UNREACHABLE = '暂时无法连接登录服务，本次退出没有执行。请检查网络后重试。'
 
 /** A session read that does not answer in time leaves the identity unknown instead of holding writes. */
 export const SESSION_READ_TIMEOUT_MS = 15_000
@@ -150,6 +153,80 @@ function loadBffSession(): Promise<void> {
 // A CSRF or session rejection re-reads the actor before any further request is sent.
 if (API_AUTH_MODE === 'bff') registerSessionConfirmation(loadBffSession)
 
+/**
+ * Sign out the actor this page belongs to and return the provider logout URL.
+ * Earlier steps may wait, bounded: for an identity read in flight, then for a
+ * fresh CSRF token (which the BFF issues even when the session read fails).
+ * The last step before the POST is one synchronous check: the same epoch and
+ * actor as at the click, the token issued to that actor, no identity read in
+ * flight and, for the normal logout, no doubt about the session. Any refusal
+ * sends nothing.
+ */
+async function signOutInitiatingActor(requireConfirmedSession: boolean): Promise<string> {
+  const initiatingActor = sessionActor()
+  const initiatingEpoch = sessionEpoch.value
+  try {
+    await identityReadsSettled({ timeoutMs: SESSION_READ_TIMEOUT_MS })
+  } catch {
+    throw new Error(LOGOUT_ACTOR_UNKNOWN)
+  }
+  if (sessionEpoch.value !== initiatingEpoch || sessionActor() !== initiatingActor) throw new Error(LOGOUT_ACTOR_CHANGED)
+  if (!initiatingActor || (requireConfirmedSession && sessionActorInDoubt.value)) throw new Error(LOGOUT_ACTOR_UNKNOWN)
+
+  const csrfResponse = await fetch('/api/v1/auth/csrf', {
+    credentials: 'include',
+    headers: { Accept: 'application/json, application/problem+json' },
+  }).catch((failure: unknown) => {
+    const unreachable = new Error(LOGOUT_UNREACHABLE)
+    Object.defineProperty(unreachable, 'cause', { value: failure, enumerable: false })
+    throw unreachable
+  })
+  if (csrfResponse.status === 401) {
+    // The session has already ended: there is nothing to sign out.
+    confirmSignedOut()
+    resolveSessionActorDoubt()
+    throw sessionExpiredError(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
+  }
+  if (!csrfResponse.ok) {
+    const unreachable = new Error(LOGOUT_UNREACHABLE)
+    Object.defineProperty(unreachable, 'cause', { value: `BFF CSRF lookup failed with HTTP ${csrfResponse.status}`, enumerable: false })
+    throw unreachable
+  }
+  const csrf = await csrfResponse.json() as Partial<Record<keyof CsrfTokenResponseSchema, unknown>>
+  if (typeof csrf.csrfToken !== 'string' || !csrf.csrfToken) throw new Error('BFF returned an invalid CSRF token')
+
+  // The final check, synchronous, with nothing awaited before the POST starts.
+  if (sessionEpoch.value !== initiatingEpoch || sessionActor() !== initiatingActor) throw new Error(LOGOUT_ACTOR_CHANGED)
+  if (csrf.actorId !== initiatingActor) {
+    // The cookie changed hands: read the actor again before anything else is sent.
+    reportSessionRejected()
+    throw new Error(LOGOUT_ACTOR_CHANGED)
+  }
+  if (identityReadPending() || (requireConfirmedSession && sessionActorInDoubt.value)) throw new Error(LOGOUT_ACTOR_UNKNOWN)
+  const response = await fetch('/auth/logout', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json, application/problem+json',
+      'X-CSRF-Token': csrf.csrfToken,
+    },
+  })
+
+  if (response.status === 401) {
+    confirmSignedOut()
+    resolveSessionActorDoubt()
+    throw sessionExpiredError(`BFF logout failed with HTTP ${response.status}`)
+  }
+  if (!response.ok) throw new Error(`BFF logout failed with HTTP ${response.status}`)
+  const logout = await response.json() as LogoutBrowserSessionResponse
+  if (typeof logout.logoutUrl !== 'string' || !logout.logoutUrl) {
+    throw new Error('BFF returned an invalid provider logout URL')
+  }
+  confirmSignedOut()
+  resolveSessionActorDoubt()
+  return logout.logoutUrl
+}
+
 /** Returns the current non-expired OIDC bearer for bearer-mode deployments. */
 export async function getOidcAccessToken(): Promise<string | undefined> {
   if (!userManager) return undefined
@@ -198,59 +275,13 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
     }
   }
 
-  async function logout() {
+  async function runLogout(requireConfirmedSession: boolean) {
     if (isLoading.value) return
     isLoading.value = true
     error.value = null
     try {
       if (API_AUTH_MODE === 'bff') {
-        // Sign out only the actor this page belongs to: wait (bounded) for an
-        // identity read in flight, then require the same actor and epoch.
-        const initiatingActor = sessionActor()
-        const initiatingEpoch = sessionEpoch.value
-        try {
-          await identityReadsSettled({ timeoutMs: SESSION_READ_TIMEOUT_MS })
-        } catch {
-          throw new Error(LOGOUT_ACTOR_UNKNOWN)
-        }
-        if (sessionEpoch.value !== initiatingEpoch || sessionActor() !== initiatingActor) throw new Error(LOGOUT_ACTOR_CHANGED)
-        if (!initiatingActor || sessionActorInDoubt.value) throw new Error(LOGOUT_ACTOR_UNKNOWN)
-        const csrfResponse = await fetch('/api/v1/auth/csrf', {
-          credentials: 'include',
-          headers: { Accept: 'application/json, application/problem+json' },
-        })
-        if (csrfResponse.status === 401) {
-          confirmSignedOut()
-          throw sessionExpiredError(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
-        }
-        if (!csrfResponse.ok) throw new Error(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
-        const csrf = await csrfResponse.json() as Partial<Record<keyof CsrfTokenResponseSchema, unknown>>
-        if (typeof csrf.csrfToken !== 'string' || !csrf.csrfToken) throw new Error('BFF returned an invalid CSRF token')
-        // The token must be issued to the actor that started the logout; any
-        // other actor means the cookie changed hands: read the actor again.
-        if (csrf.actorId !== initiatingActor) {
-          reportSessionRejected()
-          throw new Error(LOGOUT_ACTOR_CHANGED)
-        }
-        const response = await fetch('/auth/logout', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            Accept: 'application/json, application/problem+json',
-            'X-CSRF-Token': csrf.csrfToken,
-          },
-        })
-        if (response.status === 401) {
-          confirmSignedOut()
-          throw sessionExpiredError(`BFF logout failed with HTTP ${response.status}`)
-        }
-        if (!response.ok) throw new Error(`BFF logout failed with HTTP ${response.status}`)
-        const logout = await response.json() as LogoutBrowserSessionResponse
-        if (typeof logout.logoutUrl !== 'string' || !logout.logoutUrl) {
-          throw new Error('BFF returned an invalid provider logout URL')
-        }
-        confirmSignedOut()
-        navigate(logout.logoutUrl)
+        navigate(await signOutInitiatingActor(requireConfirmedSession))
       } else if (userManager) {
         await userManager.signoutRedirect()
         confirmSignedOut()
@@ -286,11 +317,21 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
     isLoading,
     /** The identity read that follows a server rejection is still in flight. */
     isConfirming: sessionActorConfirming,
+    /** Who holds the session is unknown: a read failed or a rejection is unanswered. */
+    identityUnknown: computed(() => sessionActorInDoubt.value),
     error,
     isAuthenticated,
     login,
-    logout,
+    /** Sign out the confirmed actor this page belongs to. */
+    logout: () => runLogout(true),
+    /**
+     * Recovery while the identity is unknown: sign out the actor this page
+     * belongs to without a confirmed session read; the fresh CSRF token must
+     * still be issued to that actor, or nothing is sent.
+     */
+    endBrowserSession: () => runLogout(false),
     handleCallback,
+    /** Read the session again; read-only, it never replays a write. */
     loadUser,
   }
 }

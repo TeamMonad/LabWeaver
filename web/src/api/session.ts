@@ -103,6 +103,11 @@ export function trackIdentityRead(read: Promise<unknown>): void {
   read.then(settled, settled)
 }
 
+/** Whether an identity read is in flight right now (the final write check refuses then). */
+export function identityReadPending(): boolean {
+  return identityRead !== null
+}
+
 /** Why waiting for the identity read ended before it settled. */
 export class IdentityWaitInterrupted extends Error {
   constructor(readonly reason: 'timeout' | 'cancelled') {

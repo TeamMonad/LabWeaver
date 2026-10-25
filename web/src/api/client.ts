@@ -8,6 +8,7 @@ import type { ServerSentEventsOptions, ServerSentEventsResult } from '@/generate
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
 import {
   IdentityWaitInterrupted,
+  identityReadPending,
   identityReadsSettled,
   reportSessionRejected,
   sessionActor,
@@ -165,13 +166,21 @@ export function decodeProblemDetails(error: unknown): ProblemDetails | undefined
   return isProblemDetails(error.response?.data) ? error.response.data : undefined
 }
 
+/** A write refused because the actor is unknown; nothing was sent. */
+function identityUnconfirmed(): LabWeaverApiError {
+  const refused = new LabWeaverApiError('LW_SDK_IDENTITY_UNCONFIRMED', 'The signed-in actor could not be confirmed; the write was not sent.')
+  // The generated SDK hands `response.data` back as `result.error`: give
+  // callers the code (and its Chinese reason) instead of an empty object.
+  Object.assign(refused, { response: { data: { diagnosticCode: refused.diagnosticCode, detail: refused.message, retryable: false } } })
+  return refused
+}
+
 /**
- * Hold a write until no identity read is in flight, within the write's own
- * timeout and cancellation, then refuse it while the actor is unknown. If the
- * read found another actor, the epoch has moved and the caller refuses the
- * write as the previous actor's. Nothing is sent in any refusal.
+ * Wait, within the write's own timeout and cancellation, until no identity
+ * read is in flight. Only a head start: the final check before dispatch
+ * decides, so a read that starts after this wait still stops the write.
  */
-async function confirmIdentityBeforeWrite(config: { timeout?: number; signal?: unknown }): Promise<void> {
+async function waitForIdentityRead(config: { timeout?: number; signal?: unknown }): Promise<void> {
   try {
     await identityReadsSettled({ signal: config.signal as AbortSignal | undefined, timeoutMs: config.timeout })
   } catch (error) {
@@ -180,12 +189,26 @@ async function confirmIdentityBeforeWrite(config: { timeout?: number; signal?: u
       ? new LabWeaverApiError('LW_SDK_REQUEST_TIMEOUT', 'The API request timed out while the signed-in actor was being confirmed.')
       : new LabWeaverApiError('LW_SDK_REQUEST_CANCELLED', 'The API request was cancelled while the signed-in actor was being confirmed.')
   }
-  if (sessionActorInDoubt.value) {
-    const refused = new LabWeaverApiError('LW_SDK_IDENTITY_UNCONFIRMED', 'The signed-in actor could not be confirmed; the write was not sent.')
-    // The generated SDK hands `response.data` back as `result.error`: give
-    // callers the code (and its Chinese reason) instead of an empty object.
-    Object.assign(refused, { response: { data: { diagnosticCode: refused.diagnosticCode, detail: refused.message, retryable: false } } })
-    throw refused
+}
+
+/**
+ * The one authoritative check of a write, run synchronously as the last thing
+ * before the real adapter: still the epoch the write started in (otherwise it
+ * belongs to the previous actor), no identity read in flight, the actor not in
+ * doubt, and its CSRF token issued to the confirmed actor. Nothing is awaited
+ * between this check and the dispatch. A refusal sends nothing and is not
+ * retried; the caller keeps its pending command for the user to resubmit.
+ */
+function assertWriteStillAuthorized(initiatingEpoch: number, csrfActor: string): void {
+  if (sessionEpoch.value !== initiatingEpoch) throw sessionChanged()
+  if (identityReadPending() || sessionActorInDoubt.value) throw identityUnconfirmed()
+  const confirmedActor = sessionActor()
+  if (confirmedActor === undefined) throw identityUnconfirmed()
+  // The BFF accepts a token only with the session that issued it; a token of
+  // another actor means the cookie changed hands: read the actor again.
+  if (csrfActor !== confirmedActor) {
+    reportSessionRejected()
+    throw sessionChanged()
   }
 }
 
@@ -196,8 +219,8 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
       : undefined
 
   instance.interceptors.request.use(async (config) => {
-    requestEpochs.set(config, sessionEpoch.value)
-    const actor = sessionActor()
+    const initiatingEpoch = sessionEpoch.value
+    requestEpochs.set(config, initiatingEpoch)
     if (authentication.mode === 'bearer') {
       const token = await authentication.accessToken()
       if (!token) {
@@ -206,22 +229,19 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
         config.headers.Authorization = `Bearer ${token}`
       }
     } else if (isUnsafeMethod(config.method)) {
-      // If the identity read found another actor, the epoch has moved and the
-      // write is refused below without being sent: it belonged to the previous actor.
-      await confirmIdentityBeforeWrite(config)
+      // Earlier steps may wait: for an identity read in flight, then for the token.
+      await waitForIdentityRead(config)
+      if (sessionActorInDoubt.value) throw identityUnconfirmed()
       const csrf = await csrfToken?.()
       if (!csrf) {
         throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
       }
-      // The BFF accepts a token only with the session that issued it, so a
-      // write carrying a token of its own actor can never be accepted for
-      // another one, whenever it is dispatched. A token of another actor means
-      // the cookie changed hands: this write belongs to the previous actor.
-      if (actor !== undefined && csrf.actorId !== actor) {
-        reportSessionRejected()
-        throw sessionChanged()
-      }
       config.headers['X-CSRF-Token'] = csrf.token
+      const realAdapter = axios.getAdapter(config.adapter ?? axios.defaults.adapter)
+      config.adapter = (dispatched) => {
+        assertWriteStillAuthorized(initiatingEpoch, csrf.actorId)
+        return realAdapter(dispatched)
+      }
     }
     // Reading the bearer of another actor advances the epoch.
     if (startedInEarlierSession(config)) throw sessionChanged()

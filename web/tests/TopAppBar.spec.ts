@@ -16,8 +16,10 @@ const authState = vi.hoisted(() => ({
   isLoading: { value: false },
   error: { value: null as Error | null },
   isAuthenticated: { value: false },
+  identityUnknown: { value: false },
   login: vi.fn(),
   logout: vi.fn(),
+  endBrowserSession: vi.fn(),
 }))
 
 const projectsState = vi.hoisted(() => ({
@@ -67,6 +69,9 @@ describe('TopAppBar', () => {
     authState.isLoading.value = false
     authState.error.value = null
     authState.isAuthenticated.value = false
+    authState.identityUnknown.value = false
+    authState.logout.mockReset()
+    authState.endBrowserSession.mockReset()
     projectsState.selectedProjectId = null
     vi.mocked(getNotificationUnreadCount).mockReset().mockResolvedValue({ data: { unreadCount: 0 }, error: undefined } as never)
   })
@@ -76,6 +81,18 @@ describe('TopAppBar', () => {
     expect(wrapper.text()).toContain('未认证')
     expect(wrapper.text()).toContain('登录')
     expect(wrapper.find('.shell-button').exists()).toBe(false)
+  })
+
+  it('keeps the logout entry while the identity is unknown and ends the session through the actor-bound path', async () => {
+    authState.identityUnknown.value = true
+    const wrapper = await createWrapper()
+
+    expect(wrapper.text()).toContain('账号未确认')
+    const logout = wrapper.get('[data-testid="identity-unknown-logout"]')
+    expect(logout.attributes('aria-label')).toBe('退出')
+    await logout.trigger('click')
+    expect(authState.endBrowserSession).toHaveBeenCalledOnce()
+    expect(authState.logout).not.toHaveBeenCalled()
   })
 
   it('opens the shared Work console for a teacher', async () => {

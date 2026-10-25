@@ -178,7 +178,7 @@ describe('BFF browser session', () => {
 
     expect(fetch.mock.calls.map(([url]) => url)).not.toContain('/auth/logout')
     expect(navigate).not.toHaveBeenCalled()
-    expect(auth.error.value?.message).toBe('登录账号已在其他页面变化，本次退出没有执行，以免退出另一个账号。请核对页面上的账号后再操作。')
+    expect(auth.error.value?.message).toBe('此浏览器的登录账号已变化，未执行退出。请刷新页面后再操作。')
   })
 })
 
@@ -316,7 +316,7 @@ describe('BFF session epoch (#198)', () => {
     expect(urls).not.toContain('/auth/logout')
     expect(session.sessionActor()).toBe(actorB)
     expect(navigate).not.toHaveBeenCalled()
-    expect(auth.error.value?.message).toBe('登录账号已在其他页面变化，本次退出没有执行，以免退出另一个账号。请核对页面上的账号后再操作。')
+    expect(auth.error.value?.message).toBe('此浏览器的登录账号已变化，未执行退出。请刷新页面后再操作。')
   })
 
   it('ends a hung session read after its timeout and refuses the waiting write unsent, keeping the actor\'s commands', async () => {
@@ -358,5 +358,100 @@ describe('BFF session epoch (#198)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  /**
+   * Answers fetches by URL: each session read takes the next queued answer,
+   * the CSRF lookup returns `csrf`, and every POST is recorded.
+   */
+  function routedFetch(sessionReads: Array<() => Promise<Response>>, csrf: () => Promise<Response>) {
+    const posts: string[] = []
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push(url)
+        return new Response(JSON.stringify({ logoutUrl: 'https://identity.example.test/logout' }), { status: 200 })
+      }
+      if (url === '/api/v1/auth/csrf') return csrf()
+      const next = sessionReads.shift()
+      if (!next) throw new TypeError('Failed to fetch')
+      return next()
+    })
+    vi.stubGlobal('fetch', fetch)
+    return { fetch, posts }
+  }
+
+  const csrfOf = (actorId: string) => new Response(JSON.stringify({ csrfToken: `token-of-${actorId}`, actorId }), { status: 200 })
+  const failedRead = async (): Promise<Response> => { throw new TypeError('Failed to fetch') }
+
+  it('(c) sends no logout when the actor goes A→B→A while the logout waits for its CSRF token', async () => {
+    let answerCsrf!: (response: Response) => void
+    const { posts } = routedFetch(
+      [async () => sessionOf(actorA), async () => sessionOf(actorB), async () => sessionOf(actorA)],
+      () => new Promise<Response>((resolve) => { answerCsrf = resolve }),
+    )
+    const navigate = vi.fn()
+    const { useAuth } = await import('@/composables/useAuth')
+    const auth = useAuth(navigate)
+    await auth.loadUser()
+
+    const logout = auth.logout()
+    await vi.waitFor(() => expect(answerCsrf).toBeTypeOf('function'))
+    // Another tab signs in as B, then as A again: same actor, different session.
+    await auth.loadUser()
+    await auth.loadUser()
+    answerCsrf(csrfOf(actorA))
+    await logout
+
+    expect(posts).toEqual([])
+    expect(navigate).not.toHaveBeenCalled()
+    expect(auth.error.value?.message).toBe('此浏览器的登录账号已变化，未执行退出。请刷新页面后再操作。')
+  })
+
+  describe('ending the browser session while the identity is unknown', () => {
+    /** Actor A was confirmed, then the session read failed: the identity is unknown. */
+    async function unknownIdentity(csrf: () => Promise<Response>) {
+      const routed = routedFetch([async () => sessionOf(actorA), failedRead], csrf)
+      const navigate = vi.fn()
+      const { useAuth } = await import('@/composables/useAuth')
+      const auth = useAuth(navigate)
+      await auth.loadUser()
+      await auth.loadUser()
+      expect(auth.identityUnknown.value).toBe(true)
+      // The normal logout refuses while the identity is unknown.
+      await auth.logout()
+      expect(routed.posts).toEqual([])
+      return { ...routed, auth, navigate }
+    }
+
+    it('signs out when the fresh CSRF token belongs to the actor this page belongs to', async () => {
+      const { auth, posts, navigate } = await unknownIdentity(async () => csrfOf(actorA))
+
+      await auth.endBrowserSession()
+
+      expect(posts).toEqual(['/auth/logout'])
+      expect(navigate).toHaveBeenCalledWith('https://identity.example.test/logout')
+      expect(auth.identityUnknown.value).toBe(false)
+      expect(auth.error.value).toBeNull()
+    })
+
+    it('sends nothing when the fresh CSRF token belongs to another actor', async () => {
+      const { auth, posts, navigate } = await unknownIdentity(async () => csrfOf(actorB))
+
+      await auth.endBrowserSession()
+
+      expect(posts).toEqual([])
+      expect(navigate).not.toHaveBeenCalled()
+      expect(auth.error.value?.message).toBe('此浏览器的登录账号已变化，未执行退出。请刷新页面后再操作。')
+    })
+
+    it('sends nothing when the CSRF lookup fails too', async () => {
+      const { auth, posts, navigate } = await unknownIdentity(async () => { throw new TypeError('Failed to fetch') })
+
+      await auth.endBrowserSession()
+
+      expect(posts).toEqual([])
+      expect(navigate).not.toHaveBeenCalled()
+      expect(auth.error.value?.message).toBe('暂时无法连接登录服务，本次退出没有执行。请检查网络后重试。')
+    })
   })
 })

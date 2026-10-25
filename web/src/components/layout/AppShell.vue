@@ -26,13 +26,34 @@
         <span>正在确认项目…</span>
       </div>
       <section
+        v-else-if="context.state.value.kind === 'signed-out' && auth.identityUnknown.value"
+        class="project-context-error"
+        aria-labelledby="project-context-identity-unknown-title"
+        data-testid="project-context-identity-unknown"
+      >
+        <h1 id="project-context-identity-unknown-title">无法确认当前登录账号</h1>
+        <p>平台暂时读不到当前的登录账号。为避免显示或操作其他账号的数据，本页暂不打开，写操作也不会发出。平台不会自动重试；未确认的提交会保留，确认账号后可以手动重新提交。</p>
+        <div class="project-context-actions">
+          <button type="button" class="filled-button" data-testid="identity-recheck" @click="recheckIdentity">
+            <SvgIcon name="refresh" size="sm" aria-hidden="true" />
+            <span>重新确认账号</span>
+          </button>
+          <button type="button" class="outlined-button" data-testid="identity-end-session" @click="endBrowserSession">
+            <SvgIcon name="logout" size="sm" aria-hidden="true" />
+            <span>结束此浏览器的登录会话</span>
+          </button>
+        </div>
+        <p class="project-context-note">“结束此浏览器的登录会话”只退出本页所属的账号；如果此浏览器已登录为其他账号，不会执行退出。也可以刷新页面重新确认账号。</p>
+        <p v-if="recoveryMessage" class="project-context-feedback" role="alert" data-testid="identity-recovery-message">{{ recoveryMessage }}</p>
+      </section>
+      <section
         v-else-if="context.state.value.kind === 'signed-out'"
         class="project-context-error"
         aria-labelledby="project-context-signed-out-title"
         data-testid="project-context-signed-out"
       >
         <h1 id="project-context-signed-out-title">需要重新登录</h1>
-        <p>登录已失效，或暂时无法确认当前登录账号。为避免显示或操作其他账号的数据，本页暂不打开。</p>
+        <p>登录已失效。为避免显示或操作其他账号的数据，本页暂不打开。</p>
         <div>
           <button type="button" class="filled-button" @click="auth.login()">
             <SvgIcon name="login" size="sm" aria-hidden="true" />
@@ -92,6 +113,21 @@ const viewKey = computed(() => {
   const state = context.state.value
   return `${sessionEpoch.value}:${state.kind === 'ready' ? `project:${state.project.id}` : 'global'}`
 })
+
+// Feedback of the recovery controls while the identity is unknown; nothing is retried on its own.
+const recoveryMessage = ref('')
+
+async function recheckIdentity() {
+  recoveryMessage.value = ''
+  await auth.loadUser()
+  if (auth.identityUnknown.value) recoveryMessage.value = '仍然无法确认当前登录账号。请稍后再点“重新确认账号”，或刷新页面。'
+}
+
+async function endBrowserSession() {
+  recoveryMessage.value = ''
+  await auth.endBrowserSession()
+  if (auth.error.value) recoveryMessage.value = auth.error.value.message
+}
 
 function handleToggleDrawer() {
   if (typeof window !== 'undefined' && window.innerWidth >= 840) {
@@ -172,6 +208,16 @@ onMounted(() => {
   margin: 0;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-medium);
+}
+
+.project-context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.project-context-error .project-context-feedback {
+  color: var(--md-sys-color-error);
 }
 
 .spinner {

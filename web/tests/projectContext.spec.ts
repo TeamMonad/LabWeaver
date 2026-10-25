@@ -207,12 +207,12 @@ describe('AppShell project context', () => {
     expect(auth.isAuthenticated.value).toBe(false)
     // The list read for that actor is still cached, yet the page and its controls are gone.
     expect(wrapper.find('.scoped-page').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="project-context-signed-out"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="project-context-identity-unknown"]').exists()).toBe(true)
 
     // The same actor is confirmed again: the page opens again, freshly created.
     await auth.loadUser()
     await flushPromises()
-    expect(wrapper.find('[data-testid="project-context-signed-out"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="project-context-identity-unknown"]').exists()).toBe(false)
     expect(wrapper.find('.scoped-page').exists()).toBe(true)
     expect(mounts).toBe(2)
   })
@@ -281,9 +281,47 @@ describe('AppShell project context', () => {
 
       expect(auth.isAuthenticated.value).toBe(false)
       expect(wrapper.find('.scoped-page').exists()).toBe(false)
-      expect(wrapper.find('[data-testid="project-context-signed-out"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="project-context-identity-unknown"]').exists()).toBe(true)
       expect(sessionEpoch.value).toBe(epoch)
       expect(commands.readPendingCommand(actorA, scope)).toEqual(command)
+    })
+
+    it('offers a read-only recheck and an actor-bound session end while the session read keeps failing', async () => {
+      const { wrapper, fetch, session, commands } = await openPage()
+      const posts: string[] = []
+      let sessionReads = 0
+      fetch.mockImplementation((async (url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          posts.push(url)
+          return new Response(JSON.stringify({ logoutUrl: 'https://identity.example.test/logout' }), { status: 200 })
+        }
+        if (url === '/api/v1/auth/csrf') return new Response(JSON.stringify({ csrfToken: 'token-of-a', actorId: actorA }), { status: 200 })
+        sessionReads += 1
+        throw new TypeError('Failed to fetch')
+      }) as never)
+
+      session.reportSessionRejected()
+      await flushPromises()
+      const banner = wrapper.get('[data-testid="project-context-identity-unknown"]')
+      expect(banner.text()).toContain('平台不会自动重试')
+      expect(sessionReads).toBe(1)
+
+      // Re-checking only reads the session again; it never replays a write.
+      await banner.get('[data-testid="identity-recheck"]').trigger('click')
+      await flushPromises()
+      expect(sessionReads).toBe(2)
+      expect(posts).toEqual([])
+      expect(wrapper.get('[data-testid="identity-recovery-message"]').text()).toContain('仍然无法确认当前登录账号')
+      expect(commands.readPendingCommand(actorA, scope)).toEqual(command)
+      // Nothing is retried on its own.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(sessionReads).toBe(2)
+
+      // Ending the session takes a fresh CSRF token of this page's actor and posts the logout.
+      await wrapper.get('[data-testid="identity-end-session"]').trigger('click')
+      await flushPromises()
+      expect(posts).toEqual(['/auth/logout'])
+      expect(navigateTopLevel).toHaveBeenCalledWith('https://identity.example.test/logout')
     })
 
     it('reopens the page when the same actor is confirmed and keeps that actor\'s commands', async () => {
