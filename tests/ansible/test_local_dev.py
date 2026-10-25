@@ -1780,6 +1780,9 @@ class LocalDevBundleTests(unittest.TestCase):
             and "containers/Containerfile.ansible-probe" in command
         )
         self.assertEqual(build[build.index("--target") + 1], "evaluation-runtime")
+        probe_lock = yaml.safe_load((ROOT / "deploy" / "versions.lock.yml").read_text())["ansible_probe"]
+        self.assertIn(f"ANSIBLE_CORE_VERSION={probe_lock['ansible_core']}", build)
+        self.assertIn(f"ANSIBLE_POSIX_VERSION={probe_lock['ansible_posix']}", build)
 
     def test_work_runtime_fixture_build_uses_seed_runtime_target(self) -> None:
         captured: list[list[str]] = []

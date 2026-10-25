@@ -1893,6 +1893,26 @@ def _sandbox_runtime_lock() -> dict[str, str]:
     return resolved
 
 
+def _ansible_probe_build_args() -> list[str]:
+    """Return the locked ansible-core/ansible.posix build args for the probe image.
+
+    ``containers/Containerfile.ansible-probe`` refuses to build without them; CI reads the
+    same ``ansible_probe`` block of ``deploy/versions.lock.yml``.
+    """
+
+    lock = load_yaml(ROOT / "deploy" / "versions.lock.yml")
+    probe = lock.get("ansible_probe") if isinstance(lock, dict) else None
+    if not isinstance(probe, dict):
+        fail("versions lock has no ansible_probe block")
+    args: list[str] = []
+    for key, name in (("ansible_core", "ANSIBLE_CORE_VERSION"), ("ansible_posix", "ANSIBLE_POSIX_VERSION")):
+        value = probe.get(key)
+        if not isinstance(value, str) or not value.strip():
+            fail(f"versions lock ansible_probe.{key} is missing or empty")
+        args += ["--build-arg", f"{name}={value.strip()}"]
+    return args
+
+
 def _sha512_digest(path: Path, label: str) -> str:
     digest = hashlib.sha512()
     try:
@@ -3040,7 +3060,7 @@ def build_images(*, external_fixtures: bool) -> dict[str, str]:
         images[key] = f"{root}/{service}{match.group(0)}"
     evaluation_runner_tag = f"{root}/evaluation-runner:{commit}"
     run(["docker", "buildx", "build", "--load", "--target", "evaluation-runtime",
-         "--build-arg", f"SOURCE_COMMIT={commit}",
+         "--build-arg", f"SOURCE_COMMIT={commit}", *_ansible_probe_build_args(),
          "--build-arg", f"SOURCE_DATE_EPOCH={epoch}",
          "--tag", evaluation_runner_tag, "--file", "containers/Containerfile.ansible-probe", "."])
     run(["docker", "push", evaluation_runner_tag])
