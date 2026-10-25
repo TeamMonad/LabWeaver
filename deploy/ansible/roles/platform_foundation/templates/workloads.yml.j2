@@ -1,3 +1,4 @@
+{% if platform_foundation_ha | default({}) | length == 0 %}
 ---
 apiVersion: v1
 kind: Service
@@ -77,6 +78,7 @@ spec:
         accessModes: [ReadWriteOnce]
         storageClassName: {{ platform_foundation_storage_class }}
         resources: {requests: {storage: {{ platform_foundation_postgres_storage }}}}
+{% endif %}
 ---
 apiVersion: v1
 kind: Service
@@ -86,10 +88,16 @@ metadata:
   labels: {app.kubernetes.io/name: nats, app.kubernetes.io/part-of: labweaver-infrastructure}
 spec:
   clusterIP: None
+{% if platform_foundation_ha | default({}) | length > 0 %}
+  publishNotReadyAddresses: true
+{% endif %}
   selector: {app.kubernetes.io/name: nats}
   ports:
     - {name: client, port: 4222, targetPort: client}
     - {name: monitor, port: 8222, targetPort: monitor}
+{% if platform_foundation_ha | default({}) | length > 0 %}
+    - {name: cluster, port: 6222, targetPort: cluster}
+{% endif %}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -98,7 +106,8 @@ metadata:
   namespace: {{ platform_foundation_namespace }}
 spec:
   serviceName: nats
-  replicas: 1
+  replicas: {{ 3 if platform_foundation_ha | default({}) | length > 0 else 1 }}
+  podManagementPolicy: {{ 'Parallel' if platform_foundation_ha | default({}) | length > 0 else 'OrderedReady' }}
   selector: {matchLabels: {app.kubernetes.io/name: nats}}
   template:
     metadata:
@@ -107,6 +116,13 @@ spec:
         labweaver.io/configuration-sha256: {{ platform_foundation_workload_configuration_sha256.nats }}
     spec:
       automountServiceAccountToken: false
+{% if platform_foundation_ha | default({}) | length > 0 %}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {app.kubernetes.io/name: nats}}
+              topologyKey: kubernetes.io/hostname
+{% endif %}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -117,9 +133,13 @@ spec:
         - name: nats
           image: {{ platform_foundation_lock.platform_foundation.nats }}
           args: [-c, /etc/nats/nats-server.conf]
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
           ports:
             - {name: client, containerPort: 4222}
             - {name: monitor, containerPort: 8222}
+            - {name: cluster, containerPort: 6222}
           readinessProbe:
             httpGet: {path: /healthz, port: monitor}
             periodSeconds: 5
@@ -142,8 +162,8 @@ spec:
     - metadata: {name: data}
       spec:
         accessModes: [ReadWriteOnce]
-        storageClassName: {{ platform_foundation_storage_class }}
-        resources: {requests: {storage: {{ platform_foundation_nats_storage }}}}
+        storageClassName: {{ 'ceph-rbd' if platform_foundation_ha | default({}) | length > 0 else platform_foundation_storage_class }}
+        resources: {requests: {storage: {{ platform_foundation_ha.natsStorage | default('20Gi') if platform_foundation_ha | default({}) | length > 0 else platform_foundation_nats_storage }}}}
 ---
 apiVersion: v1
 kind: Service

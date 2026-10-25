@@ -51,3 +51,7 @@ platform_foundation_nats_storage: 10Gi
 platform_foundation_minio_storage: 100Gi
 platform_foundation_rollout_retries: 60
 platform_foundation_rollout_delay: 5
+platform_foundation_ha: {}
+platform_foundation_application_namespace: labweaver-system
+platform_foundation_postgres_pod: postgres-0
+platform_foundation_resource_namespace: labweaver-system

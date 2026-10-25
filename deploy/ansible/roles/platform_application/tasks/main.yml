@@ -1113,6 +1113,8 @@
       - "{{ item.item.subjects | join(',') }}"
       - --storage
       - file
+      - --replicas
+      - "{{ 3 if platform_foundation_ha | default({}) | length > 0 else 1 }}"
       - --retention
       - limits
       - --max-age
@@ -1122,6 +1124,33 @@
       - --defaults
   loop: "{{ platform_application_stream_info_before.results }}"
   when: item.rc != 0
+  changed_when: true
+
+- name: Reconcile existing streams to the HA replication factor
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_nats }}"
+      - --server
+      - "{{ platform_application_nats_probe_server }}"
+      - --creds
+      - "{{ platform_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ platform_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ platform_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ platform_application_nats_client_private_key_file }}"
+      - stream
+      - edit
+      - "{{ item.item.name }}"
+      - --replicas
+      - "3"
+      - --force
+  loop: "{{ platform_application_stream_info_before.results }}"
+  when:
+    - platform_foundation_ha | default({}) | length > 0
+    - item.rc == 0
+    - (item.stdout | from_json).config.num_replicas | int != 3
   changed_when: true
 
 - name: Expand only the explicitly retained Environment lifecycle stream
@@ -1191,6 +1220,7 @@
       - (item.stdout | from_json).config.storage == 'file'
       - (item.stdout | from_json).config.retention == 'limits'
       - (item.stdout | from_json).config.discard == 'old'
+      - (item.stdout | from_json).config.num_replicas | int == (3 if platform_foundation_ha | default({}) | length > 0 else 1)
     fail_msg: PLATFORM_APPLICATION_STREAM_CONFLICT
   loop: "{{ platform_application_stream_info_after.results }}"
   when: item.rc == 0

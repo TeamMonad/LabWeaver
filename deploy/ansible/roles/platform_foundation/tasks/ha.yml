@@ -1,0 +1,167 @@
+---
+- name: Derive HA resources from the decrypted Bundle inventory
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ role_path }}/../../../../tools/ha_foundation.py"
+    stdin: >-
+      {{ {'configuration': platform_foundation_ha,
+          'lock': platform_foundation_lock,
+          'foundation': platform_foundation_objects,
+          'applicationNamespace': platform_foundation_application_namespace,
+          'resourceNamespace': platform_foundation_resource_namespace,
+          'databaseName': platform_foundation_postgres_database,
+          'adminRole': platform_foundation_postgres_admin_role} | to_json }}
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  register: platform_foundation_ha_render
+  no_log: true
+
+- name: Retain the single derived HA projection
+  ansible.builtin.set_fact:
+    platform_foundation_ha_projection: "{{ platform_foundation_ha_render.stdout | from_json }}"
+  no_log: true
+
+
+- name: Require three distinct Ready storage hosts
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: v1
+    kind: Node
+    name: "{{ item.name }}"
+  loop: "{{ platform_foundation_ha.nodes }}"
+  register: platform_foundation_ha_nodes
+
+- name: Reject unavailable or incorrectly labelled storage hosts
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 1
+      - item.resources[0].metadata.labels['kubernetes.io/hostname'] == item.item.name
+      - >-
+        item.resources[0].status.conditions
+        | selectattr('type', 'equalto', 'Ready')
+        | selectattr('status', 'equalto', 'True') | list | length == 1
+    fail_msg: PLATFORM_FOUNDATION_HA_REQUIRES_THREE_READY_HOSTS
+  loop: "{{ platform_foundation_ha_nodes.results }}"
+
+- name: Reject in-place conversion of a standalone database
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: "{{ platform_foundation_namespace }}"
+    name: postgres
+  register: platform_foundation_ha_standalone
+
+- name: Require the reviewed data cutover before enabling HA
+  ansible.builtin.assert:
+    that: platform_foundation_ha_standalone.resources | length == 0
+    fail_msg: PLATFORM_FOUNDATION_HA_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION
+
+- name: Read the existing NATS immutable scheduling policy
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: "{{ platform_foundation_namespace }}"
+    name: nats
+  register: platform_foundation_ha_nats
+
+- name: Require a reviewed StatefulSet cutover while retaining NATS PVCs
+  ansible.builtin.assert:
+    that: >-
+      platform_foundation_ha_nats.resources | length == 0 or
+      platform_foundation_ha_nats.resources[0].spec.podManagementPolicy == 'Parallel'
+    fail_msg: PLATFORM_FOUNDATION_HA_NATS_CUTOVER_REQUIRED_RETAIN_PVCS
+- name: Apply the derived authenticated NATS cluster configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    definition: "{{ item }}"
+  loop: "{{ platform_foundation_ha_projection.foundation | selectattr('kind', 'equalto', 'ConfigMap') | list }}"
+  no_log: true
+
+- name: Bind clustered NATS rollout to its actual configuration
+  ansible.builtin.set_fact:
+    platform_foundation_workload_configuration_sha256: >-
+      {{ platform_foundation_workload_configuration_sha256 | combine({'nats':
+         platform_foundation_ha_projection.foundation | to_json | hash('sha256')}) }}
+  no_log: true
+
+- name: Create protected operator namespaces
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ item }}"
+        labels:
+          pod-security.kubernetes.io/enforce: "{{ 'privileged' if item == 'rook-ceph' else 'restricted' }}"
+          labweaver.io/infrastructure: "true"
+  loop: [rook-ceph, cnpg-system]
+
+- name: Fetch checksum-locked operator charts
+  ansible.builtin.get_url:
+    url: "{{ platform_foundation_lock.high_availability[item].chart_url }}"
+    dest: "/var/tmp/labweaver-{{ item }}-{{ platform_foundation_lock.high_availability[item].chart }}.tgz"
+    checksum: "sha256:{{ platform_foundation_lock.high_availability[item].chart_sha256 }}"
+    mode: "0644"
+  loop: [rook, cnpg, barman]
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+
+- name: Install checksum-locked HA operators
+  kubernetes.core.helm:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    name: "{{ item.name }}"
+    chart_ref: "/var/tmp/labweaver-{{ item.key }}-{{ platform_foundation_lock.high_availability[item.key].chart }}.tgz"
+    release_namespace: "{{ item.namespace }}"
+    values: "{{ platform_foundation_ha_projection.charts[item.key] }}"
+    wait: true
+    timeout: 600s
+  loop:
+    - {key: rook, name: rook-ceph, namespace: rook-ceph}
+    - {key: cnpg, name: cnpg, namespace: cnpg-system}
+    - {key: barman, name: plugin-barman-cloud, namespace: cnpg-system}
+
+- name: Apply the derived HA storage and database resources
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    state: present
+    definition: "{{ item }}"
+  loop: "{{ platform_foundation_ha_projection.objects }}"
+  no_log: true
+
+- name: Require healthy Ceph before database readiness is accepted
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: ceph.rook.io/v1
+    kind: CephCluster
+    namespace: rook-ceph
+    name: rook-ceph
+  register: platform_foundation_ha_ceph
+  until: >-
+    platform_foundation_ha_ceph.resources | length == 1 and
+    platform_foundation_ha_ceph.resources[0].status.phase | default('') == 'Ready' and
+    platform_foundation_ha_ceph.resources[0].status.ceph.health | default('') == 'HEALTH_OK'
+  retries: "{{ platform_foundation_rollout_retries }}"
+  delay: "{{ platform_foundation_rollout_delay }}"
+
+- name: Wait for the three-instance synchronous database
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: postgres
+    namespace: "{{ platform_foundation_namespace }}"
+  register: platform_foundation_ha_database
+  until: >-
+    platform_foundation_ha_database.resources | length == 1 and
+    platform_foundation_ha_database.resources[0].status.readyInstances | default(0) | int == 3 and
+    platform_foundation_ha_database.resources[0].status.currentPrimary | default('') | length > 0
+  retries: "{{ platform_foundation_rollout_retries }}"
+  delay: "{{ platform_foundation_rollout_delay }}"
+
+- name: Bind administrative SQL to the observed primary
+  ansible.builtin.set_fact:
+    platform_foundation_postgres_pod: "{{ platform_foundation_ha_database.resources[0].status.currentPrimary }}"

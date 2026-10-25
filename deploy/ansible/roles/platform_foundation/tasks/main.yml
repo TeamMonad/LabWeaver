@@ -93,7 +93,8 @@
       - item.data is defined
       - item.stringData is not defined
       - item.binaryData is not defined
-      - item.data.keys() | sort == platform_foundation_expected_keys | sort
+      - platform_foundation_expected_keys | difference(item.data.keys()) | length == 0
+      - item.data.keys() | difference(platform_foundation_expected_keys + platform_foundation_optional_keys) | length == 0
       - item.kind != 'Secret' or item.type == 'Opaque'
     fail_msg: PLATFORM_FOUNDATION_BUNDLE_KEYS_INVALID
   vars:
@@ -101,6 +102,9 @@
       {{ (platform_foundation_manifest_value.configMaps
           if item.kind == 'ConfigMap'
           else platform_foundation_manifest_value.secrets)[item.metadata.name] }}
+    platform_foundation_optional_keys: >-
+      {{ (platform_foundation_manifest_value.optionalSecrets | default({}))[item.metadata.name] | default([])
+         if item.kind == 'Secret' else [] }}
   loop: "{{ platform_foundation_objects }}"
   no_log: true
 
@@ -174,8 +178,14 @@
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     state: present
     definition: "{{ item }}"
-  loop: "{{ platform_foundation_objects }}"
+  loop: >-
+    {{ platform_foundation_objects | rejectattr('kind', 'equalto', 'ConfigMap') | list
+       if platform_foundation_ha | length > 0 else platform_foundation_objects }}
   no_log: true
+
+- name: Reconcile the Bundle three-host HA profile
+  ansible.builtin.include_tasks: ha.yml
+  when: platform_foundation_ha | length > 0
 
 - name: Reconcile foundation workloads
   kubernetes.core.k8s:
@@ -222,30 +232,36 @@
     namespace: "{{ platform_foundation_namespace }}"
   register: platform_foundation_statefulsets
   until: >-
-    platform_foundation_statefulsets.resources | length == 3 and
+    platform_foundation_statefulsets.resources | length == (2 if platform_foundation_ha | length > 0 else 3) and
     platform_foundation_statefulsets.resources
-    | map(attribute='status.readyReplicas') | map('default', 0, true) | map('int') | min == 1
+    | selectattr('metadata.name', 'equalto', 'nats')
+    | map(attribute='status.readyReplicas') | map('default', 0, true) | map('int')
+    | min == (3 if platform_foundation_ha | length > 0 else 1) and
+    platform_foundation_statefulsets.resources
+    | rejectattr('metadata.name', 'equalto', 'nats') | map(attribute='status.readyReplicas') | map('default', 0, true) | map('int') | min == 1
   retries: "{{ platform_foundation_rollout_retries }}"
   delay: "{{ platform_foundation_rollout_delay }}"
 
 - name: Verify exact foundation workload set and immutable images
   ansible.builtin.assert:
     that:
-      - platform_foundation_statefulsets.resources | map(attribute='metadata.name') | sort == ['minio', 'nats', 'postgres']
+      - >-
+        platform_foundation_statefulsets.resources | map(attribute='metadata.name') | sort
+        == (['minio', 'nats'] if platform_foundation_ha | length > 0 else ['minio', 'nats', 'postgres'])
       - >-
         platform_foundation_statefulsets.resources
         | map(attribute='spec.template.spec.containers') | map('first')
         | map(attribute='image') | sort
-        == [platform_foundation_lock.postgresql.image,
-            platform_foundation_lock.platform_foundation.minio,
-            platform_foundation_lock.platform_foundation.nats] | sort
+        == (([platform_foundation_lock.postgresql.image] if platform_foundation_ha | length == 0 else []) +
+            [platform_foundation_lock.platform_foundation.minio,
+             platform_foundation_lock.platform_foundation.nats]) | sort
     fail_msg: PLATFORM_FOUNDATION_READBACK_INVALID
 
 - name: Read the PostgreSQL deployment-admin role before reconciliation
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
@@ -260,7 +276,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -v ON_ERROR_STOP=1
@@ -275,7 +291,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -v ON_ERROR_STOP=1
@@ -293,7 +309,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -v ON_ERROR_STOP=1
@@ -308,7 +324,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
@@ -331,7 +347,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
@@ -353,7 +369,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
@@ -375,7 +391,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -v ON_ERROR_STOP=1
@@ -398,7 +414,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -v ON_ERROR_STOP=1
@@ -421,7 +437,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc
@@ -443,7 +459,7 @@
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     namespace: "{{ platform_foundation_namespace }}"
-    pod: postgres-0
+    pod: "{{ platform_foundation_postgres_pod }}"
     container: postgres
     command: >-
       psql -U postgres -d {{ platform_foundation_postgres_database }} -Atqc

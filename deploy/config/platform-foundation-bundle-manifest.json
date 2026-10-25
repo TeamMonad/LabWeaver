@@ -8,5 +8,8 @@
     "minio-secrets": ["ca.crt", "private.key", "public.crt", "root-password", "root-user"],
     "nats-server-secrets": ["ca.crt", "tls.crt", "tls.key"],
     "postgres-secrets": ["ca.crt", "client.crt", "client.key", "postgres-password", "tls.crt", "tls.key"]
+  },
+  "optionalSecrets": {
+    "postgres-secrets": ["backup-access-key", "backup-secret-key", "backup-ca.crt", "replication.crt", "replication.key"]
   }
 }

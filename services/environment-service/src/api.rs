@@ -1556,6 +1556,17 @@ impl IntoResponse for EnvironmentApiError {
         if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
             return template_upgrade_problem(error);
         }
+        if let Self::RuntimeAdmission(crate::RuntimeAdmissionError::StorageHealth(error)) = &self {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "diagnosticCode": error.diagnostic_code(),
+                    "detail": error.detail(),
+                    "retryable": true
+                })),
+            )
+                .into_response();
+        }
         let status = self.status();
         let rendered = self.to_string();
         let diagnostic = rendered

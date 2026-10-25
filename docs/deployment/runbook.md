@@ -128,6 +128,8 @@ cargo xtask platform-harbor-route --env v1 --infra --yes
 
 这些入口分别对应 `92-platform-foundation.yml`、`92-platform-buildkit.yml` 和 `92-platform-harbor-route.yml`。Harbor 本身不存在时才使用 `cargo xtask deploy --env v1 --infra --yes`。
 
+生产三节点安装先配置[高可用基线](high-availability.md)中的 Bundle `platform_foundation_ha`、裸盘清单与独立备份目标，再运行相同入口。HA profile 的版本锁、CNPG 同步 quorum、JetStream 三副本与存储健康拒绝准入由同一 Bundle 派生；缺少独立备份字段时校验失败。已有独立数据库不得直接原地转换，必须先进入获准的数据切换窗口。目标 RPO/RTO 已决定，实际兑现待 #208 恢复验收；RGW 切换尚需兼容验收，不把渲染通过当成生产故障恢复通过。
+
 Keycloak foundation 使用受保护的 root-only locator；locator 由私有清单提供，不能把内容、固定 UUID 或口令写进文档：
 
 ```sh

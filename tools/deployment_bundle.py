@@ -24,11 +24,13 @@ from urllib.parse import urlsplit
 import yaml
 
 try:
+    import ha_foundation
     import render_platform_bundle as objects
     import render_resource_bundle as resource_objects
 except ModuleNotFoundError as error:
-    if error.name != "render_platform_bundle":
+    if error.name not in {"ha_foundation", "render_platform_bundle", "render_resource_bundle"}:
         raise
+    from tools import ha_foundation
     from tools import render_platform_bundle as objects
     from tools import render_resource_bundle as resource_objects
 
@@ -330,6 +332,8 @@ CONTROLLER_LOCATORS = {
 INFRASTRUCTURE_DERIVED = (
     {
         "labweaver_versions_lock_file",
+        "platform_foundation_application_namespace",
+        "platform_foundation_resource_namespace",
         "identity_secret_locator_controller",
         "identity_secret_locator_sha256",
         "identity_secret_locator_controller_tmp",
@@ -404,14 +408,45 @@ def _infrastructure_model(
     inventory = _document(files[inventory_file])
     if not isinstance(inventory, dict) or set(inventory) != {"all"}:
         raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
-    _inventory_group(inventory["all"])
+    _inventory_group(inventory["all"], root=True)
+    _ha_configuration(model, files)
     _inventory_references(inventory, references)
     for name in ("vaultPasswordFile", "identitySecretFile"):
         if infrastructure[name] is not None:
             references.add(_relative(infrastructure[name], "secrets"))
 
 
-def _inventory_group(group: Any) -> None:
+def _ha_configuration(model: dict, files: dict[str, bytes]) -> dict | None:
+    if "infrastructure" not in model:
+        return None
+    inventory = _document(files[model["infrastructure"]["inventoryFile"]])
+    raw = inventory["all"].get("vars", {}).get("platform_foundation_ha", {})
+    if raw == {}:
+        return None
+    try:
+        return ha_foundation.validate(raw)
+    except ha_foundation.HAError as error:
+        raise BundleError(str(error)) from error
+
+
+def _ha_workload_inputs(model: dict, files: dict[str, bytes], inputs: dict) -> dict:
+    if _ha_configuration(model, files) is None:
+        return inputs
+    result = dict(inputs)
+    for name in ("environment-service", "resource-service", "container-executor", "kubevirt-executor"):
+        if name not in result:
+            continue
+        environment = dict(result[name]["env"])
+        key = "LABWEAVER_STORAGE_HEALTH_CEPH_URL"
+        endpoint = "https://kubernetes.default.svc/apis/ceph.rook.io/v1/namespaces/rook-ceph/cephclusters/rook-ceph"
+        if key in result[name]["secretEnv"] or environment.get(key, endpoint) != endpoint:
+            raise BundleError("LW_BUNDLE_HA_HEALTH_OVERRIDE_FORBIDDEN")
+        environment[key] = endpoint
+        result[name] = dict(result[name], env=environment)
+    return result
+
+
+def _inventory_group(group: Any, *, root: bool = False) -> None:
     if not isinstance(group, dict) or set(group) - {"vars", "hosts", "children"}:
         raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
     for key in ("vars", "hosts", "children"):
@@ -421,9 +456,13 @@ def _inventory_group(group: Any) -> None:
             for name in entries
         ):
             raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
+    if not root and "platform_foundation_ha" in group.get("vars", {}):
+        raise BundleError("LW_BUNDLE_HA_INVALID:platform_foundation_ha.all.vars_required")
     for variables in group.get("hosts", {}).values():
         if variables is not None and not isinstance(variables, dict):
             raise BundleError("LW_BUNDLE_INFRASTRUCTURE_INVENTORY_INVALID")
+        if variables and "platform_foundation_ha" in variables:
+            raise BundleError("LW_BUNDLE_HA_INVALID:platform_foundation_ha.all.vars_required")
     for child in group.get("children", {}).values():
         _inventory_group(child)
 
@@ -719,6 +758,11 @@ def environment_executor_bindings(
         not isinstance(p, dict) for p in providers
     ):
         raise BundleError("LW_BUNDLE_ENVIRONMENT_EXECUTOR_INVALID")
+    if _ha_configuration(model, files) is not None:
+        try:
+            ha_foundation.validate_storage(providers)
+        except ha_foundation.HAError as error:
+            raise BundleError(str(error)) from error
     configs = {}
     for name in executors:
         source = inputs[name]
@@ -1074,7 +1118,10 @@ def load_bundle(
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _configuration_policy(_settings(model, files))
-    environment_executor_bindings(model, files, _workload_inputs(application, manifest))
+    validated_inputs, _, _ = environment_executor_bindings(model, files, _workload_inputs(application, manifest))
+    _ha_workload_inputs(model, files, validated_inputs)
+    if "resource" in model:
+        _ha_workload_inputs(model, files, model["resource"]["workloadInputs"])
     lock = _document(files[versions["lockFile"]])
     package = _document(files[versions["packageFile"]])
     if (
@@ -1084,6 +1131,11 @@ def load_bundle(
         or not isinstance(package.get("images"), list)
     ):
         raise BundleError("LW_BUNDLE_VERSIONS_INVALID")
+    if _ha_configuration(model, files) is not None:
+        try:
+            ha_foundation.validate_lock(lock)
+        except ha_foundation.HAError as error:
+            raise BundleError(str(error)) from error
     components: set[str] = set()
     for image in package["images"]:
         if (
@@ -1170,6 +1222,7 @@ def derive_bundle(
     workload_inputs["control-service"]["env"]["LABWEAVER_NOTIFICATIONS_FILE"] = "/etc/labweaver/config/notifications.json"
     if notification["smtp"]:
         manifest["secrets"]["control-service-secrets"].extend(["smtp-password", "smtp-ca.pem"])
+    workload_inputs = _ha_workload_inputs(model, files, workload_inputs)
     manifest["namespace"] = model["target"]["namespace"]
     manifest_output = output / "object-manifest.json"
     _write(manifest_output, json.dumps(manifest, sort_keys=True).encode())
@@ -1194,6 +1247,11 @@ def derive_bundle(
     values = dict(application["helmValues"])
     values["workloadInputs"] = workload_inputs
     values["notificationSmtpEgress"] = ({"cidrs": model["notifications"]["smtp"]["egressCidrs"], "port": notification["smtp"]["port"]} if notification["smtp"] else None)
+    if _ha_configuration(model, files) is not None:
+        workloads = dict(values.get("workloads", {}))
+        for name in ("environment-service", "container-executor", "kubevirt-executor"):
+            workloads[name] = dict(workloads.get(name, {}), kubernetesApi=True)
+        values["workloads"] = workloads
     if "container-placement-config" in application["configMaps"]:
         values["containerPlacementProfileConfigMap"] = "container-placement-config"
     if executor_authority:
@@ -1276,6 +1334,9 @@ def derive_bundle(
         inventory = _resolve_values(source_inventory, root, files)
         _derive_controller_locators(source_inventory, inventory, files, output)
         variables = inventory["all"].setdefault("vars", {})
+        if _ha_configuration(model, files) is not None:
+            variables["platform_foundation_application_namespace"] = model["target"]["namespace"]
+            variables["platform_foundation_resource_namespace"] = model.get("resource", {}).get("target", model["target"])["namespace"]
         variables["labweaver_versions_lock_file"] = str(
             root / model["versions"]["lockFile"]
         )
@@ -1329,7 +1390,9 @@ def _derive_resource(
         name: dict(overrides.get(name, {}), enabled=name == "resource-service")
         for name in workloads
     }
-    values["workloadInputs"] = profile["workloadInputs"]
+    values["workloadInputs"] = _ha_workload_inputs(model, files, profile["workloadInputs"])
+    if _ha_configuration(model, files) is not None:
+        values["workloads"]["resource-service"]["kubernetesApi"] = True
     values["images"] = {
         "resource_service": _document(files[profile["packageFile"]])["images"][0][
             "reference"

@@ -119,23 +119,14 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("item.status.currentRevision != item.status.updateRevision", tasks)
         self.assertIn("kind: StatefulSet", workloads)
         self.assertEqual(workloads.count("kind: StatefulSet"), 3)
-        replacements = {
-            "{{ platform_foundation_namespace }}": "labweaver-data",
-            "{{ platform_foundation_storage_class }}": "local-path",
-            "{{ platform_foundation_minio_storage_class }}": "nfs-rwx",
-            "{{ platform_foundation_postgres_storage }}": "20Gi",
-            "{{ platform_foundation_nats_storage }}": "10Gi",
-            "{{ platform_foundation_minio_storage }}": "100Gi",
-            "{{ platform_foundation_lock.postgresql.image }}": "registry.invalid/postgres@sha256:" + "a" * 64,
-            "{{ platform_foundation_lock.platform_foundation.nats }}": "registry.invalid/nats@sha256:" + "b" * 64,
-            "{{ platform_foundation_lock.platform_foundation.minio }}": "registry.invalid/minio@sha256:" + "c" * 64,
-            "{{ platform_foundation_workload_configuration_sha256.postgres }}": "d" * 64,
-            "{{ platform_foundation_workload_configuration_sha256.nats }}": "e" * 64,
-            "{{ platform_foundation_workload_configuration_sha256.minio }}": "f" * 64,
+        variables = yaml.safe_load(foundation_defaults)
+        variables["platform_foundation_lock"] = yaml.safe_load(
+            (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
+        )
+        variables["platform_foundation_workload_configuration_sha256"] = {
+            "postgres": "d" * 64, "nats": "e" * 64, "minio": "f" * 64,
         }
-        rendered = workloads
-        for source, value in replacements.items():
-            rendered = rendered.replace(source, value)
+        rendered = Environment(undefined=StrictUndefined).from_string(workloads).render(**variables)
         documents = list(yaml.safe_load_all(rendered))
         self.assertEqual(len(documents), 9)
         self.assertEqual(sum(document["kind"] == "StatefulSet" for document in documents), 3)
