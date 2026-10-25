@@ -3712,4 +3712,21 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn process_shutdown_does_not_become_non_retryable_user_cancellation() {
+        let response = execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled);
+        assert!(
+            !matches!(
+                response,
+                KubeVirtExecutorResponse::Failed {
+                    failure: ProviderFailure {
+                        code: ProviderFailureCode::Cancelled,
+                        retryable: false,
+                    }
+                }
+            ),
+            "process shutdown must preserve durable recovery rather than persist user cancellation"
+        );
+    }
 }
