@@ -871,6 +871,86 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.findAll('button').filter((button) => button.text() === '重试')).toHaveLength(0)
   })
 
+  describe('unknown restart outcome (#229)', () => {
+    const unknownRestart = { kind: 'restart', diagnosticCode: 'LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN' }
+
+    function mockUnknownRestart(retryEligible: boolean) {
+      mockEnvironmentInstance({
+        observedState: 'failed',
+        failedPhase: 'provisioning',
+        operation: { ...mockOperation('failed', unknownRestart), id: 'op-restart' },
+      })
+      vi.mocked(listEnvironmentOperations).mockResolvedValue({
+        data: { items: [mockOperation('failed', { ...unknownRestart, retryEligible })] },
+        error: undefined as never,
+      } as never)
+    }
+
+    it('explains the unknown outcome before the code and sends nothing on its own', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        mockUnknownRestart(true)
+        const { wrapper } = await mountAt({ environmentId: 'env-1' })
+        await vi.waitFor(() => expect(wrapper.text()).toContain('上次重启结果未知，平台不会自动重试'))
+        await openTab(wrapper, '异步操作与诊断')
+        const panel = await vi.waitFor(() => wrapper.get('.env-failed-panel'))
+
+        expect(panel.get('.diagnostic-message').text()).toBe('无法确认上次重启是否完成，请检查环境状态后手动选择恢复。')
+        expect(panel.get('.diagnostic-next-step').text()).toContain('使用顶部操作栏的“重试失败的操作”手动恢复')
+        expect(panel.get('.diagnostic-code').text()).toBe('LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN')
+        // The reason comes before the code, in the panel and in the timeline.
+        expect(panel.text().indexOf('无法确认上次重启')).toBeLessThan(panel.text().indexOf('LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN'))
+        const timeline = wrapper.text()
+        expect(timeline.indexOf('无法确认上次重启是否完成')).toBeLessThan(timeline.indexOf('诊断码：LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN'))
+        expect(panel.find('.diagnostic-retry').exists()).toBe(false)
+
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushPromises()
+        expect(retryEnvironment).not.toHaveBeenCalled()
+        expect(restartEnvironment).not.toHaveBeenCalled()
+        expect(startEnvironment).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('recovers only through the explicit toolbar entry, once per click', async () => {
+      mockUnknownRestart(true)
+      vi.mocked(retryEnvironment).mockResolvedValue({
+        data: { environmentId: 'env-1', operationId: 'op-recover', revision: 12, statusUrl: '/api/v1/environments/env-1' },
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      const recover = await vi.waitFor(() => {
+        const button = wrapper.findAll('button').find((candidate) => candidate.text() === '重试失败的操作')
+        expect(button).toBeDefined()
+        return button!
+      })
+      expect(retryEnvironment).not.toHaveBeenCalled()
+
+      await recover.trigger('click')
+      await vi.waitFor(() => expect(retryEnvironment).toHaveBeenCalledTimes(1))
+      expect(retryEnvironment).toHaveBeenCalledWith({
+        path: { environmentId: 'env-1' },
+        headers: { 'If-Match': '"rev-11"', 'Idempotency-Key': expect.any(String) },
+      })
+      expect(restartEnvironment).not.toHaveBeenCalled()
+    })
+
+    it('says no recovery is available when the server no longer offers one', async () => {
+      mockUnknownRestart(false)
+      const { wrapper } = await mountAt({ environmentId: 'env-1' })
+      await vi.waitFor(() => expect(wrapper.text()).toContain('上次重启结果未知'))
+      await openTab(wrapper, '异步操作与诊断')
+      const panel = await vi.waitFor(() => wrapper.get('.env-failed-panel'))
+
+      expect(panel.get('.diagnostic-message').text()).toBe('无法确认上次重启是否完成，请检查环境状态后手动选择恢复。')
+      expect(panel.get('.diagnostic-next-step').text()).toContain('当前没有可用的恢复操作')
+      expect(wrapper.findAll('button').some((button) => button.text() === '重试失败的操作')).toBe(false)
+      expect(retryEnvironment).not.toHaveBeenCalled()
+    })
+  })
+
   it.each([
     ['ready', 'running', true, '', '运行中'],
     ['stopped', 'stopped', false, '环境已停止，启动后才能签发访问授权。', '已停止'],

@@ -2,7 +2,7 @@ import { computed, ref, type Ref } from 'vue'
 import type { ProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { freezeSubmission, getFrozenSubmission } from '@/generated/contracts'
 import type {
-  EnvironmentInstanceSchema,
+  EnvironmentDetailSchema,
   EnvironmentOperationSnapshotSchema,
   EnvironmentTemplateReleaseViewSchema,
   OperationAccepted,
@@ -14,7 +14,7 @@ import { useCurrentActorId } from '@/composables/useSubmissionDirectory'
 import { rememberSubmission } from '@/utils/trackedSubmissions'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
-type InstanceState = { kind: string; data?: EnvironmentInstanceSchema }
+type InstanceState = { kind: string; data?: EnvironmentDetailSchema }
 type ReleasesState = AsyncState<readonly EnvironmentTemplateReleaseViewSchema[]> | AsyncState<EnvironmentTemplateReleaseViewSchema[]>
 
 export interface EnvironmentSubmissionDeps {
@@ -56,7 +56,7 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
   const frozenSubmission = ref<{
     environmentId: string
     submissionId: string
-    object: NonNullable<EnvironmentInstanceSchema['cleanupEvidence']>
+    object: NonNullable<EnvironmentDetailSchema['cleanupEvidence']>
     contentSha256: string
     frozenAt: string
   } | null>(null)
@@ -89,20 +89,20 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
     || freezeStatus.value === 'cancelling',
   )
 
-  function releaseForEnvironment(data: EnvironmentInstanceSchema): EnvironmentTemplateReleaseViewSchema | null {
+  function releaseForEnvironment(data: EnvironmentDetailSchema): EnvironmentTemplateReleaseViewSchema | null {
     const state = releases.releases
     const rows = state.kind === 'success' ? state.data : []
     return rows.find((release) => release.id === data.releaseId && release.version === data.releaseVersion) ?? null
   }
 
-  function selectedSubmissionManifestFor(data: EnvironmentInstanceSchema): SubmissionManifest | null {
+  function selectedSubmissionManifestFor(data: EnvironmentDetailSchema): SubmissionManifest | null {
     if (data.class === 'work' || isWorkConnection.value) return null
     const release = releaseForEnvironment(data)
     if (!release || release.withdrawal) return null
     return release.submissionManifest ?? null
   }
 
-  function freezeBlockReason(data: EnvironmentInstanceSchema): string | null {
+  function freezeBlockReason(data: EnvironmentDetailSchema): string | null {
     if (data.class === 'work' || isWorkConnection.value) return '此 Work 环境未配置评测，无法提交评测。'
     const denied = permissions.denialReason('edit', '提交评测')
     if (denied) return denied
@@ -120,12 +120,12 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
     return null
   }
 
-  function freezeManifestText(data: EnvironmentInstanceSchema): string {
+  function freezeManifestText(data: EnvironmentDetailSchema): string {
     const manifest = selectedSubmissionManifestFor(data)
     return manifest ? JSON.stringify(manifest, null, 2) : ''
   }
 
-  function canFreeze(data: EnvironmentInstanceSchema): boolean {
+  function canFreeze(data: EnvironmentDetailSchema): boolean {
     return permissions.allows('edit')
       && data.observedState === 'ready'
       && selectedSubmissionManifestFor(data) !== null
@@ -137,7 +137,7 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
     freezeDiagnostic.value = freezeState.value.diagnostic
   }
 
-  async function freeze(data: EnvironmentInstanceSchema) {
+  async function freeze(data: EnvironmentDetailSchema) {
     freezeDiagnostic.value = null
     // The confirmation may have been opened before the responsibility changed: check it again before sending.
     const denied = permissions.denialReason('edit', '提交评测')
@@ -243,12 +243,12 @@ export function useEnvironmentSubmission(deps: EnvironmentSubmissionDeps) {
     await operations.load()
   }
 
-  async function confirmFreeze(data: EnvironmentInstanceSchema) {
+  async function confirmFreeze(data: EnvironmentDetailSchema) {
     freezeConfirmVisible.value = false
     await freeze(data)
   }
 
-  function freezeEvidenceFor(data: EnvironmentInstanceSchema) {
+  function freezeEvidenceFor(data: EnvironmentDetailSchema) {
     return frozenSubmission.value && frozenSubmission.value.environmentId === data.id ? frozenSubmission.value : null
   }
 

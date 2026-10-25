@@ -86,6 +86,16 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '任务缺少原始的模型输入授权，未开始新的模型调用。'
     case 'LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE':
       return '平台暂时无法核验模型输入授权，未开始模型调用。'
+    // Environment restart outcome and storage admission codes (#229, #205).
+    case 'LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN':
+      // The diagnostic asserts nothing about the VM, the restart or released compute.
+      return '无法确认上次重启是否完成，请检查环境状态后手动选择恢复。'
+    case 'LW_STORAGE_HEALTH_UNAVAILABLE':
+      return '平台暂时读不到存储健康状态，为保护数据已暂停新的资源分配和环境运行，本次操作没有执行。'
+    case 'LW_STORAGE_HEALTH_STALE':
+      return '平台的存储健康状态已过期，无法确认存储当前是否安全，已暂停新的资源分配和环境运行，本次操作没有执行。'
+    case 'LW_STORAGE_UNSAFE':
+      return '平台存储出现容量、仲裁或副本异常，为保护数据已暂停新的资源分配和环境运行，本次操作没有执行。'
     // Costing and Credits codes from Resource (#209/#210).
     case 'LW_RESOURCE_RATE_UNCONFIGURED':
       return '缺少适用费率：当前规格或时间段没有可计价的费率，估价或扣收无法完成，不会按免费处理。'
@@ -163,6 +173,12 @@ function codeNextStep(code: string): string | undefined {
     case 'LW_AUTH_CSRF_REJECTED':
     case 'LW_SDK_SESSION_CHANGED':
       return '平台会重新确认当前登录账号。请核对页面上的账号和内容，再手动重新提交；平台不会自动重试。'
+    case 'LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN':
+      return '平台不会自动重试。请在“异步操作与诊断”中核对环境当前状态；确认需要恢复时，使用顶部操作栏的“重试失败的操作”手动恢复。'
+    case 'LW_STORAGE_HEALTH_UNAVAILABLE':
+    case 'LW_STORAGE_HEALTH_STALE':
+    case 'LW_STORAGE_UNSAFE':
+      return '这是平台存储问题，请稍后重试；多次失败请把下方诊断信息发给管理员。'
     default:
       return undefined
   }
@@ -202,15 +218,22 @@ export function diagnosticNextStep(status: number | undefined, retryable: boolea
 type DiagnosticProblem = Pick<Partial<ProblemDetails>, 'requestId' | 'status' | 'traceId'> | null | undefined
 
 /**
- * Refusals that are final for the request as sent: repeating it cannot
- * succeed, so no surface offers a retry even when the transport marks it
- * retryable. The next step names what has to change instead.
+ * Codes whose request must not be repeated as sent, so no surface offers a
+ * retry even when the transport marks it retryable: either repeating it cannot
+ * succeed, or (unknown restart outcome) repeating it could run a
+ * non-idempotent action twice. The next step names the explicit way forward.
  */
 const FINAL_REFUSAL_CODES: Record<string, true> = {
   LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED: true,
   LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL: true,
   LW_WORK_TEMPLATE_UPGRADE_FAMILY_MISMATCH: true,
   LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE: true,
+  LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN: true,
+}
+
+/** A persisted operation diagnostic: the last Restart may or may not have taken effect. */
+export function isRestartOutcomeUnknown(code: string | null | undefined): code is 'LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN' {
+  return code === 'LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN'
 }
 
 /** The environment can only run again after a new, approved resource request. */
