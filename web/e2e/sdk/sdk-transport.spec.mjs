@@ -113,27 +113,41 @@ test('strictly decodes RFC 9457 and preserves stable diagnostics', async ({ page
   expect(error).toEqual({ diagnosticCode: 'LW_ACCESS_DENIED', status: 403, requestId: 'sdk-problem' })
 })
 
-test('BFF mode sends session credentials and synchronizer token only on mutations', async ({ page, context }) => {
+const bffActorId = '01900000-0000-7000-8000-0000000000aa'
+
+/**
+ * The BFF routes of a session cookie: the session read answers with
+ * `session` (null aborts it like a network failure), the CSRF lookup issues a
+ * token to `bffActorId`, and every environment request is recorded.
+ */
+async function routeBffSession(page, context, session) {
   await context.addCookies([
     { name: 'labweaver_test_session', value: 'opaque-session', url: 'http://127.0.0.1:4178' },
   ])
-  let csrfRequests = 0
-  const requests = []
+  const seen = { sessionReads: 0, csrfRequests: 0, requests: [] }
+  await page.route('**/api/v1/auth/session', async (route) => {
+    seen.sessionReads += 1
+    if (!session) {
+      await route.abort('failed')
+      return
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(session) })
+  })
   await page.route('**/api/v1/auth/csrf', async (route) => {
-    csrfRequests += 1
+    seen.csrfRequests += 1
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         csrfToken: 'synchronizer-token',
-        actorId: '01900000-0000-7000-8000-0000000000aa',
+        actorId: bffActorId,
         expiresAt: '2099-01-01T00:00:00.000Z',
       }),
     })
   })
   await page.route('**/api/v1/environments**', async (route) => {
     const request = route.request()
-    requests.push({ method: request.method(), headers: request.headers() })
+    seen.requests.push({ method: request.method(), headers: request.headers() })
     if (request.method() === 'POST') {
       await route.fulfill({
         status: 202,
@@ -148,31 +162,68 @@ test('BFF mode sends session credentials and synchronizer token only on mutation
       })
     }
   })
+  return seen
+}
 
-  await page.evaluate(async ({ courseId }) => {
+/** Read the session as the app does, then list and create through a BFF client; returns the create's diagnostic code, if any. */
+function listAndCreateAfterSessionRead(page) {
+  return page.evaluate(async ({ courseId }) => {
+    const { useAuth } = await import('/src/composables/useAuth.ts')
     const api = await import('/src/api/client.ts')
     const sdk = await import('/src/generated/contracts/index.ts')
+    await useAuth().loadUser()
     const client = api.createLabWeaverApiClient({
       baseUrl: window.location.origin,
       authentication: { mode: 'bff' },
     })
     await sdk.listEnvironments({ client, query: { courseId }, throwOnError: true })
-    await sdk.createEnvironment({
-      client,
-      headers: { 'Idempotency-Key': 'sdk-bff-create-1' },
-      body: { courseId, releaseId: courseId, releaseVersion: 1 },
-      throwOnError: true,
-    })
+    try {
+      await sdk.createEnvironment({
+        client,
+        headers: { 'Idempotency-Key': 'sdk-bff-create-1' },
+        body: { courseId, releaseId: courseId, releaseVersion: 1 },
+        throwOnError: true,
+      })
+      return null
+    } catch (caught) {
+      return caught?.diagnosticCode ?? String(caught)
+    }
   }, { courseId })
+}
 
-  expect(csrfRequests).toBe(1)
-  expect(requests).toHaveLength(2)
-  expect(requests[0].headers.cookie).toContain('labweaver_test_session=opaque-session')
-  expect(requests[0].headers.authorization).toBeUndefined()
-  expect(requests[0].headers['x-csrf-token']).toBeUndefined()
-  expect(requests[1].headers.cookie).toContain('labweaver_test_session=opaque-session')
-  expect(requests[1].headers.authorization).toBeUndefined()
-  expect(requests[1].headers['x-csrf-token']).toBe('synchronizer-token')
+test('BFF mode sends session credentials and synchronizer token only on mutations', async ({ page, context }) => {
+  const seen = await routeBffSession(page, context, {
+    actor: { actorId: bffActorId, roles: ['student'], expiresAt: '2099-01-01T00:00:00.000Z' },
+    authorizationRevision: 1,
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    scopes: [],
+  })
+
+  // The session read confirms the actor; the write then goes out with that actor's token.
+  expect(await listAndCreateAfterSessionRead(page)).toBeNull()
+
+  expect(seen.sessionReads).toBe(1)
+  expect(seen.csrfRequests).toBe(1)
+  expect(seen.requests.map(({ method }) => method)).toEqual(['GET', 'POST'])
+  const [list, create] = seen.requests
+  expect(list.headers.cookie).toContain('labweaver_test_session=opaque-session')
+  expect(list.headers.authorization).toBeUndefined()
+  expect(list.headers['x-csrf-token']).toBeUndefined()
+  expect(create.headers.cookie).toContain('labweaver_test_session=opaque-session')
+  expect(create.headers.authorization).toBeUndefined()
+  expect(create.headers['x-csrf-token']).toBe('synchronizer-token')
+})
+
+test('BFF mode refuses a mutation unsent while the session actor stays unconfirmed', async ({ page, context }) => {
+  // The session read fails in transit: who holds the session is unknown.
+  const seen = await routeBffSession(page, context, null)
+
+  expect(await listAndCreateAfterSessionRead(page)).toBe('LW_SDK_IDENTITY_UNCONFIRMED')
+
+  expect(seen.sessionReads).toBe(1)
+  // Reads still go out; the write sends nothing, not even a CSRF lookup.
+  expect(seen.requests.map(({ method }) => method)).toEqual(['GET'])
+  expect(seen.csrfRequests).toBe(0)
 })
 
 test('preserves a stream cursor above Number.MAX_SAFE_INTEGER in SSE resume and events', async ({ page }) => {
