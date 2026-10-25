@@ -79,7 +79,7 @@ export const environmentCandidateView = {
       resources: { cpuMillicores: 2000, memoryBytes: 4 * GIB, storageBytes: 10 * GIB, gpu: null },
       retention: { class: 'course_material', disposition: 'retain_until_revoked' },
       runtime: { kind: 'container', provider_binding: 'gvisor-default', service_port: 8888, build_context: { artifactId: 'ctx-1', mediaType: 'application/x-tar', objectVersion: 'v1', sha256: 'sha256:aa', sizeBytes: 1 }, terminal: { executable: '/bin/bash', workingDirectory: '/workspace' } },
-      security: { privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', rootFilesystemPolicy: 'read_only_required', securityProfileBinding: 'restricted-v1', userPolicy: 'non_root_required' },
+      security: { allowPrivilegeEscalation: false, publicExposurePolicy: 'deny', readOnlyRootFilesystem: false, securityProfileBinding: 'restricted-v1', runAsUser: null },
     },
   },
   approvals: [],

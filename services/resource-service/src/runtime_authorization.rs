@@ -9,7 +9,7 @@ use contracts::resource::{ResourceRequest, ResourceTarget};
 use contracts::runtime_authorization::{
     RuntimeAdmissionBasis, RuntimeAuthorizationBinding, RuntimeAuthorizationError,
     RuntimeConfigurationIdentity, RuntimePolicyUse, check_platform_range, check_policy_use,
-    declared_baseline_permissions, select_preauthorization,
+    declared_runtime_permissions, select_preauthorization,
 };
 use contracts::supply_chain::EnvironmentTemplateRelease;
 use persistence_sqlx::Sha256Digest;
@@ -268,7 +268,7 @@ pub async fn resolve_binding(
         .applied
         .as_ref()
         .ok_or(RuntimeAuthorizationError::PolicyNotVerified)?;
-    let declared = declared_baseline_permissions(&spec, request.project_id)?;
+    let declared = declared_runtime_permissions(&spec, request.project_id)?;
     check_platform_range(&applied.configuration.runtime_policy, &declared)?;
     let (permissions, basis) = select_permissions(
         &applied.configuration.runtime_policy,
@@ -311,7 +311,7 @@ async fn validated_policy(
 ) -> Result<contracts::platform_configuration::PlatformConfigurationVersion, RuntimeBindingError> {
     let (identity, spec, status) = current_inputs(tx, request).await?;
     binding.validate_current(request, &identity, &status)?;
-    let declared = declared_baseline_permissions(&spec, request.project_id)?;
+    let declared = declared_runtime_permissions(&spec, request.project_id)?;
     if declared.capabilities != binding.permissions.capabilities
         || declared.privileged != binding.permissions.privileged
     {

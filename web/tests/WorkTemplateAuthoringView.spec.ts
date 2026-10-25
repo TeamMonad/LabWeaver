@@ -93,11 +93,11 @@ const spec = {
     },
   },
   security: {
-    privilegeEscalationPolicy: 'deny',
+    allowPrivilegeEscalation: false,
     publicExposurePolicy: 'deny',
-    rootFilesystemPolicy: 'read_only',
+    readOnlyRootFilesystem: false,
     securityProfileBinding: 'default',
-    userPolicy: 'non_root',
+    runAsUser: null,
   },
 }
 

@@ -286,3 +286,70 @@ impl KubeVirtExecutorBackend for Cluster {
         }
     }
 }
+
+pub(super) async fn assert_security_rejections(
+    pool: &PgPool,
+    admission: &EnvironmentRuntimeAdmission,
+    instance: &EnvironmentInstance,
+    original: &environment_service::ContainerResourcePlan,
+) -> Result {
+    use environment_service::{ContainerExecutorFenceError, ContainerExecutorRequestEnvelope};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = FencedContainerExecutor::new(
+        PgContainerExecutorFenceStore::new(pool.clone()),
+        Cluster(
+            calls.clone(),
+            PgEnvironmentStore::new(pool.clone()).current_time().await?,
+        ),
+    )
+    .with_runtime_admission(admission.clone());
+    admission.for_instance(instance).await?;
+    for (field, value) in [
+        ("runAsUser", serde_json::json!(12345)),
+        (
+            "capabilities",
+            serde_json::json!({"drop":["ALL"],"add":["SYS_ADMIN"]}),
+        ),
+        ("readOnlyRootFilesystem", serde_json::json!(true)),
+        ("privileged", serde_json::json!(true)),
+    ] {
+        let mut plan = original.clone();
+        let deployment = plan
+            .resources
+            .iter_mut()
+            .find(|r| r.kind == "Deployment")
+            .ok_or("deployment")?;
+        deployment.document["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+            [field] = value;
+        let request = ContainerExecutorRequest::Apply { plan };
+        let deadline = instance.operation.deadline_at.min(
+            instance
+                .runtime_authorization
+                .as_ref()
+                .ok_or("receipt")?
+                .valid_until,
+        );
+        let mut fence = super::physical_envelope(instance, 1, false, deadline)?.fence;
+        fence.request_id = Sha256Digest::of_canonical(&serde_json::json!({
+            "protocolVersion": fence.protocol_version, "environmentId": fence.environment_id,
+            "operationId": fence.operation_id, "providerStep": fence.provider_step,
+            "operationGeneration": fence.operation_generation, "attempt": fence.attempt,
+            "action": fence.action, "deadlineAt": fence.deadline_at, "request": request,
+        }))?;
+        assert!(
+            matches!(
+                executor
+                    .execute(ContainerExecutorRequestEnvelope { fence, request })
+                    .await,
+                Err(ContainerExecutorFenceError::IdentityMismatch)
+            ),
+            "{field}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "inconsistent {field} must never reach Kubernetes"
+        );
+    }
+    Ok(())
+}

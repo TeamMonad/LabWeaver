@@ -56,6 +56,31 @@ pub enum LinuxCapability {
     CheckpointRestore,
 }
 
+impl LinuxCapability {
+    /// Capabilities supported within the ordinary container boundary, never host-wide powers.
+    #[must_use]
+    pub const fn supported_in_container(self) -> bool {
+        matches!(
+            self,
+            Self::AuditWrite
+                | Self::Chown
+                | Self::DacOverride
+                | Self::Fowner
+                | Self::Fsetid
+                | Self::Kill
+                | Self::Mknod
+                | Self::NetBindService
+                | Self::Setfcap
+                | Self::Setgid
+                | Self::Setpcap
+                | Self::Setuid
+                | Self::SysChroot
+                | Self::NetAdmin
+                | Self::NetRaw
+        )
+    }
+}
+
 /// An execution boundary declaration. The Environment consumer must prove exclusivity.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -100,7 +125,7 @@ pub struct RuntimePreauthorization {
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformRuntimePolicy {
-    /// Zero means guest/container root, without host privileges.
+    /// Default ordinary-container UID; zero is container root, without host privileges.
     pub default_container_uid: u32,
     pub allowed_capabilities: BTreeSet<LinuxCapability>,
     pub preauthorizations: Vec<RuntimePreauthorization>,
@@ -199,15 +224,23 @@ pub struct PlatformConfigurationPolicyDescriptor {
 }
 
 fn unsupported_default_container_uid(configuration: &PlatformConfigurationDesired) -> bool {
-    configuration.runtime_policy.default_container_uid != 0
+    configuration.runtime_policy.default_container_uid == u32::MAX
 }
 
 fn unsupported_allowed_capabilities(configuration: &PlatformConfigurationDesired) -> bool {
-    !configuration.runtime_policy.allowed_capabilities.is_empty()
+    configuration
+        .runtime_policy
+        .allowed_capabilities
+        .iter()
+        .any(|capability| !capability.supported_in_container())
 }
 
 fn unsupported_preauthorizations(configuration: &PlatformConfigurationDesired) -> bool {
-    !configuration.runtime_policy.preauthorizations.is_empty()
+    configuration
+        .runtime_policy
+        .preauthorizations
+        .iter()
+        .any(|grant| grant.privileged)
 }
 
 fn unsupported_privileged_execution_location(configuration: &PlatformConfigurationDesired) -> bool {
@@ -234,9 +267,11 @@ pub const PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS: &[PlatformConfigurationPoli
         field: "runtimePolicy.defaultContainerUid",
         is_unsupported: unsupported_default_container_uid,
         #[cfg(test)]
-        rejected_sample: |configuration| configuration.runtime_policy.default_container_uid = 1000,
+        rejected_sample: |configuration| {
+            configuration.runtime_policy.default_container_uid = u32::MAX;
+        },
         #[cfg(test)]
-        accepted_sample: |configuration| configuration.runtime_policy.default_container_uid = 0,
+        accepted_sample: |configuration| configuration.runtime_policy.default_container_uid = 1000,
     },
     PlatformConfigurationPolicyDescriptor {
         field: "runtimePolicy.allowedCapabilities",
@@ -246,10 +281,15 @@ pub const PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS: &[PlatformConfigurationPoli
             configuration
                 .runtime_policy
                 .allowed_capabilities
-                .insert(LinuxCapability::SysPtrace);
+                .insert(LinuxCapability::SysAdmin);
         },
         #[cfg(test)]
-        accepted_sample: |configuration| configuration.runtime_policy.allowed_capabilities.clear(),
+        accepted_sample: |configuration| {
+            configuration
+                .runtime_policy
+                .allowed_capabilities
+                .insert(LinuxCapability::NetAdmin);
+        },
     },
     PlatformConfigurationPolicyDescriptor {
         field: "runtimePolicy.preauthorizations",
@@ -264,7 +304,7 @@ pub const PLATFORM_CONFIGURATION_POLICY_DESCRIPTORS: &[PlatformConfigurationPoli
                         project_id: ProjectId::new(),
                     },
                     capabilities: BTreeSet::new(),
-                    privileged: false,
+                    privileged: true,
                 });
         },
         #[cfg(test)]
@@ -717,12 +757,7 @@ mod tests {
                 capabilities: BTreeSet::new(),
                 privileged: false,
             });
-        assert!(matches!(
-            configuration.validate(),
-            Err(PlatformConfigurationContractError::PolicyUnsupported {
-                field: "runtimePolicy.preauthorizations"
-            })
-        ));
+        assert!(configuration.validate().is_ok());
         configuration
             .runtime_policy
             .preauthorizations

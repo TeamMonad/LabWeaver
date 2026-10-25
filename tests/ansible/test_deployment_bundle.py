@@ -615,7 +615,7 @@ class DeploymentBundleTests(unittest.TestCase):
                 ("runtimePolicy", "preauthorizations", 0),
                 ("runtimePolicy", "preauthorizations", [{}]),
                 ("runtimePolicy", "defaultContainerUid", {}),
-                ("runtimePolicy", "defaultContainerUid", 1.0),
+                ("runtimePolicy", "defaultContainerUid", 1.5),
                 ("runtimePolicy", "privilegedExecutionLocation", {"kind": "virtual_machine_guest", "providerBinding": "kubevirt"}),
                 ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {}}),
                 ("runtimePolicy", "privilegedExecutionLocation", {"kind": "dedicated_node_pool", "nodeSelector": {f"pool{i}": "x" for i in range(17)}, "taintKey": "labweaver.io/taint", "taintValue": "v"}),

@@ -645,9 +645,9 @@ fn environment_candidate() -> Value {
             "servicePort": 22
         }],
         "security": {
-            "userPolicy": "non_root_required",
-            "rootFilesystemPolicy": "mutable_required",
-            "privilegeEscalationPolicy": "deny",
+            "runAsUser": null,
+            "readOnlyRootFilesystem": false,
+            "allowPrivilegeEscalation": false,
             "publicExposurePolicy": "deny",
             "securityProfileBinding": "restricted-v1"
         },
@@ -693,9 +693,9 @@ fn container_environment_candidate() -> Value {
             "servicePort": 8080
         }],
         "security": {
-            "userPolicy": "non_root_required",
-            "rootFilesystemPolicy": "read_only_required",
-            "privilegeEscalationPolicy": "deny",
+            "runAsUser": null,
+            "readOnlyRootFilesystem": false,
+            "allowPrivilegeEscalation": false,
             "publicExposurePolicy": "deny",
             "securityProfileBinding": "restricted-v1"
         },
@@ -5077,8 +5077,8 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
         .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
     for required in [
         "runtime variant properties are exactly provider_binding",
-        "Container security requires rootFilesystemPolicy read_only_required",
-        "virtual_machine requires rootFilesystemPolicy mutable_required",
+        "Container security defaults to the verified platform UID",
+        "virtual_machine keeps the existing guest user",
         "retainUntil must either be null only for class course_material with disposition retain_until_revoked",
         "Preserve the materials' legal retention form exactly",
         "\"build_recipe\"",

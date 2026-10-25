@@ -6199,7 +6199,7 @@ async fn seed_runtime_projection(
         "apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"code-server","class":"work",
         "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824,"storageBytes":1_073_741_824},"network":{"mode":"deny_all"},
         "entries":[{"name":"code-server","protocol":"https","servicePort":8080}],
-        "security":{"userPolicy":"non_root_required","rootFilesystemPolicy":"read_only_required","privilegeEscalationPolicy":"deny","publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
+        "security":{"runAsUser":null,"readOnlyRootFilesystem":false,"allowPrivilegeEscalation":false,"publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
         "runtime":{"kind":"container","provider_binding":"container-primary-v1","build_context":{"artifactId":ArtifactId::new(),"storeBinding":"approved-context-v1","objectVersion":"version-1","sizeBytes":7,"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip"},"service_port":8080},
         "retention":{"policyId":ApprovalId::new(),"policyRevision":1,"class":"run_evidence","retainUntil":"2030-08-16T08:00:00.000Z","disposition":"delete"}
     }))?;

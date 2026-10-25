@@ -379,6 +379,106 @@ pub(crate) fn release_project_matches(
             )
             .is_ok()
 }
+
+/// The only ordinary-container security projection, consumed by provider and durable executor.
+pub(crate) fn container_security_context(
+    instance: &EnvironmentInstance,
+    projection: &contracts::events::ReleasePublished,
+) -> Result<serde_json::Value, crate::ReleaseProjectionError> {
+    let receipt = instance
+        .runtime_authorization
+        .as_ref()
+        .ok_or(crate::ReleaseProjectionError::IdentityMismatch)?;
+    let digest = Sha256Digest::of_canonical(&projection.environment_spec)
+        .map_err(|_| crate::ReleaseProjectionError::ContractInvalid)?;
+    receipt
+        .validate_for(
+            &ResolveEnvironmentRuntimeAuthorizationRequest {
+                expected_lease_id: instance.lease_id,
+                resource_request_id: receipt.authorization.request_id,
+                environment_id: Some(instance.id),
+                project_id: instance.project_id,
+                course_id: instance.course_id,
+                owner_actor_id: instance.owner_id,
+                release_id: instance.release_id,
+                release_version: instance.release_version,
+            },
+            &projection.environment_spec,
+            &digest.to_string(),
+        )
+        .map_err(|_| crate::ReleaseProjectionError::IdentityMismatch)?;
+    if instance.runtime_kind != contracts::authoring::RuntimeKind::Container
+        || receipt.provider_binding != instance.provider_binding
+        || receipt.authorization.configuration.authoring_project_id != projection.release.project_id
+    {
+        return Err(crate::ReleaseProjectionError::IdentityMismatch);
+    }
+    let security = &projection.environment_spec.security;
+    let uid = security
+        .run_as_user
+        .unwrap_or(receipt.default_container_uid);
+    Ok(serde_json::json!({
+        "runAsNonRoot":uid!=0,"runAsUser":uid,"privileged":false,
+        "allowPrivilegeEscalation":security.allow_privilege_escalation,
+        "readOnlyRootFilesystem":security.read_only_root_filesystem,
+        "capabilities":{"drop":["ALL"],"add":security.capabilities},
+        "seccompProfile":{"type":"RuntimeDefault"}
+    }))
+}
+
+pub(crate) fn validate_container_runtime_plan(
+    instance: &EnvironmentInstance,
+    projection: &contracts::events::ReleasePublished,
+    plan: &crate::ContainerResourcePlan,
+    generation: u64,
+) -> Result<(), crate::ReleaseProjectionError> {
+    if instance.id != plan.environment_id
+        || instance.project_id != plan.project_id
+        || instance.generation != generation
+    {
+        return Err(crate::ReleaseProjectionError::IdentityMismatch);
+    }
+    let expected = container_security_context(instance, projection)?;
+    let uid = expected["runAsUser"]
+        .as_u64()
+        .ok_or(crate::ReleaseProjectionError::SecurityPostureInvalid)?;
+    let mut deployments = plan
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == "Deployment");
+    let Some(deployment) = deployments.next() else {
+        // A sparse plan cannot change a Pod's security context. Scale/restart still requires
+        // fresh authorization and the persisted environment/project/generation above.
+        return Ok(());
+    };
+    if deployments.next().is_some() {
+        return Err(crate::ReleaseProjectionError::ContractInvalid);
+    }
+    let pod = deployment
+        .document
+        .pointer("/spec/template/spec")
+        .ok_or(crate::ReleaseProjectionError::ContractInvalid)?;
+    if pod["securityContext"]
+        != serde_json::json!({"runAsNonRoot":uid!=0,"runAsUser":uid,"runAsGroup":uid,"fsGroup":uid,"seccompProfile":{"type":"RuntimeDefault"}})
+        || ["containers", "initContainers"].iter().any(|name| {
+            pod.get(name)
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|values| {
+                    values.is_empty()
+                        || values
+                            .iter()
+                            .any(|value| value["securityContext"] != expected)
+                })
+        })
+        || pod
+            .get("ephemeralContainers")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    {
+        return Err(crate::ReleaseProjectionError::SecurityPostureInvalid);
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

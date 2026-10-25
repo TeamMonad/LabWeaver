@@ -155,9 +155,9 @@ export function entryLabels(spec: EnvironmentSpec): string[] {
 export function permissionRows(spec: EnvironmentSpec): Row[] {
   const { security } = spec
   return [
-    { label: '运行用户', value: security.userPolicy === 'non_root_required' ? '必须以非 root 用户运行' : security.userPolicy },
-    { label: '根文件系统', value: security.rootFilesystemPolicy === 'read_only_required' ? '只读，学生只能写工作目录' : '可写' },
-    { label: '提升权限', value: security.privilegeEscalationPolicy === 'deny' ? '禁止' : security.privilegeEscalationPolicy },
+    { label: '运行用户', value: security.runAsUser == null ? '使用平台已验证配置的默认 UID' : `UID ${security.runAsUser}` },
+    { label: '根文件系统', value: security.readOnlyRootFilesystem ? '只读，学生只能写工作目录' : '可写，系统修改不持久化' },
+    { label: '提升权限', value: security.allowPrivilegeEscalation ? '允许' : '禁止' },
     { label: '公网暴露', value: security.publicExposurePolicy === 'deny' ? '禁止，只能通过平台入口访问' : security.publicExposurePolicy },
     { label: '网络', value: networkLabel(spec.network) },
     { label: '安全配置', value: security.securityProfileBinding, hint: '由管理员策略定义' },

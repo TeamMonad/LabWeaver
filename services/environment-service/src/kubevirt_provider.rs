@@ -9,8 +9,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::access::validate_ssh_public_key;
 use contracts::authoring::{
-    EnvironmentRuntimeSpec, NetworkPolicySpec, PrivilegeEscalationPolicy, PublicExposurePolicy,
-    RootFilesystemPolicy, RuntimeKind, RuntimeUserPolicy,
+    EnvironmentRuntimeSpec, NetworkPolicySpec, PublicExposurePolicy, RuntimeKind,
 };
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
@@ -2420,15 +2419,17 @@ where
             || base_binding.source_registry_digest != base_disk.source_registry_digest
             || base_binding.capacity_bytes != base_disk.capacity_bytes
             || base_binding.format != *format
-            || projection.environment_spec.security.user_policy
-                != RuntimeUserPolicy::NonRootRequired
-            || projection.environment_spec.security.root_filesystem_policy
-                != RootFilesystemPolicy::MutableRequired
+            || projection.environment_spec.security.run_as_user.is_some()
             || projection
                 .environment_spec
                 .security
-                .privilege_escalation_policy
-                != PrivilegeEscalationPolicy::Deny
+                .read_only_root_filesystem
+            || projection
+                .environment_spec
+                .security
+                .allow_privilege_escalation
+            || projection.environment_spec.security.privileged
+            || !projection.environment_spec.security.capabilities.is_empty()
             || projection.environment_spec.security.public_exposure_policy
                 != PublicExposurePolicy::Deny
             || base_disk.validate().is_err()

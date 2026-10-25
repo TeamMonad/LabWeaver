@@ -335,7 +335,7 @@ describe('WorkEnvironmentsView', () => {
           name: 'Python 分析',
           entries: [{ name: 'app', protocol: 'http', servicePort: 8080 }],
           network: { mode: 'deny_all' },
-          security: { rootFilesystemPolicy: 'read_only_required', securityProfileBinding: 'restricted-v1', userPolicy: 'non_root_required' },
+          security: { readOnlyRootFilesystem: false, securityProfileBinding: 'restricted-v1', runAsUser: null },
           runtime: { kind: 'container', provider_binding: 'kubernetes-work', service_port: 8080, terminal: { executable: '/bin/bash', args: [], workingDirectory: '/workspace' } },
           retention: { class: 'run_evidence', disposition: 'delete', policyRevision: 1 },
         },
@@ -384,7 +384,7 @@ describe('WorkEnvironmentsView', () => {
         spec: {
           network: { mode: 'deny_all' },
           entries: [{ name: 'ssh', protocol: 'ssh', servicePort: 22 }],
-          security: { rootFilesystemPolicy: 'mutable_required' },
+          security: { readOnlyRootFilesystem: false },
           runtime: {
             kind: 'virtual_machine',
             provider_binding: 'kubevirt-primary-v1',

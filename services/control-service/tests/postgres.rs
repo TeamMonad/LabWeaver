@@ -414,7 +414,7 @@ async fn project_policy_updates_require_current_revision_and_replay_idempotently
 #[tokio::test]
 async fn candidate_decision_route_kind_is_bound_before_approval()
 -> Result<(), Box<dyn std::error::Error>> {
-    Box::pin(candidate_publication_fixture(None)).await
+    Box::pin(candidate_publication_fixture(None, None)).await
 }
 
 #[tokio::test]
@@ -426,14 +426,25 @@ async fn container_executor_transport_persists_original_admission_diagnostics()
         ExecutorFailure::Funding,
         ExecutorFailure::ResourceUnavailable,
     ] {
-        Box::pin(candidate_publication_fixture(Some(fault))).await?;
+        Box::pin(candidate_publication_fixture(Some(fault), None)).await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn approved_net_admin_projects_through_the_original_funded_container_journey()
+-> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(candidate_publication_fixture(
+        None,
+        Some(contracts::platform_configuration::LinuxCapability::NetAdmin),
+    ))
+    .await
 }
 
 #[allow(clippy::too_many_lines)]
 async fn candidate_publication_fixture(
     executor_failure: Option<runtime_authorization_cases::ExecutorFailure>,
+    capability: Option<contracts::platform_configuration::LinuxCapability>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let url = format!(
@@ -562,6 +573,13 @@ async fn candidate_publication_fixture(
     let mut environment_candidate =
         environment_candidate(project_id, Some(course_id), environment_schema)?;
     environment_candidate.spec.retention.retain_until = Some("2099-01-01T00:00:00.000Z".parse()?);
+    if let Some(capability) = capability {
+        environment_candidate
+            .spec
+            .security
+            .capabilities
+            .insert(capability);
+    }
     // The concrete Container provider probes an internal HTTP listener; TLS terminates at Access.
     environment_candidate
         .spec
@@ -2971,9 +2989,9 @@ fn environment_candidate(
         "network":{"mode":"deny_all"},
         "entries":[{"name":"code-server","protocol":"https","servicePort":8080}],
         "security":{
-            "userPolicy":"non_root_required",
-            "rootFilesystemPolicy":"read_only_required",
-            "privilegeEscalationPolicy":"deny",
+            "runAsUser":null,
+            "readOnlyRootFilesystem":false,
+            "allowPrivilegeEscalation":false,
             "publicExposurePolicy":"deny",
             "securityProfileBinding":"restricted-v1"
         },
@@ -3091,7 +3109,7 @@ fn vm_environment_candidate(
     value["spec"]["entries"] = serde_json::json!([
         {"name":"ssh","protocol":"ssh","servicePort":22}
     ]);
-    value["spec"]["security"]["rootFilesystemPolicy"] = serde_json::json!("mutable_required");
+    value["spec"]["security"]["readOnlyRootFilesystem"] = serde_json::json!(false);
     value["spec"]["runtime"] = serde_json::json!({
         "kind":"virtual_machine",
         "provider_binding":base.provider_binding,

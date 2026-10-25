@@ -6,9 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::authoring::{
-    EnvironmentRuntimeSpec, NetworkPolicySpec, RootFilesystemPolicy, RuntimeKind,
-};
+use contracts::authoring::{EnvironmentRuntimeSpec, NetworkPolicySpec, RuntimeKind};
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
@@ -632,6 +630,7 @@ impl PgContainerExecutorFenceStore {
                 return Err(ContainerExecutorFenceError::IdentityMismatch);
             }
             runtime_gate?;
+            validate_container_execution_plan(&mut transaction, envelope).await?;
             sqlx::query(
                 "UPDATE environment.container_executor_fences SET highest_generation=$2, \
                      operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
@@ -651,6 +650,7 @@ impl PgContainerExecutorFenceStore {
             .await?;
         } else {
             runtime_gate?;
+            validate_container_execution_plan(&mut transaction, envelope).await?;
             sqlx::query(
                 "INSERT INTO environment.container_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
@@ -744,13 +744,7 @@ impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
         envelope: ContainerExecutorRequestEnvelope,
     ) -> Result<ContainerExecutorResponseEnvelope, ContainerExecutorFenceError> {
         validate_container_executor_request(&envelope)?;
-        let runtime_gate = if match &envelope.request {
-            ContainerExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
-            ContainerExecutorRequest::Scale { replicas, .. } => *replicas > 0,
-            ContainerExecutorRequest::Restart { .. } => true,
-            ContainerExecutorRequest::Observe { .. }
-            | ContainerExecutorRequest::DeleteNamespace { .. } => false,
-        } {
+        let runtime_gate = if container_request_starts_compute(&envelope.request) {
             crate::runtime_admission::executor_authorization(
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),
@@ -920,6 +914,40 @@ fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFa
             code: ProviderFailureCode::Rejected,
             retryable: false,
         },
+    }
+}
+
+async fn validate_container_execution_plan(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    envelope: &ContainerExecutorRequestEnvelope,
+) -> Result<(), ContainerExecutorFenceError> {
+    if !container_request_starts_compute(&envelope.request) {
+        return Ok(());
+    }
+    let plan = container_executor_plan(&envelope.request);
+    let row = sqlx::query("SELECT i.contract AS instance,p.contract AS projection FROM environment.environment_instances i JOIN environment.release_projections p ON p.release_id=i.release_id WHERE i.environment_id=$1")
+        .bind(plan.environment_id.as_uuid()).fetch_optional(&mut **transaction).await?
+        .ok_or(ContainerExecutorFenceError::IdentityMismatch)?;
+    let instance: EnvironmentInstance = serde_json::from_value(row.try_get("instance")?)
+        .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    let projection: ReleasePublished = serde_json::from_value(row.try_get("projection")?)
+        .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    crate::runtime_admission::validate_container_runtime_plan(
+        &instance,
+        &projection,
+        plan,
+        envelope.fence.operation_generation,
+    )
+    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)
+}
+
+fn container_request_starts_compute(request: &ContainerExecutorRequest) -> bool {
+    match request {
+        ContainerExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+        ContainerExecutorRequest::Scale { replicas, .. } => *replicas > 0,
+        ContainerExecutorRequest::Restart { .. } => true,
+        ContainerExecutorRequest::Observe { .. }
+        | ContainerExecutorRequest::DeleteNamespace { .. } => false,
     }
 }
 
@@ -1515,11 +1543,11 @@ where
         }) {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
-        if projection.environment_spec.security.root_filesystem_policy
-            != RootFilesystemPolicy::ReadOnlyRequired
-        {
-            return Err(ReleaseProjectionError::SecurityPostureInvalid);
-        }
+        let security_context =
+            crate::runtime_admission::container_security_context(instance, projection)?;
+        let uid = security_context["runAsUser"]
+            .as_u64()
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
         let cpu = format!("{cpu_millicores}m");
         let memory = memory_bytes.to_string();
         let quota_request_cpu = cpu_millicores
@@ -1590,6 +1618,19 @@ where
         if let Some(course_id) = instance.course_id {
             pod_labels["labweaver.io/course-id"] = json!(course_id.to_string());
         }
+        let mut namespace_labels = labels.clone();
+        // Root is allowed by baseline. Approved NET_ADMIN needs a less restrictive namespace
+        // admission level, not a privileged Pod or any Kubernetes API entitlement.
+        namespace_labels["pod-security.kubernetes.io/enforce"] =
+            json!(
+                if projection.environment_spec.security.capabilities.is_empty() {
+                    "baseline"
+                } else {
+                    "privileged"
+                }
+            );
+        namespace_labels["pod-security.kubernetes.io/audit"] = json!("restricted");
+        namespace_labels["pod-security.kubernetes.io/warn"] = json!("restricted");
         let mut documents = vec![
             resource(
                 "Namespace",
@@ -1597,7 +1638,7 @@ where
                 &namespace,
                 json!({
                     "apiVersion":"v1","kind":"Namespace",
-                    "metadata":{"name":namespace,"labels":labels,"finalizers":["labweaver.io/environment-cleanup"]}
+                    "metadata":{"name":namespace,"labels":namespace_labels,"finalizers":["labweaver.io/environment-cleanup"]}
                 }),
             ),
             resource(
@@ -1686,26 +1727,22 @@ where
                             "metadata":{"labels":pod_labels},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
-                                // The shared NFS PVC is provisioned with the `nobody` owner.
-                                // Pinning the runtime identity to that non-root UID keeps the
-                                // student workspace writable. The fixed init command copies the
-                                // approved image's seed exactly once and preserves an existing
-                                // workspace across stop/start and pod replacement.
-                                "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
+                                // Both the seed and runtime consume the same approved identity.
+                                "securityContext":{"runAsNonRoot":uid!=0,"runAsUser":uid,"runAsGroup":uid,"fsGroup":uid,"seccompProfile":{"type":"RuntimeDefault"}},
                                 "initContainers":[{
                                     "name":"workspace-seed",
                                     "image":image,
                                     "imagePullPolicy":"IfNotPresent",
                                     "command":["/bin/sh","-c",WORKSPACE_SEED_COMMAND],
                                     "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"128Mi"}},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "securityContext":security_context,
                                     "volumeMounts":[{"name":"workspace","mountPath":WORKSPACE_ROOT}]
                                 }],
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
                                     "ports":[{"name":"service","containerPort":service_port}],
                                      "resources":{"requests":workload_requests,"limits":workload_limits},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
+                                    "securityContext":security_context,
                                     "volumeMounts":[
                                         {"name":"workspace","mountPath":WORKSPACE_ROOT},
                                         {"name":"runtime-tmp","mountPath":"/tmp"}

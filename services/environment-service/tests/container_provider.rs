@@ -276,12 +276,12 @@ fn assert_workspace_seed(document: &serde_json::Value, image: &str) {
     assert!(command.contains("find /workspace"));
     assert_eq!(
         document.pointer("/spec/template/spec/initContainers/0/securityContext/runAsNonRoot"),
-        Some(&json!(true))
+        Some(&json!(false))
     );
     assert_eq!(
         document
             .pointer("/spec/template/spec/initContainers/0/securityContext/readOnlyRootFilesystem"),
-        Some(&json!(true))
+        Some(&json!(false))
     );
     assert_eq!(
         document
@@ -324,7 +324,7 @@ fn assert_runtime_security_and_tmp(document: &serde_json::Value) {
     assert_eq!(
         document
             .pointer("/spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem",),
-        Some(&json!(true))
+        Some(&json!(false))
     );
     assert_eq!(
         document
@@ -809,6 +809,7 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     instance.release_id = projection.release.id;
     instance.release_version = projection.release.version;
     "container-primary-v1".clone_into(&mut instance.provider_binding);
+    instance.runtime_authorization = Some(support::runtime_receipt(&instance, projection));
     instance
 }
 
@@ -1279,9 +1280,9 @@ fn projection() -> ReleasePublished {
         "network":{"mode":"deny_all"},
         "entries":[{"name":"web","protocol":"http","servicePort":8080}],
         "security":{
-            "userPolicy":"non_root_required",
-            "rootFilesystemPolicy":"read_only_required",
-            "privilegeEscalationPolicy":"deny",
+            "runAsUser":null,
+            "readOnlyRootFilesystem":false,
+            "allowPrivilegeEscalation":false,
             "publicExposurePolicy":"deny",
             "securityProfileBinding":"restricted-v1"
         },
@@ -1371,4 +1372,69 @@ fn revision(value: u64) -> Revision {
 
 fn timestamp(value: &str) -> UtcTimestamp {
     UtcTimestamp::from_str(value).expect("valid timestamp")
+}
+
+#[test]
+fn ordinary_container_projects_only_the_approved_uid_capabilities_and_root_filesystem() {
+    use contracts::platform_configuration::LinuxCapability;
+    for run_as_user in [None, Some(0), Some(1234)] {
+        let mut projection = projection();
+        projection.environment_spec.security.run_as_user = run_as_user;
+        projection
+            .environment_spec
+            .security
+            .capabilities
+            .insert(LinuxCapability::NetAdmin);
+        projection
+            .environment_spec
+            .security
+            .read_only_root_filesystem = true;
+        let mut instance = instance_for(&projection);
+        instance
+            .runtime_authorization
+            .as_mut()
+            .expect("receipt")
+            .default_container_uid = 1000;
+        let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+        let plan = provider
+            .plan(
+                &instance,
+                &resolved(projection.clone()),
+                ReconcileAction::Provision,
+            )
+            .expect("approved capability plan");
+        let document = &resource(&plan, "Deployment").document;
+        let uid = run_as_user.unwrap_or(1000);
+        let expected = json!({"runAsNonRoot":uid!=0,"runAsUser":uid,"privileged":false,
+            "allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,
+            "capabilities":{"drop":["ALL"],"add":["NET_ADMIN"]},"seccompProfile":{"type":"RuntimeDefault"}});
+        assert_eq!(
+            document.pointer("/spec/template/spec/containers/0/securityContext"),
+            Some(&expected)
+        );
+        assert_eq!(
+            document.pointer("/spec/template/spec/initContainers/0/securityContext"),
+            Some(&expected)
+        );
+        assert_eq!(
+            resource(&plan, "Namespace")
+                .document
+                .pointer("/metadata/labels/pod-security.kubernetes.io~1enforce"),
+            Some(&json!("privileged"))
+        );
+        instance
+            .runtime_authorization
+            .as_mut()
+            .expect("receipt")
+            .authorization
+            .permissions
+            .capabilities
+            .clear();
+        assert!(
+            provider
+                .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+                .is_err(),
+            "adding a capability cannot reuse the original approval"
+        );
+    }
 }

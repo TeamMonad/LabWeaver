@@ -136,7 +136,7 @@
           "uniqueItems": true
         },
         "defaultContainerUid": {
-          "description": "Zero means guest/container root, without host privileges.",
+          "description": "Default ordinary-container UID; zero is container root, without host privileges.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -228,12 +228,30 @@
       "properties": {
         "capabilities": {
           "items": {
-            "$ref": "#/definitions/LinuxCapability"
+            "enum": [
+              "CHOWN",
+              "DAC_OVERRIDE",
+              "FOWNER",
+              "FSETID",
+              "KILL",
+              "SETGID",
+              "SETUID",
+              "SETPCAP",
+              "NET_BIND_SERVICE",
+              "NET_ADMIN",
+              "NET_RAW",
+              "SYS_CHROOT",
+              "MKNOD",
+              "AUDIT_WRITE",
+              "SETFCAP"
+            ],
+            "type": "string"
           },
           "type": "array",
           "uniqueItems": true
         },
         "privileged": {
+          "const": false,
           "type": "boolean"
         },
         "scope": {
@@ -428,21 +446,38 @@
               "properties": {
                 "allowedCapabilities": {
                   "items": {
-                    "$ref": "#/definitions/LinuxCapability"
+                    "enum": [
+                      "CHOWN",
+                      "DAC_OVERRIDE",
+                      "FOWNER",
+                      "FSETID",
+                      "KILL",
+                      "SETGID",
+                      "SETUID",
+                      "SETPCAP",
+                      "NET_BIND_SERVICE",
+                      "NET_ADMIN",
+                      "NET_RAW",
+                      "SYS_CHROOT",
+                      "MKNOD",
+                      "AUDIT_WRITE",
+                      "SETFCAP"
+                    ],
+                    "type": "string"
                   },
-                  "maxItems": 0,
                   "type": "array",
                   "uniqueItems": true
                 },
                 "defaultContainerUid": {
-                  "const": 0,
+                  "maximum": 4294967294,
+                  "minimum": 0,
                   "type": "integer"
                 },
                 "preauthorizations": {
                   "items": {
                     "$ref": "#/definitions/RuntimePreauthorization"
                   },
-                  "maxItems": 0,
+                  "maxItems": 512,
                   "type": "array"
                 },
                 "privilegedAllowed": {

@@ -520,36 +520,38 @@ pub struct EnvironmentEntrySpec {
     pub service_port: u16,
 }
 
-/// Runtime-independent minimum security posture.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// Runtime permissions, independently declared and bound to the immutable approved spec.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentSecuritySpec {
-    pub user_policy: RuntimeUserPolicy,
-    pub root_filesystem_policy: RootFilesystemPolicy,
-    pub privilege_escalation_policy: PrivilegeEscalationPolicy,
+    /// Null consumes the default UID from the same verified platform configuration as approval.
+    #[serde(default)]
+    pub run_as_user: Option<u32>,
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(default)]
+    pub capabilities: BTreeSet<crate::platform_configuration::LinuxCapability>,
+    #[serde(default)]
+    pub allow_privilege_escalation: bool,
+    #[serde(default)]
+    pub read_only_root_filesystem: bool,
+    #[serde(default)]
+    pub seccomp: RuntimeSeccompProfile,
     pub public_exposure_policy: PublicExposurePolicy,
     pub security_profile_binding: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeUserPolicy {
-    NonRootRequired,
+pub enum RuntimeSeccompProfile {
+    #[default]
+    RuntimeDefault,
+    Unconfined,
 }
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootFilesystemPolicy {
-    ReadOnlyRequired,
-    MutableRequired,
-}
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrivilegeEscalationPolicy {
-    Deny,
-}
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicExposurePolicy {
+    #[default]
     Deny,
 }
 
@@ -764,6 +766,23 @@ impl EnvironmentSpec {
                 "entries and fail-closed security posture are required".to_owned(),
             ));
         }
+        if self.security.run_as_user == Some(u32::MAX) {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "LW_RUNTIME_USER_UNSUPPORTED: runAsUser uses the reserved Linux UID".to_owned(),
+            ));
+        }
+        if self.security.privileged
+            || self.security.seccomp != RuntimeSeccompProfile::RuntimeDefault
+            || self
+                .security
+                .capabilities
+                .iter()
+                .any(|capability| !capability.supported_in_container())
+        {
+            return Err(AuthoringError::InvalidEnvironmentSpec(
+                "LW_RUNTIME_SECURITY_UNSUPPORTED: privileged, unconfined seccomp and broad kernel capabilities require an unsupported execution boundary".to_owned(),
+            ));
+        }
         let mut entry_names = BTreeSet::new();
         for entry in &self.entries {
             if entry.name.trim().is_empty()
@@ -791,8 +810,6 @@ impl EnvironmentSpec {
             } => {
                 if provider_binding.trim().is_empty()
                     || *service_port == 0
-                    || self.security.root_filesystem_policy
-                        != RootFilesystemPolicy::ReadOnlyRequired
                     || !self
                         .entries
                         .iter()
@@ -815,6 +832,15 @@ impl EnvironmentSpec {
                 storage_class_binding,
                 ssh_port,
             } => {
+                if self.security.run_as_user.is_some()
+                    || !self.security.capabilities.is_empty()
+                    || self.security.allow_privilege_escalation
+                    || self.security.read_only_root_filesystem
+                {
+                    return Err(AuthoringError::InvalidEnvironmentSpec(
+                        "LW_RUNTIME_SECURITY_UNSUPPORTED: container security cannot configure VM guests".to_owned(),
+                    ));
+                }
                 if matches!(self.network, NetworkPolicySpec::AllowAll) {
                     return Err(AuthoringError::InvalidEnvironmentSpec(
                         "allow_all network policy is supported only by container runtimes"

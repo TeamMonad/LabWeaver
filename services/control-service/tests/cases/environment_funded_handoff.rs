@@ -78,6 +78,11 @@ impl EnvironmentRuntimeAuthority for PgAuthority {
             diagnostic_code: error.to_string(),
         })?;
         Ok(EnvironmentRuntimeAuthorizationResolution {
+            default_container_uid: value
+                .applied_configuration
+                .configuration
+                .runtime_policy
+                .default_container_uid,
             valid_until: value.lease.expires_at.min(value.approval_valid_until),
             provider_binding: value.provider_binding,
             owner_actor_id: value.lease.owner_actor_id,
@@ -932,11 +937,39 @@ async fn exercise_execution(
             Arc::new(projections),
             configuration,
         )?;
-        provider.plan(
+        let plan = provider.plan(
             instance,
             &resolved,
             environment_service::ReconcileAction::Validate,
         )?;
+        assert_eq!(
+            plan.resources
+                .iter()
+                .find(|r| r.kind == "Deployment")
+                .and_then(|r| r
+                    .document
+                    .pointer("/spec/template/spec/containers/0/securityContext/runAsUser")),
+            Some(&serde_json::json!(0)),
+            "the real approved baseline runs as ordinary root"
+        );
+        let pod = plan
+            .resources
+            .iter()
+            .find(|r| r.kind == "Deployment")
+            .ok_or("deployment")?
+            .document
+            .pointer("/spec/template/spec")
+            .ok_or("pod")?;
+        for containers in ["containers", "initContainers"] {
+            let security = &pod[containers][0]["securityContext"];
+            assert_eq!(security["privileged"], false);
+            assert_eq!(security["readOnlyRootFilesystem"], false);
+            assert_eq!(
+                security["capabilities"],
+                serde_json::json!({"drop":["ALL"],"add":projection.environment_spec.security.capabilities})
+            );
+        }
+        executor_gate::assert_security_rejections(pool, admission, instance, &plan).await?;
         let provider = Arc::new(provider);
         container_provider = Some(provider.clone());
         registry.register(provider)?;

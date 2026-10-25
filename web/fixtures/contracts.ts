@@ -166,7 +166,7 @@ const manualWorkSpec = {
   resources: { cpuMillicores: 2000, memoryBytes: 4 * GIB, storageBytes: 20 * GIB },
   network: { mode: 'deny_all' },
   entries: [{ name: 'app', protocol: 'http', servicePort: 8080 }],
-  security: { userPolicy: 'non_root_required', rootFilesystemPolicy: 'read_only_required', privilegeEscalationPolicy: 'deny', publicExposurePolicy: 'deny', securityProfileBinding: 'restricted-v1' },
+  security: { runAsUser: null, readOnlyRootFilesystem: false, allowPrivilegeEscalation: false, publicExposurePolicy: 'deny', securityProfileBinding: 'restricted-v1' },
   runtime: { kind: 'container', provider_binding: 'fixture-kubernetes', service_port: 8080, terminal: { executable: '/bin/bash', args: [], workingDirectory: '/workspace' } },
   retention: { policyId: '0197f0e0-0000-7000-8000-0000000000c1', policyRevision: 1, class: 'run_evidence', disposition: 'delete', retainUntil: '2027-03-01T00:00:00.000Z' },
 } satisfies NonNullable<EnvironmentTemplateReleaseViewSchema['manualApproval']>['spec']

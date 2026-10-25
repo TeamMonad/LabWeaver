@@ -1847,8 +1847,8 @@ fn fresh_vm_work_candidate(
             "network":{"mode":"deny_all"},
             "entries":[{"name":"ssh","protocol":"ssh","servicePort":22}],
             "security":{
-                "userPolicy":"non_root_required", "rootFilesystemPolicy":"mutable_required",
-                "privilegeEscalationPolicy":"deny", "publicExposurePolicy":"deny",
+                "runAsUser":null, "readOnlyRootFilesystem":false,
+                "allowPrivilegeEscalation":false, "publicExposurePolicy":"deny",
                 "securityProfileBinding":"restricted-v1"
             },
             "runtime":{
