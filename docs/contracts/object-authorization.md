@@ -98,8 +98,11 @@ cutover 不改历史批准：缺少投影的旧批准读取为旧格式，但在
 
 普通切片的 `allowPrivilegeEscalation` 只接受 `false`/`null`，缺省和 null 均规范为 false；true 由唯一
 Rust spec 语义校验拒绝，而不是由 Provider 降权执行。消费授权时，executor 从可信 spec/release、同版本
-receipt 与部署配置重新生成该动作的完整预期对象并逐对象比较，包括完整 Pod/Deployment 安全面与
-Namespace PSA；请求自带摘要或单个 securityContext 相等都不能代替完整计划一致性。
+receipt 与部署配置重新生成完整可信计划。所有带对象 Apply 和计算动作的接收对象列表必须与可信计划
+数量、顺序及内容相同，不接受携带计算对象的稀疏计划或有序子集；省略 NetworkPolicy、ResourceQuota、
+LimitRange 等约束对象也会拒绝。接收列表使用同一 canonical 函数重算 SHA 后再比对可信 SHA，不能仅靠
+自报摘要或 securityContext 相等取得执行权。完整 Pod/Deployment 安全面、Namespace PSA 和其他对象都
+逐一核对；缺少、多出、重排或内容漂移均在 Kubernetes 副作用前拒绝。
 
 `GET /api/v1/resource-requests/{requestId}/runtime-authorization` 通过现有 Access 服务鉴权及用户范围返回当前有效绑定，使用 `Cache-Control: no-store`。它重新读取当前请求、未过期的原 ResourceApproval、当前成员、Control 配置和已验证策略。请求换代、配置换版、发布撤回或范围失效会拒绝读取。已验证 applied 版本变更使旧绑定返回 `LW_RUNTIME_POLICY_CHANGED`，需要按新版本重新判定。desired 草稿不使旧绑定失效。响应不能替代 #207 在实际创建和实例换代时的检查。
 

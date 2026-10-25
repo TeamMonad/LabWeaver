@@ -78,8 +78,11 @@ JSON 使用 `application/json`。高级 YAML 使用 `application/yaml`。两个�
 
 实例的 `allowPrivilegeEscalation=true` 不属于普通运行支持范围，不能因默认 UID 为 root 或 scope 预授权而
 放开。缺省/false/null 只对应规范化 false；唯一 Rust spec 语义校验负责拒绝 true，Provider 不做静默降权。
-执行器还使用同一可信 spec、receipt 和部署配置重建完整 Pod/Deployment/Namespace 对象集合逐一比较，
-而非只相信请求中的安全上下文或 PSA 标签；平台配置和权限回执都不授予任意对象补丁能力。
+执行器还使用同一可信 spec、receipt 和部署配置重建完整可信计划。所有带对象 Apply 与计算动作都要求
+接收对象的数量、顺序和内容与其完全相同，包括 Pod/Deployment、Namespace PSA、NetworkPolicy、配额
+和 LimitRange；缺少任一应有对象都拒绝，不提供携带计算对象的稀疏或有序子集例外。接收对象列表还要
+通过同一 canonical 摘要函数独立重算 SHA 并与可信 SHA 比对，不能只相信调用方的安全上下文或摘要。
+平台配置和权限回执都不授予任意对象补丁或裁剪完整计划的能力。
 
 `runtimePolicy` 与 `builderPolicy` 独立。更改特权运行或 runtime capabilities 不会增加 builder capabilities、提权或 entitlements。`impact` 比较 desired 与最后验证的 applied，分别提示运行、构建和生命周期设置变化。它不提供虚构的受影响资源数量。
 

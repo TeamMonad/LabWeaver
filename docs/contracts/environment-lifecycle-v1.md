@@ -141,12 +141,21 @@ Environment 自己创建的运行 Namespace 使用 PSA `enforce=baseline`（能�
 或运行 Pod Kubernetes API 权限。运行 ServiceAccount 不自动挂载 token，不增补 RBAC；宿主 namespace、
 hostPath、平台凭据和额外设备不会因 root/capabilities 自动开放。既有 namespace 模式不改管理员的 PSA。
 
-在会产生计算的命令执行前，持久 executor 不只比较 `securityContext`，也不信任调用方重算的计划摘要。
-它用可信不可变 spec/release、同一 verified receipt 和部署配置调用现有唯一投影，重建当前动作应有的
-完整对象集合，再按对象身份逐一精确比较。Pod/Deployment 的命令和参数、环境、工作目录、安全上下文、
-init/sidecar、ServiceAccount 与 token 挂载、卷及挂载、宿主 namespace/网络设置，以及 Namespace PSA
-等都属于这份完整安全面；未声明字段、额外对象、缺少对象或任何漂移都会在 Kubernetes 副作用前拒绝。
-只读观察、纯停止/回收仍沿其各自协议与 fence，不因此取得新运行权限。
+普通容器的所有带对象 Apply 和会创建或变更计算的动作，持久 executor 都从可信不可变 spec/release、
+同一 verified receipt 和部署配置调用现有唯一投影，重建该动作的完整可信计划。接收列表必须与它的
+**对象数量、顺序和内容全部相同**；按身份逐对象比较不能接受有序子集，也不保留携带计算对象的稀疏例外。
+即使 Pod/Deployment 本身的 securityContext 完全相同，遗漏 NetworkPolicy、ResourceQuota、LimitRange
+或其他应有对象也必须拒绝，不能把隔离策略和资源上限视为可选附带对象。
+
+executor 使用与可信投影相同的 canonical 摘要函数、相同输入结构重算接收对象列表的 SHA，再与可信计划
+SHA 比较。复制可信 planSha256 却删改列表会失败；为被裁剪、重排或修改的列表自算一个新 SHA 也不能
+取得执行权。调用方声明的摘要不是完整性事实，更不能代替数量、顺序和逐对象内容一致性检查。
+
+完整安全面包括 Pod/Deployment 的命令和参数、环境、工作目录、安全上下文、init/sidecar、ServiceAccount
+与 token 挂载、卷及挂载、宿主 namespace/网络设置、Namespace PSA，以及隔离策略、配额和 LimitRange。
+未声明字段、额外对象、缺少对象、对象重排或任何漂移都会在 Kubernetes 副作用前拒绝。合法计算路径使用
+完整计划；测试中的稀疏消息只用于无授权攻击负向场景，不能作为生产计算路径的兼容入口。
+只读观察、纯停止/回收仍沿其各自协议与 fence，不因此取得新运行权限；这些路径不构成上述 Apply 与计算动作的稀疏计划豁免。
 
 `allowPrivilegeEscalation=true` 的拒绝由 Rust spec 语义校验这一真源完成；显式 `false` 和输入 `null`
 得到同一规范化 false 投影。Provider/Executor 不能把不支持的 true 静默钳制为 false，也不能通过相同
