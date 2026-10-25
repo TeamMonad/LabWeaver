@@ -86,3 +86,5 @@ jobs:
         run: cargo test -p control-service --test platform_configuration_replicas all_control_replicas_must_report_actual_loaded_source_before_applied --locked -- --ignored --exact --test-threads=1
       - name: Run generated SDK against real Control and PostgreSQL
         run: cargo test -p control-service --test platform_configuration browser_sdk_registers_real_ciphertext_and_reads_durable_failure --locked -- --ignored --exact --test-threads=1
+      - name: Verify native runtime origin isolation against Access and Environment
+        run: cargo test -p access-service chromium_runtime_script_cannot_use_portal_session --locked -- --ignored --test-threads=1

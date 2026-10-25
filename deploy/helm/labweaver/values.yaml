@@ -36,6 +36,15 @@ portalRoute:
   gatewayName: ""
   gatewaySectionName: http
 
+# Required whenever the public portal route is enabled. Provision a wildcard
+# certificate in portalRoute.namespace; a shared runtime origin is not supported.
+runtimeRoute:
+  baseHostname: ""
+  gatewayName: labweaver-runtime
+  gatewayClassName: cilium
+  tlsHostname: ""
+  tlsSecretName: ""
+
 objectStoreRoute:
   enabled: false
   namespace: ""

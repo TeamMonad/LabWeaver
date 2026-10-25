@@ -13,6 +13,8 @@ public_ingress_enabled: false
 public_ingress_namespace: labweaver-system
 public_ingress_domain: labweaver.2018wzh.top
 public_ingress_gateway_name: labweaver-public
+# Mandatory dedicated base zone; every grant has its own host under this zone.
+public_ingress_runtime_base_hostname: ""
 public_ingress_gateway_vip: 10.99.0.140
 public_ingress_gateway_class: cilium
 # The OpenSSH Gateway keeps its dedicated TCP/2222 LoadBalancer VIP. The

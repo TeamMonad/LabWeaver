@@ -26,6 +26,8 @@ oidc:
 browser:
   bind_addr: "0.0.0.0:8080"
   allowed_origins: ["https://portal.example.invalid"]
+  # Each grant uses g-<uuid-without-hyphens>.<base-host>; provision wildcard DNS/TLS.
+  runtime_base_origin: "https://runtime.example.invalid"
   session_ttl_seconds: 900
   session_idle_ttl_seconds: 300
   # Each tab receives its own Secure/HttpOnly transaction cookie for this 60-900s lifetime.

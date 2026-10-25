@@ -48,7 +48,7 @@ pub(super) struct ControlGatewayProxy {
 /// exact `EndpointGrant` against both Access and Environment authorities.
 #[derive(Clone)]
 pub(super) struct RuntimeGatewayProxy {
-    client: Client,
+    pub(super) client: Client,
     max_request_bytes: usize,
     max_response_bytes: usize,
 }
@@ -1539,11 +1539,9 @@ pub(super) async fn forward_runtime(
     if body.len() > state.runtime_proxy.max_request_bytes {
         return Err(ApiError::bad_request("LW_ACCESS_RUNTIME_REQUEST_TOO_LARGE"));
     }
-    if !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
-        require_browser_origin(&state, &headers)?;
-    }
     let (endpoint_grant_id, runtime_path) = parse_runtime_path(uri.path())?;
-    let session = authenticated_session(&state, &headers).await?;
+    let session =
+        super::runtime::authenticated_capability(&state, &uri, &headers, endpoint_grant_id).await?;
     let target = authorize_runtime(
         &state,
         session.actor_id,
@@ -1600,7 +1598,11 @@ pub(super) async fn forward_runtime(
             "LW_ACCESS_RUNTIME_RESPONSE_TOO_LARGE",
         ));
     }
-    let mut downstream = Response::builder().status(status);
+    let mut downstream = Response::builder()
+        .status(status)
+        .header("cross-origin-resource-policy", "same-origin")
+        .header("cross-origin-opener-policy", "same-origin")
+        .header("origin-agent-cluster", "?1");
     for name in [
         header::CONTENT_TYPE,
         header::CONTENT_ENCODING,
@@ -1632,7 +1634,7 @@ pub(super) async fn forward_runtime(
         .map_err(|_| ApiError::internal("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))
 }
 
-struct RuntimeTarget {
+pub(super) struct RuntimeTarget {
     environment_id: contracts::EnvironmentId,
     service: contracts::environment::ContainerServiceTarget,
 }
@@ -1641,7 +1643,7 @@ struct RuntimeTarget {
     clippy::too_many_lines,
     reason = "runtime authorization keeps grant, environment, and endpoint fences together"
 )]
-async fn authorize_runtime(
+pub(super) async fn authorize_runtime(
     state: &AppState,
     actor_id: uuid::Uuid,
     endpoint_grant_id: contracts::EndpointGrantId,
@@ -2290,7 +2292,9 @@ fn copy_runtime_request_headers(
     request
 }
 
-fn parse_runtime_path(path: &str) -> Result<(contracts::EndpointGrantId, String), ApiError> {
+pub(super) fn parse_runtime_path(
+    path: &str,
+) -> Result<(contracts::EndpointGrantId, String), ApiError> {
     if !safe_path(path) {
         return Err(ApiError::bad_request("LW_ACCESS_RUNTIME_PATH_REJECTED"));
     }

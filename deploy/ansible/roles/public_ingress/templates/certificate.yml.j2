@@ -11,6 +11,7 @@ spec:
   dnsNames:
     - {{ public_ingress_domain }}
     - "*.{{ public_ingress_domain }}"
+    - "*.{{ public_ingress_runtime_base_hostname }}"
   duration: {{ public_ingress_certificate_duration }}
   renewBefore: {{ public_ingress_certificate_renew_before }}
   privateKey:

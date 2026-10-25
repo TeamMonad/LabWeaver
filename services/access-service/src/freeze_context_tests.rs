@@ -43,7 +43,7 @@ async fn freeze_context_is_server_derived_and_denied_requests_never_forward()
         .bind(now - Duration::minutes(1)).bind(now + Duration::minutes(3)).execute(&state.pool).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(Arc::clone(&state));
+    let router = browser_router_on(Arc::clone(&state), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -264,7 +264,7 @@ async fn freeze_rejects_idle_expiry_while_absolute_session_expiry_remains_valid(
         .bind(now - Duration::minutes(1)).bind(now + Duration::minutes(5)).execute(&state.pool).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(Arc::clone(&state));
+    let router = browser_router_on(Arc::clone(&state), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -351,7 +351,7 @@ async fn freeze_context_uses_persisted_earliest_expiries_and_microsecond_idle()
         .bind(grant).bind(actor).bind(project).bind(course).bind(environment).bind(now-Duration::minutes(1)).bind(now+Duration::minutes(5)).execute(&state.pool).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(Arc::clone(&state));
+    let router = browser_router_on(Arc::clone(&state), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));

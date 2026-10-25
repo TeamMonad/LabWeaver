@@ -29,7 +29,7 @@ async fn rubric_rules_bff_forwards_teacher_requests_and_denies_before_upstream()
         .bind(project).bind(actor).execute(&state.pool).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(Arc::clone(&state));
+    let router = browser_router_on(Arc::clone(&state), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));

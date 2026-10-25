@@ -30,6 +30,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "contracts",
+ "environment-service",
  "futures-util",
  "hyper 1.10.1",
  "hyper-util",

@@ -93,6 +93,9 @@ domains:
       - id: 8
         file: access/0008_funded_experiment_console_fence.sql
         sha256: 487108d32859120d34f33cf1689730c5b175226d8f89a960e8029cf2d4f8923d
+      - id: 9
+        file: access/0009_runtime_capabilities.sql
+        sha256: d5817df7f14eceacb56a6861dacde81e5d07a9bc2f7e56ee1dbbe3a0dac797f9
   - name: environment
     migrations:
       - id: 1

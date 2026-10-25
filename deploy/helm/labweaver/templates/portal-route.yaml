@@ -1,6 +1,11 @@
 {{- if .Values.portalRoute.enabled }}
 {{- $routeNamespace := required "portalRoute.namespace is required" .Values.portalRoute.namespace }}
 {{- $routeName := required "portalRoute.name is required" .Values.portalRoute.name }}
+{{- $runtimeBase := required "runtimeRoute.baseHostname is required" .Values.runtimeRoute.baseHostname }}
+{{- if or (eq $runtimeBase .Values.portalRoute.hostname) (hasSuffix (printf ".%s" $runtimeBase) .Values.portalRoute.hostname) }}
+{{- fail "portalRoute.hostname must differ from and lie outside the runtime base zone" }}
+{{- end }}
+{{- $_ := required "runtimeRoute.tlsSecretName is required" .Values.runtimeRoute.tlsSecretName }}
 ---
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant

@@ -487,8 +487,9 @@ pub struct EndpointGrant {
     pub action: EndpointAction,
     pub health: EndpointHealth,
     pub alias: Option<String>,
-    /// Same-origin, Access Service-authorized browser entry point. Present only
-    /// for HTTP(S) grants and derived from this immutable endpoint grant ID.
+    /// Portal handoff entry point, not a same-origin runtime proxy. Opening this
+    /// path navigates to this grant's dedicated HTTPS runtime host using a one-time,
+    /// browser-bound handoff. Present only for HTTP(S), derived from this grant ID.
     pub connect_url: Option<String>,
     /// Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.
     pub ssh_gateway_hostname: Option<String>,

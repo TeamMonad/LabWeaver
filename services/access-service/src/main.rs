@@ -11,6 +11,7 @@ mod membership_governance;
 mod object_authorization;
 mod oidc_login;
 mod proxy;
+mod runtime;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
@@ -116,7 +117,12 @@ async fn main() -> Result<(), StartupError> {
     reason = "the browser surface is intentionally enumerated in one auditable router"
 )]
 fn browser_router(state: Arc<AppState>) -> Router {
-    let router = browser_routes().with_state(state);
+    let router = browser_routes()
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            runtime::isolate_origin,
+        ))
+        .with_state(state);
     telemetry::instrument_http(router, "access-service", "browser-api")
 }
 
@@ -162,6 +168,14 @@ fn browser_routes() -> Router<Arc<AppState>> {
             get(console::list_capabilities).post(console::issue_capability),
         )
         .route("/connect/console/{opaque}", get(console::connect))
+        .route(
+            "/runtime-bootstrap/{endpoint_grant_id}",
+            get(runtime::bootstrap),
+        )
+        .route(
+            "/runtime-handoff/{endpoint_grant_id}",
+            get(runtime::handoff_page).post(runtime::consume),
+        )
         .route(
             "/api/v1/environments",
             axum::routing::any(proxy::forward_environment),
@@ -237,11 +251,11 @@ fn browser_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/connect/{endpoint_grant_id}/",
-            axum::routing::any(proxy::forward_runtime),
+            axum::routing::any(runtime::connect),
         )
         .route(
             "/connect/{endpoint_grant_id}/{*runtime_path}",
-            axum::routing::any(proxy::forward_runtime),
+            axum::routing::any(runtime::connect),
         )
         .merge(resource_browser_router())
 }
@@ -933,6 +947,11 @@ async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
+        if sqlx::query("DELETE FROM access.runtime_capabilities WHERE expires_at<=now() OR (consumed_at IS NULL AND handoff_expires_at<=now())")
+            .execute(&state.pool).await.is_err()
+        {
+            tracing::error!(diagnostic_code = "LW_ACCESS_STORE_UNAVAILABLE", event = "access.runtime_cleanup.failed");
+        }
         match cleanup_expired_auth_state(
             &state.pool,
             OffsetDateTime::now_utc(),

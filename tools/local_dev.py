@@ -1633,17 +1633,21 @@ def free_port() -> str:
 
 
 def verify_loopback_nip_io() -> None:
-    """Require nip.io's convenience name to remain a loopback-only alias."""
+    """Require the portal convenience name to remain loopback-only.
 
-    try:
-        addresses = {
-            item[4][0]
-            for item in socket.getaddrinfo("127.0.0.1.nip.io", None, type=socket.SOCK_STREAM)
-        }
-    except OSError as error:
-        fail(f"cannot resolve the local portal hostname 127.0.0.1.nip.io: {error}")
-    if addresses != {"127.0.0.1"}:
-        fail("127.0.0.1.nip.io did not resolve exclusively to 127.0.0.1")
+    Runtime hosts use the browser-reserved *.localhost namespace, not public DNS.
+    """
+
+    for hostname in ("127.0.0.1.nip.io",):
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+            }
+        except OSError as error:
+            fail(f"cannot resolve the local hostname {hostname}: {error}")
+        if addresses != {"127.0.0.1"}:
+            fail(f"{hostname} did not resolve exclusively to 127.0.0.1")
 
 
 def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
@@ -3179,6 +3183,7 @@ def make_app_input(
         data=data.replace("https://keycloak.example.invalid/realms/labweaver", public_issuer)
         data=data.replace("https://keycloak.example.invalid/realms/workloads", public_issuer)
         data=data.replace("https://portal.example.invalid", portal_origin)
+        data=data.replace("https://runtime.example.invalid", f"https://runtime.localhost:{PORTAL_PORT}")
         data=data.replace("https://demo.lab.example/", portal_origin + "/")
         registry_host = (
             real_build_provider.registry_host
@@ -3597,92 +3602,7 @@ def deploy_local_portal(kubeconfig: Path, work: Path, images: dict[str, str],
                         portal_key: Path, portal_crt: Path, portal_ca: Path) -> None:
     """Run the browser edge through the same Nginx proxy used in production."""
 
-    nginx_config = """pid /tmp/nginx.pid;
-error_log /dev/stderr warn;
-events { worker_connections 1024; }
-http {
-  include /etc/nginx/mime.types;
-  default_type application/octet-stream;
-  server_tokens off;
-  access_log /dev/stdout;
-  sendfile on;
-  client_body_temp_path /tmp/client_temp;
-  proxy_temp_path /tmp/proxy_temp;
-  fastcgi_temp_path /tmp/fastcgi_temp;
-  uwsgi_temp_path /tmp/uwsgi_temp;
-  scgi_temp_path /tmp/scgi_temp;
-  proxy_http_version 1.1;
-  proxy_buffering off;
-  map $http_upgrade $connection_upgrade { default upgrade; '' close; }
-  resolver kube-dns.kube-system.svc.cluster.local valid=5s ipv6=off;
-  server {
-    listen 8443 ssl;
-    ssl_certificate /etc/labweaver/tls/tls.crt;
-    ssl_certificate_key /etc/labweaver/tls/tls.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    set $labweaver_access access-service.labweaver-system.svc.cluster.local:8080;
-    set $labweaver_web web.labweaver-system.svc.cluster.local:8080;
-    set $labweaver_keycloak keycloak.keycloak-system.svc.cluster.local:8443;
-    set $labweaver_minio minio.labweaver-data.svc.cluster.local:9000;
-    location = /health/live {
-      access_log off;
-      default_type application/json;
-      return 200 '{"service":"local-dev-portal","status":"live"}';
-    }
-    location = /health/ready {
-      access_log off;
-      default_type application/json;
-      return 200 '{"service":"local-dev-portal","status":"ready"}';
-    }
-    location = /identity {
-      return 308 /identity/;
-    }
-    location /identity/ {
-      proxy_pass https://$labweaver_keycloak;
-      proxy_set_header Host $http_host;
-      proxy_set_header X-Forwarded-Proto https;
-      proxy_set_header X-Forwarded-Host $http_host;
-      proxy_set_header X-Forwarded-Prefix /identity;
-      proxy_ssl_server_name on;
-      proxy_ssl_name keycloak.keycloak-system.svc.cluster.local;
-      proxy_ssl_verify on;
-      proxy_ssl_verify_depth 2;
-      proxy_ssl_trusted_certificate /etc/labweaver/trust/ca.crt;
-    }
-    # Control signs browser uploads for this exact same-origin path. Keep the
-    # Host and URI intact while validating MinIO with the local private CA.
-    location /labweaver-artifacts {
-      client_max_body_size 256m;
-      proxy_http_version 1.1;
-      proxy_request_buffering off;
-      proxy_buffering off;
-      proxy_set_header Host $http_host;
-      proxy_ssl_server_name on;
-      proxy_ssl_name minio.labweaver-data.svc;
-      proxy_ssl_verify on;
-      proxy_ssl_verify_depth 2;
-      proxy_ssl_trusted_certificate /etc/labweaver/trust/ca.crt;
-      proxy_pass https://$labweaver_minio;
-    }
-    location ~ ^/(api|auth|connect)(/|$) {
-      proxy_pass http://$labweaver_access;
-      proxy_set_header Host $http_host;
-      proxy_set_header X-Forwarded-Proto https;
-      proxy_set_header X-Forwarded-Host $http_host;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection $connection_upgrade;
-    }
-    location / {
-      proxy_pass http://$labweaver_web;
-      proxy_set_header Host $http_host;
-      proxy_set_header X-Forwarded-Proto https;
-      proxy_set_header X-Forwarded-Host $http_host;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection $connection_upgrade;
-    }
-  }
-}
-"""
+    nginx_config = (ROOT / "deploy/config/local-dev-portal.nginx.conf").read_text(encoding="utf-8")
     objects = [
         config("local-dev-portal-nginx", NAMESPACE, {"nginx.conf": nginx_config}),
         secret("local-dev-portal-tls", NAMESPACE,
@@ -3880,7 +3800,7 @@ def up(
         portal_key, portal_crt = cert(
             work / "portal", foundation / "authority" / "ca.key",
             foundation / "authority" / "ca.crt", "portal",
-            ["DNS:127.0.0.1.nip.io", "DNS:localhost", "IP:127.0.0.1"],
+            ["DNS:127.0.0.1.nip.io", "DNS:*.runtime.localhost", "DNS:localhost", "IP:127.0.0.1"],
             usage="serverAuth",
         )
         deploy_local_portal(kubeconfig, work, images, portal_key, portal_crt,

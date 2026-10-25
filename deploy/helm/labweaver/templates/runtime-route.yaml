@@ -1,0 +1,53 @@
+{{- if .Values.portalRoute.enabled }}
+{{- $base := required "runtimeRoute.baseHostname is required" .Values.runtimeRoute.baseHostname }}
+{{- $hostname := printf "*.%s" $base }}
+{{- $tlsHostname := required "runtimeRoute.tlsHostname wildcard is required" .Values.runtimeRoute.tlsHostname }}
+{{- if ne $tlsHostname $hostname }}
+{{- fail "runtimeRoute.tlsHostname must cover exactly *.runtimeRoute.baseHostname" }}
+{{- end }}
+{{- $namespace := required "portalRoute.namespace is required" .Values.portalRoute.namespace }}
+{{- $gateway := required "runtimeRoute.gatewayName is required" .Values.runtimeRoute.gatewayName }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $gateway }}
+  namespace: {{ $namespace }}
+spec:
+  gatewayClassName: {{ required "runtimeRoute.gatewayClassName is required" .Values.runtimeRoute.gatewayClassName }}
+  listeners:
+    - name: runtime-https
+      hostname: {{ $hostname | quote }}
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ required "runtimeRoute.tlsSecretName is required" .Values.runtimeRoute.tlsSecretName }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.portalRoute.name }}-runtime
+  namespace: {{ $namespace }}
+spec:
+  hostnames:
+    - {{ $hostname | quote }}
+  parentRefs:
+    - name: {{ $gateway }}
+      sectionName: runtime-https
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /connect}
+        - path: {type: PathPrefix, value: /runtime-bootstrap}
+        # Fixed grant-only page/POST path; credentials never appear in request targets.
+        - path: {type: PathPrefix, value: /runtime-handoff}
+      backendRefs:
+        - name: access-service
+          namespace: {{ .Release.Namespace }}
+          port: 8080
+{{- end }}
