@@ -1272,6 +1272,9 @@ impl EnvironmentCleanupTarget {
     }
 }
 
+/// Version whose destructive calls always require an owner-persisted UID checkpoint first.
+pub const ENVIRONMENT_CLEANUP_PROTOCOL_VERSION: u8 = 1;
+
 /// Idempotent accepted environment operation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1291,6 +1294,9 @@ pub struct EnvironmentOperation {
     pub cleanup_started_at: Option<UtcTimestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_target: Option<EnvironmentCleanupTarget>,
+    /// Missing on legacy operations; absence never authorizes a first UID capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_protocol_version: Option<u8>,
     pub diagnostic_code: Option<String>,
     pub preserve_mutable_disk: bool,
     pub access_revocation_revision: Option<Revision>,
@@ -1359,8 +1365,308 @@ pub struct EnvironmentConnectionReadiness {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentDetail {
     #[serde(flatten)]
-    pub instance: EnvironmentInstance,
+    pub instance: PublicEnvironmentInstance,
     pub connection: EnvironmentConnectionReadiness,
+}
+
+/// Public operation fields. Cleanup targets and protocol markers remain owner-internal.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicEnvironmentOperation {
+    pub id: OperationId,
+    pub kind: EnvironmentOperationKind,
+    pub state: OperationState,
+    pub accepted_revision: Revision,
+    pub attempt: u32,
+    pub provider_step: u32,
+    pub max_attempts: u32,
+    pub next_attempt_at: UtcTimestamp,
+    pub actor_id: ActorId,
+    pub trace_id: String,
+    pub accepted_at: UtcTimestamp,
+    pub deadline_at: UtcTimestamp,
+    pub cleanup_started_at: Option<UtcTimestamp>,
+    pub diagnostic_code: Option<String>,
+    pub preserve_mutable_disk: bool,
+    pub access_revocation_revision: Option<Revision>,
+    pub retry_from_phase: Option<ObservedEnvironmentState>,
+    pub reset_target: Option<EnvironmentResetTarget>,
+    pub lease_authorization: Option<EnvironmentLeaseAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_upgrade: Option<EnvironmentTemplateUpgrade>,
+}
+
+impl From<EnvironmentOperation> for PublicEnvironmentOperation {
+    fn from(operation: EnvironmentOperation) -> Self {
+        let EnvironmentOperation {
+            id,
+            kind,
+            state,
+            accepted_revision,
+            attempt,
+            provider_step,
+            max_attempts,
+            next_attempt_at,
+            actor_id,
+            trace_id,
+            accepted_at,
+            deadline_at,
+            cleanup_started_at,
+            diagnostic_code,
+            preserve_mutable_disk,
+            access_revocation_revision,
+            retry_from_phase,
+            reset_target,
+            lease_authorization,
+            template_upgrade,
+            cleanup_target: _,
+            cleanup_protocol_version: _,
+        } = operation;
+        Self {
+            id,
+            kind,
+            state,
+            accepted_revision,
+            attempt,
+            provider_step,
+            max_attempts,
+            next_attempt_at,
+            actor_id,
+            trace_id,
+            accepted_at,
+            deadline_at,
+            cleanup_started_at,
+            diagnostic_code,
+            preserve_mutable_disk,
+            access_revocation_revision,
+            retry_from_phase,
+            reset_target,
+            lease_authorization,
+            template_upgrade,
+        }
+    }
+}
+
+impl PublicEnvironmentOperation {
+    fn into_unbound_snapshot(self) -> EnvironmentOperation {
+        let Self {
+            id,
+            kind,
+            state,
+            accepted_revision,
+            attempt,
+            provider_step,
+            max_attempts,
+            next_attempt_at,
+            actor_id,
+            trace_id,
+            accepted_at,
+            deadline_at,
+            cleanup_started_at,
+            diagnostic_code,
+            preserve_mutable_disk,
+            access_revocation_revision,
+            retry_from_phase,
+            reset_target,
+            lease_authorization,
+            template_upgrade,
+        } = self;
+        EnvironmentOperation {
+            id,
+            kind,
+            state,
+            accepted_revision,
+            attempt,
+            provider_step,
+            max_attempts,
+            next_attempt_at,
+            actor_id,
+            trace_id,
+            accepted_at,
+            deadline_at,
+            cleanup_started_at,
+            diagnostic_code,
+            preserve_mutable_disk,
+            access_revocation_revision,
+            retry_from_phase,
+            reset_target,
+            lease_authorization,
+            template_upgrade,
+            cleanup_target: None,
+            cleanup_protocol_version: None,
+        }
+    }
+}
+
+/// Explicit owner-facing instance projection, separate from the persisted aggregate.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicEnvironmentInstance {
+    pub id: EnvironmentId,
+    pub display_label: String,
+    pub project_id: ProjectId,
+    pub course_id: Option<crate::CourseId>,
+    pub owner_id: ActorId,
+    pub class: EnvironmentClass,
+    pub runtime_kind: RuntimeKind,
+    pub release_id: ReleaseId,
+    pub release_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authorization: Option<EnvironmentRuntimeAuthorizationResolution>,
+    pub lease_id: Option<LeaseId>,
+    pub capacity_binding: Option<String>,
+    pub approved_resources: WorkloadResources,
+    pub provider_binding: String,
+    pub desired_state: DesiredEnvironmentState,
+    pub observed_state: ObservedEnvironmentState,
+    pub revision: Revision,
+    pub generation: u64,
+    pub observed_generation: u64,
+    pub operation: PublicEnvironmentOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_allocation: Option<GpuAllocation>,
+    #[serde(default)]
+    pub resource_reservation_released: bool,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
+    pub endpoints: Vec<EnvironmentEndpoint>,
+    pub last_diagnostic_code: Option<String>,
+    pub failed_phase: Option<ObservedEnvironmentState>,
+    pub cleanup_evidence: Option<crate::ArtifactRef>,
+}
+
+impl From<EnvironmentInstance> for PublicEnvironmentInstance {
+    fn from(instance: EnvironmentInstance) -> Self {
+        let EnvironmentInstance {
+            id,
+            display_label,
+            project_id,
+            course_id,
+            owner_id,
+            class,
+            runtime_kind,
+            release_id,
+            release_version,
+            runtime_authorization,
+            lease_id,
+            capacity_binding,
+            approved_resources,
+            provider_binding,
+            desired_state,
+            observed_state,
+            revision,
+            generation,
+            observed_generation,
+            operation,
+            gpu_allocation,
+            resource_reservation_released,
+            eligibility_expires_at,
+            endpoints,
+            last_diagnostic_code,
+            failed_phase,
+            cleanup_evidence,
+        } = instance;
+        Self {
+            id,
+            display_label,
+            project_id,
+            course_id,
+            owner_id,
+            class,
+            runtime_kind,
+            release_id,
+            release_version,
+            runtime_authorization,
+            lease_id,
+            capacity_binding,
+            approved_resources,
+            provider_binding,
+            desired_state,
+            observed_state,
+            revision,
+            generation,
+            observed_generation,
+            operation: operation.into(),
+            gpu_allocation,
+            resource_reservation_released,
+            eligibility_expires_at,
+            endpoints,
+            last_diagnostic_code,
+            failed_phase,
+            cleanup_evidence,
+        }
+    }
+}
+
+impl PublicEnvironmentInstance {
+    /// Validates the disclosed fields with the authoritative invariant implementation.
+    /// Values move through a private unbound snapshot; no private cleanup authority is recreated.
+    pub fn validated(self) -> Result<Self, EnvironmentError> {
+        let Self {
+            id,
+            display_label,
+            project_id,
+            course_id,
+            owner_id,
+            class,
+            runtime_kind,
+            release_id,
+            release_version,
+            runtime_authorization,
+            lease_id,
+            capacity_binding,
+            approved_resources,
+            provider_binding,
+            desired_state,
+            observed_state,
+            revision,
+            generation,
+            observed_generation,
+            operation,
+            gpu_allocation,
+            resource_reservation_released,
+            eligibility_expires_at,
+            endpoints,
+            last_diagnostic_code,
+            failed_phase,
+            cleanup_evidence,
+        } = self;
+        let snapshot = EnvironmentInstance {
+            id,
+            display_label,
+            project_id,
+            course_id,
+            owner_id,
+            class,
+            runtime_kind,
+            release_id,
+            release_version,
+            runtime_authorization,
+            lease_id,
+            capacity_binding,
+            approved_resources,
+            provider_binding,
+            desired_state,
+            observed_state,
+            revision,
+            generation,
+            observed_generation,
+            operation: operation.into_unbound_snapshot(),
+            gpu_allocation,
+            resource_reservation_released,
+            eligibility_expires_at,
+            endpoints,
+            last_diagnostic_code,
+            failed_phase,
+            cleanup_evidence,
+        };
+        snapshot.validate()?;
+        Ok(snapshot.into())
+    }
 }
 
 /// PostgreSQL-authoritative environment view.
@@ -1527,6 +1833,13 @@ impl EnvironmentInstance {
         }
         if let Some(target) = &self.operation.cleanup_target {
             target.validate()?;
+        }
+        if self
+            .operation
+            .cleanup_protocol_version
+            .is_some_and(|version| version != ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
+        {
+            return Err(EnvironmentError::InvalidAggregate);
         }
         if (self.observed_state == ObservedEnvironmentState::Failed) != self.failed_phase.is_some()
         {

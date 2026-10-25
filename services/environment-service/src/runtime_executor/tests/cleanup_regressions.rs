@@ -7,6 +7,8 @@ use tokio::sync::watch;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+mod legacy_protocol;
+
 // In-process transport at the existing Kubernetes seam, forwarding every operation to the
 // production executor. The lifecycle, worker CAS and PostgreSQL store are not replaced.
 struct DirectKubernetes(KubernetesContainerExecutor);
@@ -64,6 +66,10 @@ struct Context {
 
 impl Context {
     async fn start() -> TestResult<Self> {
+        Self::start_runtime(contracts::authoring::RuntimeKind::Container).await
+    }
+
+    async fn start_runtime(runtime: contracts::authoring::RuntimeKind) -> TestResult<Self> {
         let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(4)
@@ -74,7 +80,11 @@ impl Context {
             .await?;
         crate::test_support::apply_environment_migrations(&pool).await?;
         let store = crate::PgEnvironmentStore::new(pool.clone());
-        let initial = crate::test_support::requested_instance();
+        let mut initial = crate::test_support::requested_instance();
+        initial.runtime_kind = runtime;
+        if runtime == contracts::authoring::RuntimeKind::VirtualMachine {
+            initial.provider_binding = "kubevirt-primary-v1".to_owned();
+        }
         store.create("cleanup-checkpoint-create", &initial).await?;
         let now = timestamp().map_err(|error| format!("{error:?}"))?;
         store
@@ -443,6 +453,7 @@ async fn lost_worker_lease_cannot_commit_checkpoint_or_send_delete() -> TestResu
 #[tokio::test]
 async fn failed_legacy_cleanup_without_original_uid_is_diagnostic_only() -> TestResult {
     let context = Context::start().await?;
+    context.seed_legacy_active(OperationState::Accepted).await?;
     context.fail_current().await?;
     let report = context.scan_snapshot(context.namespace().await?).await?;
     assert_eq!(report.recovering, 0);

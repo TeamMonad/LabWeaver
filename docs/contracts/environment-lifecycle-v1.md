@@ -328,6 +328,15 @@ Orphan recovery copies the original binding instead of observing a replacement a
 A failed old operation with no saved binding stays diagnostic-only. Nothing is written to an
 idempotency ledger to represent this domain fact, and no additional database table is required.
 
+Freshly accepted operations persist `cleanupProtocolVersion=1` before execution. A missing
+marker is not permission to capture: legacy Accepted/Running/Cancelling cleanup and scheduled
+retries can be reclaimed without command admission, so the shared worker diagnoses them before
+any Kubernetes request when no original binding exists. The checkpoint helper and lease/CAS
+store independently reject inventing that marker or the missing target. Existing proven targets
+remain immutable. This rule applies to both native Container and KubeVirt execution paths.
+Public owner detail uses an explicit safe projection and operation snapshots keep their existing
+read model; neither discloses the target, namespace/object UIDs, or the internal protocol marker.
+
 Objects with unknown, malformed or conflicting ownership stay untouched and are reported as
 unverified. Live/stopped workloads and active operations remain referenced. An object found
 after a durable `Deleted` result is reported as inconsistent; it is not automatically removed

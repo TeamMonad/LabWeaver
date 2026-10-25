@@ -279,6 +279,16 @@
           "minimum": 0,
           "type": "integer"
         },
+        "cleanupProtocolVersion": {
+          "description": "Missing on legacy operations; absence never authorizes a first UID capture.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "cleanupStartedAt": {
           "anyOf": [
             {

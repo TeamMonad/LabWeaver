@@ -637,18 +637,11 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
     ) -> Result<ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure> {
-        match self
-            .request(fence, KubeVirtExecutorRequest::Stop { plan: plan.clone() })
-            .await?
-        {
-            KubeVirtExecutorResponse::Stopped {
-                plan_sha256,
-                observation,
-            } if plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(observation)),
-            KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
-            KubeVirtExecutorResponse::Failed { failure } => Err(failure),
-            _ => Err(invalid_observation()),
-        }
+        stopped_response(
+            self.request(fence, KubeVirtExecutorRequest::Stop { plan: plan.clone() })
+                .await?,
+            plan,
+        )
     }
 
     async fn restart(
@@ -672,37 +665,21 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         plan: &KubeVirtCleanupPlan,
         target: Option<&contracts::environment::EnvironmentCleanupTarget>,
     ) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure> {
-        match self
-            .request(
+        cleanup_response(
+            self.request(
                 fence,
                 KubeVirtExecutorRequest::DeleteNamespace {
                     plan: plan.clone(),
                     target: target.cloned(),
                 },
             )
-            .await?
-        {
-            KubeVirtExecutorResponse::CleanupTargetObserved {
-                plan_sha256,
-                target,
-            } if plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::CleanupTarget(target)),
-            KubeVirtExecutorResponse::Deleted {
-                plan_sha256,
-                cleanup_evidence,
-            } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
-                Ok(ProviderOutcome::Completed(cleanup_evidence))
-            }
-            KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
-            KubeVirtExecutorResponse::Failed { failure } => Err(failure),
-            _ => Err(ProviderFailure {
-                code: ProviderFailureCode::CleanupFailed,
-                retryable: true,
-            }),
-        }
+            .await?,
+            plan,
+        )
     }
 }
 
-fn running_response(
+pub(crate) fn running_response(
     response: KubeVirtExecutorResponse,
     plan: &KubeVirtResourcePlan,
 ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
@@ -714,6 +691,45 @@ fn running_response(
         KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
         KubeVirtExecutorResponse::Failed { failure } => Err(failure),
         _ => Err(invalid_observation()),
+    }
+}
+
+pub(crate) fn stopped_response(
+    response: KubeVirtExecutorResponse,
+    plan: &KubeVirtCleanupPlan,
+) -> Result<ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure> {
+    match response {
+        KubeVirtExecutorResponse::Stopped {
+            plan_sha256,
+            observation,
+        } if plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(observation)),
+        KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
+        KubeVirtExecutorResponse::Failed { failure } => Err(failure),
+        _ => Err(invalid_observation()),
+    }
+}
+
+pub(crate) fn cleanup_response(
+    response: KubeVirtExecutorResponse,
+    plan: &KubeVirtCleanupPlan,
+) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure> {
+    match response {
+        KubeVirtExecutorResponse::CleanupTargetObserved {
+            plan_sha256,
+            target,
+        } if plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::CleanupTarget(target)),
+        KubeVirtExecutorResponse::Deleted {
+            plan_sha256,
+            cleanup_evidence,
+        } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
+            Ok(ProviderOutcome::Completed(cleanup_evidence))
+        }
+        KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
+        KubeVirtExecutorResponse::Failed { failure } => Err(failure),
+        _ => Err(ProviderFailure {
+            code: ProviderFailureCode::CleanupFailed,
+            retryable: true,
+        }),
     }
 }
 
@@ -771,7 +787,7 @@ impl KubeVirtExecutorRequest {
     }
 }
 
-fn bind_kubevirt_executor_request(
+pub(crate) fn bind_kubevirt_executor_request(
     mut fence: KubeVirtBackendFence,
     request: &KubeVirtExecutorRequest,
 ) -> Result<KubeVirtBackendFence, ProviderFailure> {
@@ -1638,7 +1654,7 @@ fn validate_kubevirt_executor_request(
     Ok(())
 }
 
-fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> ProviderFailure {
+pub(crate) fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> ProviderFailure {
     match error {
         KubeVirtExecutorFenceError::RuntimeAdmission(error) => error.provider_failure(),
         KubeVirtExecutorFenceError::InProgress

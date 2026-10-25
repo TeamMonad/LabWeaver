@@ -1040,6 +1040,14 @@ impl PgEnvironmentStore {
         {
             return Err(EnvironmentStoreError::InvalidOperationRecord);
         }
+        if stored.operation.cleanup_protocol_version != updated.operation.cleanup_protocol_version
+            || (stored.operation.cleanup_target.is_none()
+                && updated.operation.cleanup_target.is_some()
+                && stored.operation.cleanup_protocol_version
+                    != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION))
+        {
+            return Err(EnvironmentStoreError::InvalidOperationRecord);
+        }
         let row = sqlx::query(
             "SELECT environment_id, lease_owner, lease_token, \
                     lease_expires_at > now() AS lease_current \
@@ -1498,6 +1506,9 @@ fn build_create_instance(
             accepted_at: command.accepted_at,
             deadline_at: command.deadline_at,
             cleanup_started_at: None,
+            cleanup_protocol_version: Some(
+                contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
+            ),
             cleanup_target: None,
             diagnostic_code: None,
             preserve_mutable_disk: false,
@@ -1964,6 +1975,9 @@ fn operation_record_mismatch_reason(
     }
     if stored.cleanup_target != current.cleanup_target {
         return Some("cleanup_target");
+    }
+    if stored.cleanup_protocol_version != current.cleanup_protocol_version {
+        return Some("cleanup_protocol_version");
     }
     if stored.diagnostic_code != current.diagnostic_code {
         return Some("diagnostic_code");

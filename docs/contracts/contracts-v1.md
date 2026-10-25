@@ -30,7 +30,7 @@ Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；�
 
 进度读取不返回命令、凭据、评分输入、分数或 Kubernetes 对象。Resource 绑定缺失或暂时不可用返回 503 / `LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE`，不返回旧失败作为新进度。读取时 owner 改变则有界重读，仍不稳定时返回 409 / `LW_TASK_PROGRESS_CHANGED`。响应使用 `Cache-Control: no-store`，事件用于提示刷新，不能替代权威查询。
 
-这两个接口读取指定任务，不新增全项目任务聚合。项目 Agent 列表仍只支持 `page`/`pageSize`；Resource 项目申请列表仍为按调用者可见范围返回的数组。客户端不能把第一页或可见数组当作全项目完整任务数。
+这两个接口读取指定任务，不新增全项目任务聚合。项目 AgentRun 与 Resource 项目申请列表使用下文的稳定游标，并保留各领域的权威状态。客户端不能把单页或可见项数量当作全项目完整任务数。
 
 ## 格式与错误
 
@@ -79,10 +79,12 @@ Evaluation release 列表按 `published_at DESC, release_id DESC` 排序；学�
 
 ## Environment 清理身份检查点
 
-`EnvironmentOperation` 新增可选 `cleanupTarget`，包含 namespace 名称、原 namespace UID，
-以及共享 namespace 内待删 Work 对象的 `ExecutionObjectRef`。它是 Environment worker 在
-持有真实操作 lease 时保存的只读 Kubernetes 观察，不是客户端提交的清理授权参数。
-原 Delete/Cleanup 记录、重试和孤儿恢复始终沿用同一绑定；缺少原绑定的旧失败记录仅诊断。
-新增字段不改变列表查询、分页响应或操作状态枚举。Schema/SDK 从 Rust 真源生成；
-前端不需要创建、修改或推导这个检查点，继续使用已有公开操作快照与错误诊断。
+持久化及内部 NATS 使用的 `EnvironmentOperation` 包含可选 `cleanupTarget`：namespace、原 UID
+及 shared namespace 待删 Work 对象的 `ExecutionObjectRef`。新接受的操作持久写入
+`cleanupProtocolVersion=1`，证明首次 DELETE 必须先观察、经 owner lease/CAS 保存身份。
+缺少标记且没有绑定的旧 Accepted/Running/Cancelling 操作和已排定重试只诊断，不得接管后重新捕获。
+这两个字段不属于客户端清理授权参数，也不会出现在公开环境详情或公开操作快照中。
+详情使用显式 `PublicEnvironmentInstance`/`PublicEnvironmentOperation` 投影；Access 对公开字段
+继续复用权威 aggregate 的校验，不重建或推导私有清理身份。Schema/SDK 从 Rust 真源生成，
+列表接口、分页响应及操作状态枚举不变，前端继续使用公开快照与已有诊断。
 

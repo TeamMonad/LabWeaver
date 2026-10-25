@@ -2563,7 +2563,7 @@ async fn read_owned_environment(
     state: &AppState,
     headers: &HeaderMap,
     environment_id: contracts::EnvironmentId,
-) -> Result<contracts::environment::EnvironmentInstance, ApiError> {
+) -> Result<contracts::environment::PublicEnvironmentInstance, ApiError> {
     let uri = Uri::from_str(&format!("/api/v1/environments/{environment_id}"))
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
     let response = forward(
@@ -2595,9 +2595,9 @@ async fn read_owned_environment(
     .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
     let detail = contracts::parse_strict_json::<contracts::environment::EnvironmentDetail>(&bytes)
         .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
-    let instance = detail.instance;
-    instance
-        .validate()
+    let instance = detail
+        .instance
+        .validated()
         .map_err(|_| ApiError::unavailable("LW_AUTH_ENVIRONMENT_RESPONSE_INVALID"))?;
     let actor = authenticated_session(state, headers).await?;
     if instance.id != environment_id || instance.owner_id.as_uuid() != actor.actor_id {

@@ -757,6 +757,146 @@ async fn drive_state(
     Err("runtime did not become ready".into())
 }
 
+async fn persist_visibility_checkpoint(
+    store: &PgEnvironmentStore,
+) -> TestResult<EnvironmentInstance> {
+    let initial = requested_instance();
+    store.create("visibility-create", &initial).await?;
+    let now = store.current_time().await?;
+    store
+        .accept_command(
+            "visibility-delete",
+            &LifecycleCommand {
+                environment_id: initial.id,
+                kind: EnvironmentOperationKind::Delete,
+                expected_revision: initial.revision,
+                actor_id: initial.owner_id,
+                trace_id: "visibility-owner".to_owned(),
+                accepted_at: now,
+                deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))?,
+                access_revocation_revision: Some(initial.revision),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    let lease = store
+        .claim_due("visibility-worker", Duration::from_secs(30))
+        .await?
+        .ok_or("lease")?;
+    let mut pinned = lease.instance.clone();
+    pinned.revision = revision(pinned.revision.get() + 1);
+    pinned.operation.provider_step += 1;
+    pinned.operation.cleanup_target = Some(contracts::environment::EnvironmentCleanupTarget {
+        namespace: "private-shared-namespace".to_owned(),
+        uid: uuid::Uuid::now_v7(),
+        objects: vec![contracts::execution::ExecutionObjectRef {
+            api_version: "v1".to_owned(),
+            resource: "secrets".to_owned(),
+            name: "private-registry-secret".to_owned(),
+            uid: uuid::Uuid::now_v7().to_string(),
+        }],
+    });
+    pinned.validate()?;
+    store.save_reconciled(&lease, &pinned).await?;
+    Ok(pinned)
+}
+
+#[tokio::test]
+async fn authenticated_owner_detail_and_operation_snapshot_hide_cleanup_internals() -> TestResult {
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let nats = GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(4222.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .start()
+        .await?;
+    let client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let pinned = Box::pin(persist_visibility_checkpoint(&store)).await?;
+    let uid = pinned
+        .operation
+        .cleanup_target
+        .as_ref()
+        .ok_or("cleanup target")?
+        .uid;
+    assert!(
+        store
+            .load(pinned.id)
+            .await?
+            .operation
+            .cleanup_target
+            .is_some()
+    );
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.environment_operations WHERE operation_id=$1",
+    )
+    .bind(pinned.operation.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(stored.get("cleanupTarget").is_some());
+    assert!(stored.get("cleanupProtocolVersion").is_some());
+    let releases = PgReleaseProjectionStore::new(pool.clone());
+    let mut tasks = Tasks(Vec::new());
+    let (_authority, base, token) =
+        serve_authenticated_api(&pool, &store, &releases, &client, &mut tasks).await?;
+    let http = reqwest::Client::builder().no_proxy().build()?;
+    let detail_url = format!("{base}/api/v1/environments/{}", pinned.id);
+    assert_eq!(
+        http.get(&detail_url).send().await?.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    for url in [
+        detail_url,
+        format!(
+            "{base}/api/v1/environments/{}/operations/{}",
+            pinned.id, pinned.operation.id
+        ),
+    ] {
+        let response = http
+            .get(url)
+            .bearer_auth(&token)
+            .header("x-labweaver-actor-id", pinned.owner_id.to_string())
+            .header("x-labweaver-session-id", uuid::Uuid::now_v7().to_string())
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await?;
+        let encoded = serde_json::to_string(&body)?;
+        for private in [
+            "cleanupTarget",
+            "cleanupProtocolVersion",
+            "private-shared-namespace",
+            "private-registry-secret",
+            &uid.to_string(),
+        ] {
+            assert!(
+                !encoded.contains(private),
+                "owner response exposed {private}"
+            );
+        }
+        if let Some(operation) = body.get("operation") {
+            assert_eq!(operation["id"], pinned.operation.id.to_string());
+            assert_eq!(operation["kind"], "delete");
+        } else {
+            assert_eq!(body["operationId"], pinned.operation.id.to_string());
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn authenticated_http_upgrade_requires_runtime_authority_without_side_effects() -> TestResult
 {

@@ -57,6 +57,8 @@ pub(crate) fn pin_cleanup_target(
 ) -> Result<EnvironmentInstance, LifecycleError> {
     target.validate()?;
     if current.operation.cleanup_target.is_some()
+        || current.operation.cleanup_protocol_version
+            != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
         || current.desired_state != DesiredEnvironmentState::Deleted
         || current.observed_state != ObservedEnvironmentState::Deleting
     {
@@ -101,6 +103,8 @@ pub fn plan_command_authorized(
     }
     if current.desired_state == DesiredEnvironmentState::Deleted
         && current.operation.cleanup_target.is_none()
+        && current.operation.cleanup_protocol_version
+            != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
         && (current.observed_state == ObservedEnvironmentState::Deleting
             || current.failed_phase == Some(ObservedEnvironmentState::Deleting))
     {
@@ -240,6 +244,9 @@ pub fn plan_command_authorized(
         accepted_at: command.accepted_at,
         deadline_at: command.deadline_at,
         cleanup_started_at: None,
+        cleanup_protocol_version: Some(
+            contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
+        ),
         cleanup_target: if current.desired_state == DesiredEnvironmentState::Deleted {
             current.operation.cleanup_target.clone()
         } else {
