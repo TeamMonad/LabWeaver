@@ -521,4 +521,31 @@ describe('ResourceRequestView', () => {
     expect(estimate.text()).toContain('CPU · 16 核·小时')
     wrapper.unmount()
   })
+
+  it('locates the request a notification links to', async () => {
+    mocks.requests = { kind: 'success', data: [{ ...pendingRequest(), id: 'request-0', requestKey: 'other' }, pendingRequest()] }
+    const wrapper = await mountView('project-1', { requestId: 'request-1' })
+    const located = wrapper.get('[data-testid="resource-request-located"]')
+    expect(located.attributes('id')).toBe('resource-request-request-1')
+    expect(located.attributes('aria-current')).toBe('true')
+    expect(wrapper.findAll('[aria-current="true"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="resource-request-not-found"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('only notes a request it cannot find, without showing anything about it', async () => {
+    mocks.requests = { kind: 'success', data: [pendingRequest()] }
+    const wrapper = await mountView('project-1', { requestId: 'request-hidden' })
+    expect(wrapper.get('[data-testid="resource-request-not-found"]').text()).toContain('页面不会显示该申请的内容')
+    expect(wrapper.find('[data-testid="resource-request-located"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('request-hidden')
+    wrapper.unmount()
+  })
+
+  it('notes a missing request when the project has no requests at all', async () => {
+    mocks.requests = { kind: 'empty' }
+    const wrapper = await mountView('project-1', { requestId: 'request-hidden' })
+    expect(wrapper.find('[data-testid="resource-request-not-found"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })

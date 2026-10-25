@@ -53,6 +53,16 @@
       </template>
 
       <template v-else-if="auth.isAuthenticated.value">
+        <RouterLink
+          :to="notificationCenterPath"
+          class="icon-button notification-button"
+          :aria-label="notificationLabel"
+          :title="notificationLabel"
+          data-testid="notification-entry"
+        >
+          <SvgIcon name="notifications" size="md" aria-hidden="true" />
+          <span v-if="unreadText" class="notification-badge" aria-hidden="true" data-testid="notification-unread-badge">{{ unreadText }}</span>
+        </RouterLink>
         <span class="user-chip" :title="userDisplayName">
           <SvgIcon name="person" size="sm" aria-hidden="true" />
           <span class="user-name">{{ userDisplayName }}</span>
@@ -82,9 +92,11 @@ import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
 import GcpSearchBar from '@/components/layout/GcpSearchBar.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useProjects } from '@/composables/useProjects'
+import { useUnreadNotificationCount } from '@/composables/useNotifications'
 import { useThemeStore } from '@/stores/theme'
 import { OIDC_ENABLED } from '@/config'
-import { consoleNavigationTarget, rolesFromProfile } from '@/utils/navigation'
+import { consoleNavigationTarget, NOTIFICATION_CENTER_PATH, rolesFromProfile } from '@/utils/navigation'
+import { unreadBadgeText } from '@/utils/notifications'
 
 defineProps<{
   drawerOpen: boolean
@@ -105,6 +117,16 @@ const consoleTarget = computed(() => consoleNavigationTarget(
   route.path,
   projects.selectedProjectId,
 ))
+
+const notificationCenterPath = NOTIFICATION_CENTER_PATH
+const unread = useUnreadNotificationCount(computed(() => auth.isAuthenticated.value))
+// Zero shows no badge; a count that cannot be read shows no number rather than a stale one.
+const unreadText = computed(() => (unread.value.kind === 'success' && unread.value.data > 0 ? unreadBadgeText(unread.value.data) : ''))
+const notificationLabel = computed(() => {
+  if (unread.value.kind === 'success') return unread.value.data > 0 ? `通知，${unread.value.data} 条未读` : '通知，没有未读'
+  if (unread.value.kind === 'error') return '通知，未读数暂时无法读取'
+  return '通知'
+})
 
 const userDisplayName = computed(() => {
   const profile = auth.user.value?.profile
@@ -185,6 +207,27 @@ function cycleTheme() {
 
 .shell-button {
   text-decoration: none;
+}
+
+.notification-button {
+  position: relative;
+  text-decoration: none;
+}
+
+.notification-badge {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--md-sys-shape-full);
+  background: var(--md-sys-color-error);
+  color: var(--md-sys-color-on-error);
+  font: var(--md-sys-label-small);
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
 }
 
 .context-label {

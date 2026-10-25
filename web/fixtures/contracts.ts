@@ -22,6 +22,9 @@ import type {
   EnvironmentSummaryPageSchema,
   EnvironmentTemplateReleaseViewSchema,
   ProjectMembershipSchema,
+  Notification,
+  NotificationPageSchema,
+  NotificationUnreadCountSchema,
   ProjectSchema,
   OrganizationUserPageSchema,
   PlatformImageCatalogSchema,
@@ -1169,3 +1172,44 @@ export async function listProjectCreditLedger(options?: FixtureOptions): Promise
 export async function createCreditAdminOperation(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('Credits 管理员操作') }
 export async function estimateProjectResourceCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('资源费用估价') }
 export async function estimateProjectBuildCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('镜像构建费用估价') }
+
+// Notification center (#224) preview: one unread approval and one read reminder
+// whose email delivery could not be confirmed. Marking read is a real write, so the preview refuses it.
+function notificationsForPreview(): Notification[] {
+  return [
+    {
+      id: '01900000-0000-7000-8000-00000000e001',
+      eventId: '01900000-0000-7000-8000-00000000e101',
+      projectId: fixtureProjectId,
+      kind: 'resource_decision',
+      objectUrl: `/researcher/resources?projectId=${fixtureProjectId}&requestId=request-authorized`,
+      observedAt: now,
+      summary: '资源申请已批准；请打开对象查看当前分配进度和实际可用期限。',
+      emailState: 'disabled',
+      emailAttempts: 0,
+    },
+    {
+      id: '01900000-0000-7000-8000-00000000e002',
+      eventId: '01900000-0000-7000-8000-00000000e102',
+      projectId: fixtureProjectId,
+      kind: 'lease_expiry_reminder',
+      objectUrl: `/researcher/resources?projectId=${fixtureProjectId}&requestId=request-authorized`,
+      observedAt: now,
+      deadline: later,
+      readAt: now,
+      summary: '资源使用授权将在 1 小时后到期；到期后环境会停止，请及时保存数据。',
+      emailState: 'delivery_unknown',
+      emailAttempts: 1,
+      emailDetail: '邮件可能已送达，系统无法确认；为避免重复发送，不会自动重发。',
+      emailDiagnostic: 'LW_NOTIFICATION_SMTP_DELIVERY_UNKNOWN',
+    },
+  ]
+}
+
+export async function listNotifications(_options?: unknown): Promise<FixtureResult<NotificationPageSchema>> {
+  return fixtureResponse({ items: notificationsForPreview(), nextCursor: null })
+}
+export async function getNotificationUnreadCount(_options?: unknown): Promise<FixtureResult<NotificationUnreadCountSchema>> {
+  return fixtureResponse({ unreadCount: notificationsForPreview().filter((item) => !item.readAt).length })
+}
+export async function markNotificationRead(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('标记通知已读') }
