@@ -923,6 +923,7 @@ class AnsibleFixtureTests(unittest.TestCase):
                 "service_file": "unused",
                 "service": "platform-admin",
                 "sql_file": "unused",
+                "kubernetes_service": "postgres-rw",
             }
 
             def fail_json(self, **kwargs: object) -> None:
@@ -1047,10 +1048,10 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("Require the retained PostgreSQL port-forward endpoint", tasks)
         self.assertIn("platform_application_postgres_effective_service_file", tasks)
         self.assertIn("hostaddr=127.0.0.1", tasks)
-        self.assertIn(r"'\n' ~", tasks)
+        self.assertIn(r"'\n') if platform_application_postgres_forward_enabled", tasks)
         self.assertNotIn(r"'\\n' ~", tasks)
         self.assertIn("Canonicalize retained data-service host mappings", tasks)
-        self.assertIn("(?:postgres|nats|minio)", tasks)
+        self.assertIn("(?:postgres(?:-rw)?|nats|minio)", tasks)
         self.assertLess(
             tasks.index("Canonicalize retained data-service host mappings"),
             tasks.index("Bind controller tools to retained service identities"),
@@ -1538,7 +1539,7 @@ class AnsibleFixtureTests(unittest.TestCase):
 
         read_only_probes = (
             "Require Control to publish both retained quarantine subjects",
-            "Resolve retained headless data-service endpoints",
+            "Resolve actual primary and retained data-service endpoints",
             "Probe retained PostgreSQL database identity",
             "Probe retained JetStream",
             "Inspect exact configured streams without mutation",

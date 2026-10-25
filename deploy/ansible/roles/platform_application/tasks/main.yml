@@ -794,7 +794,7 @@
     group: root
     mode: "0700"
 
-- name: Resolve retained headless data-service endpoints
+- name: Resolve actual primary and retained data-service endpoints
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kubectl }}"
@@ -826,7 +826,7 @@
 - name: Canonicalize retained data-service host mappings
   ansible.builtin.replace:
     path: /etc/hosts
-    regexp: '^[0-9.]+\s+(?:postgres|nats|minio)\.labweaver-data\.svc\s*$\n?'
+    regexp: '^[0-9.]+\s+(?:postgres(?:-rw)?|nats|minio)\.labweaver-data\.svc\s*$\n?'
     replace: ''
 
 - name: Bind controller tools to retained service identities
@@ -925,16 +925,13 @@
     content: >-
       {{ (platform_application_postgres_service_source.content | b64decode)
          | regex_replace('(?m)^hostaddr=.*$\n?', '')
-         | regex_replace('(?m)^port=.*$', 'port=' ~ (platform_application_postgres_forward_port | string))
-         | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\n' ~
+         | regex_replace('(?m)^port=.*$', 'port=' ~
+             ((platform_application_postgres_forward_port if platform_application_postgres_forward_enabled | bool else 5432) | string))
+         | regex_replace('(?m)^host=.*$',
+             (('hostaddr=127.0.0.1' ~ '\n') if platform_application_postgres_forward_enabled | bool else '') ~
              'host=' ~ platform_application_postgres_forward_hostname) }}
-  when: platform_application_postgres_forward_enabled | bool
   no_log: true
 
-- name: Bind PostgreSQL service without a controller forward
-  ansible.builtin.set_fact:
-    platform_application_postgres_effective_service_file: "{{ platform_application_postgres_service_file }}"
-  when: not (platform_application_postgres_forward_enabled | bool)
 
 - name: Probe retained PostgreSQL database identity
   ansible.builtin.command:

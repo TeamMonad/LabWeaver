@@ -50,7 +50,8 @@ class HAFoundationTests(unittest.TestCase):
         cls.lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text())
 
     def objects(self):
-        return ha.resources(configuration(), self.lock, foundation(), "application-test", "resource-test")
+        coordinator = yaml.safe_load((ROOT / "deploy/config/evaluation-service.yaml.example").read_text())["coordinator"]
+        return ha.resources(configuration(), self.lock, foundation(), "application-test", "resource-test", freeze_coordinator=coordinator)
 
     def test_ceph_replica_host_quorum_capacity_and_reclaim(self):
         objects = self.objects()
@@ -194,6 +195,17 @@ class HAFoundationTests(unittest.TestCase):
                     if provider.get("runtimeVmBase") is not None:
                         provider["runtimeVmBase"]["storageClassName"] = "ceph-rbd"
             provider_path.write_text(json.dumps(providers))
+            database_ref = "secrets/ha-database-url"
+            (source.root / database_ref).write_bytes(b"postgresql://runtime:p%40ss@postgres.labweaver-data.svc/labweaver?sslmode=verify-full")
+            (source.root / database_ref).chmod(0o600)
+            for secret in source.model["application"]["secrets"].values():
+                if "database-url" in secret:
+                    secret["database-url"] = database_ref
+            evaluation_ref = source.model["application"]["configMaps"]["evaluation-service-config"]["config.yaml"]
+            evaluation = {"coordinator": yaml.safe_load((ROOT / "deploy/config/evaluation-service.yaml.example").read_text())["coordinator"]}
+            evaluation["coordinator"]["vmJobNamespace"] = "freeze-vm-derived"
+            (source.root / evaluation_ref).write_text(yaml.safe_dump(evaluation))
+            fixture.save()
             source.seal()
             with bundle.opened_bundle(source.archive, source.identity, source.runtime) as (_, derived, _):
                 values = yaml.safe_load((derived / "helm-values.yaml").read_text())
@@ -203,6 +215,46 @@ class HAFoundationTests(unittest.TestCase):
                 inventory = DataLoader().load((derived / "infrastructure/inventory.yaml").read_text())
                 self.assertEqual(inventory["all"]["vars"]["platform_foundation_application_namespace"], source.model["target"]["namespace"])
                 self.assertEqual(inventory["all"]["vars"]["platform_foundation_ha"]["backup"]["endpoint"], configuration()["backup"]["endpoint"])
+                appvars = DataLoader().load((derived / "ansible-vars.yaml").read_text())
+                self.assertEqual(appvars["platform_application_postgres_forward_kubernetes_service"], "postgres-rw")
+                self.assertEqual(appvars["platform_application_data_services"], ["postgres-rw", "nats", "minio"])
+                workers = inventory["all"]["vars"]["platform_foundation_freeze_coordinator"]
+                self.assertEqual(workers["vmJobNamespace"], "freeze-vm-derived")
+                resources = ha.resources(configuration(), self.lock, foundation(), source.model["target"]["namespace"], freeze_coordinator=workers)
+                self.assertFalse(any(item["kind"] == "Service" and item["metadata"]["name"] == "postgres" for item in resources))
+                cluster = next(item for item in resources if item["kind"] == "Cluster")
+                self.assertEqual(cluster["metadata"]["name"] + "-rw", appvars["platform_application_postgres_forward_kubernetes_service"])
+                role = ROOT / "deploy/ansible/roles/platform_application"
+                defaults = yaml.safe_load((role / "defaults/main.yml").read_text())
+                context = dict(defaults, **appvars)
+                unit = Environment(undefined=StrictUndefined).from_string((role / "templates/postgres-port-forward.service.j2").read_text()).render(**context)
+                self.assertIn("service/postgres-rw ", unit)
+                tasks = yaml.safe_load((role / "tasks/main.yml").read_text())
+                query = next(task for task in tasks if task.get("name") == "Resolve actual primary and retained data-service endpoints")
+                selector = Environment(undefined=StrictUndefined).from_string(query["ansible.builtin.command"]["argv"][8]).render(item=appvars["platform_application_data_services"][0])
+                self.assertEqual(selector, "kubernetes.io/service-name=postgres-rw")
+                rewrite = next(task for task in tasks if task.get("name") == "Bind PostgreSQL service through the retained controller forward")["ansible.builtin.copy"]["content"]
+                renderer = Environment(undefined=StrictUndefined)
+                renderer.filters.update(bool=bool, b64decode=lambda value: base64.b64decode(value).decode(), regex_replace=lambda value, pattern, replacement: re.sub(pattern, replacement, value))
+                original_service = "[platform-admin]\nhost=postgres.labweaver-data.svc\nhostaddr=192.0.2.8\nport=5432\nsslmode=verify-full\nsslrootcert=/private/ca.pem\n"
+                import configparser
+                for forward in (True, False):
+                    connection = dict(context, platform_application_postgres_forward_enabled=forward,
+                                      platform_application_postgres_service_source={"content": base64.b64encode(original_service.encode()).decode()})
+                    parsed = configparser.ConfigParser()
+                    parsed.read_string(renderer.from_string(rewrite).render(**connection))
+                    self.assertEqual(parsed["platform-admin"]["host"], "postgres-rw.labweaver-data.svc")
+                    self.assertEqual(parsed["platform-admin"]["port"], "15432" if forward else "5432")
+                    self.assertEqual(parsed["platform-admin"].get("hostaddr"), "127.0.0.1" if forward else None)
+                    self.assertEqual(parsed["platform-admin"]["sslmode"], "verify-full")
+                    self.assertEqual(parsed["platform-admin"]["sslrootcert"], "/private/ca.pem")
+                application_objects = list(yaml.safe_load_all((derived / "application.yaml").read_text()))
+                for item in application_objects:
+                    if item["kind"] == "Secret" and "database-url" in item["data"]:
+                        url = base64.b64decode(item["data"]["database-url"]).decode()
+                        self.assertIn("p%40ss@postgres-rw.labweaver-data.svc:5432", url)
+                        self.assertIn("sslmode=verify-full", url)
+                self.assertIn("@postgres.labweaver-data.svc/", (source.root / database_ref).read_text())
                 subprocess.run(["helm", "template", source.model["target"]["releaseName"], str(ROOT / "deploy/helm/labweaver"), "--namespace", source.model["target"]["namespace"], "--values", str(derived / "helm-values.yaml")], check=True, capture_output=True, text=True)
             del fixture.inventory["all"]["vars"]["platform_foundation_ha"]["backup"]["endpoint"]
             fixture.save()
@@ -210,6 +262,35 @@ class HAFoundationTests(unittest.TestCase):
                 bundle.load_bundle(source.root)
         finally:
             fixture.doCleanups()
+
+    def test_rendered_cnpg_policy_only_admits_real_freeze_workers(self):
+        policy = next(item for item in self.objects() if item["kind"] == "NetworkPolicy" and item["metadata"]["name"] == "cnpg-freeze-workers")
+        rule = policy["spec"]["ingress"][0]
+        self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": 5432}])
+        labels = {"app.kubernetes.io/name": "evaluation-freeze-worker", "app.kubernetes.io/managed-by": "labweaver-freeze-coordinator"}
+        def admits(namespace, pod):
+            return any(all(namespace.get(key) == value for key, value in peer["namespaceSelector"]["matchLabels"].items())
+                       and all(pod.get(key) == value for key, value in peer["podSelector"]["matchLabels"].items()) for peer in rule["from"])
+        self.assertTrue(admits({"kubernetes.io/metadata.name": "labweaver-evaluation"}, labels))
+        environment = {"labweaver.io/environment": "true", "labweaver.io/managed": "true"}
+        self.assertTrue(admits(environment, labels))
+        self.assertFalse(admits(environment, {"app.kubernetes.io/name": "tenant-runtime"}))
+        self.assertFalse(admits({"kubernetes.io/metadata.name": "unrelated-tenant"}, labels))
+        self.assertFalse(admits({"kubernetes.io/metadata.name": "labweaver-evaluation"}, {}))
+
+    def test_resource_bootstrap_reuses_only_the_selected_primary_tunnel(self):
+        import importlib.util
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        path = ROOT / "deploy/ansible/library/labweaver_postgres_apply.py"
+        spec = importlib.util.spec_from_file_location("ha_postgres_apply", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for selected, actual, expected in (("postgres-rw", "postgres-rw", True), ("postgres-rw", "postgres", False), ("postgres-rw", "postgres-rwx", False)):
+            replies = [SimpleNamespace(returncode=0, stdout="active\n"),
+                       SimpleNamespace(returncode=0, stdout=f"/usr/bin/kubectl port-forward service/{actual} 15432:5432")]
+            with self.subTest(actual=actual), patch.object(module.subprocess, "run", side_effect=replies):
+                self.assertEqual(module.canonical_forward_service_active(selected), expected)
 
     def test_ha_health_does_not_authorize_unrelated_or_multiwriter_storage(self):
         good = {"providerKind": "container", "workspaceStorageClassName": "ceph-rbd", "workspaceAccessMode": "ReadWriteOnce"}

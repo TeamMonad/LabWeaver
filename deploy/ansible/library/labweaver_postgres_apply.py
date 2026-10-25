@@ -10,6 +10,8 @@ an arbitrary command from Ansible variables.
 from __future__ import annotations
 
 import errno
+import configparser
+import tempfile
 import os
 import re
 import socket
@@ -79,7 +81,7 @@ def postgres_protocol_ready(psql: Path, service_file: Path, service: str) -> boo
     return result.returncode == 0 and result.stdout.strip() == "1"
 
 
-def canonical_forward_service_active() -> bool:
+def canonical_forward_service_active(kubernetes_service: str) -> bool:
     """Return whether the reviewed, persistent forward service is active.
 
     A listener on the bootstrap port is not sufficient evidence to reuse it:
@@ -116,8 +118,9 @@ def canonical_forward_service_active() -> bool:
             timeout=3,
         )
         normalized = command.stdout.replace(r"\x20", " ")
-        required = ("kubectl", "port-forward", "service/postgres", "15432:5432")
-        return command.returncode == 0 and all(token in normalized for token in required)
+        required = ("kubectl", "port-forward", "15432:5432")
+        endpoint = re.search(r"service/" + re.escape(kubernetes_service) + r"(?:\s|;|}|$)", normalized)
+        return command.returncode == 0 and endpoint is not None and all(token in normalized for token in required)
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -138,6 +141,7 @@ def main() -> None:
             "service_file": {"type": "path", "required": True},
             "service": {"type": "str", "required": True},
             "sql_file": {"type": "path", "required": True},
+            "kubernetes_service": {"type": "str", "required": True},
         },
         supports_check_mode=False,
     )
@@ -150,14 +154,17 @@ def main() -> None:
     service = module.params["service"]
     if not SERVICE.fullmatch(service):
         fail(module, "RESOURCE_APPLICATION_POSTGRES_SERVICE_INVALID")
+    kubernetes_service = module.params["kubernetes_service"]
+    if not SERVICE.fullmatch(kubernetes_service):
+        fail(module, "RESOURCE_APPLICATION_POSTGRES_SERVICE_INVALID")
     tunnel: subprocess.Popen[str] | None = None
-    if not canonical_forward_service_active():
+    if not canonical_forward_service_active(kubernetes_service):
         if local_port_occupied():
             fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT")
         tunnel = subprocess.Popen(
             [
                 "/usr/bin/kubectl", "--kubeconfig", str(kubeconfig), "--namespace", "labweaver-data",
-                "port-forward", "service/postgres", f"{POSTGRES_FORWARD_PORT}:5432",
+                "port-forward", f"service/{kubernetes_service}", f"{POSTGRES_FORWARD_PORT}:5432",
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -165,32 +172,40 @@ def main() -> None:
             text=True,
         )
     try:
-        if tunnel is not None:
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                if tunnel.poll() is not None:
-                    fail(module, process_diagnostic(tunnel, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE"))
-                if postgres_protocol_ready(psql, service_file, service):
-                    break
-                time.sleep(0.2)
-            else:
-                fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE")
-
-        result = subprocess.run(
-            [str(psql), f"service={service}", "--no-psqlrc", "--file", str(sql_file)],
-            env={"PGSERVICEFILE": str(service_file), "PATH": "/usr/local/bin:/usr/bin:/bin"},
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=45,
-            check=False,
-        )
-        if result.returncode != 0:
-            match = re.search(r"LW_[A-Z0-9_]+", result.stderr)
-            fail(module, match.group(0) if match else "RESOURCE_APPLICATION_ACCESS_SEED_APPLY_FAILED")
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="labweaver-postgres-") as effective:
+            configuration = configparser.ConfigParser(interpolation=None)
+            configuration.read_string(service_file.read_text(encoding="utf-8"))
+            if service not in configuration:
+                fail(module, "RESOURCE_APPLICATION_POSTGRES_SERVICE_INVALID")
+            configuration[service]["host"] = f"{kubernetes_service}.labweaver-data.svc"
+            configuration[service]["hostaddr"] = POSTGRES_FORWARD_HOST
+            configuration[service]["port"] = str(POSTGRES_FORWARD_PORT)
+            configuration.write(effective)
+            effective.flush()
+            effective_file = Path(effective.name)
+            if tunnel is not None:
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    if tunnel.poll() is not None:
+                        fail(module, process_diagnostic(tunnel, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE"))
+                    if postgres_protocol_ready(psql, effective_file, service):
+                        break
+                    time.sleep(0.2)
+                else:
+                    fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE")
+            result = subprocess.run(
+                [str(psql), f"service={service}", "--no-psqlrc", "--file", str(sql_file)],
+                env={"PGSERVICEFILE": str(effective_file), "PATH": "/usr/local/bin:/usr/bin:/bin"},
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, timeout=45, check=False,
+            )
+            if result.returncode != 0:
+                match = re.search(r"LW_[A-Z0-9_]+", result.stderr)
+                fail(module, match.group(0) if match else "RESOURCE_APPLICATION_ACCESS_SEED_APPLY_FAILED")
     except subprocess.TimeoutExpired:
         fail(module, "RESOURCE_APPLICATION_ACCESS_SEED_TIMEOUT")
+    except (configparser.Error, OSError, UnicodeError):
+        fail(module, "RESOURCE_APPLICATION_POSTGRES_SERVICE_INVALID")
     finally:
         if tunnel is not None and tunnel.poll() is None:
             tunnel.terminate()

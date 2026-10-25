@@ -333,6 +333,7 @@ INFRASTRUCTURE_DERIVED = (
     {
         "labweaver_versions_lock_file",
         "platform_foundation_application_namespace",
+        "platform_foundation_freeze_coordinator",
         "platform_foundation_resource_namespace",
         "identity_secret_locator_controller",
         "identity_secret_locator_sha256",
@@ -1230,10 +1231,10 @@ def derive_bundle(
     for group, directory in (("configMaps", "configmaps"), ("secrets", "secrets")):
         for name, bindings in application[group].items():
             for key, ref in bindings.items():
-                _write(
-                    inputs / directory / name / key,
-                    executor_configs.get(ref, files[ref]),
-                )
+                content = executor_configs.get(ref, files[ref])
+                if _ha_configuration(model, files) is not None and group == "secrets" and key == "database-url":
+                    content = ha_foundation.database_url(content)
+                _write(inputs / directory / name / key, content)
     _write(inputs / "configmaps/control-service-config/notifications.json", json.dumps(notification, sort_keys=True).encode())
     if notification["smtp"]:
         for field, key in (("passwordFile", "smtp-password"), ("caFile", "smtp-ca.pem")):
@@ -1307,6 +1308,10 @@ def derive_bundle(
     values_output = output / "helm-values.yaml"
     _write(values_output, yaml.safe_dump(values, sort_keys=True).encode())
     variables = _resolve_values(application["ansibleVariables"], root, files)
+    if _ha_configuration(model, files) is not None:
+        variables.update(platform_application_postgres_forward_kubernetes_service="postgres-rw",
+                         platform_application_postgres_forward_hostname="postgres-rw.labweaver-data.svc",
+                         platform_application_data_services=["postgres-rw", "nats", "minio"])
     variables.update(
         {
             "platform_application_namespace": model["target"]["namespace"],
@@ -1337,6 +1342,17 @@ def derive_bundle(
         if _ha_configuration(model, files) is not None:
             variables["platform_foundation_application_namespace"] = model["target"]["namespace"]
             variables["platform_foundation_resource_namespace"] = model.get("resource", {}).get("target", model["target"])["namespace"]
+            evaluation = _document(files[application["configMaps"]["evaluation-service-config"]["config.yaml"]])
+            coordinator = evaluation.get("coordinator", {})
+            if not isinstance(coordinator, dict) or not objects.DNS_LABEL.fullmatch(coordinator.get("vmJobNamespace", "")):
+                raise BundleError("LW_BUNDLE_HA_INVALID:freezeCoordinator.vmJobNamespace")
+            workers = {"vmJobNamespace": coordinator["vmJobNamespace"]}
+            placement_ref = application["configMaps"].get("container-placement-config", {}).get("profile.json")
+            if placement_ref:
+                placement = _document(files[placement_ref])
+                if placement.get("mode") == "existing":
+                    workers["existingWorkerNamespaces"] = [placement["namespace"]]
+            variables["platform_foundation_freeze_coordinator"] = workers
         variables["labweaver_versions_lock_file"] = str(
             root / model["versions"]["lockFile"]
         )
@@ -1378,7 +1394,10 @@ def _derive_resource(
     for group, directory in (("configMaps", "configmaps"), ("secrets", "secrets")):
         for name, bindings in profile[group].items():
             for key, ref in bindings.items():
-                _write(inputs / directory / name / key, files[ref])
+                content = files[ref]
+                if _ha_configuration(model, files) is not None and group == "secrets" and key == "database-url":
+                    content = ha_foundation.database_url(content)
+                _write(inputs / directory / name / key, content)
     payload = resource_objects.render(manifest_output, inputs, profile["natsIssuer"])
     bundle_output = output / "application.yaml"
     _write(bundle_output, payload)
@@ -1414,6 +1433,8 @@ def _derive_resource(
     values_output = output / "helm-values.yaml"
     _write(values_output, yaml.safe_dump(values, sort_keys=True).encode())
     variables = _resolve_values(profile["ansibleVariables"], root, files)
+    if _ha_configuration(model, files) is not None:
+        variables["resource_application_postgres_kubernetes_service"] = "postgres-rw"
     variables.update(
         {
             "resource_application_namespace": profile["target"]["namespace"],

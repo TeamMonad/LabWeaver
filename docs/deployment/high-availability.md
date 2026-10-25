@@ -72,7 +72,9 @@ HA Bundle 还校验实际 `providers.json`：容器必须选择 `workspaceStorag
 
 ## 持久性、故障与拒绝准入
 
-CNPG 创建三个不同 host 上的实例、真实 operator 就绪检查与 PDB。`synchronous.method=any`、`number=1`、`dataDurability=required`，提交必须等待至少一个同步 standby 的 WAL 落盘；`synchronous_commit=on`，丢失同步成员不降成异步写入。启用 `failoverQuorum`，保留主节点隔离检查和主租约，`smartShutdownTimeout=0` 避免分区时等待旧会话继续提交。客户端仍连原来的 `postgres` 名称，该 Service 指向 CNPG 的 `postgres-rw`；管理 SQL 读取 operator 当前 primary，不固定 `postgres-0`。
+CNPG 创建三个不同 host 上的实例、真实 operator 就绪检查与 PDB。`synchronous.method=any`、`number=1`、`dataDurability=required`，提交必须等待至少一个同步 standby 的 WAL 落盘；`synchronous_commit=on`，丢失同步成员不降成异步写入。启用 `failoverQuorum`，保留主节点隔离检查和主租约，`smartShutdownTimeout=0` 避免分区时等待旧会话继续提交。HA 客户端直接连接 CNPG 管理的 `postgres-rw.labweaver-data.svc`；Bundle 从同一个 HA profile 派生业务/Resource 的数据库 URL、控制器 port-forward、EndpointSlice 查询与 TLS server name，保留原凭据及 TLS 参数。管理 SQL 读取当前 primary，不固定 `postgres-0`；不创建无 selector 的 `postgres` 别名。
+
+冻结 worker 的入站规则单独选择 CNPG Pod，只允许 TCP 5432。VM worker namespace 来自 Bundle 中实际 Evaluation coordinator 的 `vmJobNamespace`；容器 worker 位于受管环境 namespace，采用现有环境标签；已有落点从同一配置的 placement profile 派生。两类来源都必须同时具备真实 Job 使用的 `app.kubernetes.io/name=evaluation-freeze-worker` 和 `app.kubernetes.io/managed-by=labweaver-freeze-coordinator` Pod 标签，不能把整个环境 namespace 或全部租户 Pod 放行。
 
 NATS StatefulSet 是三个成员、host 必须反亲和、PDB 至少保留两个。路由通过既有 CA 的双向 TLS 连接；JWT 用户权限不扩大。stream 创建和 readback 都要求 `num_replicas=3`，已有 stream 通过原有配置角色调整。失去 quorum 后 JetStream 自身不确认不能提交的写入；消费者跟随 stream 的复制策略。禁止通过重建单副本 stream 隐藏丢失的 quorum。
 
@@ -100,7 +102,7 @@ WAL、base backup 的 ObjectStore、插件和 ScheduledBackup 已渲染到独立
 
 1. 在授权窗口核对三个节点、磁盘清单、内核与独立备份。先检查现有 Bundle 的基础设施输入，不手动向集群应用第二份 YAML。
 2. 更新 Bundle 里的版本锁和 inventory，重新 seal；沿用 [加密 Bundle 手册](encrypted-bundle.md) 的 `validate`/`exec`、`platform-foundation` 和 `platform-application` 入口。
-3. 已有独立 `postgres` StatefulSet 会触发 `PLATFORM_FOUNDATION_HA_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION`。先按获准的数据切换流程处理它；角色不自动删库、搬数据或清空 PV。旧 Service 从 headless 切到 ExternalName 也属于该窗口，不在有运行数据库时强行修改不可变字段。
+3. 已有独立 `postgres` StatefulSet 会触发 `PLATFORM_FOUNDATION_HA_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION`。在获准的数据切换窗口处理它及旧 `postgres` Service；角色不自动删库、搬数据或清空 PV。HA 只消费实际 `postgres-rw` Service，不保留 ExternalName 或旧名称兼容路径。先完成同一 Bundle 的配置切换，再执行应用初始化/迁移。
 
    旧 NATS StatefulSet 的 `podManagementPolicy=OrderedReady` 也不能原地修改为 Parallel，会明确触发 `PLATFORM_FOUNDATION_HA_NATS_CUTOVER_REQUIRED_RETAIN_PVCS`。在同一获准窗口完成 StatefulSet 切换并保留原 PVC；角色不自动删除 stream 或卷。单节点开发保持原 OrderedReady，不受 HA 调度策略变更影响。
 4. 部署后核对三个 Ceph mon、pool size/min_size/host、CNPG 三实例与同步/quorum、NATS 三成员及每条 stream 副本。读探针或 manifests 渲染不能代替写入后故障恢复。

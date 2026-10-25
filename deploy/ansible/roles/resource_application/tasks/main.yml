@@ -83,6 +83,7 @@
     psql: "{{ resource_application_psql }}"
     service_file: "{{ resource_application_postgres_service_file }}"
     service: "{{ resource_application_postgres_service }}"
+    kubernetes_service: "{{ resource_application_postgres_kubernetes_service }}"
     sql_file: "{{ resource_application_work_root }}/access-seed-adopt.sql"
   when: resource_application_access_seed_file | length > 0
 

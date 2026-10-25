@@ -135,12 +135,25 @@ def chart_values(lock: dict) -> dict:
     }
 
 
+def database_url(payload: bytes) -> bytes:
+    """Derive the CNPG primary endpoint without changing credentials or TLS options."""
+    from urllib.parse import urlsplit, urlunsplit
+    parsed = urlsplit(payload.decode("utf-8").strip())
+    require(parsed.scheme in {"postgres", "postgresql"} and bool(parsed.hostname), "database-url")
+    credentials = parsed.netloc.rsplit("@", 1)[0] + "@" if "@" in parsed.netloc else ""
+    return urlunsplit((parsed.scheme, credentials + "postgres-rw.labweaver-data.svc:5432",
+                       parsed.path, parsed.query, parsed.fragment)).encode()
+
+
 def resources(raw: dict, lock: dict, foundation: list[dict], application_namespace: str,
               resource_namespace: str | None = None, database_name: str = "labweaver",
-              admin_role: str = "postgres-admin") -> list[dict]:
+              admin_role: str = "postgres-admin", freeze_coordinator: dict | None = None) -> list[dict]:
     config = validate(raw)
     validate_lock(lock)
     require(bool(re.fullmatch(r"[a-z][a-z0-9_]{0,62}", database_name)), "postgresDatabase")
+    require(isinstance(freeze_coordinator, dict), "freezeCoordinator")
+    vm_namespace = freeze_coordinator.get("vmJobNamespace")
+    require(isinstance(vm_namespace, str) and bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", vm_namespace)), "freezeCoordinator.vmJobNamespace")
     require(bool(re.fullmatch(r"[a-z][a-z0-9-]{0,62}", admin_role)), "postgresAdminRole")
     ha = lock["high_availability"]
     backup = config["backup"]
@@ -204,7 +217,6 @@ def resources(raw: dict, lock: dict, foundation: list[dict], application_namespa
             "plugins": [{"name": "barman-cloud.cloudnative-pg.io", "isWALArchiver": True, "parameters": {"barmanObjectName": "independent-backup"}}],
             "resources": {"requests": {"cpu": "1", "memory": "2Gi"}, "limits": {"memory": "4Gi"}},
         }),
-        obj("v1", "Service", "postgres", namespace, {"type": "ExternalName", "externalName": "postgres-rw.labweaver-data.svc.cluster.local", "ports": [{"port": 5432}]}),
         obj("postgresql.cnpg.io/v1", "ScheduledBackup", "postgres-daily", namespace, {
             "schedule": backup["baseBackupSchedule"], "backupOwnerReference": "cluster", "cluster": {"name": "postgres"}, "method": "plugin", "pluginConfiguration": {"name": "barman-cloud.cloudnative-pg.io"}}),
         obj("policy/v1", "PodDisruptionBudget", "nats", namespace, {"minAvailable": 2, "selector": {"matchLabels": {"app.kubernetes.io/name": "nats"}}}),
@@ -226,6 +238,21 @@ def resources(raw: dict, lock: dict, foundation: list[dict], application_namespa
                        {"toFQDNs": [{"matchName": urlsplit(backup["endpoint"]).hostname}], "toPorts": [{"ports": [{"port": str(urlsplit(backup["endpoint"]).port or 443), "protocol": "TCP"}]}]}],
         },
     })
+    worker_labels = {"app.kubernetes.io/name": "evaluation-freeze-worker",
+                     "app.kubernetes.io/managed-by": "labweaver-freeze-coordinator"}
+    sources = [
+        {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": vm_namespace}},
+         "podSelector": {"matchLabels": worker_labels}},
+        {"namespaceSelector": {"matchLabels": {"labweaver.io/environment": "true", "labweaver.io/managed": "true"}},
+         "podSelector": {"matchLabels": worker_labels}},
+    ]
+    for name in freeze_coordinator.get("existingWorkerNamespaces", []):
+        sources.append({"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": name}},
+                        "podSelector": {"matchLabels": worker_labels}})
+    result.append(obj("networking.k8s.io/v1", "NetworkPolicy", "cnpg-freeze-workers", namespace, {
+        "podSelector": {"matchLabels": {"cnpg.io/cluster": "postgres"}},
+        "policyTypes": ["Ingress"], "ingress": [{"from": sources, "ports": [{"protocol": "TCP", "port": 5432}]}],
+    }))
     return result
 
 
@@ -255,7 +282,7 @@ cluster {
 def main() -> int:
     try:
         value = json.load(sys.stdin)
-        print(json.dumps({"objects": resources(value["configuration"], value["lock"], value["foundation"], value["applicationNamespace"], value.get("resourceNamespace"), value["databaseName"], value["adminRole"]), "charts": chart_values(value["lock"]), "foundation": clustered_foundation(value["foundation"])}))
+        print(json.dumps({"objects": resources(value["configuration"], value["lock"], value["foundation"], value["applicationNamespace"], value.get("resourceNamespace"), value["databaseName"], value["adminRole"], value["freezeCoordinator"]), "charts": chart_values(value["lock"]), "foundation": clustered_foundation(value["foundation"])}))
     except (HAError, KeyError, TypeError, ValueError) as error:
         print(str(error) if isinstance(error, HAError) else "LW_BUNDLE_HA_RENDER_INVALID", file=sys.stderr)
         return 1

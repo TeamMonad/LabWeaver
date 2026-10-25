@@ -11,7 +11,8 @@
           'applicationNamespace': platform_foundation_application_namespace,
           'resourceNamespace': platform_foundation_resource_namespace,
           'databaseName': platform_foundation_postgres_database,
-          'adminRole': platform_foundation_postgres_admin_role} | to_json }}
+          'adminRole': platform_foundation_postgres_admin_role,
+          'freezeCoordinator': platform_foundation_freeze_coordinator} | to_json }}
   delegate_to: localhost
   become: false
   changed_when: false
