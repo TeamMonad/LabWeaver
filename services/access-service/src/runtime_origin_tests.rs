@@ -18,7 +18,7 @@ struct RuntimeFixture {
     upstream: Arc<Mutex<Vec<Value>>>,
     certificate_pem: String,
     private_key_pem: String,
-    _tasks: Tasks,
+    tasks: Tasks,
     _database: testcontainers::ContainerAsync<Postgres>,
 }
 
@@ -257,7 +257,7 @@ impl RuntimeFixture {
             upstream,
             certificate_pem: ca,
             private_key_pem,
-            _tasks: tasks,
+            tasks,
             _database: database,
         })
     }
@@ -966,7 +966,7 @@ async fn runtime_handoff_credentials_never_enter_real_nginx_fault_logs()
     let timeout_upstream =
         std::net::SocketAddr::new(gateway, blackhole.local_addr()?.port()).to_string();
     // This is deliberate network fault injection, never a business authorization backend.
-    fixture._tasks.0.push(tokio::spawn(async move {
+    fixture.tasks.0.push(tokio::spawn(async move {
         let mut connections = Vec::new();
         while let Ok((connection, _)) = blackhole.accept().await {
             connections.push(connection);

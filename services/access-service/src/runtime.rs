@@ -384,7 +384,7 @@ pub(super) struct RuntimeHandoff {
 
 // The page is identical for every grant and contains no credential. Only this
 // exact inline script is allowed by CSP. Secrets never enter a request target.
-const HANDOFF_SCRIPT: &str = r#"(async () => {
+const HANDOFF_SCRIPT: &str = r"(async () => {
   const token = new URLSearchParams(location.hash.slice(1)).get('token');
   history.replaceState(null, '', location.pathname);
   if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
@@ -399,7 +399,7 @@ const HANDOFF_SCRIPT: &str = r#"(async () => {
   });
   if (response.type !== 'opaqueredirect') throw new Error('handoff denied');
   location.replace('/connect/' + location.pathname.split('/').pop() + '/');
-})().catch(() => { document.body.textContent = '运行时交接失败，请从门户重新打开。'; });"#;
+})().catch(() => { document.body.textContent = '运行时交接失败，请从门户重新打开。'; });";
 
 static HANDOFF_PAGE: LazyLock<String> = LazyLock::new(|| {
     format!(
