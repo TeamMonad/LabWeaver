@@ -3591,7 +3591,7 @@ impl ControlService {
         after_version: u64,
         limit: u32,
         actor_id: ActorId,
-    ) -> Result<Vec<EnvironmentTemplateReleaseView>, ControlError> {
+    ) -> Result<contracts::http::CursorPage<EnvironmentTemplateReleaseView>, ControlError> {
         if limit == 0 || limit > 100 {
             return Err(ControlError::ContractInvalid);
         }
@@ -3640,14 +3640,24 @@ impl ControlService {
         .bind(project_id.as_uuid())
         .bind(course_id.map(CourseId::as_uuid))
         .bind(i64::try_from(after_version).map_err(|_| ControlError::ContractInvalid)?)
-        .bind(i64::from(limit))
+        .bind(i64::from(limit) + 1)
         .bind(actor_id.as_uuid())
         .fetch_all(&self.pool)
         .await
         .map_err(db)?;
-        rows.into_iter()
+        let mut items = rows
+            .into_iter()
             .map(|row| project_release_view(&row, project_id))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more =
+            items.len() > usize::try_from(limit).map_err(|_| ControlError::ContractInvalid)?;
+        items.truncate(usize::try_from(limit).map_err(|_| ControlError::ContractInvalid)?);
+        let next_cursor = if has_more {
+            items.last().map(|view| view.release.version.to_string())
+        } else {
+            None
+        };
+        Ok(contracts::http::CursorPage { items, next_cursor })
     }
 
     /// Projects one Agent-owned candidate using its exact source event identity.

@@ -35,7 +35,7 @@ use contracts::http::{
     CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
     CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest,
-    CreateWorkConfigurationRunRequest, CursorPage, DisablePlatformImageRequest,
+    CreateWorkConfigurationRunRequest, DisablePlatformImageRequest,
     EnvironmentPublicationAdmissionQuery, EvaluationReleaseListQuery, GeneratedArtifactKind,
     GeneratedArtifactQuery, IdempotencyKey, InternalAgentRunMutationRequest,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
@@ -2520,7 +2520,7 @@ async fn list_project_releases(
     )
     .await?;
     let after_version = release_cursor(query.cursor.as_deref())?;
-    let items = state
+    let page = state
         .control
         .project_releases(
             project_id,
@@ -2530,8 +2530,7 @@ async fn list_project_releases(
             decision.actor.actor_id,
         )
         .await?;
-    let next_cursor = items.last().map(|view| view.release.version.to_string());
-    Ok(Json(CursorPage { items, next_cursor }).into_response())
+    Ok(Json(page).into_response())
 }
 
 async fn get_project_release(

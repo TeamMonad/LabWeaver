@@ -309,9 +309,10 @@ never treats a label selector as ownership proof: it checks object UID, exact na
 project and the durable Environment aggregate before deciding what to do.
 
 The scan does not delete objects directly. A durable failed deletion with desired state
-`Deleted`, no active lifecycle operation, no endpoints and no mutable-disk preservation
-re-enters the existing revisioned `Cleanup` pipeline. Its original owner and current revision
-come from the database; the scanner does not invent a user principal, Access revocation receipt,
+`Deleted`, no active lifecycle operation, no endpoints, a persisted Access revocation receipt
+and no mutable-disk preservation re-enters the existing revisioned `Cleanup` pipeline.
+It preserves that receipt. Its original owner and current revision come from the database;
+the scanner does not invent a user principal, Access revocation receipt,
 compute grant or cleanup-complete receipt. Concurrent lifecycle changes invalidate admission.
 The ordinary worker and provider keep their lease, attempt, generation and UID protections.
 A namespace delete conflict may retry the same UID, but must never adopt a replacement UID.

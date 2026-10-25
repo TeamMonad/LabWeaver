@@ -125,10 +125,9 @@ impl KubernetesContainerExecutor {
             return Ok(OrphanDecision::Unverified);
         }
         if !namespace_object {
-            let placement = self
-                .namespace_profile
-                .for_instance(&instance)
-                .map_err(|_| rejected())?;
+            let Ok(placement) = self.namespace_profile.for_instance(&instance) else {
+                return Ok(OrphanDecision::Unverified);
+            };
             if object
                 .pointer("/metadata/namespace")
                 .and_then(Value::as_str)
@@ -160,7 +159,7 @@ impl KubernetesContainerExecutor {
             accepted_at: now,
             deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))
                 .map_err(|_| rejected())?,
-            access_revocation_revision: None,
+            access_revocation_revision: instance.operation.access_revocation_revision,
             preserve_mutable_disk: false,
             max_attempts: instance.operation.max_attempts,
             reset_target: None,
@@ -195,7 +194,7 @@ impl KubernetesContainerExecutor {
         kind: RuntimeKind,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), ProviderFailure> {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_mins(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut continuation = None;
         loop {
@@ -287,10 +286,41 @@ fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
     if instance.observed_state == ObservedEnvironmentState::Failed
         && instance.operation.state == OperationState::Failed
         && instance.endpoints.is_empty()
+        && instance.operation.access_revocation_revision.is_some()
         && !instance.operation.preserve_mutable_disk
     {
         OrphanDecision::Recovering
     } else {
         OrphanDecision::Unverified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_recovery_never_invents_revocation_or_removes_retained_or_active_work() {
+        let mut instance = crate::test_support::ready_instance();
+        let original_endpoints = instance.endpoints.clone();
+        instance.desired_state = DesiredEnvironmentState::Deleted;
+        instance.observed_state = ObservedEnvironmentState::Failed;
+        instance.operation.state = OperationState::Failed;
+        instance.endpoints.clear();
+        assert_eq!(classify_instance(&instance), OrphanDecision::Unverified);
+        instance.operation.access_revocation_revision = Some(instance.revision);
+        assert_eq!(classify_instance(&instance), OrphanDecision::Recovering);
+        instance.operation.preserve_mutable_disk = true;
+        assert_eq!(classify_instance(&instance), OrphanDecision::Unverified);
+        instance.operation.preserve_mutable_disk = false;
+        instance.endpoints = original_endpoints;
+        assert_eq!(classify_instance(&instance), OrphanDecision::Unverified);
+        instance.endpoints.clear();
+        instance.operation.state = OperationState::Running;
+        assert_eq!(classify_instance(&instance), OrphanDecision::Referenced);
+        instance.observed_state = ObservedEnvironmentState::Deleted;
+        assert_eq!(classify_instance(&instance), OrphanDecision::Inconsistent);
+        instance.desired_state = DesiredEnvironmentState::Running;
+        assert_eq!(classify_instance(&instance), OrphanDecision::Referenced);
     }
 }

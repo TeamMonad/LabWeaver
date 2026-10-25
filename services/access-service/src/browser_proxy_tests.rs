@@ -46,7 +46,7 @@ mod rubric_rules_proxy_tests;
 #[path = "runtime_origin_tests.rs"]
 mod runtime_origin_tests;
 #[path = "../tests/support/mod.rs"]
-mod support;
+pub(super) mod support;
 
 const ORIGIN: &str = "https://portal.example.invalid";
 const AUDIENCE: &str = "labweaver-control";

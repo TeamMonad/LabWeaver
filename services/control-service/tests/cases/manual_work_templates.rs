@@ -334,6 +334,7 @@ async fn publish_without_model(kind: RuntimeKind) -> TestResult {
             .service
             .project_releases(fixture.project.id, None, 0, 10, owner)
             .await?
+            .items
             .len(),
         1
     );

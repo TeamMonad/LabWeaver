@@ -5475,13 +5475,14 @@ mod tests {
         let now = timestamp().map_err(|error| format!("{error:?}"))?;
         let command = crate::LifecycleCommand {
             environment_id: doomed.id,
-            kind: EnvironmentOperationKind::Cleanup,
+            kind: EnvironmentOperationKind::Delete,
             expected_revision: doomed.revision,
             actor_id: doomed.owner_id,
             trace_id: "orphan-fixture".to_owned(),
             accepted_at: now,
             deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))?,
-            access_revocation_revision: None,
+            // Persisted upstream Access receipt is an input fixture to this recovery-consumer test.
+            access_revocation_revision: Some(doomed.revision),
             preserve_mutable_disk: false,
             max_attempts: 3,
             reset_target: None,
@@ -5547,6 +5548,10 @@ mod tests {
         let recovered = store.load(doomed.id).await?;
         assert_eq!(recovered.operation.kind, EnvironmentOperationKind::Cleanup);
         assert_eq!(recovered.operation.state, OperationState::Accepted);
+        assert_eq!(
+            recovered.operation.access_revocation_revision,
+            failed.operation.access_revocation_revision
+        );
         assert_eq!(recovered.generation, failed.generation + 1);
         let (again, _) = executor
             .reconcile_orphans(&pool, contracts::authoring::RuntimeKind::Container, None)

@@ -1,8 +1,7 @@
 use super::*;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 
-#[path = "../tests/support/mod.rs"]
-mod support;
+use crate::browser_proxy_tests::support;
 
 #[tokio::test]
 #[allow(clippy::too_many_lines, clippy::expect_used)]
