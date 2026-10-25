@@ -460,6 +460,15 @@ fn retry_and_recover_resume_the_persisted_failed_phase() -> Result<(), Box<dyn s
         ) {
             active.desired_state = DesiredEnvironmentState::Deleted;
         }
+        if failed_phase == ObservedEnvironmentState::Deleting {
+            // This case resumes a proven original cleanup, not an unbound legacy failure.
+            active.operation.cleanup_target =
+                Some(contracts::environment::EnvironmentCleanupTarget {
+                    namespace: format!("lw-env-{}", active.id),
+                    uid: uuid::Uuid::now_v7(),
+                    objects: Vec::new(),
+                });
+        }
         let failed = apply_provider_failure(
             &active,
             active.operation.id,
@@ -487,6 +496,10 @@ fn retry_and_recover_resume_the_persisted_failed_phase() -> Result<(), Box<dyn s
                 OperationId::new(),
             )?;
             assert_eq!(planned.operation.retry_from_phase, Some(failed_phase));
+            assert_eq!(
+                planned.operation.cleanup_target,
+                failed.operation.cleanup_target
+            );
             assert_eq!(planned.observed_state, resumed_phase);
             assert_eq!(
                 next_action(&planned, timestamp("2026-07-14T01:00:01.000Z"))?,

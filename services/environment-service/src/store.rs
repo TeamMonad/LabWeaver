@@ -35,6 +35,25 @@ use uuid::Uuid;
 
 use crate::lifecycle::{LifecycleCommand, LifecycleError, plan_command_authorized};
 
+/// Verifies the worker-persisted target instead of trusting identities supplied over NATS.
+pub(crate) async fn cleanup_target_matches(
+    transaction: &mut Transaction<'_, Postgres>,
+    environment_id: EnvironmentId,
+    operation_id: OperationId,
+    generation: u64,
+    target: &contracts::environment::EnvironmentCleanupTarget,
+) -> Result<bool, sqlx::Error> {
+    if target.validate().is_err() {
+        return Ok(false);
+    }
+    let Ok(generation) = i64::try_from(generation) else {
+        return Ok(false);
+    };
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM environment.environment_instances WHERE environment_id=$1 AND generation=$2 AND contract->'operation'->>'id'=$3 AND contract->'operation'->'cleanupTarget'=$4 AND desired_state='deleted' AND observed_state='deleting')")
+        .bind(environment_id.as_uuid()).bind(generation).bind(operation_id.to_string())
+        .bind(sqlx::types::Json(target)).fetch_one(&mut **transaction).await
+}
+
 /// One operation and aggregate reserved by a reconciler worker lease.
 #[derive(Clone, Debug)]
 pub struct LeasedEnvironment {
@@ -1016,6 +1035,11 @@ impl PgEnvironmentStore {
         {
             return Err(EnvironmentStoreError::RevisionConflict);
         }
+        if stored.operation.cleanup_target.is_some()
+            && stored.operation.cleanup_target != updated.operation.cleanup_target
+        {
+            return Err(EnvironmentStoreError::InvalidOperationRecord);
+        }
         let row = sqlx::query(
             "SELECT environment_id, lease_owner, lease_token, \
                     lease_expires_at > now() AS lease_current \
@@ -1474,6 +1498,7 @@ fn build_create_instance(
             accepted_at: command.accepted_at,
             deadline_at: command.deadline_at,
             cleanup_started_at: None,
+            cleanup_target: None,
             diagnostic_code: None,
             preserve_mutable_disk: false,
             access_revocation_revision: None,
@@ -1936,6 +1961,9 @@ fn operation_record_mismatch_reason(
     }
     if stored.cleanup_started_at != current.cleanup_started_at {
         return Some("cleanup_started_at");
+    }
+    if stored.cleanup_target != current.cleanup_target {
+        return Some("cleanup_target");
     }
     if stored.diagnostic_code != current.diagnostic_code {
         return Some("diagnostic_code");

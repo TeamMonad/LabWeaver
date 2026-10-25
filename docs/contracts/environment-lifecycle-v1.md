@@ -300,8 +300,10 @@ UID, generation and tombstone checks and does not depend on a new credit grant.
 
 ## Kubernetes orphan inventory and recovery
 
-Both runtime executors inspect one Kubernetes inventory page (at most 100 objects) every
-60 seconds and carry the apiserver continuation token to the next pass. Dedicated placement
+Both runtime executors inspect Kubernetes inventory in pages of at most 100 objects. A nonempty
+apiserver continuation advances immediately; only a completed sweep waits 60 seconds. Expired
+tokens use the apiserver's replacement continuation when supplied; other list errors start a
+fresh sweep after the error backoff. Dedicated placement
 scans namespaces labeled `labweaver.io/managed=true`; existing-namespace container placement
 first verifies the configured namespace UID, then scans the managed runtime Deployments.
 The runtime ServiceAccount needs `list` on those already managed resource kinds. The scan
@@ -315,7 +317,16 @@ It preserves that receipt. Its original owner and current revision come from the
 the scanner does not invent a user principal, Access revocation receipt,
 compute grant or cleanup-complete receipt. Concurrent lifecycle changes invalidate admission.
 The ordinary worker and provider keep their lease, attempt, generation and UID protections.
-A namespace delete conflict may retry the same UID, but must never adopt a replacement UID.
+Before the first DELETE, the executor only reads identities and returns a `cleanupTarget`.
+The original ReconcileWorker saves it on `environment_operations.contract` and the aggregate
+through the existing revision/lease-token CAS, then advances `provider_step`. A lost lease
+cannot commit this checkpoint and cannot proceed to DELETE. Only the next provider request
+uses that durable namespace UID; shared-namespace Work cleanup also uses the exact saved object
+UIDs, and must not adopt objects absent from its checkpoint. Namespace DELETE conflicts,
+worker restarts, retries and newly issued Cleanup operations retain the same binding.
+Orphan recovery copies the original binding instead of observing a replacement as a new intent.
+A failed old operation with no saved binding stays diagnostic-only. Nothing is written to an
+idempotency ledger to represent this domain fact, and no additional database table is required.
 
 Objects with unknown, malformed or conflicting ownership stay untouched and are reported as
 unverified. Live/stopped workloads and active operations remain referenced. An object found

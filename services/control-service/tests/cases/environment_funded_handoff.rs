@@ -615,8 +615,14 @@ impl environment_service::ContainerProviderBackend for ClusterFixture {
         &self,
         _: &environment_service::ContainerBackendFence,
         _: &environment_service::ContainerResourcePlan,
-    ) -> std::result::Result<contracts::ArtifactRef, environment_service::ProviderFailure> {
-        Ok(cleanup_evidence())
+        _: Option<&contracts::environment::EnvironmentCleanupTarget>,
+    ) -> std::result::Result<
+        environment_service::ProviderOutcome<contracts::ArtifactRef>,
+        environment_service::ProviderFailure,
+    > {
+        Ok(environment_service::ProviderOutcome::Completed(
+            cleanup_evidence(),
+        ))
     }
 }
 fn assert_native_access_fence(
@@ -700,7 +706,7 @@ impl environment_service::ContainerExecutorBackend for PhysicalClusterFixture {
     ) -> environment_service::ContainerExecutorResponse {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match request {
-            environment_service::ContainerExecutorRequest::DeleteNamespace { plan } => {
+            environment_service::ContainerExecutorRequest::DeleteNamespace { plan, .. } => {
                 environment_service::ContainerExecutorResponse::Deleted {
                     plan_sha256: plan.plan_sha256,
                     cleanup_evidence: cleanup_evidence(),
@@ -849,7 +855,7 @@ async fn physical_envelope(
         ReconcileAction::Provision
     };
     let request = if cleanup {
-        ContainerExecutorRequest::DeleteNamespace { plan }
+        ContainerExecutorRequest::DeleteNamespace { plan, target: None }
     } else {
         ContainerExecutorRequest::Apply { plan }
     };

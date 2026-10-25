@@ -536,7 +536,11 @@ impl environment_service::ContainerProviderBackend for TamperingContainerTranspo
         &self,
         fence: &environment_service::ContainerBackendFence,
         plan: &environment_service::ContainerResourcePlan,
-    ) -> std::result::Result<contracts::ArtifactRef, environment_service::ProviderFailure> {
-        self.transport.delete_namespace(fence, plan).await
+        target: Option<&contracts::environment::EnvironmentCleanupTarget>,
+    ) -> std::result::Result<
+        environment_service::ProviderOutcome<contracts::ArtifactRef>,
+        environment_service::ProviderFailure,
+    > {
+        self.transport.delete_namespace(fence, plan, target).await
     }
 }

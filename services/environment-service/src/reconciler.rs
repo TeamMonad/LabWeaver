@@ -24,6 +24,8 @@ pub type ProviderObservation = crate::lifecycle::AppliedProviderObservation;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderOutcome<T> {
     Pending,
+    /// Read-only Kubernetes identity observation; the worker must durably pin it before deletion.
+    CleanupTarget(contracts::environment::EnvironmentCleanupTarget),
     Completed(T),
 }
 
@@ -31,7 +33,7 @@ impl<T> ProviderOutcome<T> {
     #[must_use]
     pub fn completed(self) -> Option<T> {
         match self {
-            Self::Pending => None,
+            Self::Pending | Self::CleanupTarget(_) => None,
             Self::Completed(value) => Some(value),
         }
     }
@@ -221,6 +223,15 @@ impl ReconcileWorker {
                 if !self.persist_reconciled(&lease, &updated).await? {
                     return Ok(ReconcileWorkerOutcome::LeaseLost);
                 }
+                Ok(ReconcileWorkerOutcome::Pending)
+            }
+            Ok(ProviderOutcome::CleanupTarget(target)) => {
+                let updated = crate::lifecycle::pin_cleanup_target(&lease.instance, target)?;
+                if !self.persist_reconciled(&lease, &updated).await? {
+                    return Ok(ReconcileWorkerOutcome::LeaseLost);
+                }
+                // The advanced provider_step separates the next destructive request from
+                // the cached read-only response. No DELETE happens in this call.
                 Ok(ReconcileWorkerOutcome::Pending)
             }
             Ok(ProviderOutcome::Completed(observation)) => {
@@ -815,6 +826,7 @@ mod tests {
                 accepted_at,
                 deadline_at: timestamp("2026-07-22T00:10:00.000Z"),
                 cleanup_started_at: None,
+                cleanup_target: None,
                 diagnostic_code: None,
                 preserve_mutable_disk: false,
                 access_revocation_revision: None,

@@ -124,15 +124,18 @@ impl ContainerProviderBackend for FixtureBackend {
         &self,
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
+        _target: Option<&contracts::environment::EnvironmentCleanupTarget>,
+    ) -> Result<environment_service::ProviderOutcome<ArtifactRef>, ProviderFailure> {
         self.record("delete", fence);
-        Ok(ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "environment-cleanup-evidence-v1".to_owned(),
-            object_version: plan.plan_sha256.to_string(),
-            size_bytes: 1,
-            media_type: "application/json".to_owned(),
-        })
+        Ok(environment_service::ProviderOutcome::Completed(
+            ArtifactRef {
+                artifact_id: ArtifactId::new(),
+                store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                object_version: plan.plan_sha256.to_string(),
+                size_bytes: 1,
+                media_type: "application/json".to_owned(),
+            },
+        ))
     }
 }
 

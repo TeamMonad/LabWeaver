@@ -6,9 +6,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ProviderOutcome;
 use artifact_store::S3ImmutableObjectStore;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use contracts::environment::EnvironmentCleanupTarget;
 use contracts::{ArtifactRef, EnvironmentId, Revision, UtcTimestamp};
 use futures_util::StreamExt;
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
@@ -687,34 +689,126 @@ impl KubernetesContainerExecutor {
         self.observe_plan(plan).await
     }
 
+    /// Read-only observation; the worker must persist this result before any deletion.
+    async fn capture_cleanup_target(
+        &self,
+        environment_id: EnvironmentId,
+        project_id: contracts::ProjectId,
+        namespace: &str,
+        work: Option<&ContainerResourcePlan>,
+    ) -> Result<Option<EnvironmentCleanupTarget>, ProviderFailure> {
+        let observed = if let Some(plan) = work {
+            self.verify_container_namespace(plan).await?;
+            self.get_api_json(&format!("/api/v1/namespaces/{namespace}"))
+                .await?
+        } else {
+            self.owned_namespace(namespace, environment_id, project_id)
+                .await?
+        };
+        let Some(observed) = observed else {
+            return Ok(None);
+        };
+        let mut target = EnvironmentCleanupTarget {
+            namespace: namespace.to_owned(),
+            uid: pointer_uuid(&observed, "/metadata/uid")?,
+            objects: Vec::new(),
+        };
+        if let Some(plan) = work {
+            for (kind, suffix) in [
+                ("Deployment", "runtime"),
+                ("Service", "runtime"),
+                ("ServiceAccount", "runtime"),
+                ("Secret", "registry-pull"),
+                ("PersistentVolumeClaim", "workspace"),
+            ] {
+                let name = plan.placement().resource_name(suffix);
+                if let Some(value) = self.get_json(kind, namespace, &name).await? {
+                    verify_owned_identity(
+                        &value,
+                        &name,
+                        Some(namespace),
+                        environment_id,
+                        project_id,
+                    )?;
+                    let (prefix, resource, _) = resource_path(kind)?;
+                    target
+                        .objects
+                        .push(contracts::execution::ExecutionObjectRef {
+                            api_version: if prefix == "/api/v1" {
+                                "v1".to_owned()
+                            } else {
+                                prefix.trim_start_matches("/apis/").to_owned()
+                            },
+                            resource: resource.to_owned(),
+                            name,
+                            uid: pointer_uuid(&value, "/metadata/uid")?.to_string(),
+                        });
+                }
+            }
+        }
+        target.validate().map_err(|_| invalid_observation())?;
+        Ok(Some(target))
+    }
+
     async fn delete_namespace(
         &self,
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
+        target: Option<&EnvironmentCleanupTarget>,
+    ) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure> {
         validate_cleanup_plan(plan)?;
+        let Some(target) = target else {
+            return match self
+                .capture_cleanup_target(
+                    plan.environment_id,
+                    plan.project_id,
+                    &plan.namespace,
+                    plan.namespace_uid.map(|_| plan),
+                )
+                .await?
+            {
+                Some(target) => Ok(ProviderOutcome::CleanupTarget(target)),
+                None => self
+                    .write_cleanup_evidence(fence, plan)
+                    .await
+                    .map(ProviderOutcome::Completed),
+            };
+        };
+        target.validate().map_err(|_| rejected())?;
+        if target.namespace != plan.namespace
+            || plan.namespace_uid.is_some_and(|uid| uid != target.uid)
+        {
+            return Err(rejected());
+        }
         if plan.namespace_uid.is_some() {
-            self.delete_work_objects(fence, plan).await?;
-            return self.write_cleanup_evidence(fence, plan).await;
+            self.delete_work_objects(fence, plan, target).await?;
+            return self
+                .write_cleanup_evidence(fence, plan)
+                .await
+                .map(ProviderOutcome::Completed);
         }
         self.remove_owned_namespace(
             plan.environment_id,
             plan.project_id,
             &plan.namespace,
             fence.deadline_at,
+            target.uid,
             None,
         )
         .await?;
-        self.write_cleanup_evidence(fence, plan).await
+        self.write_cleanup_evidence(fence, plan)
+            .await
+            .map(ProviderOutcome::Completed)
     }
 
     async fn delete_work_objects(
         &self,
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
+        target: &EnvironmentCleanupTarget,
     ) -> Result<(), ProviderFailure> {
-        self.retire_work_compute(fence, plan).await?;
-        self.delete_owned_work_object(fence, plan, "PersistentVolumeClaim", "workspace")
+        self.retire_work_compute(fence, plan, target).await?;
+        self.delete_owned_work_object(fence, plan, "PersistentVolumeClaim", "workspace", target)
             .await
     }
 
@@ -722,6 +816,7 @@ impl KubernetesContainerExecutor {
         &self,
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
+        target: &EnvironmentCleanupTarget,
     ) -> Result<(), ProviderFailure> {
         for (kind, suffix) in [
             ("Deployment", "runtime"),
@@ -729,7 +824,7 @@ impl KubernetesContainerExecutor {
             ("ServiceAccount", "runtime"),
             ("Secret", "registry-pull"),
         ] {
-            self.delete_owned_work_object(fence, plan, kind, suffix)
+            self.delete_owned_work_object(fence, plan, kind, suffix, target)
                 .await?;
         }
         // A missing Deployment does not prove its Pods or another Pod using the disk are gone.
@@ -815,9 +910,9 @@ impl KubernetesContainerExecutor {
         plan: &ContainerResourcePlan,
         kind: &str,
         suffix: &str,
+        target: &EnvironmentCleanupTarget,
     ) -> Result<(), ProviderFailure> {
         let name = plan.placement().resource_name(suffix);
-        let mut first_uid = None;
         loop {
             if timestamp()?.get() >= fence.deadline_at.get() {
                 return Err(unavailable());
@@ -834,10 +929,12 @@ impl KubernetesContainerExecutor {
                 plan.project_id,
             )?;
             let uid = pointer_uuid(&value, "/metadata/uid")?;
-            if first_uid.is_some_and(|original| original != uid) {
+            let (_, resource, _) = resource_path(kind)?;
+            if !target.objects.iter().any(|object| {
+                object.resource == resource && object.name == name && object.uid == uid.to_string()
+            }) {
                 return Err(rejected());
             }
-            first_uid = Some(uid);
             let resource_version = value
                 .pointer("/metadata/resourceVersion")
                 .and_then(Value::as_str)
@@ -876,12 +973,10 @@ impl KubernetesContainerExecutor {
         project_id: contracts::ProjectId,
         namespace: &str,
         deadline_at: UtcTimestamp,
+        expected_uid: uuid::Uuid,
         kubevirt_permit: Option<&crate::KubeVirtExecutionPermit>,
     ) -> Result<(), ProviderFailure> {
         let url = self.namespaced_url(&format!("/api/v1/namespaces/{namespace}"))?;
-        // A 409 may mean replacement, not just a resourceVersion change. Never adopt a
-        // different namespace incarnation on the next retry of an older cleanup.
-        let mut admitted_uid = None;
         loop {
             if timestamp()?.get() >= deadline_at.get() {
                 return Err(unavailable());
@@ -894,10 +989,9 @@ impl KubernetesContainerExecutor {
             };
             verify_namespace_identity(&value, namespace, environment_id)?;
             let uid = pointer_uuid(&value, "/metadata/uid")?;
-            if admitted_uid.is_some_and(|admitted| admitted != uid) {
+            if uid != expected_uid {
                 return Err(rejected());
             }
-            admitted_uid = Some(uid);
             let resource_version = value
                 .pointer("/metadata/resourceVersion")
                 .and_then(Value::as_str)
@@ -1668,9 +1762,26 @@ impl KubernetesContainerExecutor {
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
         permit: &crate::KubeVirtExecutionPermit,
-    ) -> Result<ArtifactRef, ProviderFailure> {
+        target: Option<&EnvironmentCleanupTarget>,
+    ) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure> {
         let expected_namespace = format!("lw-env-{}", plan.environment_id);
         if plan.namespace != expected_namespace || plan.virtual_machine_name != "runtime" {
+            return Err(rejected());
+        }
+        let Some(target) = target else {
+            if let Some(target) = self
+                .capture_cleanup_target(plan.environment_id, plan.project_id, &plan.namespace, None)
+                .await?
+            {
+                return Ok(ProviderOutcome::CleanupTarget(target));
+            }
+            return self
+                .kubevirt_absence_evidence(fence, plan)
+                .await
+                .map(ProviderOutcome::Completed);
+        };
+        target.validate().map_err(|_| rejected())?;
+        if target.namespace != plan.namespace || !target.objects.is_empty() {
             return Err(rejected());
         }
         self.remove_owned_namespace(
@@ -1678,9 +1789,20 @@ impl KubernetesContainerExecutor {
             plan.project_id,
             &plan.namespace,
             fence.deadline_at,
+            target.uid,
             Some(permit),
         )
         .await?;
+        self.kubevirt_absence_evidence(fence, plan)
+            .await
+            .map(ProviderOutcome::Completed)
+    }
+
+    async fn kubevirt_absence_evidence(
+        &self,
+        fence: &KubeVirtBackendFence,
+        plan: &KubeVirtCleanupPlan,
+    ) -> Result<ArtifactRef, ProviderFailure> {
         let now = timestamp()?;
         let document = json!({
             "schemaVersion":"environment-cleanup.v1",
@@ -2215,7 +2337,7 @@ impl ContainerExecutorBackend for KubernetesContainerExecutor {
             | ContainerExecutorRequest::Observe { plan }
             | ContainerExecutorRequest::Scale { plan, .. }
             | ContainerExecutorRequest::Restart { plan, .. }
-            | ContainerExecutorRequest::DeleteNamespace { plan } => plan,
+            | ContainerExecutorRequest::DeleteNamespace { plan, .. } => plan,
         };
         if let Err(failure) = self.verify_container_namespace(plan).await {
             return ContainerExecutorResponse::Failed { failure };
@@ -2254,12 +2376,23 @@ impl ContainerExecutorBackend for KubernetesContainerExecutor {
                     plan_sha256: plan.plan_sha256,
                     observation,
                 }),
-            ContainerExecutorRequest::DeleteNamespace { plan } => self
-                .delete_namespace(fence, plan)
+            ContainerExecutorRequest::DeleteNamespace { plan, target } => self
+                .delete_namespace(fence, plan, target.as_ref())
                 .await
-                .map(|cleanup_evidence| ContainerExecutorResponse::Deleted {
-                    plan_sha256: plan.plan_sha256,
-                    cleanup_evidence,
+                .map(|outcome| match outcome {
+                    ProviderOutcome::Completed(cleanup_evidence) => {
+                        ContainerExecutorResponse::Deleted {
+                            plan_sha256: plan.plan_sha256,
+                            cleanup_evidence,
+                        }
+                    }
+                    ProviderOutcome::CleanupTarget(target) => {
+                        ContainerExecutorResponse::CleanupTargetObserved {
+                            plan_sha256: plan.plan_sha256,
+                            target,
+                        }
+                    }
+                    ProviderOutcome::Pending => ContainerExecutorResponse::Pending,
                 }),
         };
         result.unwrap_or_else(|failure| ContainerExecutorResponse::Failed { failure })
@@ -2361,12 +2494,23 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
                 plan_sha256: plan.plan_sha256,
                 observation,
             }),
-            KubeVirtExecutorRequest::DeleteNamespace { plan } => self
-                .delete_kubevirt_namespace(fence, plan, permit)
+            KubeVirtExecutorRequest::DeleteNamespace { plan, target } => self
+                .delete_kubevirt_namespace(fence, plan, permit, target.as_ref())
                 .await
-                .map(|cleanup_evidence| KubeVirtExecutorResponse::Deleted {
-                    plan_sha256: plan.plan_sha256,
-                    cleanup_evidence,
+                .map(|outcome| match outcome {
+                    ProviderOutcome::Completed(cleanup_evidence) => {
+                        KubeVirtExecutorResponse::Deleted {
+                            plan_sha256: plan.plan_sha256,
+                            cleanup_evidence,
+                        }
+                    }
+                    ProviderOutcome::CleanupTarget(target) => {
+                        KubeVirtExecutorResponse::CleanupTargetObserved {
+                            plan_sha256: plan.plan_sha256,
+                            target,
+                        }
+                    }
+                    ProviderOutcome::Pending => KubeVirtExecutorResponse::Pending,
                 }),
         };
         result.unwrap_or_else(|failure| KubeVirtExecutorResponse::Failed { failure })
@@ -2901,6 +3045,7 @@ const fn invalid_observation() -> ProviderFailure {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    mod cleanup_regressions;
     use super::*;
     use crate::{KubeVirtBaseDiskIdentity, ReconcileAction};
     use axum::{
@@ -4148,6 +4293,9 @@ mod tests {
         kubevirt_read: Arc<Mutex<Option<(StatusCode, Duration)>>>,
         ca_pem: String,
         license_response: Arc<Mutex<MockLicenseResponse>>,
+        read_gate: Arc<Mutex<Option<Arc<KubernetesReadGate>>>>,
+        inventory_pages: Arc<Mutex<std::collections::VecDeque<InventoryPage>>>,
+        inventory_progress: Arc<tokio::sync::Notify>,
     }
 
     #[derive(Clone)]
@@ -4155,6 +4303,18 @@ mod tests {
         status: StatusCode,
         body: Vec<u8>,
         location: Option<String>,
+    }
+
+    struct KubernetesReadGate {
+        path: String,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+    }
+
+    struct InventoryPage {
+        continuation: Option<String>,
+        status: StatusCode,
+        body: Value,
     }
 
     struct MockKubernetes {
@@ -4168,6 +4328,9 @@ mod tests {
         task: tokio::task::JoinHandle<()>,
         kubevirt_read: Arc<Mutex<Option<(StatusCode, Duration)>>>,
         license_response: Arc<Mutex<MockLicenseResponse>>,
+        read_gate: Arc<Mutex<Option<Arc<KubernetesReadGate>>>>,
+        inventory_pages: Arc<Mutex<std::collections::VecDeque<InventoryPage>>>,
+        inventory_progress: Arc<tokio::sync::Notify>,
     }
 
     impl Drop for MockKubernetes {
@@ -4202,6 +4365,9 @@ mod tests {
             location: None,
         }));
         let lifecycle = lifecycle.map(|fixture| Arc::new(Mutex::new(fixture)));
+        let read_gate = Arc::new(Mutex::new(None));
+        let inventory_pages = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let inventory_progress = Arc::new(tokio::sync::Notify::new());
         let state = MockKubernetesState {
             deployment_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events: Arc::clone(&events),
@@ -4212,6 +4378,9 @@ mod tests {
             kubevirt_read: Arc::clone(&kubevirt_read),
             ca_pem: ca_pem.clone(),
             license_response: Arc::clone(&license_response),
+            read_gate: Arc::clone(&read_gate),
+            inventory_pages: Arc::clone(&inventory_pages),
+            inventory_progress: Arc::clone(&inventory_progress),
         };
         let router = Router::new()
             .fallback(mock_kubernetes_handler)
@@ -4230,6 +4399,9 @@ mod tests {
             task,
             kubevirt_read,
             license_response,
+            read_gate,
+            inventory_pages,
+            inventory_progress,
         })
     }
 
@@ -4277,6 +4449,39 @@ mod tests {
             )
         };
         state.events.lock().await.push(event);
+        if method == Method::GET {
+            let gate = {
+                let mut gate = state.read_gate.lock().await;
+                if gate.as_ref().is_some_and(|gate| gate.path == path) {
+                    gate.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                gate.resume.notified().await;
+            }
+            let page = if path == "/api/v1/namespaces" {
+                state.inventory_pages.lock().await.pop_front()
+            } else {
+                None
+            };
+            if let Some(page) = page {
+                let query =
+                    url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+                        .collect::<std::collections::BTreeMap<_, _>>();
+                let continuation = query.get("continue").map(ToString::to_string);
+                if continuation != page.continuation
+                    || query.get("limit").map(AsRef::as_ref) != Some("100")
+                {
+                    state.inventory_pages.lock().await.push_front(page);
+                    return StatusCode::BAD_REQUEST.into_response();
+                }
+                state.inventory_progress.notify_one();
+                return (page.status, axum::Json(page.body)).into_response();
+            }
+        }
         if method == Method::GET && path == "/-/client-token" {
             if request.headers().contains_key("authorization") {
                 return StatusCode::FORBIDDEN.into_response();
@@ -4441,6 +4646,7 @@ mod tests {
         pods_remaining: bool,
         replace_disk_after_stop: bool,
         deletion: LifecycleDeletion,
+        delete_uids: Vec<uuid::Uuid>,
     }
 
     impl LifecycleKubernetes {
@@ -4482,6 +4688,7 @@ mod tests {
                 pods_remaining: false,
                 replace_disk_after_stop: false,
                 deletion: LifecycleDeletion::Finalizer,
+                delete_uids: Vec::new(),
             }
         }
     }
@@ -4544,6 +4751,13 @@ mod tests {
             return StatusCode::NOT_FOUND.into_response();
         };
         if method == Method::DELETE {
+            if let Some(uid) = body
+                .pointer("/preconditions/uid")
+                .and_then(Value::as_str)
+                .and_then(|uid| uuid::Uuid::parse_str(uid).ok())
+            {
+                fixture.delete_uids.push(uid);
+            }
             if fixture.deletion == LifecycleDeletion::ReplaceNamespaceConflict {
                 object["metadata"]["uid"] = json!(uuid::Uuid::from_u128(999));
                 fixture.deletion = LifecycleDeletion::Immediate;
@@ -4641,6 +4855,7 @@ mod tests {
                 pods_remaining: false,
                 replace_disk_after_stop: false,
                 deletion: LifecycleDeletion::Immediate,
+                delete_uids: Vec::new(),
             },
             plan,
             crate::ContainerNamespaceProfile::Existing {
@@ -4671,6 +4886,22 @@ mod tests {
         }
     }
 
+    async fn observed_work_target(
+        executor: &KubernetesContainerExecutor,
+        plan: &ContainerResourcePlan,
+    ) -> Result<EnvironmentCleanupTarget, Box<dyn std::error::Error>> {
+        executor
+            .capture_cleanup_target(
+                plan.environment_id,
+                plan.project_id,
+                &plan.namespace,
+                Some(plan),
+            )
+            .await
+            .map_err(|error| format!("cleanup observation: {error:?}"))?
+            .ok_or_else(|| "missing cleanup target".into())
+    }
+
     #[tokio::test]
     async fn existing_namespace_cleanup_retains_operator_objects_and_other_work()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4685,8 +4916,9 @@ mod tests {
         let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
         let (_files, executor) = test_kubevirt_executor(&mock).await?;
         let executor = executor.with_namespace_profile(profile);
+        let target = observed_work_target(&executor, &plan).await?;
         executor
-            .delete_work_objects(&container_test_fence(plan.environment_id), &plan)
+            .delete_work_objects(&container_test_fence(plan.environment_id), &plan, &target)
             .await
             .map_err(|e| format!("{e:?}"))?;
         let events = mock.events.lock().await;
@@ -4752,12 +4984,13 @@ mod tests {
             let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
             let (_files, executor) = test_kubevirt_executor(&mock).await?;
             let executor = executor.with_namespace_profile(profile);
+            let target = observed_work_target(&executor, &plan).await?;
             let mut fence = container_test_fence(plan.environment_id);
             fence.deadline_at = UtcTimestamp::from_utc(
                 OffsetDateTime::now_utc().replace_nanosecond(0)? + time::Duration::seconds(2),
             )?;
             let failure = executor
-                .delete_work_objects(&fence, &plan)
+                .delete_work_objects(&fence, &plan, &target)
                 .await
                 .err()
                 .ok_or("cleanup deleted a workspace while a Pod still referenced it")?;
@@ -4807,9 +5040,10 @@ mod tests {
             let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
             let (_files, executor) = test_kubevirt_executor(&mock).await?;
             let executor = executor.with_namespace_profile(profile);
+            let target = observed_work_target(&executor, &plan).await?;
             assert!(
                 executor
-                    .delete_work_objects(&container_test_fence(plan.environment_id), &plan)
+                    .delete_work_objects(&container_test_fence(plan.environment_id), &plan, &target)
                     .await
                     .is_err()
             );
@@ -4857,9 +5091,10 @@ mod tests {
         let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
         let (_files, executor) = test_kubevirt_executor(&mock).await?;
         let executor = executor.with_namespace_profile(profile);
+        let target = observed_work_target(&executor, &plan).await?;
         let fence = container_test_fence(plan.environment_id);
         let cleanup =
-            tokio::spawn(async move { executor.delete_work_objects(&fence, &plan).await });
+            tokio::spawn(async move { executor.delete_work_objects(&fence, &plan, &target).await });
         let pod_read = format!("GET {}", pod_path.trim_end_matches("/runtime"));
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -4922,9 +5157,14 @@ mod tests {
             let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
             let (_files, executor) = test_kubevirt_executor(&mock).await?;
             let executor = executor.with_namespace_profile(profile);
+            let target = EnvironmentCleanupTarget {
+                namespace: plan.namespace.clone(),
+                uid: plan.namespace_uid.ok_or("existing namespace uid")?,
+                objects: Vec::new(),
+            };
             assert!(
                 executor
-                    .delete_work_objects(&container_test_fence(plan.environment_id), &plan)
+                    .delete_work_objects(&container_test_fence(plan.environment_id), &plan, &target)
                     .await
                     .is_err()
             );
@@ -5316,6 +5556,7 @@ mod tests {
                     project_id,
                     &namespace,
                     stop_fence(environment_id).deadline_at,
+                    uuid::Uuid::from_u128(1),
                     None,
                 )
                 .await
@@ -5337,6 +5578,7 @@ mod tests {
                     project_id,
                     &namespace,
                     stop_fence(environment_id).deadline_at,
+                    uuid::Uuid::from_u128(1),
                     None,
                 )
                 .await
@@ -5362,6 +5604,7 @@ mod tests {
                     project_id,
                     &namespace,
                     stop_fence(environment_id).deadline_at,
+                    uuid::Uuid::from_u128(1),
                     None
                 )
                 .await
@@ -5422,6 +5665,7 @@ mod tests {
                     project_id,
                     &namespace,
                     stop_fence(environment_id).deadline_at,
+                    uuid::Uuid::from_u128(1),
                     None,
                 )
                 .await;
@@ -5504,6 +5748,19 @@ mod tests {
                 .ok_or("missing cleanup lease")?
         };
         assert_eq!(lease.instance.id, doomed.id);
+        let pinned = crate::lifecycle::pin_cleanup_target(
+            &lease.instance,
+            EnvironmentCleanupTarget {
+                namespace: format!("lw-env-{}", doomed.id),
+                uid: doomed.id.as_uuid(),
+                objects: Vec::new(),
+            },
+        )?;
+        store.save_reconciled(&lease, &pinned).await?;
+        let lease = store
+            .claim_due("orphan-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("pinned cleanup lease")?;
         let failed = crate::apply_provider_failure(
             &lease.instance,
             lease.instance.operation.id,
@@ -5512,7 +5769,7 @@ mod tests {
         store.save_reconciled(&lease, &failed).await?;
         let namespace = |id: contracts::EnvironmentId, project: contracts::ProjectId| {
             json!({
-                "metadata":{"name":format!("lw-env-{id}"),"uid":uuid::Uuid::now_v7(),
+                "metadata":{"name":format!("lw-env-{id}"),"uid":id.as_uuid(),
                     "labels":{"labweaver.io/managed":"true","labweaver.io/environment-id":id,
                         "labweaver.io/project-id":project}}
             })

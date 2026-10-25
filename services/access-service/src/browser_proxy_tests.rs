@@ -2254,6 +2254,7 @@ async fn owned_environment_requests_use_current_control_actions_and_reject_remov
             accepted_at: timestamp,
             deadline_at: "2026-10-12T00:10:00.000Z".parse()?,
             cleanup_started_at: None,
+            cleanup_target: None,
             diagnostic_code: None,
             preserve_mutable_disk: false,
             access_revocation_revision: None,

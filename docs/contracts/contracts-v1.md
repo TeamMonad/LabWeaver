@@ -77,3 +77,12 @@ Evaluation release 列表按 `published_at DESC, release_id DESC` 排序；学�
 也不会因为删除上一页末项而重复或跳过仍符合过滤条件的记录。状态或权限改变后，每页采用当前权限，
 不承诺重放已失效的记录。Agent 历史游标同样保留 PostgreSQL 微秒精度，公开 DTO 仍使用毫秒。
 
+## Environment 清理身份检查点
+
+`EnvironmentOperation` 新增可选 `cleanupTarget`，包含 namespace 名称、原 namespace UID，
+以及共享 namespace 内待删 Work 对象的 `ExecutionObjectRef`。它是 Environment worker 在
+持有真实操作 lease 时保存的只读 Kubernetes 观察，不是客户端提交的清理授权参数。
+原 Delete/Cleanup 记录、重试和孤儿恢复始终沿用同一绑定；缺少原绑定的旧失败记录仅诊断。
+新增字段不改变列表查询、分页响应或操作状态枚举。Schema/SDK 从 Rust 真源生成；
+前端不需要创建、修改或推导这个检查点，继续使用已有公开操作快照与错误诊断。
+

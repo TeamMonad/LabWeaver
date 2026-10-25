@@ -1216,6 +1216,62 @@ impl EnvironmentSummary {
     }
 }
 
+/// Kubernetes identities captured before the first destructive cleanup request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentCleanupTarget {
+    pub namespace: String,
+    #[schemars(with = "String")]
+    pub uid: uuid::Uuid,
+    /// Existing-namespace Work objects; an absent entry must never be adopted later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<crate::execution::ExecutionObjectRef>,
+}
+
+impl EnvironmentCleanupTarget {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        let dns = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 63
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                && value
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && value
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        };
+        let mut names = BTreeSet::new();
+        if !dns(&self.namespace)
+            || self.uid.is_nil()
+            || self.objects.len() > 5
+            || self.objects.iter().any(|object| {
+                !dns(&object.name)
+                    || uuid::Uuid::parse_str(&object.uid).map_or(true, |uid| uid.is_nil())
+                    || !matches!(
+                        (object.api_version.as_str(), object.resource.as_str()),
+                        ("apps/v1", "deployments")
+                            | (
+                                "v1",
+                                "services"
+                                    | "serviceaccounts"
+                                    | "secrets"
+                                    | "persistentvolumeclaims"
+                            )
+                    )
+                    || !names.insert((&object.api_version, &object.resource, &object.name))
+            })
+        {
+            return Err(EnvironmentError::InvalidAggregate);
+        }
+        Ok(())
+    }
+}
+
 /// Idempotent accepted environment operation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1233,6 +1289,8 @@ pub struct EnvironmentOperation {
     pub accepted_at: UtcTimestamp,
     pub deadline_at: UtcTimestamp,
     pub cleanup_started_at: Option<UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_target: Option<EnvironmentCleanupTarget>,
     pub diagnostic_code: Option<String>,
     pub preserve_mutable_disk: bool,
     pub access_revocation_revision: Option<Revision>,
@@ -1466,6 +1524,9 @@ impl EnvironmentInstance {
             allocation
                 .validate()
                 .map_err(|_| EnvironmentError::InvalidAggregate)?;
+        }
+        if let Some(target) = &self.operation.cleanup_target {
+            target.validate()?;
         }
         if (self.observed_state == ObservedEnvironmentState::Failed) != self.failed_phase.is_some()
         {

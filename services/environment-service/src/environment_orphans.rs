@@ -68,6 +68,19 @@ impl KubernetesContainerExecutor {
             request = request.query(&[("continue", continuation)]);
         }
         let response = request.send().await.map_err(|_| unavailable())?;
+        if response.status() == StatusCode::GONE {
+            let expired: Value = response.json().await.map_err(|_| invalid_observation())?;
+            if let Some(next) = expired
+                .pointer("/metadata/continue")
+                .and_then(Value::as_str)
+                .filter(|next| !next.is_empty())
+            {
+                // Kubernetes may supply a replacement token for an expired list snapshot.
+                // Continue from that position; rechecking durable ownership remains mandatory.
+                return Ok((EnvironmentOrphanReport::default(), Some(next.to_owned())));
+            }
+            return Err(unavailable());
+        }
         if !response.status().is_success() {
             return Err(status_failure(response.status()));
         }
@@ -105,7 +118,9 @@ impl KubernetesContainerExecutor {
         object: &Value,
         namespace_object: bool,
     ) -> Result<OrphanDecision, ProviderFailure> {
-        let Some((environment_id, project_id)) = object_owner(object, namespace_object) else {
+        let Some((environment_id, project_id, observed_uid)) =
+            object_owner(object, namespace_object)
+        else {
             return Ok(OrphanDecision::Unverified);
         };
         let value: Option<Value> = sqlx::query_scalar("SELECT contract FROM environment.environment_instances WHERE environment_id=$1 AND project_id=$2")
@@ -145,6 +160,15 @@ impl KubernetesContainerExecutor {
                     generation = instance.generation);
             }
             return Ok(decision);
+        }
+        // classify_instance leaves legacy operations without this proof diagnostic-only.
+        let target = instance
+            .operation
+            .cleanup_target
+            .as_ref()
+            .ok_or_else(invalid_observation)?;
+        if !matches_cleanup_target(target, object, namespace_object, observed_uid) {
+            return Ok(OrphanDecision::Unverified);
         }
         // Re-enter the owner implementation, preserving its revision CAS, Access revocation,
         // lease fencing, task claim and UID-protected provider cleanup. No network call holds a
@@ -194,26 +218,31 @@ impl KubernetesContainerExecutor {
         kind: RuntimeKind,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), ProviderFailure> {
-        let mut interval = tokio::time::interval(Duration::from_mins(1));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut continuation = None;
+        let mut wait_for_cycle = false;
         loop {
             if *shutdown.borrow() {
                 return Ok(());
             }
-            tokio::select! {
+            if wait_for_cycle {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                        continue;
+                    }
+                    () = tokio::time::sleep(Duration::from_mins(1)) => {}
+                }
+            }
+            let result = tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                     continue;
                 }
-                _ = interval.tick() => {}
-            }
-            // A failed API page is retried from its same token; restart starts a fresh snapshot.
-            match self
-                .reconcile_orphans(&pool, kind, continuation.as_deref())
-                .await
-            {
+                result = self.reconcile_orphans(&pool, kind, continuation.as_deref()) => result,
+            };
+            match result {
                 Ok((report, next)) => {
+                    wait_for_cycle = next.is_none();
                     continuation = next;
                     tracing::info!(
                         event = "environment.orphan.scan",
@@ -225,9 +254,8 @@ impl KubernetesContainerExecutor {
                     );
                 }
                 Err(failure) => {
-                    // Expired Kubernetes list snapshots need a fresh list, not a permanent
-                    // stale token loop. Rechecking ownership makes revisiting objects safe.
                     continuation = None;
+                    wait_for_cycle = true;
                     tracing::warn!(
                         event = "environment.orphan.scan_failed",
                         diagnostic_code = failure.diagnostic_code()
@@ -246,7 +274,34 @@ enum OrphanDecision {
     Recovering,
 }
 
-fn object_owner(object: &Value, namespace_object: bool) -> Option<(EnvironmentId, ProjectId)> {
+fn matches_cleanup_target(
+    target: &EnvironmentCleanupTarget,
+    object: &Value,
+    namespace_object: bool,
+    uid: uuid::Uuid,
+) -> bool {
+    let Some(name) = object.pointer("/metadata/name").and_then(Value::as_str) else {
+        return false;
+    };
+    if namespace_object {
+        return target.namespace == name && target.uid == uid;
+    }
+    object
+        .pointer("/metadata/namespace")
+        .and_then(Value::as_str)
+        == Some(target.namespace.as_str())
+        && target.objects.iter().any(|reference| {
+            reference.api_version == "apps/v1"
+                && reference.resource == "deployments"
+                && reference.name == name
+                && uuid::Uuid::parse_str(&reference.uid).ok() == Some(uid)
+        })
+}
+
+fn object_owner(
+    object: &Value,
+    namespace_object: bool,
+) -> Option<(EnvironmentId, ProjectId, uuid::Uuid)> {
     let label = |key: &str| object.pointer("/metadata/labels")?.get(key)?.as_str();
     if namespace_object && label("labweaver.io/managed") != Some("true") {
         return None;
@@ -260,13 +315,13 @@ fn object_owner(object: &Value, namespace_object: bool) -> Option<(EnvironmentId
     let project_id = label("labweaver.io/project-id")?
         .parse::<ProjectId>()
         .ok()?;
-    pointer_uuid(object, "/metadata/uid").ok()?;
+    let uid = pointer_uuid(object, "/metadata/uid").ok()?;
     if namespace_object
         && object.pointer("/metadata/name")?.as_str()? != format!("lw-env-{environment_id}")
     {
         return None;
     }
-    Some((environment_id, project_id))
+    Some((environment_id, project_id, uid))
 }
 
 fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
@@ -287,6 +342,7 @@ fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
         && instance.operation.state == OperationState::Failed
         && instance.endpoints.is_empty()
         && instance.operation.access_revocation_revision.is_some()
+        && instance.operation.cleanup_target.is_some()
         && !instance.operation.preserve_mutable_disk
     {
         OrphanDecision::Recovering
@@ -309,6 +365,11 @@ mod tests {
         instance.endpoints.clear();
         assert_eq!(classify_instance(&instance), OrphanDecision::Unverified);
         instance.operation.access_revocation_revision = Some(instance.revision);
+        instance.operation.cleanup_target = Some(EnvironmentCleanupTarget {
+            namespace: format!("lw-env-{}", instance.id),
+            uid: uuid::Uuid::now_v7(),
+            objects: Vec::new(),
+        });
         assert_eq!(classify_instance(&instance), OrphanDecision::Recovering);
         instance.operation.preserve_mutable_disk = true;
         assert_eq!(classify_instance(&instance), OrphanDecision::Unverified);

@@ -122,6 +122,30 @@
       ],
       "type": "string"
     },
+    "EnvironmentCleanupTarget": {
+      "additionalProperties": false,
+      "description": "Kubernetes identities captured before the first destructive cleanup request.",
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "objects": {
+          "description": "Existing-namespace Work objects; an absent entry must never be adopted later.",
+          "items": {
+            "$ref": "#/$defs/ExecutionObjectRef"
+          },
+          "type": "array"
+        },
+        "uid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "uid"
+      ],
+      "type": "object"
+    },
     "EnvironmentEndpoint": {
       "additionalProperties": false,
       "description": "Sanitized Environment-owned endpoint metadata.",
@@ -259,6 +283,16 @@
           "anyOf": [
             {
               "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanupTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentCleanupTarget"
             },
             {
               "type": "null"
@@ -514,6 +548,34 @@
         "targetReleaseId",
         "targetReleaseVersion",
         "dataPolicy"
+      ],
+      "type": "object"
+    },
+    "ExecutionObjectRef": {
+      "additionalProperties": false,
+      "description": "One Kubernetes object owned by an execution generation.",
+      "properties": {
+        "apiVersion": {
+          "description": "Exact API version used to address the object, such as `batch/v1`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "resource": {
+          "description": "Kubernetes collection name, such as `jobs` or `configmaps`.",
+          "type": "string"
+        },
+        "uid": {
+          "description": "Server-assigned UID proving ownership; never reused after deletion.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "resource",
+        "name",
+        "uid"
       ],
       "type": "object"
     },

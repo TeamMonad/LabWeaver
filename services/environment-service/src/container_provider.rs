@@ -8,7 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use contracts::authoring::{EnvironmentRuntimeSpec, NetworkPolicySpec, RuntimeKind};
 use contracts::environment::{
-    EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
+    EndpointHealth, EnvironmentCleanupTarget, EnvironmentEndpoint, EnvironmentInstance,
+    ObservedEnvironmentState,
 };
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
@@ -171,7 +172,8 @@ pub trait ContainerProviderBackend: Send + Sync {
         &self,
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
-    ) -> Result<ArtifactRef, ProviderFailure>;
+        target: Option<&EnvironmentCleanupTarget>,
+    ) -> Result<crate::ProviderOutcome<ArtifactRef>, ProviderFailure>;
 }
 
 /// Typed NATS backend for the deployment-owned Kubernetes apply/observe executor.
@@ -366,19 +368,30 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
         &self,
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
+        target: Option<&EnvironmentCleanupTarget>,
+    ) -> Result<crate::ProviderOutcome<ArtifactRef>, ProviderFailure> {
         match self
             .request(
                 fence,
-                ContainerExecutorRequest::DeleteNamespace { plan: plan.clone() },
+                ContainerExecutorRequest::DeleteNamespace {
+                    plan: plan.clone(),
+                    target: target.cloned(),
+                },
             )
             .await?
         {
+            ContainerExecutorResponse::CleanupTargetObserved {
+                plan_sha256,
+                target,
+            } if plan_sha256 == plan.plan_sha256 => {
+                Ok(crate::ProviderOutcome::CleanupTarget(target))
+            }
+            ContainerExecutorResponse::Pending => Ok(crate::ProviderOutcome::Pending),
             ContainerExecutorResponse::Deleted {
                 plan_sha256,
                 cleanup_evidence,
             } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
-                Ok(cleanup_evidence)
+                Ok(crate::ProviderOutcome::Completed(cleanup_evidence))
             }
             ContainerExecutorResponse::Deleted {
                 plan_sha256,
@@ -405,7 +418,8 @@ impl ContainerProviderBackend for NatsContainerProviderBackend {
                 );
                 Err(failure)
             }
-            ContainerExecutorResponse::Observed { .. } => Err(ProviderFailure {
+            ContainerExecutorResponse::Observed { .. }
+            | ContainerExecutorResponse::CleanupTargetObserved { .. } => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
                 retryable: true,
             }),
@@ -437,6 +451,8 @@ pub enum ContainerExecutorRequest {
     },
     DeleteNamespace {
         plan: ContainerResourcePlan,
+        #[serde(default)]
+        target: Option<EnvironmentCleanupTarget>,
     },
 }
 
@@ -478,6 +494,11 @@ pub struct ContainerExecutorResponseEnvelope {
     deny_unknown_fields
 )]
 pub enum ContainerExecutorResponse {
+    Pending,
+    CleanupTargetObserved {
+        plan_sha256: Sha256Digest,
+        target: EnvironmentCleanupTarget,
+    },
     Observed {
         plan_sha256: Sha256Digest,
         observation: ContainerApplyObservation,
@@ -549,6 +570,21 @@ impl PgContainerExecutorFenceStore {
         validate_container_executor_request(envelope)?;
         let fence = envelope.fence.clone();
         let mut transaction = self.pool.begin().await?;
+        if let ContainerExecutorRequest::DeleteNamespace {
+            target: Some(target),
+            ..
+        } = &envelope.request
+            && !crate::store::cleanup_target_matches(
+                &mut transaction,
+                fence.environment_id,
+                fence.operation_id,
+                fence.operation_generation,
+                target,
+            )
+            .await?
+        {
+            return Err(ContainerExecutorFenceError::IdentityMismatch);
+        }
         let plan = container_executor_plan(&envelope.request);
         if self
             .namespace_profile
@@ -1075,7 +1111,7 @@ const fn container_executor_plan(request: &ContainerExecutorRequest) -> &Contain
         | ContainerExecutorRequest::Observe { plan }
         | ContainerExecutorRequest::Scale { plan, .. }
         | ContainerExecutorRequest::Restart { plan, .. }
-        | ContainerExecutorRequest::DeleteNamespace { plan } => plan,
+        | ContainerExecutorRequest::DeleteNamespace { plan, .. } => plan,
     }
 }
 
@@ -1984,6 +2020,38 @@ where
         action: ReconcileAction,
         instance: &EnvironmentInstance,
     ) -> Result<crate::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        if action == ReconcileAction::Cleanup
+            && instance.observed_state == ObservedEnvironmentState::Deleting
+        {
+            let fence = ContainerBackendFence::for_action(instance, action)?;
+            let plan = self
+                .cleanup_plan(instance)
+                .map_err(|error| projection_failure(&error))?;
+            return match self
+                .backend
+                .delete_namespace(&fence, &plan, instance.operation.cleanup_target.as_ref())
+                .await?
+            {
+                crate::ProviderOutcome::Pending => Ok(crate::ProviderOutcome::Pending),
+                crate::ProviderOutcome::CleanupTarget(target) => {
+                    Ok(crate::ProviderOutcome::CleanupTarget(target))
+                }
+                crate::ProviderOutcome::Completed(cleanup_evidence)
+                    if valid_artifact_ref(&cleanup_evidence) =>
+                {
+                    Ok(crate::ProviderOutcome::Completed(ProviderObservation {
+                        next_state: ObservedEnvironmentState::Deleted,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: Some(cleanup_evidence),
+                        operation_complete: true,
+                    }))
+                }
+                crate::ProviderOutcome::Completed(_) => Err(ProviderFailure {
+                    code: ProviderFailureCode::CleanupFailed,
+                    retryable: true,
+                }),
+            };
+        }
         async {
             let fence = ContainerBackendFence::for_action(instance, action)?;
             let no_endpoints = |next_state, operation_complete| ProviderObservation {
@@ -1992,26 +2060,6 @@ where
                 cleanup_evidence: None,
                 operation_complete,
             };
-            if action == ReconcileAction::Cleanup
-                && instance.observed_state == ObservedEnvironmentState::Deleting
-            {
-                let plan = self
-                    .cleanup_plan(instance)
-                    .map_err(|error| projection_failure(&error))?;
-                let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
-                if !valid_artifact_ref(&cleanup_evidence) {
-                    return Err(ProviderFailure {
-                        code: ProviderFailureCode::CleanupFailed,
-                        retryable: true,
-                    });
-                }
-                return Ok(ProviderObservation {
-                    next_state: ObservedEnvironmentState::Deleted,
-                    endpoints: Vec::new(),
-                    cleanup_evidence: Some(cleanup_evidence),
-                    operation_complete: true,
-                });
-            }
             if action == ReconcileAction::Cleanup
                 && instance.observed_state == ObservedEnvironmentState::Stopped
                 && instance.desired_state

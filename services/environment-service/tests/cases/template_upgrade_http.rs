@@ -245,7 +245,8 @@ impl ContainerProviderBackend for KubernetesBoundary {
         &self,
         _fence: &ContainerBackendFence,
         _plan: &ContainerResourcePlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
+        _target: Option<&contracts::environment::EnvironmentCleanupTarget>,
+    ) -> Result<environment_service::ProviderOutcome<ArtifactRef>, ProviderFailure> {
         Err(rejected())
     }
 }

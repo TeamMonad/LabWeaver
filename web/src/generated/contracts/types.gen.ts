@@ -2576,6 +2576,18 @@ export type EnvironmentDetailSchemaEndpointProtocol = 'http' | 'https' | 'ssh';
  */
 export type EnvironmentDetailSchemaEnvironmentClass = 'experiment' | 'work';
 
+/**
+ * Kubernetes identities captured before the first destructive cleanup request.
+ */
+export type EnvironmentCleanupTarget = {
+    namespace: string;
+    /**
+     * Existing-namespace Work objects; an absent entry must never be adopted later.
+     */
+    objects?: Array<ExecutionObjectRef>;
+    uid: string;
+};
+
 export type EnvironmentConnectionReadiness = {
     /**
      * Non-secret instructions. Platform authentication does not imply a guest OS login.
@@ -2649,6 +2661,7 @@ export type EnvironmentOperation = {
     actorId: EnvironmentDetailSchemaActorId;
     attempt: number;
     cleanupStartedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
+    cleanupTarget?: EnvironmentCleanupTarget | null;
     deadlineAt: EnvironmentDetailSchemaUtcTimestamp;
     diagnosticCode?: string | null;
     id: OperationId;
@@ -2711,6 +2724,25 @@ export type EnvironmentTemplateUpgrade = {
     sourceReleaseVersion: number;
     targetReleaseId: EnvironmentDetailSchemaReleaseId;
     targetReleaseVersion: number;
+};
+
+/**
+ * One Kubernetes object owned by an execution generation.
+ */
+export type ExecutionObjectRef = {
+    /**
+     * Exact API version used to address the object, such as `batch/v1`.
+     */
+    apiVersion: string;
+    name: string;
+    /**
+     * Kubernetes collection name, such as `jobs` or `configmaps`.
+     */
+    resource: string;
+    /**
+     * Server-assigned UID proving ownership; never reused after deletion.
+     */
+    uid: string;
 };
 
 /**
@@ -3060,6 +3092,18 @@ export type EnvironmentInstanceSchemaEndpointProtocol = 'http' | 'https' | 'ssh'
 export type EnvironmentInstanceSchemaEnvironmentClass = 'experiment' | 'work';
 
 /**
+ * Kubernetes identities captured before the first destructive cleanup request.
+ */
+export type EnvironmentInstanceSchemaEnvironmentCleanupTarget = {
+    namespace: string;
+    /**
+     * Existing-namespace Work objects; an absent entry must never be adopted later.
+     */
+    objects?: Array<EnvironmentInstanceSchemaExecutionObjectRef>;
+    uid: string;
+};
+
+/**
  * Sanitized Environment-owned endpoint metadata.
  */
 export type EnvironmentInstanceSchemaEnvironmentEndpoint = {
@@ -3116,6 +3160,7 @@ export type EnvironmentInstanceSchemaEnvironmentOperation = {
     actorId: EnvironmentInstanceSchemaActorId;
     attempt: number;
     cleanupStartedAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
+    cleanupTarget?: EnvironmentInstanceSchemaEnvironmentCleanupTarget | null;
     deadlineAt: EnvironmentInstanceSchemaUtcTimestamp;
     diagnosticCode?: string | null;
     id: EnvironmentInstanceSchemaOperationId;
@@ -3178,6 +3223,25 @@ export type EnvironmentInstanceSchemaEnvironmentTemplateUpgrade = {
     sourceReleaseVersion: number;
     targetReleaseId: EnvironmentInstanceSchemaReleaseId;
     targetReleaseVersion: number;
+};
+
+/**
+ * One Kubernetes object owned by an execution generation.
+ */
+export type EnvironmentInstanceSchemaExecutionObjectRef = {
+    /**
+     * Exact API version used to address the object, such as `batch/v1`.
+     */
+    apiVersion: string;
+    name: string;
+    /**
+     * Kubernetes collection name, such as `jobs` or `configmaps`.
+     */
+    resource: string;
+    /**
+     * Server-assigned UID proving ownership; never reused after deletion.
+     */
+    uid: string;
 };
 
 /**

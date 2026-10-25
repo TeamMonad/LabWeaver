@@ -258,7 +258,7 @@ impl ContainerExecutorBackend for Cluster {
             | ContainerExecutorRequest::Observe { plan }
             | ContainerExecutorRequest::Scale { plan, .. }
             | ContainerExecutorRequest::Restart { plan, .. }
-            | ContainerExecutorRequest::DeleteNamespace { plan } => plan,
+            | ContainerExecutorRequest::DeleteNamespace { plan, .. } => plan,
         };
         ContainerExecutorResponse::Observed {
             plan_sha256: plan.plan_sha256,
