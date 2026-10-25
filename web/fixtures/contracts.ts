@@ -21,10 +21,11 @@ import type {
   EnvironmentSummary,
   EnvironmentSummaryPageSchema,
   EnvironmentTemplateReleaseViewSchema,
-  ProjectMembershipSchema,
   Notification,
   NotificationPageSchema,
   NotificationUnreadCountSchema,
+  ProjectMembershipPageSchema,
+  ProjectPageSchema,
   ProjectSchema,
   OrganizationUserPageSchema,
   PlatformImageCatalogSchema,
@@ -615,11 +616,13 @@ interface FixtureOptions {
     query?: string
     page?: number
     pageSize?: number
+    cursor?: string
+    limit?: number
   }
 }
 
-export async function listProjects(): Promise<FixtureResult<ProjectSchema[]>> {
-  return fixtureResponse(projectsForScene())
+export async function listProjects(_options?: FixtureOptions): Promise<FixtureResult<ProjectPageSchema>> {
+  return fixtureResponse({ items: projectsForScene(), nextCursor: null })
 }
 
 export async function listOrganizationUsers(_options?: FixtureOptions): Promise<FixtureResult<OrganizationUserPageSchema>> {
@@ -702,15 +705,18 @@ function knownProject(projectId: string | undefined): ProjectSchema | undefined 
   return [project, archivedProject].find((candidate) => candidate.id === projectId)
 }
 
-export async function listProjectMemberships(options?: FixtureOptions): Promise<FixtureResult<ProjectMembershipSchema[]>> {
+export async function listProjectMemberships(options?: FixtureOptions): Promise<FixtureResult<ProjectMembershipPageSchema>> {
   const projectId = options?.path?.projectId
   const selectedProject = knownProject(projectId)
   if (!selectedProject) return notFoundResponse('读取项目成员', projectId)
-  if (selectedProject.state === 'archived') return fixtureResponse([])
-  return fixtureResponse(activeScene.value.id === 'workspace-members' || activeScene.value.id === 'workspace-viewer' ? [
-    { actorId: '周同学', projectId: fixtureProjectId, role: 'student', objectRole: 'operator', state: 'active', revision: 2, courseId: 'course-physics-2026', expiresAt: null },
-    { actorId: '助教·陈老师', projectId: fixtureProjectId, role: 'teacher', objectRole: 'manager', state: 'active', revision: 1, courseId: 'course-physics-2026', expiresAt: null },
-  ] : [])
+  if (selectedProject.state === 'archived') return fixtureResponse({ items: [], nextCursor: null })
+  return fixtureResponse({
+    items: activeScene.value.id === 'workspace-members' || activeScene.value.id === 'workspace-viewer' ? [
+      { actorId: '周同学', projectId: fixtureProjectId, role: 'student', objectRole: 'operator', state: 'active', revision: 2, courseId: 'course-physics-2026', expiresAt: null },
+      { actorId: '助教·陈老师', projectId: fixtureProjectId, role: 'teacher', objectRole: 'manager', state: 'active', revision: 1, courseId: 'course-physics-2026', expiresAt: null },
+    ] : [],
+    nextCursor: null,
+  })
 }
 
 const OWNER_ACTIONS: ObjectAction[] = ['browse', 'archive', 'edit', 'start', 'stop', 'configure_agent', 'grant_access', 'manage_members', 'view_costs', 'request_runtime_permissions']

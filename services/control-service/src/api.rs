@@ -614,6 +614,7 @@ async fn list_projects(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
     headers: HeaderMap,
+    Query(query): Query<contracts::membership_governance::ControlListQuery>,
 ) -> Result<Response, ApiError> {
     let decision = authorize_global(&state, &principal, &headers, "listProjects").await?;
     let projects = state
@@ -621,6 +622,7 @@ async fn list_projects(
         .list_projects(
             decision.actor.actor_id,
             decision.actor.roles.contains(&PlatformRole::PlatformAdmin),
+            &query,
         )
         .await?;
     Ok(Json(projects).into_response())
@@ -708,8 +710,9 @@ async fn list_project_memberships(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(project_id): Path<ProjectId>,
     headers: HeaderMap,
+    Query(query): Query<contracts::membership_governance::ControlListQuery>,
 ) -> Result<Response, ApiError> {
-    authorize_project(
+    let decision = authorize_project(
         &state,
         &principal,
         &headers,
@@ -717,7 +720,18 @@ async fn list_project_memberships(
         project_id,
     )
     .await?;
-    Ok(Json(state.control.project_memberships(project_id).await?).into_response())
+    Ok(Json(
+        state
+            .control
+            .project_memberships(
+                project_id,
+                decision.actor.actor_id,
+                decision.actor.roles.contains(&PlatformRole::PlatformAdmin),
+                &query,
+            )
+            .await?,
+    )
+    .into_response())
 }
 
 async fn add_project_membership(

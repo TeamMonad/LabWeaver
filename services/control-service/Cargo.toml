@@ -12,6 +12,7 @@ auth = { path = "../../crates/auth" }
 async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
 async-trait.workspace = true
 axum.workspace = true
+base64.workspace = true
 contracts = { path = "../../crates/contracts" }
 futures-util = "0.3.31"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "ring", "webpki-roots"] }
@@ -40,7 +41,6 @@ environment-service = { path = "../environment-service" }
 resource-service = { path = "../resource-service" }
 task-execution = { path = "../../crates/task-execution", features = ["test-support"] }
 jsonwebtoken.workspace = true
-base64.workspace = true
 quoted_printable = "=0.5.2"
 rcgen.workspace = true
 tempfile.workspace = true

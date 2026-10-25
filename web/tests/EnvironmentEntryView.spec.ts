@@ -275,7 +275,7 @@ describe('EnvironmentEntryView', () => {
       },
       error: undefined,
     } as never)
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null }, error: undefined as never })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
@@ -303,7 +303,7 @@ describe('EnvironmentEntryView', () => {
 
   it('shows blocked diagnostic when no project context is available', async () => {
     vi.mocked(listProjects).mockResolvedValue({
-      data: [],
+      data: { items: [], nextCursor: null },
       error: undefined as never,
     })
     const { wrapper } = await mountAt()
@@ -348,7 +348,7 @@ describe('EnvironmentEntryView', () => {
     await Promise.resolve()
     expect(router.currentRoute.value.path).toBe('/')
 
-    resolveProjects({ data: [mockProject], error: undefined as never })
+    resolveProjects({ data: { items: [mockProject], nextCursor: null }, error: undefined as never })
     await Promise.resolve()
     releaseGuard()
     await navigation
@@ -1284,7 +1284,7 @@ describe('EnvironmentEntryView', () => {
   })
 
   it('uses an explicit URL project over the shared context and preserves a linked environment', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject, mockProjectB], nextCursor: null }, error: undefined as never })
     mockEnvironmentInstance()
     const { wrapper, router } = await mountAt({ environmentId: 'env-1' }, true)
 
@@ -1300,7 +1300,7 @@ describe('EnvironmentEntryView', () => {
   })
 
   it('clears the environment and opens its tools when the shared project changes', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject, mockProjectB], nextCursor: null }, error: undefined as never })
     mockEnvironmentInstance()
     const { wrapper, router } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, true)
 
@@ -1478,7 +1478,7 @@ describe('EnvironmentEntryView', () => {
   })
 
   it('shows the freeze operation state and explains the temporary console disconnect', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject, mockProjectB], nextCursor: null }, error: undefined as never })
     mockEnvironmentInstance({ projectId: 'project-2' })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
       data: { items: [{ ...mockRelease, projectId: 'project-2', submissionManifest: mockSubmissionManifest }] },

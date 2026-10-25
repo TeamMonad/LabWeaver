@@ -96,7 +96,7 @@ describe('ResultListView', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     vi.mocked(listProjects).mockResolvedValue({
-      data: [projectA, projectB] as never,
+      data: { items: [projectA, projectB], nextCursor: null } as never,
       error: undefined as never,
     })
     vi.mocked(listOwnProjectEvaluationResults).mockResolvedValue({

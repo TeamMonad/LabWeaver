@@ -415,6 +415,12 @@ watch(
   [() => projects.projects, routeProjectId],
   ([state, requestedProjectId]) => {
     if (state.kind !== 'success') return
+    // The admin route is not project-scoped, so the shell does not follow the
+    // cursor for a linked project; follow it here before reporting it unavailable.
+    if (requestedProjectId && projects.hasMore && !state.data.some((project) => project.id === requestedProjectId)) {
+      void projects.locate(requestedProjectId)
+      return
+    }
     const preferred = requestedProjectId
       ? state.data.find((project) => project.id === requestedProjectId)?.id
       : projects.selectedProjectId && state.data.some((project) => project.id === projects.selectedProjectId)
@@ -425,8 +431,11 @@ watch(
   { immediate: true },
 )
 
+// A linked `?projectId=` is authoritative: the list reconciling the store's
+// selection (e.g. a stale stored project) must not rewrite it, and the shell
+// selector updates the query itself. Only a route without a project adopts one.
 watch(() => projects.selectedProjectId, (projectId) => {
-  if (!projectId || projectContextUnavailable.value || routeProjectId.value === projectId) return
+  if (!projectId || routeProjectId.value) return
   void router.replace({ query: { ...route.query, projectId } })
 })
 

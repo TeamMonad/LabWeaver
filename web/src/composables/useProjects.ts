@@ -13,6 +13,7 @@ import {
 import type {
   AddProjectMembershipRequestSchema,
   OrganizationUserPage,
+  ProjectPageSchema,
   ProjectMembershipSchema,
   ProjectSchema,
   UpdateProjectRequestSchema,
@@ -45,16 +46,38 @@ function persistedProjectId(): string | null {
   return projectId || null
 }
 
+/** Server default page size of the Control cursor lists. */
+export const CONTROL_PAGE_LIMIT = 50
+
+function pageQuery(cursor: string | null): { limit: number; cursor?: string } {
+  return { limit: CONTROL_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }
+}
+
+/** Keyset pages never overlap; the id guard only keeps a moved row from rendering twice. */
+function appendPage<T>(loaded: readonly T[], page: readonly T[], key: (item: T) => string): T[] {
+  const seen = new Set(loaded.map(key))
+  return [...loaded, ...page.filter((item) => !seen.has(key(item)))]
+}
+
+// The catalog is always a prefix of the server's cursor order: the loaded
+// pages, plus the cursor of the next one while the list continues.
 const projects = ref<AsyncState<ProjectSchema[]>>({ kind: 'idle' })
 // Last finished list result. Consumers that must not flicker while a sibling
 // component reloads the shared catalog (the AppShell project gate) read this.
 const settledProjects = ref<AsyncState<ProjectSchema[]>>({ kind: 'idle' })
+const projectsNextCursor = ref<string | null>(null)
+const loadingMoreProjects = ref(false)
+const loadMoreProjectsError = ref<DiagnosticViewModel | null>(null)
 // Restore the browser's existing project context before the first async list
 // response so project-scoped links remain scoped during a page reload.
 const selectedProjectId = ref<string | null>(persistedProjectId())
 const acting = ref<string | null>(null)
 const outcome = ref<ProjectMutationResult | null>(null)
 let loadGeneration = 0
+// A project the context asked to locate. Any reload that supersedes the
+// locating one (another component mounting, a mutation) keeps following the
+// pages for it until a load finishes.
+let locateTarget: string | null = null
 
 const selectedProject = computed<ProjectSchema | null>(() => {
   if (projects.value.kind !== 'success' || !selectedProjectId.value) return null
@@ -72,24 +95,64 @@ function preserveSelection(items: ProjectSchema[]) {
   }
 }
 
-async function loadProjects() {
+/**
+ * Reload the catalog from its first page. The current project and `wanted`
+ * may sit on a later page; pages are followed until they are listed or the
+ * list ends, so the context is never replaced just because it was not on page one.
+ */
+async function loadProjects(wanted: string | null = null) {
   const generation = ++loadGeneration
+  if (wanted) locateTarget = wanted
   projects.value = { kind: 'loading', message: '加载项目…' }
-  const result = await listProjects({})
-  if (generation !== loadGeneration) return
-  if (result.error) {
-    projects.value = { kind: 'error', diagnostic: diagnostic(result.error, 'PROJECT_LIST_FAILED', '加载项目失败') }
-    settledProjects.value = projects.value
-    return
-  }
-  if (result.data.length === 0) {
+  loadingMoreProjects.value = false
+  loadMoreProjectsError.value = null
+  const targets = [selectedProjectId.value, locateTarget].filter((id): id is string => Boolean(id))
+  let items: ProjectSchema[] = []
+  let page: ProjectPageSchema = { items: [], nextCursor: null }
+  do {
+    const result = await listProjects({ query: pageQuery(page.nextCursor ?? null) })
+    if (generation !== loadGeneration) return
+    if (result.error) {
+      locateTarget = null
+      projectsNextCursor.value = null
+      projects.value = { kind: 'error', diagnostic: diagnostic(result.error, 'PROJECT_LIST_FAILED', '加载项目失败') }
+      settledProjects.value = projects.value
+      return
+    }
+    page = result.data
+    items = appendPage(items, page.items, (project) => project.id)
+  } while (page.nextCursor && targets.some((id) => !items.some((project) => project.id === id)))
+  locateTarget = null
+  const cursor = page.nextCursor ?? null
+  projectsNextCursor.value = cursor
+  if (items.length === 0) {
     selectedProjectId.value = null
     projects.value = { kind: 'empty' }
     settledProjects.value = projects.value
     return
   }
-  preserveSelection(result.data)
-  projects.value = { kind: 'success', data: result.data }
+  preserveSelection(items)
+  projects.value = { kind: 'success', data: items }
+  settledProjects.value = projects.value
+}
+
+/** Append the next server page to the loaded catalog. */
+async function loadMoreProjects() {
+  const cursor = projectsNextCursor.value
+  const loaded = projects.value
+  if (!cursor || loadingMoreProjects.value || loaded.kind !== 'success') return
+  const generation = loadGeneration
+  loadingMoreProjects.value = true
+  loadMoreProjectsError.value = null
+  const result = await listProjects({ query: pageQuery(cursor) })
+  if (generation !== loadGeneration) return
+  loadingMoreProjects.value = false
+  if (result.error) {
+    loadMoreProjectsError.value = diagnostic(result.error, 'PROJECT_LIST_MORE_FAILED', '加载更多项目失败')
+    return
+  }
+  projectsNextCursor.value = result.data.nextCursor ?? null
+  projects.value = { kind: 'success', data: appendPage(loaded.data, result.data.items, (project) => project.id) }
   settledProjects.value = projects.value
 }
 
@@ -97,6 +160,7 @@ async function loadProjects() {
 // the AppShell waits for this actor's list before it renders a scoped page.
 watch(sessionEpoch, () => {
   settledProjects.value = { kind: 'idle' }
+  locateTarget = null
   void loadProjects()
 })
 
@@ -106,6 +170,7 @@ watch(sessionEpoch, () => {
  * when the API is unavailable.
  */
 export function useProjects() {
+  // Template handlers pass DOM events; `load` always restarts without a locate target.
   async function load() {
     await loadProjects()
   }
@@ -200,11 +265,17 @@ export function useProjects() {
   return reactive({
     projects,
     settledProjects,
+    hasMore: computed(() => projectsNextCursor.value !== null),
+    loadingMore: loadingMoreProjects,
+    loadMoreError: loadMoreProjectsError,
     selectedProjectId,
     selectedProject,
     acting,
     outcome,
     load,
+    /** Reload from the first page and follow the cursor until the project is listed or the list ends. */
+    locate: loadProjects,
+    loadMore: loadMoreProjects,
     select,
     create,
     update,
@@ -212,9 +283,12 @@ export function useProjects() {
   })
 }
 
-/** Load and mutate project-local Access memberships. */
+/** Load and mutate project-local Access memberships, one cursor page at a time. */
 export function useProjectMemberships(projectId: Ref<string | null | undefined>) {
   const memberships = ref<AsyncState<ProjectMembershipSchema[]>>({ kind: 'idle' })
+  const nextCursor = ref<string | null>(null)
+  const loadingMore = ref(false)
+  const loadMoreError = ref<DiagnosticViewModel | null>(null)
   const acting = ref<string | null>(null)
   const outcome = ref<ProjectMutationResult | null>(null)
   let loadGeneration = 0
@@ -222,18 +296,41 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
   async function load() {
     const id = projectId.value
     const generation = ++loadGeneration
+    nextCursor.value = null
+    loadingMore.value = false
+    loadMoreError.value = null
     if (!id) {
       memberships.value = { kind: 'idle' }
       return
     }
     memberships.value = { kind: 'loading', message: '加载项目成员…' }
-    const result = await listProjectMemberships({ path: { projectId: id } })
+    const result = await listProjectMemberships({ path: { projectId: id }, query: pageQuery(null) })
     if (generation !== loadGeneration || projectId.value !== id) return
     if (result.error) {
       memberships.value = { kind: 'error', diagnostic: diagnostic(result.error, 'PROJECT_MEMBERS_LIST_FAILED', '加载项目成员失败') }
       return
     }
-    memberships.value = result.data.length > 0 ? { kind: 'success', data: result.data } : { kind: 'empty' }
+    nextCursor.value = result.data.nextCursor ?? null
+    memberships.value = result.data.items.length > 0 ? { kind: 'success', data: result.data.items } : { kind: 'empty' }
+  }
+
+  async function loadMore() {
+    const id = projectId.value
+    const cursor = nextCursor.value
+    const loaded = memberships.value
+    if (!id || !cursor || loadingMore.value || loaded.kind !== 'success') return
+    const generation = loadGeneration
+    loadingMore.value = true
+    loadMoreError.value = null
+    const result = await listProjectMemberships({ path: { projectId: id }, query: pageQuery(cursor) })
+    if (generation !== loadGeneration || projectId.value !== id) return
+    loadingMore.value = false
+    if (result.error) {
+      loadMoreError.value = diagnostic(result.error, 'PROJECT_MEMBERS_LIST_MORE_FAILED', '加载更多项目成员失败')
+      return
+    }
+    nextCursor.value = result.data.nextCursor ?? null
+    memberships.value = { kind: 'success', data: appendPage(loaded.data, result.data.items, (membership) => membership.actorId) }
   }
 
   watch(projectId, (id, previousId) => {
@@ -288,7 +385,18 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
     }
   }
 
-  return reactive({ memberships, acting, outcome, load, add, remove })
+  return reactive({
+    memberships,
+    hasMore: computed(() => nextCursor.value !== null),
+    loadingMore,
+    loadMoreError,
+    acting,
+    outcome,
+    load,
+    loadMore,
+    add,
+    remove,
+  })
 }
 
 const ORGANIZATION_DIRECTORY_PAGE_SIZE = 25

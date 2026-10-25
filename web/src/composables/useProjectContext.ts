@@ -152,9 +152,10 @@ export function useProjectContextSync() {
           listRefreshedFor = null
           if (projects.selectedProjectId !== requested) projects.select(requested)
         } else if (listRefreshedFor !== requested) {
-          // The list may predate a membership change; reload it once before asking why.
+          // The project may sit on a later page or the list may predate a
+          // membership change; reload and follow the pages once before asking why.
           listRefreshedFor = requested
-          void projects.load()
+          void projects.locate(requested)
         } else {
           void probeProject(requested, toRaw(settled))
         }

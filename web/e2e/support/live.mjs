@@ -176,16 +176,24 @@ export async function createProjectByUi(page, name) {
 }
 
 export async function selectProjectByUi(page, projectId) {
-  const projects = await expectJson(await page.request.get('/api/v1/projects'), 'PROJECT_LIST_FOR_SELECTOR_FAILED')
-  if (!Array.isArray(projects)) throw new Error('PROJECT_LIST_FOR_SELECTOR_INVALID')
-  const project = projects.find((item) => item?.id === projectId)
-  if (!project || typeof project.name !== 'string' || project.name.trim() === '') {
+  const project = await expectJson(
+    await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}`),
+    'PROJECT_READ_FOR_SELECTOR_FAILED',
+  )
+  if (project?.id !== projectId || typeof project.name !== 'string' || project.name.trim() === '') {
     throw new Error(`PROJECT_SELECTOR_PROJECT_NOT_FOUND:${projectId}`)
   }
   const trigger = page.getByRole('button', { name: '选择项目', exact: true })
   await trigger.click()
   const dialog = page.getByRole('dialog', { name: '项目选择器' })
+  await dialog.getByRole('listbox', { name: '项目列表' }).waitFor({ timeout: 30_000 })
   const option = dialog.locator('button.project-item').filter({ hasText: project.name })
+  const loadMore = dialog.getByRole('button', { name: '加载更多项目', exact: true })
+  // The selector lists one cursor page at a time; follow the pages the way a user would.
+  while (await option.count() === 0 && await loadMore.count() === 1) {
+    await loadMore.click()
+    await expect(dialog.getByRole('button', { name: '加载中…', exact: true })).toHaveCount(0, { timeout: 30_000 })
+  }
   await expect(option).toHaveCount(1, { timeout: 30_000 })
   await option.click()
   await expect(trigger.locator('.trigger-primary')).toHaveText(project.name)

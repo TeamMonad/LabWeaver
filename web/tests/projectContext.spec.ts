@@ -66,7 +66,7 @@ describe('AppShell project context', () => {
     mounts = 0
     listProjects.mockReset()
     getProject.mockReset()
-    listProjects.mockResolvedValue({ data: [projectA, projectB], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
   })
 
   it('writes the selected project into the address of a scoped page', async () => {
@@ -139,7 +139,7 @@ describe('AppShell project context', () => {
     expect(getProject).not.toHaveBeenCalled()
     expect(document.title).toContain('项目不可用')
 
-    listProjects.mockResolvedValue({ data: [projectA, projectB], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
     await wrapper.get('[data-testid="project-context-list-error"] .diagnostic-banner > button.text-button').trigger('click')
     await flushPromises()
     await flushPromises()
@@ -175,11 +175,29 @@ describe('AppShell project context', () => {
     expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(true)
 
     const projectX = { ...projectA, id: 'project-x', name: '项目 X' }
-    listProjects.mockResolvedValue({ data: [projectA, projectB, projectX], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA, projectB, projectX], nextCursor: null }, error: undefined })
     await projects.load()
     await flushPromises()
     expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(false)
     expect(wrapper.find('.scoped-page').exists()).toBe(true)
     expect(projects.selectedProjectId).toBe('project-x')
+  })
+
+  it('follows the cursor to a linked project beyond the first page instead of reporting it unavailable', async () => {
+    const projectX = { ...projectA, id: 'project-x', name: '项目 X' }
+    listProjects.mockImplementation(async (options: { query?: { cursor?: string } }) => (
+      options.query?.cursor === 'page-2'
+        ? { data: { items: [projectX], nextCursor: null }, error: undefined }
+        : { data: { items: [projectA, projectB], nextCursor: 'page-2' }, error: undefined }
+    ))
+    const { wrapper, projects } = await mountShell('/researcher/environments?projectId=project-x')
+    await flushPromises()
+
+    expect(listProjects).toHaveBeenCalledWith({ query: { limit: 50, cursor: 'page-2' } })
+    expect(getProject).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(false)
+    expect(wrapper.find('.scoped-page').exists()).toBe(true)
+    expect(projects.selectedProjectId).toBe('project-x')
+    expect(document.title).toBe('Work 环境 · 项目 X · LabWeaver')
   })
 })

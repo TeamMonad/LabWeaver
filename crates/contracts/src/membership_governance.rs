@@ -122,22 +122,24 @@ pub struct CourseMembershipView {
     pub display_name: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// Stable pages of current course membership facts.
+pub type CourseMembershipPage = crate::http::CursorPage<CourseMembershipView>;
+pub type MembershipInvitationPage = crate::http::CursorPage<MembershipInvitation>;
+pub type ProjectPage = crate::http::CursorPage<crate::Project>;
+pub type ProjectMembershipPage = crate::http::CursorPage<crate::ProjectMembership>;
+
+/// Control lists use opaque scope-bound keyset cursors, never offsets.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CourseMembershipPage {
-    pub items: Vec<CourseMembershipView>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+pub struct ControlListQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MembershipInvitationPage {
-    pub items: Vec<MembershipInvitation>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+impl ControlListQuery {
+    pub fn validate(&self) -> Result<(), crate::http::HttpContractError> {
+        crate::http::validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
 }
 
 #[must_use]

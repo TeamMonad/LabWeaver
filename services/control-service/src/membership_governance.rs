@@ -1,7 +1,9 @@
 //! Control's course roster and recipient-bound invitations.
 
+use super::pagination::ListPage;
 use super::{ControlError, ControlService, canonical_hash, db, i64_revision};
-use contracts::http::{IdempotencyKey, PageQuery, RemoveProjectMembershipRequest};
+use contracts::http::{IdempotencyKey, RemoveProjectMembershipRequest};
+use contracts::membership_governance::ControlListQuery;
 use contracts::membership_governance::{
     AcceptMembershipInvitation, CourseMembershipPage, CourseMembershipView, CourseObjectRole,
     MembershipInvitation, MembershipInvitationPage, MembershipInvitationScope,
@@ -339,31 +341,24 @@ impl ControlService {
         &self,
         actor: &AuthenticatedActor,
         scope: &MembershipInvitationScope,
-        query: &PageQuery,
+        query: &ControlListQuery,
     ) -> Result<MembershipInvitationPage, ControlError> {
-        let (page, page_size, offset) = query
-            .normalized()
-            .map_err(|_| ControlError::ContractInvalid)?;
+        let page = ListPage::new(
+            query,
+            &("scoped-invitations", actor.actor_id, scope_key(scope)),
+        )?;
         let mut tx = self.pool.begin().await.map_err(db)?;
         let now = require_actor(&mut tx, actor).await?;
         lock_scope(&mut tx, scope, true).await?;
         govern(&mut tx, scope, actor).await?;
         let (kind, id) = scope_key(scope);
-        let rows=sqlx::query("SELECT * FROM control.membership_invitations WHERE scope_kind=$1 AND scope_id=$2 ORDER BY invitation_id DESC LIMIT $3 OFFSET $4")
-            .bind(kind).bind(id).bind(i64::from(page_size)+1).bind(i64::from(offset)).fetch_all(&mut *tx).await.map_err(db)?;
-        let has_more = rows.len() > usize::from(page_size);
-        let items = rows
-            .iter()
-            .take(usize::from(page_size))
-            .map(|row| decode(row).map(|record| current(record.invitation, now)))
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows=sqlx::query("SELECT *,invitation_id AS cursor_id FROM control.membership_invitations WHERE scope_kind=$1 AND scope_id=$2 AND ($4::uuid IS NULL OR invitation_id<$4) ORDER BY invitation_id DESC LIMIT $3")
+            .bind(kind).bind(id).bind(i64::from(page.limit)+1).bind(page.after).fetch_all(&mut *tx).await.map_err(db)?;
+        let result = page.finish(&rows, |row| {
+            decode(row).map(|record| current(record.invitation, now))
+        })?;
         tx.commit().await.map_err(db)?;
-        Ok(MembershipInvitationPage {
-            items,
-            page,
-            page_size,
-            has_more,
-        })
+        Ok(result)
     }
     /// Creates an invitation for one resolved recipient under current governance.
     pub async fn create_membership_invitation(
@@ -436,27 +431,17 @@ impl ControlService {
     pub async fn incoming_membership_invitations(
         &self,
         actor: &AuthenticatedActor,
-        query: &PageQuery,
+        query: &ControlListQuery,
     ) -> Result<MembershipInvitationPage, ControlError> {
-        let (page, page_size, offset) = query
-            .normalized()
-            .map_err(|_| ControlError::ContractInvalid)?;
+        let page = ListPage::new(query, &("incoming-invitations", actor.actor_id))?;
         let mut tx = self.pool.begin().await.map_err(db)?;
         let now = require_actor(&mut tx, actor).await?;
-        let rows=sqlx::query("SELECT * FROM control.membership_invitations WHERE recipient_actor_id=$1 ORDER BY invitation_id DESC LIMIT $2 OFFSET $3").bind(actor.actor_id.as_uuid()).bind(i64::from(page_size)+1).bind(i64::from(offset)).fetch_all(&mut *tx).await.map_err(db)?;
-        let has_more = rows.len() > usize::from(page_size);
-        let items = rows
-            .iter()
-            .take(usize::from(page_size))
-            .map(|row| decode(row).map(|record| current(record.invitation, now)))
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows=sqlx::query("SELECT *,invitation_id AS cursor_id FROM control.membership_invitations WHERE recipient_actor_id=$1 AND ($3::uuid IS NULL OR invitation_id<$3) ORDER BY invitation_id DESC LIMIT $2").bind(actor.actor_id.as_uuid()).bind(i64::from(page.limit)+1).bind(page.after).fetch_all(&mut *tx).await.map_err(db)?;
+        let result = page.finish(&rows, |row| {
+            decode(row).map(|record| current(record.invitation, now))
+        })?;
         tx.commit().await.map_err(db)?;
-        Ok(MembershipInvitationPage {
-            items,
-            page,
-            page_size,
-            has_more,
-        })
+        Ok(result)
     }
 
     /// A recipient can read an invitation before it has membership.
@@ -668,11 +653,9 @@ impl ControlService {
         &self,
         actor: &AuthenticatedActor,
         course_id: CourseId,
-        query: &PageQuery,
+        query: &ControlListQuery,
     ) -> Result<CourseMembershipPage, ControlError> {
-        let (page, page_size, offset) = query
-            .normalized()
-            .map_err(|_| ControlError::ContractInvalid)?;
+        let page = ListPage::new(query, &("course-members", course_id, actor.actor_id))?;
         let mut tx = self.pool.begin().await.map_err(db)?;
         require_actor(&mut tx, actor).await?;
         if is_admin(actor) {
@@ -688,27 +671,17 @@ impl ControlService {
                 return Err(ControlError::CourseGovernanceDenied);
             }
         }
-        let rows=sqlx::query("SELECT cm.*,a.username,a.display_name FROM control.course_memberships cm JOIN access.actors a ON a.actor_id=cm.actor_id WHERE cm.course_id=$1 ORDER BY cm.actor_id LIMIT $2 OFFSET $3").bind(course_id.as_uuid()).bind(i64::from(page_size)+1).bind(i64::from(offset)).fetch_all(&mut *tx).await.map_err(db)?;
-        let has_more = rows.len() > usize::from(page_size);
-        let items = rows
-            .iter()
-            .take(usize::from(page_size))
-            .map(|row| {
-                Ok(CourseMembershipView {
-                    membership: auth::repository::course_membership_from_row(row)
-                        .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-                    username: row.try_get("username").map_err(db)?,
-                    display_name: row.try_get("display_name").map_err(db)?,
-                })
+        let rows=sqlx::query("SELECT cm.*,cm.actor_id AS cursor_id,a.username,a.display_name FROM control.course_memberships cm JOIN access.actors a ON a.actor_id=cm.actor_id WHERE cm.course_id=$1 AND ($3::uuid IS NULL OR cm.actor_id>$3) ORDER BY cm.actor_id LIMIT $2").bind(course_id.as_uuid()).bind(i64::from(page.limit)+1).bind(page.after).fetch_all(&mut *tx).await.map_err(db)?;
+        let result = page.finish(&rows, |row| {
+            Ok(CourseMembershipView {
+                membership: auth::repository::course_membership_from_row(row)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+                username: row.try_get("username").map_err(db)?,
+                display_name: row.try_get("display_name").map_err(db)?,
             })
-            .collect::<Result<Vec<_>, ControlError>>()?;
+        })?;
         tx.commit().await.map_err(db)?;
-        Ok(CourseMembershipPage {
-            items,
-            page,
-            page_size,
-            has_more,
-        })
+        Ok(result)
     }
 
     /// Revokes a current member with an exact revision and protects the last live instructor.

@@ -2,10 +2,10 @@
 use super::{FixtureObjects, apply_domain_migrations, control_config};
 use base64::Engine as _;
 use contracts::http::{
-    IdempotencyKey, PageQuery, RemoveProjectMembershipRequest, ResolvedProjectMembershipRequest,
+    IdempotencyKey, RemoveProjectMembershipRequest, ResolvedProjectMembershipRequest,
 };
 use contracts::membership_governance::{
-    AcceptMembershipInvitation, CourseObjectRole, MembershipInvitationScope,
+    AcceptMembershipInvitation, ControlListQuery, CourseObjectRole, MembershipInvitationScope,
     MembershipInvitationState, ResolvedMembershipInvitation,
 };
 use contracts::object_authorization::{ObjectAction, ProjectObjectRole};
@@ -228,17 +228,17 @@ async fn course_assistant_acceptance_is_atomic_scoped_and_revocable() -> TestRes
         .course_memberships(
             &assistant,
             course,
-            &PageQuery {
-                page: Some(1),
-                page_size: Some(2),
+            &ControlListQuery {
+                cursor: None,
+                limit: Some(2),
             },
         )
         .await?;
     assert_eq!(page.items.len(), 2);
-    assert!(page.has_more);
+    assert!(page.next_cursor.is_some());
     assert!(matches!(
         service
-            .course_memberships(&participant, course, &PageQuery::default())
+            .course_memberships(&participant, course, &ControlListQuery::default())
             .await,
         Err(ControlError::CourseGovernanceDenied)
     ));
@@ -268,7 +268,7 @@ async fn course_assistant_acceptance_is_atomic_scoped_and_revocable() -> TestRes
     assert_eq!(removed.state, contracts::MembershipState::Revoked);
     assert!(matches!(
         service
-            .course_memberships(&assistant, course, &PageQuery::default())
+            .course_memberships(&assistant, course, &ControlListQuery::default())
             .await,
         Err(ControlError::CourseGovernanceDenied)
     ));
@@ -379,7 +379,11 @@ async fn pending_project_invitation_cannot_outlive_issuer_or_target_revision() -
     );
     assert_eq!(
         service
-            .scoped_membership_invitations(&manager, &invite_request.scope, &PageQuery::default())
+            .scoped_membership_invitations(
+                &manager,
+                &invite_request.scope,
+                &ControlListQuery::default()
+            )
             .await?
             .items
             .len(),
@@ -387,7 +391,11 @@ async fn pending_project_invitation_cannot_outlive_issuer_or_target_revision() -
     );
     assert!(matches!(
         service
-            .scoped_membership_invitations(&recipient, &invite_request.scope, &PageQuery::default())
+            .scoped_membership_invitations(
+                &recipient,
+                &invite_request.scope,
+                &ControlListQuery::default()
+            )
             .await,
         Err(ControlError::InvitationDenied)
     ));
@@ -625,7 +633,7 @@ async fn invitation_expiry_cancel_and_account_disable_deny_acceptance() -> TestR
     );
     assert!(
         service
-            .incoming_membership_invitations(&outsider, &PageQuery::default())
+            .incoming_membership_invitations(&outsider, &ControlListQuery::default())
             .await?
             .items
             .is_empty()
@@ -696,4 +704,467 @@ async fn revoked_admin_cannot_authorize_pending_invitation_acceptance() -> TestR
         Err(ControlError::InvitationDenied)
     ));
     Ok(())
+}
+
+fn page_query(cursor: Option<String>, limit: u16) -> ControlListQuery {
+    ControlListQuery {
+        cursor,
+        limit: Some(limit),
+    }
+}
+
+#[tokio::test]
+async fn projects_cursor_survives_metadata_updates_and_rechecks_visibility() -> TestResult {
+    let (_container, pool, service, now) = fixture().await?;
+    let owner = actor(&pool, "pagination-owner", vec![PlatformRole::Student], now).await?;
+    let outsider = actor(
+        &pool,
+        "pagination-outsider",
+        vec![PlatformRole::Student],
+        now,
+    )
+    .await?;
+    let mut ids = Vec::new();
+    for index in 0..3 {
+        ids.push(project(&service, &owner, now, &format!("visible-{index}")).await?);
+        project(&service, &outsider, now, &format!("hidden-{index}")).await?;
+    }
+    ids.sort_unstable();
+    let first = service
+        .list_projects(owner.actor_id, false, &page_query(None, 1))
+        .await?;
+    assert_eq!(
+        first.items.iter().map(|p| p.id).collect::<Vec<_>>(),
+        ids[..1]
+    );
+    let query = page_query(first.next_cursor, 1);
+    for id in &ids {
+        let original = service.project(*id).await?;
+        service
+            .update_project(
+                *id,
+                owner.actor_id,
+                false,
+                &contracts::UpdateProjectRequest {
+                    expected_revision: original.revision,
+                    name: format!("updated-{id}"),
+                    description: None,
+                },
+                &IdempotencyKey::parse(&format!("update-{id}"))?,
+                UtcTimestamp::from_utc(now.get() + time::Duration::seconds(1))?,
+            )
+            .await?;
+    }
+    let second = service.list_projects(owner.actor_id, false, &query).await?;
+    assert_eq!(second.items[0].id, ids[1]);
+    let last = service
+        .list_projects(owner.actor_id, false, &page_query(second.next_cursor, 1))
+        .await?;
+    assert_eq!(last.items[0].id, ids[2]);
+    assert!(last.next_cursor.is_none());
+    assert!(matches!(
+        service
+            .list_projects(outsider.actor_id, false, &query)
+            .await,
+        Err(ControlError::ContractInvalid)
+    ));
+    // A visible non-owner project disappears on the next page after membership revocation.
+    let shared = project(&service, &outsider, now, "shared-revocable").await?;
+    service
+        .add_project_membership(
+            shared,
+            outsider.actor_id,
+            false,
+            &ResolvedProjectMembershipRequest {
+                actor_id: owner.actor_id,
+                role: PlatformRole::Student,
+                object_role: ProjectObjectRole::Viewer,
+                expires_at: None,
+            },
+            &IdempotencyKey::parse("share-project")?,
+            now,
+        )
+        .await?;
+    sqlx::query("UPDATE control.project_memberships SET state='revoked',revision=revision+1 WHERE project_id=$1 AND actor_id=$2")
+        .bind(shared.as_uuid()).bind(owner.actor_id.as_uuid()).execute(&pool).await?;
+    let remaining = service
+        .list_projects(owner.actor_id, false, &page_query(query.cursor, 100))
+        .await?;
+    assert_eq!(
+        remaining.items.iter().map(|p| p.id).collect::<Vec<_>>(),
+        ids[1..]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_members_cursor_survives_concurrent_insert_delete_and_revocation() -> TestResult {
+    let (_container, pool, service, now) = fixture().await?;
+    let owner = actor(&pool, "member-owner", vec![PlatformRole::Student], now).await?;
+    let project_id = project(&service, &owner, now, "member-pagination").await?;
+    let other_project = project(&service, &owner, now, "member-other-scope").await?;
+    for index in 0..3 {
+        let member = actor(
+            &pool,
+            &format!("member-{index}"),
+            vec![PlatformRole::Student],
+            now,
+        )
+        .await?;
+        service
+            .add_project_membership(
+                project_id,
+                owner.actor_id,
+                false,
+                &ResolvedProjectMembershipRequest {
+                    actor_id: member.actor_id,
+                    role: PlatformRole::Student,
+                    object_role: ProjectObjectRole::Viewer,
+                    expires_at: None,
+                },
+                &IdempotencyKey::parse(&format!("member-{index}"))?,
+                now,
+            )
+            .await?;
+    }
+    let first = service
+        .project_memberships(project_id, owner.actor_id, false, &page_query(None, 2))
+        .await?;
+    let query = page_query(first.next_cursor.clone(), 100);
+    assert!(query.cursor.is_some());
+    let anchor = first.items[1].actor_id;
+    let new_member = actor(&pool, "member-new", vec![PlatformRole::Student], now).await?;
+    let request = ResolvedProjectMembershipRequest {
+        actor_id: new_member.actor_id,
+        role: PlatformRole::Student,
+        object_role: ProjectObjectRole::Viewer,
+        expires_at: None,
+    };
+    let key = IdempotencyKey::parse("member-new")?;
+    let (deleted, added) = tokio::join!(
+        sqlx::query("DELETE FROM control.project_memberships WHERE project_id=$1 AND actor_id=$2")
+            .bind(project_id.as_uuid())
+            .bind(anchor.as_uuid())
+            .execute(&pool),
+        service.add_project_membership(project_id, owner.actor_id, false, &request, &key, now)
+    );
+    deleted?;
+    added?;
+    let next = service
+        .project_memberships(project_id, owner.actor_id, false, &query)
+        .await?;
+    let expected: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT actor_id FROM control.project_memberships WHERE project_id=$1 AND actor_id>$2 ORDER BY actor_id")
+        .bind(project_id.as_uuid()).bind(anchor.as_uuid()).fetch_all(&pool).await?;
+    assert_eq!(
+        next.items
+            .iter()
+            .map(|m| m.actor_id.as_uuid())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(next.next_cursor.is_none());
+    assert!(matches!(
+        service
+            .project_memberships(other_project, owner.actor_id, false, &query)
+            .await,
+        Err(ControlError::ContractInvalid)
+    ));
+    // The caller is a regular member; current persisted permission fences old cursors.
+    let caller = new_member.actor_id;
+    let caller_page = service
+        .project_memberships(project_id, caller, false, &page_query(None, 1))
+        .await?;
+    sqlx::query("UPDATE control.project_memberships SET state='revoked',revision=revision+1 WHERE project_id=$1 AND actor_id=$2")
+        .bind(project_id.as_uuid()).bind(caller.as_uuid()).execute(&pool).await?;
+    assert!(matches!(
+        service
+            .project_memberships(
+                project_id,
+                caller,
+                false,
+                &page_query(caller_page.next_cursor, 1)
+            )
+            .await,
+        Err(ControlError::ProjectGovernanceDenied)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn course_members_cursor_survives_concurrent_insert_delete_and_revocation() -> TestResult {
+    let (_container, pool, service, now) = fixture().await?;
+    let teacher = actor(
+        &pool,
+        "course-page-teacher",
+        vec![PlatformRole::Teacher],
+        now,
+    )
+    .await?;
+    let course = CourseId::new();
+    instructor(&pool, course, &teacher).await?;
+    for index in 0..3 {
+        let member = actor(
+            &pool,
+            &format!("course-page-{index}"),
+            vec![PlatformRole::Student],
+            now,
+        )
+        .await?;
+        sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)")
+            .bind(course.as_uuid()).bind(member.actor_id.as_uuid()).execute(&pool).await?;
+    }
+    let first = service
+        .course_memberships(&teacher, course, &page_query(None, 2))
+        .await?;
+    let anchor = first.items[1].membership.actor_id;
+    let query = page_query(first.next_cursor, 100);
+    assert!(query.cursor.is_some());
+    let member = actor(&pool, "course-page-new", vec![PlatformRole::Student], now).await?;
+    let (deleted, added) = tokio::join!(
+        sqlx::query("DELETE FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2").bind(course.as_uuid()).bind(anchor.as_uuid()).execute(&pool),
+        sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)").bind(course.as_uuid()).bind(member.actor_id.as_uuid()).execute(&pool)
+    );
+    deleted?;
+    added?;
+    let next = service.course_memberships(&teacher, course, &query).await?;
+    let expected: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT actor_id FROM control.course_memberships WHERE course_id=$1 AND actor_id>$2 ORDER BY actor_id")
+        .bind(course.as_uuid()).bind(anchor.as_uuid()).fetch_all(&pool).await?;
+    assert_eq!(
+        next.items
+            .iter()
+            .map(|m| m.membership.actor_id.as_uuid())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(next.next_cursor.is_none());
+    assert!(matches!(
+        service
+            .course_memberships(&teacher, CourseId::new(), &query)
+            .await,
+        Err(ControlError::ContractInvalid)
+    ));
+    sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
+        .bind(course.as_uuid()).bind(teacher.actor_id.as_uuid()).execute(&pool).await?;
+    assert!(matches!(
+        service.course_memberships(&teacher, course, &query).await,
+        Err(ControlError::CourseGovernanceDenied)
+    ));
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn invitation_cursor_case(course_scope: bool, incoming: bool) -> TestResult {
+    let (_container, pool, service, now) = fixture().await?;
+    let governor = actor(
+        &pool,
+        "invitation-page-governor",
+        vec![PlatformRole::Teacher],
+        now,
+    )
+    .await?;
+    let recipient = actor(
+        &pool,
+        "invitation-page-recipient",
+        vec![PlatformRole::Student],
+        now,
+    )
+    .await?;
+    let outsider = actor(
+        &pool,
+        "invitation-page-outsider",
+        vec![PlatformRole::Student],
+        now,
+    )
+    .await?;
+    let scope = if course_scope {
+        let course_id = CourseId::new();
+        instructor(&pool, course_id, &governor).await?;
+        MembershipInvitationScope::Course {
+            course_id,
+            object_role: CourseObjectRole::Participant,
+        }
+    } else {
+        let owner = actor(
+            &pool,
+            "invitation-page-owner",
+            vec![PlatformRole::Student],
+            now,
+        )
+        .await?;
+        let project_id = project(&service, &owner, now, "invitation-page-project").await?;
+        service
+            .add_project_membership(
+                project_id,
+                owner.actor_id,
+                false,
+                &ResolvedProjectMembershipRequest {
+                    actor_id: governor.actor_id,
+                    role: PlatformRole::Teacher,
+                    object_role: ProjectObjectRole::Manager,
+                    expires_at: None,
+                },
+                &IdempotencyKey::parse("invitation-page-manager")?,
+                now,
+            )
+            .await?;
+        MembershipInvitationScope::Project {
+            project_id,
+            object_role: ProjectObjectRole::Viewer,
+        }
+    };
+    let request = invitation(scope.clone(), &recipient, now)?;
+    for index in 0..4 {
+        service
+            .create_membership_invitation(
+                &governor,
+                &request,
+                &IdempotencyKey::parse(&format!("page-invitation-{index}"))?,
+            )
+            .await?;
+        // Other recipients must not push the recipient's rows past LIMIT.
+        service
+            .create_membership_invitation(
+                &governor,
+                &invitation(scope.clone(), &outsider, now)?,
+                &IdempotencyKey::parse(&format!("other-invitation-{index}"))?,
+            )
+            .await?;
+    }
+    let first = if incoming {
+        service
+            .incoming_membership_invitations(&recipient, &page_query(None, 2))
+            .await?
+    } else {
+        service
+            .scoped_membership_invitations(&governor, &scope, &page_query(None, 2))
+            .await?
+    };
+    assert_eq!(first.items.len(), 2);
+    let anchor = first.items[1].id;
+    let query = page_query(first.next_cursor, 100);
+    assert!(query.cursor.is_some());
+    let delete = sqlx::query("DELETE FROM control.membership_invitations WHERE invitation_id=$1")
+        .bind(anchor.as_uuid());
+    let key = IdempotencyKey::parse("concurrent-new-invitation")?;
+    let (deleted, added) = tokio::join!(
+        delete.execute(&pool),
+        service.create_membership_invitation(&governor, &request, &key)
+    );
+    deleted?;
+    let new_invitation = added?;
+    let next = if incoming {
+        service
+            .incoming_membership_invitations(&recipient, &query)
+            .await?
+    } else {
+        service
+            .scoped_membership_invitations(&governor, &scope, &query)
+            .await?
+    };
+    assert!(
+        next.items
+            .iter()
+            .all(|entry| entry.id < anchor && entry.id != new_invitation.id)
+    );
+    let expected: Vec<uuid::Uuid> = if incoming {
+        sqlx::query_scalar("SELECT invitation_id FROM control.membership_invitations WHERE recipient_actor_id=$1 AND invitation_id<$2 ORDER BY invitation_id DESC")
+            .bind(recipient.actor_id.as_uuid()).bind(anchor.as_uuid()).fetch_all(&pool).await?
+    } else {
+        let (kind, id) = match scope {
+            MembershipInvitationScope::Project { project_id, .. } => {
+                ("project", project_id.as_uuid())
+            }
+            MembershipInvitationScope::Course { course_id, .. } => ("course", course_id.as_uuid()),
+        };
+        sqlx::query_scalar("SELECT invitation_id FROM control.membership_invitations WHERE scope_kind=$1 AND scope_id=$2 AND invitation_id<$3 ORDER BY invitation_id DESC")
+            .bind(kind).bind(id).bind(anchor.as_uuid()).fetch_all(&pool).await?
+    };
+    assert_eq!(
+        next.items
+            .iter()
+            .map(|entry| entry.id.as_uuid())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(next.next_cursor.is_none());
+    if incoming {
+        assert!(
+            next.items
+                .iter()
+                .all(|entry| entry.recipient_actor_id == recipient.actor_id)
+        );
+        assert!(matches!(
+            service
+                .incoming_membership_invitations(&outsider, &query)
+                .await,
+            Err(ControlError::ContractInvalid)
+        ));
+        assert!(matches!(
+            service
+                .scoped_membership_invitations(&governor, &scope, &query)
+                .await,
+            Err(ControlError::ContractInvalid)
+        ));
+        sqlx::query("UPDATE access.actors SET disabled_at=clock_timestamp() WHERE actor_id=$1")
+            .bind(recipient.actor_id.as_uuid())
+            .execute(&pool)
+            .await?;
+        assert!(matches!(
+            service
+                .incoming_membership_invitations(&recipient, &query)
+                .await,
+            Err(ControlError::InvitationDenied)
+        ));
+    } else {
+        let other_scope = if course_scope {
+            MembershipInvitationScope::Course {
+                course_id: CourseId::new(),
+                object_role: CourseObjectRole::Participant,
+            }
+        } else {
+            MembershipInvitationScope::Project {
+                project_id: ProjectId::new(),
+                object_role: ProjectObjectRole::Viewer,
+            }
+        };
+        assert!(matches!(
+            service
+                .scoped_membership_invitations(&governor, &other_scope, &query)
+                .await,
+            Err(ControlError::ContractInvalid)
+        ));
+        match scope {
+            MembershipInvitationScope::Project { project_id, .. } => {
+                sqlx::query("UPDATE control.project_memberships SET state='revoked',revision=revision+1 WHERE project_id=$1 AND actor_id=$2").bind(project_id.as_uuid()).bind(governor.actor_id.as_uuid()).execute(&pool).await?;
+            }
+            MembershipInvitationScope::Course { course_id, .. } => {
+                sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2").bind(course_id.as_uuid()).bind(governor.actor_id.as_uuid()).execute(&pool).await?;
+            }
+        }
+        assert!(matches!(
+            service
+                .scoped_membership_invitations(&governor, &scope, &query)
+                .await,
+            Err(ControlError::InvitationDenied)
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_invitations_cursor_survives_concurrent_insert_delete_and_revocation() -> TestResult
+{
+    invitation_cursor_case(false, false).await
+}
+
+#[tokio::test]
+async fn course_invitations_cursor_survives_concurrent_insert_delete_and_revocation() -> TestResult
+{
+    invitation_cursor_case(true, false).await
+}
+
+#[tokio::test]
+async fn incoming_invitations_cursor_survives_concurrent_insert_delete_and_account_disable()
+-> TestResult {
+    invitation_cursor_case(false, true).await
 }

@@ -18,6 +18,7 @@ pub mod messaging;
 mod model_input_authorization;
 pub mod notifications;
 mod object_authorization;
+mod pagination;
 pub mod platform_configuration;
 pub mod platform_image_jobs;
 mod rubric_model_input;
@@ -584,28 +585,33 @@ impl ControlService {
         Ok(project)
     }
 
-    /// Lists active and archived projects visible through Control memberships.
+    /// Lists currently visible projects by immutable project identity, not `updated_at`.
     pub async fn list_projects(
         &self,
         actor_id: ActorId,
         platform_admin: bool,
-    ) -> Result<Vec<Project>, ControlError> {
+        query: &contracts::membership_governance::ControlListQuery,
+    ) -> Result<contracts::membership_governance::ProjectPage, ControlError> {
+        let page = pagination::ListPage::new(query, &("projects", actor_id, platform_admin))?;
         let rows = sqlx::query(
-            "SELECT p.contract FROM control.projects p \
-             WHERE $2 OR p.owner_actor_id=$1 OR EXISTS( \
+            "SELECT p.contract,p.project_id AS cursor_id FROM control.projects p \
+             WHERE ($2 OR p.owner_actor_id=$1 OR EXISTS( \
                  SELECT 1 FROM control.project_memberships m \
                   WHERE m.project_id=p.project_id AND m.actor_id=$1 AND m.state='active' \
-                    AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())) \
-             ORDER BY p.updated_at DESC,p.project_id",
+                    AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
+               AND ($3::uuid IS NULL OR p.project_id>$3) \
+             ORDER BY p.project_id LIMIT $4",
         )
         .bind(actor_id.as_uuid())
         .bind(platform_admin)
+        .bind(page.after)
+        .bind(i64::from(page.limit) + 1)
         .fetch_all(&self.pool)
         .await
         .map_err(db)?;
-        rows.into_iter()
-            .map(|row| project_from_value(row.try_get("contract").map_err(db)?))
-            .collect()
+        page.finish(&rows, |row| {
+            project_from_value(row.try_get("contract").map_err(db)?)
+        })
     }
 
     /// Reads one project. Scope authorization is performed by Access at the
@@ -836,23 +842,47 @@ impl ControlService {
         Ok(project)
     }
 
-    /// Reads Control-owned memberships for a project in revision order.
+    /// Reads current project memberships by immutable actor identity.
     pub async fn project_memberships(
         &self,
         project_id: ProjectId,
-    ) -> Result<Vec<ProjectMembership>, ControlError> {
+        actor_id: ActorId,
+        platform_admin: bool,
+        query: &contracts::membership_governance::ControlListQuery,
+    ) -> Result<contracts::membership_governance::ProjectMembershipPage, ControlError> {
+        let page = pagination::ListPage::new(
+            query,
+            &("project-members", project_id, actor_id, platform_admin),
+        )?;
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        if !platform_admin
+            && !object_authorization::permits_in_transaction(
+                &mut tx,
+                project_id,
+                actor_id,
+                contracts::object_authorization::ObjectAction::Browse,
+            )
+            .await?
+        {
+            return Err(ControlError::ProjectGovernanceDenied);
+        }
         let rows = sqlx::query(
-            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.object_role,pm.state,pm.revision,pm.expires_at, \
+            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.actor_id AS cursor_id,pm.role,pm.object_role,pm.state,pm.revision,pm.expires_at, \
                     a.username,a.display_name \
              FROM control.project_memberships pm \
              JOIN access.actors a ON a.actor_id=pm.actor_id \
-             WHERE pm.project_id=$1 ORDER BY pm.actor_id,pm.role,pm.revision DESC",
+             WHERE pm.project_id=$1 AND ($2::uuid IS NULL OR pm.actor_id>$2) \
+             ORDER BY pm.actor_id LIMIT $3",
         )
         .bind(project_id.as_uuid())
-        .fetch_all(&self.pool)
+        .bind(page.after)
+        .bind(i64::from(page.limit) + 1)
+        .fetch_all(&mut *tx)
         .await
         .map_err(db)?;
-        rows.iter().map(project_membership_from_row).collect()
+        let result = page.finish(&rows, project_membership_from_row)?;
+        tx.commit().await.map_err(db)?;
+        Ok(result)
     }
 
     /// Adds one teacher or student membership under owner/admin governance.

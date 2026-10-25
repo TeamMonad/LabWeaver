@@ -75,7 +75,7 @@ describe('ResultDetailView', () => {
     setActivePinia(createPinia())
     vi.resetAllMocks()
     useAuth().user.value = { expired: false, profile: { actor_id: 'student-1', roles: ['student'] } }
-    vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [project], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getFrozenSubmission).mockImplementation(async (options) => ({
       data: {
         id: options.path.submissionId,
@@ -158,7 +158,7 @@ describe('ResultDetailView', () => {
 
   it('keeps a direct project route context for detail loading and the back link', async () => {
     vi.mocked(listProjects).mockResolvedValue({
-      data: [project, projectB] as never,
+      data: { items: [project, projectB], nextCursor: null } as never,
       error: undefined as never,
     })
     vi.mocked(getOwnProjectEvaluationResult).mockResolvedValue({

@@ -64,7 +64,25 @@
               <span class="project-info"><strong>{{ project.name }}</strong></span>
               <span class="project-state">{{ project.state === 'active' ? '可用' : '已归档' }}</span>
             </button>
-            <p v-if="filteredProjects(data).length === 0" class="empty-results">未找到匹配项目</p>
+            <p v-if="filteredProjects(data).length === 0" class="empty-results">{{ projects.hasMore ? '已加载的项目中未找到匹配项' : '未找到匹配项目' }}</p>
+          </div>
+          <div v-if="projects.hasMore || projects.loadMoreError" class="menu-footer">
+            <button
+              v-if="projects.hasMore"
+              type="button"
+              class="text-button small"
+              data-testid="project-selector-load-more"
+              :disabled="projects.loadingMore"
+              @click="projects.loadMore()"
+            >
+              {{ projects.loadingMore ? '加载中…' : '加载更多项目' }}
+            </button>
+            <DiagnosticBanner
+              v-if="projects.loadMoreError"
+              :diagnostic="projects.loadMoreError"
+              severity="warning"
+              @retry="projects.loadMore()"
+            />
           </div>
         </template>
       </AsyncStateView>
@@ -76,6 +94,7 @@
 import { computed, inject, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { routeLocationKey, routerKey, type LocationQueryRaw } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { PROJECT_OWNED_QUERY_KEYS } from '@/composables/useProjectContext'
 import { useProjects } from '@/composables/useProjects'
@@ -223,6 +242,7 @@ onScopeDispose(() => {
 .search-icon { color: var(--md-sys-color-on-surface-variant); }
 .search-input { flex: 1; border: 0; outline: 0; background: transparent; color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .menu-body { max-height: 320px; overflow-y: auto; padding: var(--space-2) 0; }
+.menu-footer { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--md-sys-color-outline-variant); }
 .project-item { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border: 0; background: transparent; color: var(--md-sys-color-on-surface); text-align: left; cursor: pointer; }
 .project-item:hover, .project-item--active { background: var(--md-sys-color-surface-container-high); }
 .project-item--selected { background: var(--md-sys-color-primary-container); }
