@@ -5,6 +5,7 @@
 )]
 
 mod support;
+use support::kubevirt_executor_plan;
 #[path = "cases/template_upgrade.rs"]
 mod template_upgrade_cases;
 
@@ -2580,34 +2581,6 @@ fn executor_instance() -> KubeVirtExecutionInstance {
         pod_uid: uuid::Uuid::new_v4(),
         container_name: "kubevirt-executor".to_owned(),
         boot_token: uuid::Uuid::new_v4(),
-    }
-}
-
-fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan {
-    KubeVirtResourcePlan {
-        environment_id,
-        namespace: format!("lw-env-{environment_id}"),
-        virtual_machine_name: "runtime".to_owned(),
-        data_volume_name: "rootdisk".to_owned(),
-        base_disk: VirtualMachineBaseDisk {
-            binding: "ubuntu-24.04-v1".to_owned(),
-            source_registry_digest: concat!(
-                "docker://quay.io/containerdisks/ubuntu@",
-                "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-            )
-            .to_owned(),
-            capacity_bytes: 10_737_418_240,
-        },
-        base_disk_format: VirtualMachineDiskFormat::Qcow2,
-        base_disk_identity: KubeVirtBaseDiskIdentity::ReviewedDiskSha256,
-        base_disk_data_source_namespace: "labweaver-system".to_owned(),
-        base_disk_data_source_name: "ubuntu-lab-base-v1".to_owned(),
-        base_disk_disk_sha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
-            .to_owned(),
-        storage_class_name: "local-path".to_owned(),
-        vm_vgpu_licensing: None,
-        resources: Vec::new(),
-        plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
     }
 }
 

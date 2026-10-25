@@ -33,7 +33,7 @@ Resource 与 Environment Outbox 用短数据库语句领取带 UUID 的持久发
 
 进程最多给协作收尾 20 秒。超过期限会丢弃未完成 future 并取消其所属子任务，包括租约 heartbeat；不会把未确认任务写成成功，也不会主动清除仍需 fencing 的发布 claim。后继进程根据数据库 lease/claim 期限恢复同一持久任务或 event ID，沿用已有 attempt、UID 与幂等条件；停止进程不等于取消用户任务或释放资源/费用。配置部署的 termination grace 时，应留出至少 20 秒及进程退出余量。
 
-进程停止与用户取消分开处理。KubeVirt executor 在信号到达后只停止订阅，已接收的 VM 操作继续等待真实结果；不因进程停止写入不可重试的 `Cancelled`。期限到达时只放弃进程所持的 future。经启动检查确认同一隔离容器的新 PID1，可以将尚未到业务期限的旧 boot 记录为可重试 `Unavailable`；相同请求只重放该结果，不直接重复未知副作用，由领域 owner 调度下一代 fenced 重试。已经达到业务期限的记录仍是超时；不同 Pod 不能仅因旧 Pod 不可见就声称其执行已结束。用户取消仍由权威操作状态和原有 permit 检查决定。
+进程停止与用户取消分开处理。KubeVirt executor 在信号到达后只停止订阅，已接收的 VM 操作继续等待真实结果；不因进程停止写入不可重试的 `Cancelled`。期限到达时只放弃进程所持的 future。经启动检查确认同一隔离容器的新 PID1 后，只按原记录 `last_action` 分类：幂等 Apply/Observe/Start/Stop/DeleteNamespace 可以走 fenced 重试；非幂等 Restart 的结果未知时返回 `Unavailable/retryable=false`，领域层持久化 `LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN`，不产生跨 attempt 的第二次 Restart，并保留原有显式 Recover 入口。已经达到业务期限的记录仍是超时；不同 Pod 不能仅因旧 Pod 不可见就声称其执行已结束。用户取消仍由权威操作状态和原有 permit 检查决定。
 
 停领检查覆盖每个新工作边界，而不只覆盖轮询入口。Resource 在 GPU 外部观察返回后、领取下一项容量或清理工作之前重新检查 shutdown；Agent sandbox cleanup 在下一次扫描和下一条批次条目开始前检查。已领取条目的正常收尾不会因此被当作用户取消。
 

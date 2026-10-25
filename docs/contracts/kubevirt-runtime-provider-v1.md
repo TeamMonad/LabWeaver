@@ -216,6 +216,39 @@ replacement or late work after deletion is rejected. `Observe` may recover an
 unrecorded current VM only when every readiness and release identity check
 succeeds.
 
+Process SIGINT/SIGTERM stops subscription acquisition, then allows accepted operations to drain
+within the shared 20-second process deadline. It is not a user cancellation. Deadline abandonment
+drops the owned backend futures without fabricating a successful or cancelled terminal result.
+Only a verified new PID1 in the same isolated Pod/container may retire the preceding boot; another
+Pod cannot infer completion from the old Pod being unobservable.
+
+Recovery classifies the **persisted `last_action`**, not an incoming replacement request:
+
+| Backend request | Persisted action | Recovery behavior before the business deadline |
+| --- | --- | --- |
+| Apply | `provision`, `reset` | Retryable `Unavailable`; a new attempt/request ID still uses the original named objects and native generation/owner fencing. Exact server-side apply does not create another VM, DataVolume or PVC. |
+| Observe | `observe` | Read-only observation may retry. |
+| Start | `start` | Desired-running transition may retry; an already-running Conflict converges without creating another VM. |
+| Stop | `stop` | Desired-stopped transition may retry; an already-stopped Conflict converges and observation still verifies VMI absence. |
+| Restart | `restart` | Non-idempotent subresource; unknown acceptance returns `Unavailable` with `retryable=false`. Do not automatically issue a second Restart under a new attempt/request ID. |
+| DeleteNamespace | `cleanup` | UID/ownership-fenced deletion may retry and must still produce absence evidence. |
+
+These are the complete current requests. There are no migrate, snapshot or independent GPU-binding
+subresources in this protocol. An expired business deadline remains a timeout, not a restart retry.
+
+For an unknown Restart, the Environment worker persists the stable operation diagnostic
+`LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN` instead of pretending that the user cancelled.
+It is registered in `contracts::diagnostic`; REST and SSE retain the existing `diagnosticCode`
+field and do not add a second text-message convention. Automatic retry is disabled; the existing
+explicit Recover entrypoint remains available subject to its original ownership, funding,
+permission and eligibility checks. A Recover request revalidates current state and authorization;
+it is not permission to replay the unknown Restart automatically.
+
+Frontend mapping / user wording: **“重启结果未知：平台无法确认上一次重启是否生效。请检查环境状态后手动恢复。”**
+Show that reason and next step before an optional internal code or correlation ID. This diagnostic
+does not assert that the VM has stopped, that a restart succeeded, or that compute has been released.
+
+
 ## Testing
 
 Local tests cover deterministic plans, private networking configuration, cloud-init generation,
