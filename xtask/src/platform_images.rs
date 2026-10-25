@@ -238,6 +238,27 @@ pub(crate) fn prepare(root: &Path) -> Result<(), AppError> {
         prepare_inputs(root, &lock.platform_images)
     }
 }
+/// Verify the files consumed by local image builds without changing the tree or using network.
+pub(crate) fn check(root: &Path) -> Result<(), AppError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Err(AppError::UnsupportedPlatform {
+            command: "package-check",
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let lock_bytes = fs::read(root.join("deploy/versions.lock.yml"))
+            .map_err(|error| io_error("read component lock", error))?;
+        let lock: VersionLock =
+            serde_yaml::from_slice(&lock_bytes).map_err(|error| AppError::Io {
+                role: "parse component lock",
+                detail: error.to_string(),
+            })?;
+        verify_inputs(root, &lock.platform_images)
+    }
+}
 
 pub(crate) fn deploy(environment: &str, manifest_path: &Path, root: &Path) -> Result<(), AppError> {
     validate_environment(environment)?;
@@ -521,8 +542,80 @@ fn package_linux(
     fs::rename(temporary, destination).map_err(|error| io_error("publish package manifest", error))
 }
 
+const VITE_PRODUCTION_ENV_FILES: [&str; 4] = [
+    "web/.env",
+    "web/.env.local",
+    "web/.env.production",
+    "web/.env.production.local",
+];
+
+#[cfg(target_os = "linux")]
+fn ignored_web_inputs(root: &Path) -> Result<Vec<String>, AppError> {
+    let mut command = Command::new("git");
+    command.current_dir(root).args([
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--",
+    ]);
+    command.args(VITE_PRODUCTION_ENV_FILES);
+    let output = run_checked(&mut command, "read ignored Web build inputs")?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_web_inputs_clean(root: &Path) -> Result<(), AppError> {
+    let dirty = git_output(
+        root,
+        [
+            "status",
+            "--porcelain",
+            "--",
+            "web",
+            "deploy/versions.lock.yml",
+        ],
+    )?;
+    let mut paths = dirty
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    paths.extend(ignored_web_inputs(root)?);
+    if paths.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::PlatformImage {
+        code: "LW_PACKAGE_INPUT_DIRTY",
+        detail: format!(
+            "web image inputs have uncommitted or ignored changes ({}); commit, remove, or stash the web changes, then run cargo xtask package-prepare",
+            paths.join(", ")
+        ),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn verify_inputs(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
+    verify_web_inputs_clean(root)?;
+    verify_claude_code_package(root, lock)?;
+    verify_offline_pkg_closure(root, "containers/alpine-3.21-pkgs", ALPINE_V3_21_PKGS)?;
+    verify_offline_pkg_closure(
+        root,
+        "containers/debian-bookworm-pkgs",
+        DEBIAN_BOOKWORM_PKGS,
+    )?;
+    ensure_web_dist(root)
+}
+
 #[cfg(target_os = "linux")]
 fn prepare_inputs(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
+    verify_web_inputs_clean(root)?;
     ensure_claude_code_package(root, lock)?;
     ensure_offline_pkg_closure(root, "containers/alpine-3.21-pkgs", ALPINE_V3_21_PKGS)?;
     ensure_offline_pkg_closure(
@@ -1089,6 +1182,32 @@ const DEBIAN_BOOKWORM_PKGS: &[(&str, &str, &str)] = &[
 ];
 
 #[cfg(target_os = "linux")]
+fn verify_offline_pkg_closure(
+    root: &Path,
+    dir: &str,
+    entries: &[(&str, &str, &str)],
+) -> Result<(), AppError> {
+    let base = root.join(dir);
+    for (file, expected_sha256, _) in entries {
+        let path = base.join(file);
+        let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_MISSING",
+            detail: path.to_string_lossy().into_owned(),
+        })?;
+        let actual = format!("{:x}", Sha256::digest(&actual));
+        if actual != *expected_sha256 {
+            return Err(AppError::PlatformImage {
+                code: "LW_PACKAGE_INPUT_INVALID",
+                detail: format!(
+                    "vendored package {file} sha256 mismatch: expected {expected_sha256}, observed {actual}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn ensure_offline_pkg_closure(
     root: &Path,
     dir: &str,
@@ -1097,12 +1216,9 @@ fn ensure_offline_pkg_closure(
     let base = root.join(dir);
     fs::create_dir_all(&base)
         .map_err(|error| io_error("create offline package directory", error))?;
-    for (file, expected_sha256, url) in entries {
+    for (file, _, url) in entries {
         let path = base.join(file);
-        let present = std::fs::read(&path)
-            .map(|bytes| format!("{:x}", Sha256::digest(&bytes)) == *expected_sha256)
-            .unwrap_or(false);
-        if !present {
+        if !path.exists() {
             let output_path = path.to_string_lossy().into_owned();
 
             let download_result = run_checked(
@@ -1148,21 +1264,8 @@ fn ensure_offline_pkg_closure(
                 });
             }
         }
-        let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
-            code: "LW_PACKAGE_INPUT_MISSING",
-            detail: (*file).to_owned(),
-        })?;
-        let actual = format!("{:x}", Sha256::digest(&actual));
-        if actual != *expected_sha256 {
-            return Err(AppError::PlatformImage {
-                code: "LW_PACKAGE_INPUT_INVALID",
-                detail: format!(
-                    "vendored package {file} sha256 mismatch: expected {expected_sha256}, observed {actual}"
-                ),
-            });
-        }
     }
-    Ok(())
+    verify_offline_pkg_closure(root, dir, entries)
 }
 #[cfg(target_os = "linux")]
 /// The web frontend is built outside the cluster (the build network cannot
@@ -1190,6 +1293,7 @@ fn ensure_web_dist(root: &Path) -> Result<(), AppError> {
 
 #[cfg(target_os = "linux")]
 fn prepare_web_dist(root: &Path, pnpm_version: &str) -> Result<(), AppError> {
+    verify_web_inputs_clean(root)?;
     let dist = root.join("containers/web-dist");
     let expected = web_tree_hash(root)?;
     let marker = dist.join(".web-tree-sha256");
@@ -1230,7 +1334,8 @@ fn prepare_web_dist(root: &Path, pnpm_version: &str) -> Result<(), AppError> {
     }
     copy_directory(&source, &dist)?;
     fs::write(&marker, format!("{expected}\n"))
-        .map_err(|error| io_error("write vendored web dist identity", error))
+        .map_err(|error| io_error("write vendored web dist identity", error))?;
+    ensure_web_dist(root)
 }
 
 #[cfg(target_os = "linux")]
@@ -1286,9 +1391,30 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), AppError> {
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
+fn verify_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
     let version = &lock.claude_code;
     let expected = &lock.claude_code_linux_x64_sha512;
+    let relative = format!("containers/claude-code-linux-x64-{version}.tgz");
+    let path = root.join(&relative);
+    let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_INPUT_MISSING",
+        detail: relative.clone(),
+    })?;
+    let actual = sha512_bytes(&actual);
+    if actual != *expected {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_INVALID",
+            detail: format!(
+                "claude-code package sha512 mismatch: expected {expected}, observed {actual}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
+    let version = &lock.claude_code;
     let relative = format!("containers/claude-code-linux-x64-{version}.tgz");
     if !version
         .chars()
@@ -1300,11 +1426,7 @@ fn ensure_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(
         });
     }
     let path = root.join(&relative);
-    let present_and_valid = path.exists()
-        && std::fs::read(&path)
-            .map(|bytes| sha512_bytes(&bytes) == *expected)
-            .unwrap_or(false);
-    if !present_and_valid {
+    if !path.exists() {
         let url = format!(
             "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/\
              claude-code-linux-x64-{version}.tgz"
@@ -1324,20 +1446,7 @@ fn ensure_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(
             "download pinned claude-code package",
         )?;
     }
-    let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
-        code: "LW_PACKAGE_INPUT_MISSING",
-        detail: relative,
-    })?;
-    let actual = sha512_bytes(&actual);
-    if actual != *expected {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_INPUT_INVALID",
-            detail: format!(
-                "claude-code package sha512 mismatch: expected {expected}, observed {actual}"
-            ),
-        });
-    }
-    Ok(())
+    verify_claude_code_package(root, lock)
 }
 
 #[cfg(target_os = "linux")]
@@ -2048,6 +2157,211 @@ mod tests {
             format!("harbor.lab.lan/labweaver-system/base-rust-builder@{expected}")
         );
         assert!(pinned_mirror("harbor.lab.lan", "RUST_BUILDER", "rust:latest").is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture_lock() -> PlatformImageLock {
+        PlatformImageLock {
+            platform: String::new(),
+            rust_toolchain: String::new(),
+            buildkit: String::new(),
+            buildkit_image: String::new(),
+            buildx: String::new(),
+            helm: String::new(),
+            pnpm: String::new(),
+            claude_code: "1.0.0".to_owned(),
+            claude_code_linux_x64_sha512: String::new(),
+            bases: BaseImageLock {
+                rust_builder: String::new(),
+                rust_runtime: String::new(),
+                node_builder: String::new(),
+                web_runtime: String::new(),
+                gateway_builder: String::new(),
+                gateway_runtime: String::new(),
+            },
+        }
+    }
+
+    fn web_fixture() -> Result<tempfile::TempDir, String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(root.path().join("web/src")).map_err(|error| error.to_string())?;
+        fs::write(
+            root.path().join("web/pnpm-lock.yaml"),
+            "lockfileVersion: 9\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            root.path().join("web/src/main.ts"),
+            "export const fixture = true;\n",
+        )
+        .map_err(|error| error.to_string())?;
+        for args in [
+            &["init", "--quiet"][..],
+            &["config", "user.email", "xtask-tests@example.invalid"][..],
+            &["config", "user.name", "xtask tests"][..],
+            &["add", "web"][..],
+            &["commit", "--quiet", "-m", "fixture"][..],
+        ] {
+            let status = std::process::Command::new("git")
+                .current_dir(root.path())
+                .args(args)
+                .status()
+                .map_err(|error| error.to_string())?;
+            if !status.success() {
+                return Err(format!("git command failed: {args:?}"));
+            }
+        }
+        Ok(root)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_check_rejects_ignored_vite_environment_file() -> Result<(), String> {
+        let root = web_fixture()?;
+        fs::write(root.path().join(".git/info/exclude"), "web/.env*\n")
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            root.path().join("web/.env.production"),
+            "VITE_API_PROXY_TARGET=bad\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let status = std::process::Command::new("git")
+            .current_dir(root.path())
+            .args(["status", "--porcelain"])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !status.stdout.is_empty() {
+            return Err("ignored fixture unexpectedly appears in git status".into());
+        }
+        let error = verify_web_inputs_clean(root.path()).expect_err("ignored env must fail");
+        let rendered = error.to_string();
+        if !rendered.contains("LW_PACKAGE_INPUT_DIRTY") || !rendered.contains("web/.env.production")
+        {
+            return Err(format!("unexpected ignored env error: {rendered}"));
+        }
+        let prepare_error = prepare_inputs(root.path(), &fixture_lock())
+            .expect_err("prepare must reject ignored env before network access");
+        if prepare_error.to_string() != rendered {
+            return Err(format!("prepare and check errors differ: {prepare_error}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_check_rejects_dirty_web_input() -> Result<(), String> {
+        let root = web_fixture()?;
+        fs::write(root.path().join("web/src/main.ts"), "changed\n")
+            .map_err(|error| error.to_string())?;
+        let error = verify_web_inputs_clean(root.path()).expect_err("dirty web input must fail");
+        let rendered = error.to_string();
+        if !rendered.contains("LW_PACKAGE_INPUT_DIRTY") || !rendered.contains("web/src/main.ts") {
+            return Err(format!("unexpected dirty web error: {rendered}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_check_ignores_dirty_non_web_input() -> Result<(), String> {
+        let root = web_fixture()?;
+        fs::create_dir_all(root.path().join("services/example"))
+            .map_err(|error| error.to_string())?;
+        fs::write(root.path().join("services/example/notes.txt"), "local\n")
+            .map_err(|error| error.to_string())?;
+        verify_web_inputs_clean(root.path()).map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_check_rejects_untracked_web_input() -> Result<(), String> {
+        let root = web_fixture()?;
+        fs::write(root.path().join("web/src/untracked.ts"), "local\n")
+            .map_err(|error| error.to_string())?;
+        let error =
+            verify_web_inputs_clean(root.path()).expect_err("untracked web input must fail");
+        let rendered = error.to_string();
+        if !rendered.contains("LW_PACKAGE_INPUT_DIRTY")
+            || !rendered.contains("web/src/untracked.ts")
+        {
+            return Err(format!("unexpected untracked web error: {rendered}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_check_rejects_stale_web_dist_marker() -> Result<(), String> {
+        let root = web_fixture()?;
+        let dist = root.path().join("containers/web-dist");
+        fs::create_dir_all(&dist).map_err(|error| error.to_string())?;
+        fs::write(dist.join(".web-tree-sha256"), "stale\n").map_err(|error| error.to_string())?;
+        let error = ensure_web_dist(root.path()).expect_err("stale marker must fail");
+        let rendered = error.to_string();
+        if !rendered.contains("LW_PACKAGE_INPUT_STALE") || !rendered.contains("expected stale") {
+            return Err(format!("unexpected stale marker error: {rendered}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_check_rejects_missing_web_dist_marker() -> Result<(), String> {
+        let root = web_fixture()?;
+        let dist = root.path().join("containers/web-dist");
+        fs::create_dir_all(&dist).map_err(|error| error.to_string())?;
+        let error = ensure_web_dist(root.path()).expect_err("missing marker must fail");
+        let rendered = error.to_string();
+        if !rendered.contains("LW_PACKAGE_INPUT_MISSING")
+            || !rendered.contains("containers/web-dist/.web-tree-sha256")
+        {
+            return Err(format!("unexpected missing marker error: {rendered}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_prepare_rejects_wrong_existing_offline_package_like_check() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let dir = root.path().join("containers/debian-bookworm-pkgs");
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        fs::write(dir.join("fixture.deb"), b"wrong\n").map_err(|error| error.to_string())?;
+        let expected = format!("{:x}", Sha256::digest(b"right\n"));
+        let entries = [(
+            "fixture.deb",
+            expected.as_str(),
+            "https://invalid.example/fixture.deb",
+        )];
+        let check_error =
+            verify_offline_pkg_closure(root.path(), "containers/debian-bookworm-pkgs", &entries)
+                .expect_err("check must reject wrong package");
+        let prepare_error =
+            ensure_offline_pkg_closure(root.path(), "containers/debian-bookworm-pkgs", &entries)
+                .expect_err("prepare must reject wrong package without redownloading");
+        if prepare_error.to_string() != check_error.to_string() {
+            return Err(format!("prepare and check errors differ: {prepare_error}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_check_rejects_missing_debian_closure_without_network() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let error = verify_offline_pkg_closure(
+            root.path(),
+            "containers/debian-bookworm-pkgs",
+            &[("missing.deb", "00", "https://invalid.example/missing.deb")],
+        )
+        .expect_err("missing closure must fail");
+        let rendered = error.to_string();
+        if !rendered.contains("LW_PACKAGE_INPUT_MISSING")
+            || !rendered.contains("containers/debian-bookworm-pkgs/missing.deb")
+        {
+            return Err(format!("unexpected missing closure error: {rendered}"));
+        }
         Ok(())
     }
 

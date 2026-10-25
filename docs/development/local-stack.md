@@ -4,7 +4,15 @@
 
 ## 准备与运行
 
-需要可用的 Linux Docker 引擎、Docker Buildx、Kind、kubectl、Helm、Python、OpenSSL 和 OpenSSH 的 `ssh-keygen`。首次运行会拉取基础镜像并编译 Rust 与 Web 镜像，应预留足够的磁盘、内存和构建时间。固定版本的基础镜像在服务启动前由各 Kind 节点按 digest 预拉取，下载不会占用服务启动的等待时间。已有应用构建缓存会被复用。
+首次 `up` 前必须在干净工作树中显式准备镜像输入：
+
+```sh
+cargo xtask package-prepare
+```
+
+该命令生成与当前 `HEAD` 对应的 vendored Web dist、Claude Code 包和 Alpine/Debian 离线包闭包。`up` 不会下载或生成这些输入；它在第一次 Docker image build 前运行无网络、无写入的 `cargo xtask package-check` 预检。预检失败会停止启动并说明缺失或过期输入，请按上述命令在干净工作树中重新准备。`package-check` 还会拒绝未提交、未跟踪或被忽略的 Web 构建输入（包括 Vite 读取的 `web/.env*` 文件）；请先提交、移除或暂存这些修改，再运行 `cargo xtask package-prepare`。Web dist 的校验哈希覆盖 `HEAD` 中的 `web/` 树和 lockfile，不会哈希工作树来绕过这个检查；提交或切换 HEAD 后需重新运行准备命令。
+
+ 需要可用的 Linux Docker 引擎、Docker Buildx、Kind、kubectl、Helm、Python、OpenSSL 和 OpenSSH 的 `ssh-keygen`。首次运行会拉取基础镜像并编译 Rust 与 Web 镜像，应预留足够的磁盘、内存和构建时间。固定版本的基础镜像在服务启动前由各 Kind 节点按 digest 预拉取，下载不会占用服务启动的等待时间。已有应用构建缓存会被复用。
 
 在仓库根目录运行：
 

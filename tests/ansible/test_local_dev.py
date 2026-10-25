@@ -1750,6 +1750,43 @@ class LocalDevBundleTests(unittest.TestCase):
                 local_dev.apply(Path("kubeconfig"), invalid_objects)
             run_mock.assert_not_called()
 
+    def test_prepare_and_build_images_runs_check_before_first_image_build(self) -> None:
+        captured: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        def fake_build_images(*, external_fixtures: bool) -> dict[str, str]:
+            del external_fixtures
+            captured.append(["docker", "buildx", "build"])
+            return {}
+
+        with (
+            patch.object(local_dev, "run", side_effect=fake_run),
+            patch.object(local_dev, "build_images", side_effect=fake_build_images),
+        ):
+            local_dev.prepare_and_build_images(external_fixtures=True)
+
+        check_index = captured.index(["cargo", "xtask", "package-check"])
+        build_index = captured.index(["docker", "buildx", "build"])
+        self.assertLess(check_index, build_index)
+
+    def test_package_check_failure_aborts_before_build_or_push(self) -> None:
+        captured: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured.append(argv)
+            if argv == ["cargo", "xtask", "package-check"]:
+                return subprocess.CompletedProcess(argv, 17, stderr="LW_PACKAGE_INPUT_STALE: expected x, observed y\n")
+            raise AssertionError(f"unexpected command after failed preflight: {argv}")
+
+        with patch.object(local_dev, "run", side_effect=fake_run):
+            with self.assertRaisesRegex(local_dev.LocalDevError, "LW_PACKAGE_INPUT_STALE") as error:
+                local_dev.prepare_and_build_images(external_fixtures=True)
+        self.assertIn("cargo xtask package-prepare", str(error.exception))
+        self.assertEqual([["cargo", "xtask", "package-check"]], captured)
+
     def test_agent_image_build_carries_claude_pins_in_both_profiles(self) -> None:
         captured: list[list[str]] = []
 
