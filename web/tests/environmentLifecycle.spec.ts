@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import type { EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, ObjectAction } from '@/generated/contracts'
-import { useEnvironmentLifecycleControls, type ObjectActionPermissions } from '@/composables/useEnvironmentLifecycle'
+import { useEnvironmentLifecycleControls, type ObjectActionPermissions, type OperationRecovery } from '@/composables/useEnvironmentLifecycle'
 import {
   accessGrantBlockReason,
   canIssueAccessGrant,
@@ -53,6 +53,7 @@ function controls(
       lifecycle: lifecycle as never,
       activeOperation: ref<EnvironmentOperationSnapshotSchema | null>(null),
       retryableOperation: ref<EnvironmentOperationSnapshotSchema | null>(null),
+      currentOperationRecovery: ref<OperationRecovery>({ kind: 'pending', reading: false }),
       permissions,
     }),
   }

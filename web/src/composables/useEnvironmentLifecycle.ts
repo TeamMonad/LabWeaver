@@ -142,6 +142,18 @@ interface LifecycleTarget {
 
 type InstanceState = { kind: string; data?: EnvironmentDetailSchema }
 
+/**
+ * Whether the server offers recovery for the operation the environment detail shows, as far as
+ * the operation history settles it: `pending` while the history is being read or does not yet
+ * hold that operation in the detail's state, `unreadable` when the history read failed, and
+ * `eligible`/`ineligible` only from a snapshot of that same operation.
+ */
+export type OperationRecovery =
+  | { kind: 'pending'; reading: boolean }
+  | { kind: 'unreadable'; diagnostic: DiagnosticViewModel }
+  | { kind: 'eligible' }
+  | { kind: 'ineligible' }
+
 /** The part of `useProjectAvailableActions` that page controls consume. */
 export type ObjectActionPermissions = Pick<ProjectAvailableActions, 'current' | 'allows' | 'denialReason' | 'refresh'>
 
@@ -162,6 +174,8 @@ export interface EnvironmentLifecycleControlsDeps {
   lifecycle: ReturnType<typeof useEnvironmentLifecycle>
   activeOperation: Ref<EnvironmentOperationSnapshotSchema | null>
   retryableOperation: Ref<EnvironmentOperationSnapshotSchema | null>
+  /** Recovery eligibility of the detail's current operation. */
+  currentOperationRecovery: Ref<OperationRecovery>
   /** Current object actions in the environment's project. */
   permissions: ObjectActionPermissions
 }
@@ -172,7 +186,7 @@ export interface EnvironmentLifecycleControlsDeps {
  * of a failed operation. API calls go through `useEnvironmentLifecycle`.
  */
 export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleControlsDeps) {
-  const { env, operations, lifecycle, activeOperation, retryableOperation, permissions } = deps
+  const { env, operations, lifecycle, activeOperation, retryableOperation, currentOperationRecovery, permissions } = deps
   const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
   const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
   const retryingEnvironment = ref(false)
@@ -293,7 +307,8 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
 
   /**
    * Why the environment is failed and what the user can do. An unknown restart outcome is never
-   * retried by the page; the next step names the toolbar recovery only while the server offers it.
+   * retried by the page; the next step names the toolbar recovery once the server's answer for
+   * that operation is read, and says none is available only when the server declined it.
    */
   function failedEnvironmentDiagnostic(data: EnvironmentDetailSchema): DiagnosticViewModel {
     if (failedCleanup(data)) {
@@ -302,11 +317,32 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     const code = data.operation.state === 'failed' ? data.operation.diagnosticCode : null
     if (isRestartOutcomeUnknown(code)) {
       const diagnostic = makeDiagnostic(code, '', false)
-      if (retryableOperation.value) return diagnostic
-      return { ...diagnostic, nextStep: '平台不会自动重试。请在“异步操作与诊断”中核对环境当前状态；当前没有可用的恢复操作，请把下方诊断信息发给管理员。' }
+      const recovery = currentOperationRecovery.value
+      if (recovery.kind === 'eligible') return diagnostic
+      if (recovery.kind === 'ineligible') {
+        return { ...diagnostic, nextStep: '平台不会自动重试。请在“异步操作与诊断”中核对环境当前状态；平台对这次操作没有提供恢复，请把下方诊断信息发给管理员。' }
+      }
+      if (recovery.kind === 'unreadable') {
+        return { ...diagnostic, nextStep: `平台不会自动重试。操作历史读取失败（${recovery.diagnostic.message}），暂时无法确认能否恢复；请重新读取操作历史。` }
+      }
+      return {
+        ...diagnostic,
+        nextStep: recovery.reading
+          ? '平台不会自动重试。正在读取操作历史以确认能否恢复，确认前不要重复提交重启。'
+          : '平台不会自动重试。操作历史还没有这次操作的最新结果，暂时无法确认能否恢复；请重新读取操作历史。',
+      }
     }
     const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
     return { code: '', message: `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`, retryable: false }
+  }
+
+  /** Offers to re-read the operation history when an unknown restart's recovery is still unsettled and nothing is reading it. */
+  function canRereadRecovery(data: EnvironmentDetailSchema): boolean {
+    const recovery = currentOperationRecovery.value
+    return data.operation.state === 'failed'
+      && isRestartOutcomeUnknown(data.operation.diagnosticCode)
+      && !failedCleanup(data)
+      && (recovery.kind === 'unreadable' || (recovery.kind === 'pending' && !recovery.reading))
   }
 
   async function runLifecycle(data: EnvironmentDetailSchema, action: EnvironmentLifecycleAction) {
@@ -405,6 +441,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     lifecycleActionHint,
     lifecyclePermissionHint,
     failedEnvironmentDiagnostic,
+    canRereadRecovery,
     runLifecycle,
     requestLifecycleConfirmation,
     confirmLifecycle,

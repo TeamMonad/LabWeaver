@@ -82,6 +82,15 @@
                       :retryable="false"
                       severity="error"
                     />
+                    <button
+                      v-if="canRereadRecovery(data)"
+                      type="button"
+                      class="outlined-button small"
+                      data-testid="reread-operation-history"
+                      @click="operations.load()"
+                    >
+                      重新读取操作历史
+                    </button>
                   </div>
 
                   <div
@@ -153,6 +162,7 @@ const {
   permissions,
   retryDiagnostic,
   failedEnvironmentDiagnostic,
+  canRereadRecovery,
 } = useEnvironmentEntryContext()
 </script>
 
