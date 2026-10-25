@@ -1663,11 +1663,15 @@ def kind_create_environment(registry: str) -> dict[str, str]:
                   ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))
     if not proxied:
         return environment
-    for name in ("NO_PROXY", "no_proxy"):
-        entries = [item.strip() for item in environment.get(name, "").split(",") if item.strip()]
-        if registry not in entries:
-            entries.append(registry)
-        environment[name] = ",".join(entries)
+    # Kind prefers a nonempty NO_PROXY and copies it into both spellings, so the
+    # effective list must be chosen once and written to both.
+    existing = environment.get("NO_PROXY") or environment.get("no_proxy") or ""
+    entries = [item.strip() for item in existing.split(",") if item.strip()]
+    if registry not in entries:
+        entries.append(registry)
+    merged = ",".join(entries)
+    environment["NO_PROXY"] = merged
+    environment["no_proxy"] = merged
     return environment
 
 
@@ -1688,12 +1692,30 @@ def host_docker_registry_mirrors() -> list[str]:
     if not isinstance(mirrors, list):
         fail("docker info returned an unreadable registry mirror list")
     normalized: list[str] = []
-    for mirror in mirrors:
+    for index, mirror in enumerate(mirrors):
         if not isinstance(mirror, str):
             fail("docker info returned an unreadable registry mirror list")
         parts = urlsplit(mirror.strip())
-        if parts.scheme not in ("http", "https") or not parts.netloc or parts.query or parts.fragment:
-            fail(f"host Docker registry mirror is not an http(s) URL: {mirror!r}")
+        try:
+            parts.port
+        except ValueError:
+            parts = None
+        # Mirrors are rendered into node hosts.toml: userinfo, query and fragment
+        # are rejected outright, and the raw value is never echoed because it may
+        # carry credentials.
+        if (
+            parts is None
+            or parts.scheme not in ("http", "https")
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+        ):
+            fail(
+                f"host Docker registry mirror #{index + 1} must be an http(s) URL "
+                "without credentials, query or fragment"
+            )
         normalized.append(f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}")
     return normalized
 

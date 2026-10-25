@@ -2563,7 +2563,15 @@ class KindCreateEnvironmentTests(unittest.TestCase):
         environment = self._environment(HTTPS_PROXY="http://proxy:3128", NO_PROXY="localhost, 10.0.0.0/8")
         self.assertEqual(environment["HTTPS_PROXY"], "http://proxy:3128")
         self.assertEqual(environment["NO_PROXY"], "localhost,10.0.0.0/8,labweaver-local-registry-abc")
-        self.assertEqual(environment["no_proxy"], "labweaver-local-registry-abc")
+        self.assertEqual(environment["no_proxy"], environment["NO_PROXY"])
+
+    def test_lowercase_only_exclusions_survive_into_both_spellings(self) -> None:
+        environment = self._environment(
+            https_proxy="http://proxy:3128", no_proxy="mirror.internal,.svc"
+        )
+        expected = "mirror.internal,.svc,labweaver-local-registry-abc"
+        self.assertEqual(environment["NO_PROXY"], expected)
+        self.assertEqual(environment["no_proxy"], expected)
 
     def test_registry_is_not_duplicated_when_already_bypassed(self) -> None:
         environment = self._environment(
@@ -2599,6 +2607,20 @@ class DockerHubMirrorTests(unittest.TestCase):
     def test_non_http_mirror_fails_closed(self) -> None:
         with self.assertRaises(local_dev.LocalDevError):
             self._mirrors('["ftp://mirror.example"]')
+
+    def test_credential_bearing_mirror_fails_without_disclosing_it(self) -> None:
+        for mirror in (
+            "https://user:secret@mirror.example",
+            "https://user@mirror.example",
+            "https://mirror.example/?token=topsecret",
+            "https://mirror.example:notaport",
+        ):
+            with self.subTest(mirror=mirror):
+                with self.assertRaises(local_dev.LocalDevError) as raised:
+                    self._mirrors(json.dumps([mirror]))
+                message = str(raised.exception)
+                for fragment in ("user", "secret", "topsecret", "notaport"):
+                    self.assertNotIn(fragment, message)
 
 
 if __name__ == "__main__":
