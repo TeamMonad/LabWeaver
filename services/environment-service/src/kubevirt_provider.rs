@@ -3742,7 +3742,9 @@ mod tests {
         if std::env::var_os("LW_VM_DRAIN_HELPER").is_none() {
             let output = tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new(std::env::current_exe()?)
                 .args(["--exact", "kubevirt_provider::tests::process_shutdown_does_not_become_non_retryable_user_cancellation", "--nocapture"])
-                .env("LW_VM_DRAIN_HELPER", "1").kill_on_drop(true).output()).await??;
+                .env("LW_VM_DRAIN_HELPER", "1").kill_on_drop(true).output()).await
+                .map_err(|error| format!("VM shutdown subprocess did not finish: {error}"))?
+                .map_err(|error| format!("launch VM shutdown subprocess: {error}"))?;
             assert!(
                 output.status.success(),
                 "VM process shutdown regression failed:\n{}\n{}",
@@ -3751,14 +3753,39 @@ mod tests {
             );
             return Ok(());
         }
+        let nats = GenericImage::new("nats", "2.11.8-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .start()
+            .await
+            .map_err(|error| format!("start and await NATS fixture readiness: {error}"))?;
+        let client = async_nats::connect(format!(
+            "nats://127.0.0.1:{}",
+            nats.get_host_port_ipv4(4222)
+                .await
+                .map_err(|error| format!("resolve ready NATS fixture port: {error}"))?
+        ))
+        .await
+        .map_err(|error| format!("connect ready NATS fixture before business deadline: {error}"))?;
         let authority = crate::test_support::requested_instance();
         let mut fence = KubeVirtBackendFence::for_action(&authority, ReconcileAction::Stop)
-            .map_err(|error| format!("{error:?}"))?;
-        let (_postgres, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
+            .map_err(|error| format!("prepare VM stop fence: {error:?}"))?;
+        // Complete external NATS readiness before test_permit starts the five-second business
+        // budget. That helper writes the same deadline into the fence and stored authority.
+        client
+            .flush()
+            .await
+            .map_err(|error| format!("NATS readiness flush before business deadline: {error}"))?;
+        let (_postgres, permit) = crate::kubevirt_execution::test_permit(&mut fence)
+            .await
+            .map_err(|error| {
+                format!("prepare PostgreSQL admission and synchronized deadline: {error}")
+            })?;
         sqlx::query("DELETE FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
             .bind(fence.environment_id.as_uuid())
             .execute(&permit.pool)
-            .await?;
+            .await
+            .map_err(|error| format!("clear setup admission before actual VM request: {error}"))?;
         let request = KubeVirtExecutorRequest::Stop {
             plan: KubeVirtCleanupPlan {
                 environment_id: authority.id,
@@ -3768,18 +3795,9 @@ mod tests {
                 plan_sha256: Sha256Digest::of_bytes(b"shutdown-stop"),
             },
         };
-        let fence = bind_kubevirt_executor_request(fence, &request)
-            .map_err(|error| format!("{error:?}"))?;
-        let nats = GenericImage::new("nats", "2.11.8-alpine")
-            .with_exposed_port(4222.tcp())
-            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
-            .start()
-            .await?;
-        let client = async_nats::connect(format!(
-            "nats://127.0.0.1:{}",
-            nats.get_host_port_ipv4(4222).await?
-        ))
-        .await?;
+        let fence = bind_kubevirt_executor_request(fence, &request).map_err(|error| {
+            format!("bind stop request to synchronized business deadline: {error:?}")
+        })?;
         let entered = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());
         let executor = FencedKubeVirtExecutor::new(
@@ -3822,7 +3840,11 @@ mod tests {
                 }
             }
         });
-        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|error| {
+                format!("VM backend did not enter after dependency-ready stop request: {error}")
+            })?;
         assert!(
             tokio::process::Command::new("kill")
                 .args(["-TERM", &std::process::id().to_string()])
@@ -3834,7 +3856,8 @@ mod tests {
             Duration::from_secs(2),
             crate::service_runtime::wait_for_shutdown(),
         )
-        .await?;
+        .await
+        .map_err(|error| format!("VM worker did not observe SIGTERM: {error}"))?;
         assert!(
             tokio::time::timeout(Duration::from_millis(100), async {
                 while !server_task.is_finished() {
@@ -3851,15 +3874,24 @@ mod tests {
             "process shutdown must not persist Cancelled"
         );
         resume.notify_one();
-        server_tasks
-            .join_next()
+        tokio::time::timeout(Duration::from_secs(5), server_tasks.join_next())
             .await
-            .ok_or("server task missing")???;
-        let response = request_tasks
-            .join_next()
+            .map_err(|error| {
+                format!("VM executor drain did not finish after backend release: {error}")
+            })?
+            .ok_or("VM executor task disappeared during drain")?
+            .map_err(|error| format!("VM executor task failed during drain: {error}"))?
+            .map_err(|error| {
+                format!("VM executor could not persist its terminal response: {error}")
+            })?;
+        let response = tokio::time::timeout(Duration::from_secs(5), request_tasks.join_next())
             .await
-            .ok_or("request task missing")??
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                format!("VM stop requester did not receive its drained response: {error}")
+            })?
+            .ok_or("VM stop requester task disappeared")?
+            .map_err(|error| format!("VM stop requester task failed: {error}"))?
+            .map_err(|error| format!("VM stop request failed: {error}"))?;
         let response: KubeVirtExecutorResponseEnvelope = serde_json::from_slice(&response.payload)?;
         assert!(matches!(
             response.response,
