@@ -1443,3 +1443,21 @@ fn ordinary_container_projects_only_the_approved_uid_capabilities_and_root_files
         );
     }
 }
+
+#[test]
+fn security_objects_precede_computation_in_every_container_network_mode() {
+    for network in [NetworkPolicySpec::AllowAll, NetworkPolicySpec::DenyAll,
+        NetworkPolicySpec::Restricted { policy_binding: "approved-egress".to_owned() }] {
+        let mut projection = projection();
+        projection.environment_spec.network = network;
+        let instance = instance_for(&projection);
+        let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+        let plan = provider.plan(&instance, &resolved(projection), ReconcileAction::Provision).expect("complete plan");
+        let deployment = plan.resources.iter().position(|r| r.kind == "Deployment").expect("deployment");
+        for (position, resource) in plan.resources.iter().enumerate() {
+            if matches!(resource.kind.as_str(), "NetworkPolicy" | "ResourceQuota" | "LimitRange") {
+                assert!(position < deployment, "{} must be applied before computation", resource.kind);
+            }
+        }
+    }
+}

@@ -1492,6 +1492,26 @@ impl ContainerProviderConfiguration {
                     "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.access_namespace}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":self.access_pod_label}}}],"ports":[{"protocol":"TCP","port":service_port}]}]}
                 }),
             ),
+        ];
+        match &projection.environment_spec.network {
+            NetworkPolicySpec::AllowAll => {}
+            NetworkPolicySpec::DenyAll => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "deny-all-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"deny-all-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"]}
+                })));
+            }
+            NetworkPolicySpec::Restricted { policy_binding } => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
+                })));
+            }
+        }
+        // Apply every quota and network policy before a Deployment can start its Pod.
+        documents.extend([
             resource(
                 "Deployment",
                 Some(&namespace),
@@ -1548,24 +1568,7 @@ impl ContainerProviderConfiguration {
                     "spec":{"type":"ClusterIP","selector":{"app":app_name},"ports":[{"name":"http","port":8080,"targetPort":"service"}]}
                 }),
             ),
-        ];
-        match &projection.environment_spec.network {
-            NetworkPolicySpec::AllowAll => {}
-            NetworkPolicySpec::DenyAll => {
-                documents.push(resource("NetworkPolicy", Some(&namespace), "deny-all-egress", json!({
-                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"deny-all-egress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"]}
-                })));
-            }
-            NetworkPolicySpec::Restricted { policy_binding } => {
-                documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
-                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
-                })));
-            }
-        }
+        ]);
         if placement.namespace_uid.is_some() {
             // The deployment operator owns namespace-wide admission and network policy.
             documents.retain(|resource| {
