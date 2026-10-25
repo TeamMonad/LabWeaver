@@ -16,8 +16,25 @@ struct RuntimeFixture {
     request_log: Arc<Mutex<Vec<Value>>>,
     bff: BffSession,
     upstream: Arc<Mutex<Vec<Value>>>,
+    certificate_pem: String,
+    private_key_pem: String,
     _tasks: Tasks,
     _database: testcontainers::ContainerAsync<Postgres>,
+}
+
+struct IssuedHandoff {
+    url: Url,
+    token: String,
+    binding: String,
+}
+
+impl IssuedHandoff {
+    fn exchange(&self, client: &reqwest::Client) -> reqwest::RequestBuilder {
+        client
+            .post(self.url.as_str())
+            .header(header::ORIGIN, self.url.origin().ascii_serialization())
+            .form(&[("token", self.token.as_str())])
+    }
 }
 
 impl RuntimeFixture {
@@ -119,10 +136,8 @@ impl RuntimeFixture {
             "127.0.0.1".to_owned(),
         ])?;
         let ca = certificate.cert.pem();
-        let tls = http_transport::server_config(
-            ca.as_bytes(),
-            certificate.signing_key.serialize_pem().as_bytes(),
-        )?;
+        let private_key_pem = certificate.signing_key.serialize_pem();
+        let tls = http_transport::server_config(ca.as_bytes(), private_key_pem.as_bytes())?;
         let resolver_listener = TcpListener::bind("127.0.0.1:0").await?;
         let resolver_uri = format!("https://{}", resolver_listener.local_addr()?);
         let resolver = OwnerResolver::new(
@@ -152,7 +167,10 @@ impl RuntimeFixture {
             state.oidc_http.clone(),
         )
         .await?;
-        let upstream_listener = TcpListener::bind("127.0.0.2:8080").await?;
+        let address_id = Uuid::now_v7();
+        let bytes = address_id.as_bytes();
+        let app_ip = std::net::Ipv4Addr::new(127, bytes[13], bytes[14], bytes[15]);
+        let upstream_listener = TcpListener::bind((app_ip, 8080)).await?;
         let upstream_address = upstream_listener.local_addr()?;
         let upstream = Arc::new(Mutex::new(Vec::new()));
         let app_router = Router::new()
@@ -237,12 +255,14 @@ impl RuntimeFixture {
             request_log,
             bff,
             upstream,
+            certificate_pem: ca,
+            private_key_pem,
             _tasks: tasks,
             _database: database,
         })
     }
 
-    async fn handoff(&self, grant: EndpointGrantId) -> Result<String, Box<dyn Error>> {
+    async fn handoff(&self, grant: EndpointGrantId) -> Result<IssuedHandoff, Box<dyn Error>> {
         let start = self
             .client
             .get(format!("{}/connect/{grant}/", self.portal))
@@ -287,10 +307,23 @@ impl RuntimeFixture {
                 .is_some_and(|uri| !uri.contains(binding) && !uri.contains("binding="))
         }));
         let document: Value = issued.json().await?;
-        Ok(document["handoffUrl"]
-            .as_str()
-            .ok_or("missing handoff URL")?
-            .to_owned())
+        let url = Url::parse(
+            document["handoffUrl"]
+                .as_str()
+                .ok_or("missing handoff URL")?,
+        )?;
+        let token = url
+            .fragment()
+            .and_then(|fragment| fragment.strip_prefix("token="))
+            .ok_or("missing handoff token fragment")?
+            .to_owned();
+        assert_eq!(url.path(), format!("/runtime-handoff/{grant}"));
+        assert!(url.query().is_none());
+        Ok(IssuedHandoff {
+            url,
+            token,
+            binding: binding.to_owned(),
+        })
     }
 }
 
@@ -416,17 +449,62 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
         )
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
+    let page = fixture.client.get(handoff.url.as_str()).send().await?;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert_eq!(page.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(page.headers()["referrer-policy"], "no-referrer");
+    let csp = page.headers()["content-security-policy"]
+        .to_str()?
+        .to_owned();
+    assert!(
+        csp.contains("script-src 'sha256-")
+            && !csp.contains("nonce-")
+            && !csp.contains("unsafe-inline")
+    );
+    let page_text = page.text().await?;
+    assert!(!page_text.contains(&handoff.token) && !page_text.contains(&handoff.binding));
     assert_eq!(
-        other.get(&handoff).send().await?.status(),
+        handoff.exchange(&other).send().await?.status(),
         StatusCode::FORBIDDEN
     );
-    let crossed = handoff.replace(
-        &fixture.grant.to_string(),
-        &EndpointGrantId::new().to_string(),
+    for origin in [
+        None,
+        Some(fixture.portal.as_str()),
+        Some(fixture.runtime_b.as_str()),
+    ] {
+        let mut request = fixture
+            .client
+            .post(handoff.url.as_str())
+            .form(&[("token", handoff.token.as_str())]);
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        assert_eq!(request.send().await?.status(), StatusCode::FORBIDDEN);
+    }
+    let mut crossed = handoff.url.clone();
+    crossed.set_path(&format!("/runtime-handoff/{}", EndpointGrantId::new()));
+    assert_eq!(
+        fixture
+            .client
+            .post(crossed)
+            .header(header::ORIGIN, &fixture.runtime)
+            .form(&[("token", handoff.token.as_str())])
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
     );
     assert_eq!(
-        fixture.client.get(crossed).send().await?.status(),
-        StatusCode::FORBIDDEN
+        fixture
+            .client
+            .get(format!(
+                "{}/runtime-handoff/{}/removed-token-route",
+                fixture.runtime, fixture.grant
+            ))
+            .send()
+            .await?
+            .status(),
+        StatusCode::NOT_FOUND
     );
     let row = sqlx::query("SELECT c.issued_at,c.handoff_expires_at,c.expires_at,s.expires_at AS session_expires FROM access.runtime_capabilities c JOIN access.bff_sessions s ON s.session_id=c.bff_session_id")
         .fetch_one(&fixture.state.pool).await?;
@@ -448,8 +526,8 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     );
     assert_eq!(issued_at.nanosecond() % 1_000_000, 0);
     let (first, second) = tokio::join!(
-        fixture.client.get(&handoff).send(),
-        fixture.client.get(&handoff).send()
+        handoff.exchange(&fixture.client).send(),
+        handoff.exchange(&fixture.client).send()
     );
     let first = first?;
     let second = second?;
@@ -470,7 +548,7 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     assert!(cookie.contains(&format!("Path=/connect/{}/", fixture.grant)));
     assert!(!cookie.contains("Domain="));
     assert_eq!(
-        fixture.client.get(&handoff).send().await?.status(),
+        handoff.exchange(&fixture.client).send().await?.status(),
         StatusCode::FORBIDDEN
     );
     assert!(fixture.upstream.lock().await.is_empty());
@@ -538,7 +616,7 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     }
     let requests = fixture.upstream.lock().await.len();
     let handoff_b = fixture.handoff(fixture.grant_b).await?;
-    let consumed_b = fixture.client.get(handoff_b).send().await?;
+    let consumed_b = handoff_b.exchange(&fixture.client).send().await?;
     assert_eq!(consumed_b.status(), StatusCode::SEE_OTHER);
     let cookie_b = consumed_b.headers()[header::SET_COOKIE]
         .to_str()?
@@ -619,7 +697,7 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     let expired = fixture.handoff(fixture.grant).await?;
     sqlx::query("UPDATE access.runtime_capabilities SET issued_at=now()-interval '10 minutes',handoff_expires_at=now()-interval '9 minutes 30 seconds',expires_at=now()-interval '5 minutes' WHERE consumed_at IS NULL").execute(&fixture.state.pool).await?;
     assert_eq!(
-        fixture.client.get(expired).send().await?.status(),
+        expired.exchange(&fixture.client).send().await?.status(),
         StatusCode::FORBIDDEN
     );
     sqlx::query("UPDATE access.runtime_capabilities SET issued_at=now()-interval '10 minutes',handoff_expires_at=now()-interval '9 minutes 30 seconds',expires_at=now()-interval '5 minutes' WHERE consumed_at IS NOT NULL").execute(&fixture.state.pool).await?;
@@ -629,7 +707,7 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     );
     let renewed = fixture.handoff(fixture.grant).await?;
     assert_eq!(
-        fixture.client.get(renewed).send().await?.status(),
+        renewed.exchange(&fixture.client).send().await?.status(),
         StatusCode::SEE_OTHER
     );
     let before_revoke = fixture.handoff(fixture.grant).await?;
@@ -641,7 +719,11 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        fixture.client.get(before_revoke).send().await?.status(),
+        before_revoke
+            .exchange(&fixture.client)
+            .send()
+            .await?
+            .status(),
         StatusCode::FORBIDDEN
     );
     sqlx::query("UPDATE access.access_grants SET state='active',revoked_at=NULL,reason_code=NULL")
@@ -652,7 +734,11 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
         .execute(&fixture.state.pool)
         .await?;
     assert_eq!(
-        fixture.client.get(before_expiry).send().await?.status(),
+        before_expiry
+            .exchange(&fixture.client)
+            .send()
+            .await?
+            .status(),
         StatusCode::FORBIDDEN
     );
     assert_eq!(
@@ -688,7 +774,11 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
         .await?;
     assert_eq!(logout.status(), StatusCode::OK);
     assert_eq!(
-        fixture.client.get(before_logout).send().await?.status(),
+        before_logout
+            .exchange(&fixture.client)
+            .send()
+            .await?
+            .status(),
         StatusCode::FORBIDDEN
     );
     assert_eq!(
@@ -696,6 +786,11 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(fixture.upstream.lock().await.len(), requests);
+    assert!(fixture.request_log.lock().await.iter().all(|entry| {
+        entry["target"].as_str().is_some_and(|target| {
+            !target.contains(&handoff.token) && !target.contains(&handoff.binding)
+        })
+    }));
     Ok(())
 }
 
@@ -768,5 +863,196 @@ async fn chromium_runtime_script_cannot_use_portal_session() -> Result<(), Box<d
             "B's valid host-only Cookie must be automatically attached on the rejected request"
         );
     }
+    Ok(())
+}
+
+async fn nginx_fault_proxy(
+    fixture: &RuntimeFixture,
+    upstream: &str,
+) -> Result<testcontainers::ContainerAsync<testcontainers::GenericImage>, Box<dyn Error>> {
+    use testcontainers::core::IntoContainerPort;
+    // Exactly the configuration deployed by Kind; only external infrastructure
+    // addresses and timeout duration are substituted for controlled TCP faults.
+    let source = include_str!("../../../deploy/config/local-dev-portal.nginx.conf");
+    assert!(source.contains("error_log /dev/stderr warn;"));
+    assert!(source.contains("access_log /dev/stdout;"));
+    let config = source
+        .replace("kube-dns.kube-system.svc.cluster.local", "127.0.0.11")
+        .replace(
+            "access-service.labweaver-system.svc.cluster.local:8080",
+            upstream,
+        )
+        .replace(
+            "proxy_buffering off;",
+            "proxy_buffering off;\n  proxy_connect_timeout 1s;\n  proxy_read_timeout 1s;",
+        );
+    let image = include_str!("../../../containers/Containerfile.web")
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("ARG WEB_RUNTIME=\""))
+        .and_then(|line| line.strip_suffix('"'))
+        .ok_or("missing pinned Kind Web/Nginx runtime")?;
+    let (name, tag) = image
+        .split_once(':')
+        .ok_or("invalid pinned Nginx image reference")?;
+    let edge = testcontainers::GenericImage::new(name, tag)
+        .with_exposed_port(8443.tcp())
+        .with_copy_to("/etc/nginx/nginx.conf", config.into_bytes())
+        .with_copy_to(
+            "/etc/labweaver/tls/tls.crt",
+            fixture.certificate_pem.as_bytes().to_vec(),
+        )
+        .with_copy_to(
+            "/etc/labweaver/tls/tls.key",
+            fixture.private_key_pem.as_bytes().to_vec(),
+        )
+        .with_copy_to(
+            "/etc/labweaver/trust/ca.crt",
+            fixture.certificate_pem.as_bytes().to_vec(),
+        )
+        .with_cmd(["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"])
+        .start()
+        .await?;
+    let port = edge.get_host_port_ipv4(8443).await?;
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(response) = fixture
+                .client
+                .get(format!("https://127.0.0.1:{port}/health/ready"))
+                .send()
+                .await
+                && response.status() == StatusCode::OK
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    if ready.is_err() {
+        return Err(format!(
+            "real Nginx did not become ready: {}",
+            String::from_utf8_lossy(&edge.stderr_to_vec().await?)
+        )
+        .into());
+    }
+    Ok(edge)
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the security regression keeps real minting, pinned shared Nginx configuration, and both fault/log assertions together"
+)]
+async fn runtime_handoff_credentials_never_enter_real_nginx_fault_logs()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    let network = tokio::process::Command::new("docker")
+        .args([
+            "network",
+            "inspect",
+            "bridge",
+            "--format",
+            "{{(index .IPAM.Config 0).Gateway}}",
+        ])
+        .output()
+        .await?;
+    if !network.status.success() {
+        return Err("cannot resolve the local Docker host gateway for the timeout fixture".into());
+    }
+    let gateway: std::net::IpAddr = std::str::from_utf8(&network.stdout)?.trim().parse()?;
+    let blackhole = TcpListener::bind("0.0.0.0:0").await?;
+    let timeout_upstream =
+        std::net::SocketAddr::new(gateway, blackhole.local_addr()?.port()).to_string();
+    // This is deliberate network fault injection, never a business authorization backend.
+    fixture._tasks.0.push(tokio::spawn(async move {
+        let mut connections = Vec::new();
+        while let Ok((connection, _)) = blackhole.accept().await {
+            connections.push(connection);
+        }
+    }));
+    for (upstream, status, diagnostic) in [
+        ("127.0.0.1:9", StatusCode::BAD_GATEWAY, "connect() failed"),
+        (
+            timeout_upstream.as_str(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream timed out",
+        ),
+    ] {
+        let edge = nginx_fault_proxy(&fixture, upstream).await?;
+        let port = edge.get_host_port_ipv4(8443).await?;
+        let mut runtime_url = handoff.url.clone();
+        runtime_url
+            .set_port(Some(port))
+            .map_err(|()| "invalid Nginx port")?;
+        let page = fixture.client.get(runtime_url.as_str()).send().await?;
+        assert_eq!(page.status(), status);
+        let _ = page.bytes().await?;
+        let exchange = fixture
+            .client
+            .post(runtime_url.as_str())
+            .header(header::ORIGIN, runtime_url.origin().ascii_serialization())
+            .form(&[("token", handoff.token.as_str())])
+            .send()
+            .await?;
+        assert_eq!(exchange.status(), status);
+        let _ = exchange.bytes().await?;
+        let mut portal_url = Url::parse(&fixture.portal)?;
+        portal_url
+            .set_port(Some(port))
+            .map_err(|()| "invalid Nginx port")?;
+        portal_url.set_path(&format!("/connect/{}/", fixture.grant));
+        portal_url.set_query(Some("handoff=true"));
+        portal_url.set_fragment(Some(&format!("binding={}", handoff.binding)));
+        let portal = fixture.client.get(portal_url.as_str()).send().await?;
+        assert_eq!(portal.status(), status);
+        let _ = portal.bytes().await?;
+        let binding = fixture
+            .client
+            .post(portal_url.as_str())
+            .header(header::ORIGIN, portal_url.origin().ascii_serialization())
+            .header("X-CSRF-Token", fixture.bff.csrf_token.expose())
+            .json(&json!({"binding":handoff.binding}))
+            .send()
+            .await?;
+        assert_eq!(binding.status(), status);
+        let _ = binding.bytes().await?;
+        edge.stop().await?;
+        let access = String::from_utf8(edge.stdout_to_vec().await?)?;
+        let errors = String::from_utf8(edge.stderr_to_vec().await?)?;
+        for log in [&access, &errors] {
+            assert!(
+                !log.contains(&handoff.token),
+                "a real handoff token entered Nginx logs"
+            );
+            assert!(
+                !log.contains(&handoff.binding),
+                "a real browser binding entered Nginx logs"
+            );
+            assert!(
+                log.contains(&fixture.grant.to_string()),
+                "grant correlation must remain available"
+            );
+        }
+        assert!(
+            access.contains(&format!(" {} ", status.as_u16())),
+            "access logs must retain the failure status"
+        );
+        assert!(
+            errors.contains(diagnostic),
+            "warn-level error logs must retain the upstream failure cause"
+        );
+    }
+    assert!(fixture.upstream.lock().await.is_empty());
+    let consumed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access.runtime_capabilities WHERE consumed_at IS NOT NULL",
+    )
+    .fetch_one(&fixture.state.pool)
+    .await?;
+    assert_eq!(consumed, 0);
+    println!(
+        "PASS: real Kind Nginx config retains warn/access diagnostics for 502 and 504; actual issued token and binding never enter either log"
+    );
     Ok(())
 }

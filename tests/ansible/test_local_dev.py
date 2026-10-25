@@ -1115,6 +1115,11 @@ class LocalDevBundleTests(unittest.TestCase):
 
         self.assertEqual(len(applied), 3)
         portal_objects, probe_secret, probe_objects = applied
+        portal_config = next(document for document in portal_objects if document["kind"] == "ConfigMap" and document["metadata"]["name"] == "local-dev-portal-nginx")["data"]["nginx.conf"]
+        self.assertEqual(portal_config, (ROOT / "deploy/config/local-dev-portal.nginx.conf").read_text(encoding="utf-8"))
+        self.assertIn("error_log /dev/stderr warn;", portal_config)
+        self.assertIn("access_log /dev/stdout;", portal_config)
+        self.assertNotIn("access_log off;", portal_config.split("server_name *.runtime.localhost;", 1)[1])
         self.assertEqual(probe_secret[0]["kind"], "Secret")
         self.assertEqual(probe_secret[0]["metadata"]["name"], "local-dev-oidc-probe-bootstrap")
         self.assertEqual(probe_secret[0]["data"], {"keycloak-ca.pem": base64.b64encode(b"ca").decode()})

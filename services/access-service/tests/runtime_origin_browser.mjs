@@ -21,10 +21,17 @@ try {
   assert.equal(authenticated.status(), 200, await authenticated.text())
   const runtimeRequests = []
   const requestTargets = []
+  const exchangeSecrets = []
+  const handoffPages = []
+  context.on('response', response => {
+    if (new URL(response.url()).pathname.startsWith('/runtime-handoff/') && response.request().method() === 'GET' && response.status() === 200) handoffPages.push(response)
+  })
   context.on('request', request => {
     const url = new URL(request.url())
     requestTargets.push(url.pathname + url.search)
     if (url.hostname.endsWith('.runtime.localhost')) runtimeRequests.push(request)
+    if (request.method() === 'POST' && url.pathname.startsWith('/runtime-handoff/')) exchangeSecrets.push(new URLSearchParams(request.postData()).get('token'))
+    if (request.method() === 'POST' && url.origin === portal && url.pathname.startsWith('/connect/')) exchangeSecrets.push(JSON.parse(request.postData()).binding)
   })
   async function openGrant(page, id, origin) {
     const navigation = await page.goto(`${portal}/connect/${id}/`)
@@ -38,6 +45,18 @@ try {
   const second = await context.newPage()
   await openGrant(second, grantB, runtimeB)
   await openGrant(page, grant, runtime)
+  assert.equal(handoffPages.length, 2, 'each grant must navigate through its fixed credential-free page')
+  const policies = []
+  for (const response of handoffPages) {
+    assert.equal(await response.headerValue('cache-control'), 'no-store')
+    assert.equal(await response.headerValue('referrer-policy'), 'no-referrer')
+    const policy = await response.headerValue('content-security-policy')
+    assert(policy.includes("script-src 'sha256-") && !policy.includes('nonce-') && !policy.includes('unsafe-inline'))
+    policies.push(policy)
+  }
+  assert.equal(policies[0], policies[1], 'the static page script hash must be the same across grants')
+  assert.equal(exchangeSecrets.length, 4)
+  assert(exchangeSecrets.every(secret => typeof secret === 'string' && secret.length === 43))
   const aCookies = await context.cookies(`${runtime}/connect/${grant}/`)
   const bCookies = await context.cookies(`${runtimeB}/connect/${grantB}/`)
   const a = aCookies.find(cookie => cookie.name === '__Secure-labweaver_runtime')
@@ -82,8 +101,8 @@ try {
     return { status: response.status, text: await response.text() }
   })
   assert.deepEqual(posted, { status: 200, text: 'runtime-browser-post' })
-  assert(requestTargets.every(target => !target.includes('binding=')), 'request/access-log targets must never contain the binding secret')
-  console.log('PASS: two real same-site runtime hosts; A cannot read/write B even with B cookie attached; no BFF cookie; portal API denied; fragment/CSRF POST handoff; no binding in request logs; own runtime POST works')
+  assert(requestTargets.every(target => !target.includes('binding=') && !target.includes('token=') && exchangeSecrets.every(secret => !target.includes(secret))), 'no actual token or binding may enter a request/access-log target')
+  console.log('PASS: two same-site grant hosts remain isolated; fixed hash-CSP handoff pages exchange tokens only in same-origin POST bodies; actual token/binding absent from request targets; own runtime POST works')
 } finally {
   await browser.close()
 }

@@ -1,18 +1,27 @@
 //! Host-isolated runtime admission. Opaque browser secrets are persisted only as hashes.
-use std::{borrow::Cow, collections::BTreeSet, net::IpAddr, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::BTreeSet,
+    net::IpAddr,
+    sync::{Arc, LazyLock},
+};
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, Request, State},
+    extract::{Form, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use contracts::{EndpointGrantId, object_authorization::ObjectAction};
 use persistence_sqlx::Sha256Digest;
 use rand::RngCore;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use time::OffsetDateTime;
 
@@ -342,7 +351,7 @@ pub(super) async fn connect(
     if inserted.rows_affected() != 1 {
         return Err(denied());
     }
-    let mut response = axum::Json(serde_json::json!({"handoffUrl": format!("{}/runtime-handoff/{grant}/{token}", runtime_origin(&state, grant)?)})).into_response();
+    let mut response = axum::Json(serde_json::json!({"handoffUrl": format!("{}/runtime-handoff/{grant}#token={token}", runtime_origin(&state, grant)?)})).into_response();
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -367,11 +376,63 @@ pub(super) async fn bootstrap(
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RuntimeHandoff {
+    token: String,
+}
+
+// The page is identical for every grant and contains no credential. Only this
+// exact inline script is allowed by CSP. Secrets never enter a request target.
+const HANDOFF_SCRIPT: &str = r#"(async () => {
+  const token = new URLSearchParams(location.hash.slice(1)).get('token');
+  history.replaceState(null, '', location.pathname);
+  if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    document.body.textContent = '运行时交接无效，请从门户重新打开。';
+    return;
+  }
+  // CORS-mode fetch preserves our Origin even under no-referrer; a navigation
+  // form may instead send Origin:null. Manual redirect avoids fetching the app twice.
+  const response = await fetch(location.pathname, {
+    method: 'POST', mode: 'cors', credentials: 'same-origin', redirect: 'manual',
+    body: new URLSearchParams({token})
+  });
+  if (response.type !== 'opaqueredirect') throw new Error('handoff denied');
+  location.replace('/connect/' + location.pathname.split('/').pop() + '/');
+})().catch(() => { document.body.textContent = '运行时交接失败，请从门户重新打开。'; });"#;
+
+static HANDOFF_PAGE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>连接运行时</title><body><script>{HANDOFF_SCRIPT}</script>"
+    )
+});
+static HANDOFF_CSP: LazyLock<Result<HeaderValue, axum::http::header::InvalidHeaderValue>> =
+    LazyLock::new(|| {
+        let digest = STANDARD.encode(Sha256::digest(HANDOFF_SCRIPT.as_bytes()));
+        HeaderValue::from_str(&format!(
+            "default-src 'none'; script-src 'sha256-{digest}'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+        ))
+    });
+
+pub(super) async fn handoff_page() -> Result<Response, ApiError> {
+    let csp = HANDOFF_CSP.as_ref().map_err(|_| store_error())?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("referrer-policy", "no-referrer")
+        .header("cross-origin-opener-policy", "same-origin")
+        .header("content-security-policy", csp.clone())
+        .body(axum::body::Body::from(HANDOFF_PAGE.as_str()))
+        .map_err(|_| store_error())
+}
+
 pub(super) async fn consume(
     State(state): State<Arc<AppState>>,
-    Path((grant, token)): Path<(EndpointGrantId, String)>,
+    Path(grant): Path<EndpointGrantId>,
     headers: HeaderMap,
+    Form(handoff): Form<RuntimeHandoff>,
 ) -> Result<Response, ApiError> {
+    let token = handoff.token;
     let binding = cookie(&headers, BINDING_COOKIE)
         .filter(|v| valid_secret(v))
         .ok_or_else(denied)?;

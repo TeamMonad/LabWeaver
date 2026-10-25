@@ -173,8 +173,8 @@ fn browser_routes() -> Router<Arc<AppState>> {
             get(runtime::bootstrap),
         )
         .route(
-            "/runtime-handoff/{endpoint_grant_id}/{token}",
-            get(runtime::consume),
+            "/runtime-handoff/{endpoint_grant_id}",
+            get(runtime::handoff_page).post(runtime::consume),
         )
         .route(
             "/api/v1/environments",

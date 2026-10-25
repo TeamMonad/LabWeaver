@@ -61,8 +61,13 @@ HTTP 请求目标或默认访问日志。门户可信 nonce-CSP 脚本立即清�
 handoff 和至多五分钟且不超过 session 截止的 capability；条件 UPDATE 原子兑换，并发与顺序重放
 都只有第一次成功。交接响应不缓存，使用 `Referrer-Policy: no-referrer`，隔离 opener。
 
-运行时 `/runtime-handoff/{grant}/{token}` 原子消费交接，设置独立的
-`__Secure-labweaver_runtime` capability Cookie：HttpOnly、Secure、SameSite=Lax，不设置 Domain，
+运行时导航到固定的 `/runtime-handoff/{grant}#token=…`。服务器只收到不含秘密的 grant 路径，
+返回每个 grant 完全相同的页面：no-store、no-referrer、严格 CSP，仅放行它自己内联脚本的 SHA-256
+hash（不允许任意 inline 或额外 nonce）。页面立即清除 fragment，以 CORS 模式的同源 fetch POST
+body 提交 token，在 no-referrer 策略下仍保留自己的 Origin；成功的 303 之后再导航到应用根路径。
+POST 必须来自该 grant 自己的运行时 Origin，绑定 Cookie、PG 时钟及原子一次性条件仍全部验证。
+成功后 303 到 `/connect/{grant}/`。旧的 GET `/runtime-handoff/{grant}/{token}` 兑换路径已删除。
+兑换后设置 `__Secure-labweaver_runtime` capability Cookie：HttpOnly、Secure、SameSite=Lax，无 Domain，
 host-only 绑定该 grant 的独立主机，Path 限定 `/connect/{grant}/`。每次请求同时校验主机中的 grant、
 路径中的 grant、capability 中的 grant/actor/session、数据库期限、有效 BFF session、当前
 AccessGrant/EndpointGrant、成员动作和真实 Environment 权威状态。退出、授权撤销或到期后下一次
@@ -98,5 +103,10 @@ python -m unittest discover -s tests/ansible -p test_runtime_origin.py
 
 Chromium 使用同站、不同主机的两个真实 grant（不同项目/环境），确认 A 页面脚本对 B 的读、写及
 no-cors 请求均不能访问应用上游，即使浏览器自动附带 B 的 Cookie；同时验证 HTTP/2、门户会话
-隔离和请求/访问日志目标不含 binding。CI 的 `playwright-ci` 显式执行浏览器门禁；普通 Rust 测试
+隔离和请求/访问日志目标不含实际 token/binding。CI 的 `playwright-ci` 显式执行浏览器门禁；普通 Rust 测试
 不要求 Node/Chromium。临时 TLS 夹具不能替代真实 DNS/集群证书验收。
+
+真实 Nginx 日志回归：`cargo test -p access-service runtime_handoff_credentials_never_enter_real_nginx_fault_logs --locked -- --nocapture`。
+测试使用 Kind 的 `deploy/config/local-dev-portal.nginx.conf` 与 Web Containerfile 固定的同版 Nginx，
+真实签发 token/binding 后注入连接拒绝与响应超时；access/error 两类日志均不能含实际秘密，同时
+必须保留 502/504、grant 和上游故障原因。不通过降低 warn 级别或关闭运行时访问日志掩盖泄漏。

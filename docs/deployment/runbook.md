@@ -61,8 +61,14 @@ application role 输入为 `platform_application_runtime_base_hostname`、
 `public_ingress_certificate_secret`；role 自动将 `*.基础域` 加入证书 SAN，并只在 HTTPS listener
 发布运行时路由。仅选择一条路由管理路径，不让 Helm 和基础设施 role 同时管理同一入口。
 应用 Access catalog 0009；所有 Access 副本用 PostgreSQL 权威时间签发并原子消费交接。
-绑定在 fragment 中立即清除，再经门户 CSRF POST 发送，默认请求 URL 日志不再接触 binding。
-仍须禁止记录交接 token 路径、Cookie、请求/响应体及秘密响应头；本地运行时 location 禁用访问日志。
+binding 和 token 都经 fragment 在各自可信交接页立即清除，再分别通过门户 CSRF POST 与运行时
+同源 POST body 发送；请求目标只有固定路径和 grant，没有秘密查询串或秘密路径段。
+运行时固定页为 `GET /runtime-handoff/{grant}`，`POST` 同一路径兑换后 303 到运行时根路径；
+旧 GET token 路径已删除。页面 CSP 仅放行固定内联脚本的 SHA-256 hash，并设置 no-store/no-referrer。
+Gateway/Ingress 与 Nginx 可以保留正常的请求路径、状态码、grant 和 warn/error 故障诊断，不需要靠
+关闭日志或降低级别隐藏秘密；仍禁止记录 Cookie、请求/响应体及秘密响应头。
+Kind 使用 `deploy/config/local-dev-portal.nginx.conf`，保持 warn 错误日志与运行时访问日志；同一配置
+已有真实 Nginx 的连接拒绝/超时日志回归，部署时不要恢复包含 token 的路径协议。
 
 部署后用受信任浏览器打开两个不同 grant，最终地址须有不同主机；各自应用可 GET/POST，但 A
 脚本对 B 的读/写不能到达 B 上游，且运行时不携带 BFF Cookie、无法读取门户 CSRF/API。重放、
