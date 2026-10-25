@@ -13,8 +13,7 @@ import type {
   EnvironmentAccessGrantPageSchema,
   EnvironmentEndpointSchema,
   EnvironmentDetailSchema,
-  EnvironmentInstanceSchema,
-  EnvironmentOperation,
+  PublicEnvironmentOperation,
   EnvironmentOperationPageSchema,
   EnvironmentOperationSnapshot,
   GpuCatalogEntrySchema,
@@ -265,7 +264,7 @@ function makeLease(id: string, requestId: string, state: ResourceLeaseState, ext
   }
 }
 
-function currentEnvironmentState(): EnvironmentInstanceSchema['observedState'] | undefined {
+function currentEnvironmentState(): EnvironmentDetailSchema['observedState'] | undefined {
   const state = activeScene.value.environmentState
   switch (state) {
     case undefined:
@@ -288,14 +287,14 @@ function currentEnvironmentState(): EnvironmentInstanceSchema['observedState'] |
   }
 }
 
-const environmentLabels: Partial<Record<EnvironmentInstanceSchema['observedState'], string>> = {
+const environmentLabels: Partial<Record<EnvironmentDetailSchema['observedState'], string>> = {
   ready: '量子材料 · 交互实验环境',
   stopped: '量子材料 · 数据分析环境',
   deleted: '量子材料 · 历史实验环境',
   failed: '量子材料 · 置备诊断环境',
 }
 
-function environmentDisplayLabel(state: EnvironmentInstanceSchema['observedState']): string {
+function environmentDisplayLabel(state: EnvironmentDetailSchema['observedState']): string {
   return environmentLabels[state] ?? '量子材料 · 实验环境'
 }
 
@@ -306,7 +305,7 @@ const sceneEnvironmentIds: Partial<Record<string, string>> = {
   'work-launcher': 'env-workbench',
 }
 
-function environmentClassFor(id: string): EnvironmentInstanceSchema['class'] {
+function environmentClassFor(id: string): EnvironmentDetailSchema['class'] {
   return id === 'env-workbench' ? 'work' : 'experiment'
 }
 
@@ -316,7 +315,7 @@ function environmentInstance(id: string): EnvironmentDetailSchema {
   const deleted = state === 'deleted'
   const failed = state === 'failed'
   const stopped = state === 'stopped'
-  const operation: EnvironmentOperation = {
+  const operation: PublicEnvironmentOperation = {
     id: failed ? 'operation-provision-failed' : `operation-${state}`,
     kind: failed ? 'start' : state === 'stopped' ? 'stop' : state === 'deleted' ? 'delete' : 'start',
     state: failed ? 'failed' : 'succeeded',

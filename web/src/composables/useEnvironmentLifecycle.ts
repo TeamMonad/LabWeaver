@@ -1,5 +1,5 @@
 import { reactive, ref, type Ref } from 'vue'
-import type { EnvironmentInstanceSchema, EnvironmentOperationSnapshotSchema, ObjectAction } from '@/generated/contracts'
+import type { EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, ObjectAction } from '@/generated/contracts'
 import type { ProjectAvailableActions } from '@/composables/useProjectAvailableActions'
 import { retryEnvironment } from '@/generated/contracts'
 import { environmentOperationKindLabel, environmentStateLabel } from '@/utils/stateLabels'
@@ -18,7 +18,7 @@ import {
   deleteEnvironment,
 } from '@/generated/contracts'
 import type { CreateEnvironmentRequestSchema, EnvironmentOperationAcceptedSchema } from '@/generated/contracts'
-import { extractProblemDetails, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
+import { extractProblemDetails, isRestartOutcomeUnknown, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 export type LifecycleAction = 'start' | 'stop' | 'restart' | 'delete'
@@ -140,7 +140,19 @@ interface LifecycleTarget {
   action: EnvironmentLifecycleAction
 }
 
-type InstanceState = { kind: string; data?: EnvironmentInstanceSchema }
+type InstanceState = { kind: string; data?: EnvironmentDetailSchema }
+
+/**
+ * Whether the server offers recovery for the operation the environment detail shows, as far as
+ * the operation history settles it: `pending` while the history is being read or does not yet
+ * hold that operation in the detail's state, `unreadable` when the history read failed, and
+ * `eligible`/`ineligible` only from a snapshot of that same operation.
+ */
+export type OperationRecovery =
+  | { kind: 'pending'; reading: boolean }
+  | { kind: 'unreadable'; diagnostic: DiagnosticViewModel }
+  | { kind: 'eligible' }
+  | { kind: 'ineligible' }
 
 /** The part of `useProjectAvailableActions` that page controls consume. */
 export type ObjectActionPermissions = Pick<ProjectAvailableActions, 'current' | 'allows' | 'denialReason' | 'refresh'>
@@ -162,6 +174,8 @@ export interface EnvironmentLifecycleControlsDeps {
   lifecycle: ReturnType<typeof useEnvironmentLifecycle>
   activeOperation: Ref<EnvironmentOperationSnapshotSchema | null>
   retryableOperation: Ref<EnvironmentOperationSnapshotSchema | null>
+  /** Recovery eligibility of the detail's current operation. */
+  currentOperationRecovery: Ref<OperationRecovery>
   /** Current object actions in the environment's project. */
   permissions: ObjectActionPermissions
 }
@@ -172,19 +186,19 @@ export interface EnvironmentLifecycleControlsDeps {
  * of a failed operation. API calls go through `useEnvironmentLifecycle`.
  */
 export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleControlsDeps) {
-  const { env, operations, lifecycle, activeOperation, retryableOperation, permissions } = deps
+  const { env, operations, lifecycle, activeOperation, retryableOperation, currentOperationRecovery, permissions } = deps
   const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
   const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
   const retryingEnvironment = ref(false)
   const lastLifecycleTarget = ref<LifecycleTarget | null>(null)
-  const deleteEnvironment = ref<EnvironmentInstanceSchema | null>(null)
-  const lifecycleConfirmation = ref<{ data: EnvironmentInstanceSchema; action: ConfirmedLifecycleAction } | null>(null)
+  const deleteEnvironment = ref<EnvironmentDetailSchema | null>(null)
+  const lifecycleConfirmation = ref<{ data: EnvironmentDetailSchema; action: ConfirmedLifecycleAction } | null>(null)
 
-  function currentInstance(): EnvironmentInstanceSchema | undefined {
+  function currentInstance(): EnvironmentDetailSchema | undefined {
     return env.instance.kind === 'success' ? env.instance.data : undefined
   }
 
-  function hasActiveLifecycleOperation(data: EnvironmentInstanceSchema): boolean {
+  function hasActiveLifecycleOperation(data: EnvironmentDetailSchema): boolean {
     const current = data.operation.state
     if (current === 'accepted' || current === 'running' || current === 'cancelling') return true
     const accepted = lifecycle.lastAccepted
@@ -192,7 +206,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     return activeOperation.value?.environmentId === data.id
   }
 
-  function canStart(data: EnvironmentInstanceSchema) {
+  function canStart(data: EnvironmentDetailSchema) {
     return permissions.allows('start')
       && !isTerminalEnvironment(data)
       && !hasActiveLifecycleOperation(data)
@@ -202,7 +216,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
       && !lifecycle.operating.has(`${data.id}:start`)
   }
 
-  function canStop(data: EnvironmentInstanceSchema) {
+  function canStop(data: EnvironmentDetailSchema) {
     return permissions.allows('stop')
       && !isTerminalEnvironment(data)
       && !hasActiveLifecycleOperation(data)
@@ -212,7 +226,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
       && !lifecycle.operating.has(`${data.id}:stop`)
   }
 
-  function canRestart(data: EnvironmentInstanceSchema) {
+  function canRestart(data: EnvironmentDetailSchema) {
     return permissions.allows('start')
       && !isTerminalEnvironment(data)
       && !hasActiveLifecycleOperation(data)
@@ -221,7 +235,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
       && !lifecycle.operating.has(`${data.id}:restart`)
   }
 
-  function canDelete(data: EnvironmentInstanceSchema) {
+  function canDelete(data: EnvironmentDetailSchema) {
     return permissions.allows('edit')
       && !isTerminalEnvironment(data)
       && (data.desiredState !== 'deleted' || (failedCleanup(data) && !hasActiveLifecycleOperation(data)))
@@ -234,7 +248,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     return permissions.allows('edit')
   }
 
-  function lifecycleActionReason(data: EnvironmentInstanceSchema, action: EnvironmentLifecycleAction): string {
+  function lifecycleActionReason(data: EnvironmentDetailSchema, action: EnvironmentLifecycleAction): string {
     if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
     const denied = permissions.denialReason(
       LIFECYCLE_OBJECT_ACTION[action],
@@ -256,14 +270,19 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     return `${action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '删除'}环境`
   }
 
-  function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
+  function lifecycleActionHint(data: EnvironmentDetailSchema): string {
     if (data.observedState === 'deleted') return '此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。'
     if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return '环境回收失败，资源释放尚未确认。请重试回收；回收完成前不能打开控制台或重新启动环境。'
     if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
     if (hasActiveLifecycleOperation(data)) return `当前正在${environmentOperationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
     if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
     if (data.observedState === 'stopped') return `环境已停止，启动后才能打开终端。工作目录和磁盘仍保留。${STOPPED_IMPACT_NOTICE}`
-    if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
+    if (data.observedState === 'failed') {
+      if (data.operation.state === 'failed' && isRestartOutcomeUnknown(data.operation.diagnosticCode)) {
+        return '上次重启结果未知，平台不会自动重试。请先在“异步操作与诊断”中核对环境状态，再手动选择恢复。'
+      }
+      return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
+    }
     return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
   }
 
@@ -286,13 +305,47 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     if (diagnostic?.status === 403) void permissions.refresh()
   }
 
-  function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
-    if (failedCleanup(data)) return '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。'
+  /**
+   * Why the environment is failed and what the user can do. An unknown restart outcome is never
+   * retried by the page; the next step names the toolbar recovery once the server's answer for
+   * that operation is read, and says none is available only when the server declined it.
+   */
+  function failedEnvironmentDiagnostic(data: EnvironmentDetailSchema): DiagnosticViewModel {
+    if (failedCleanup(data)) {
+      return { code: '', message: '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。', retryable: false }
+    }
+    const code = data.operation.state === 'failed' ? data.operation.diagnosticCode : null
+    if (isRestartOutcomeUnknown(code)) {
+      const diagnostic = makeDiagnostic(code, '', false)
+      const recovery = currentOperationRecovery.value
+      if (recovery.kind === 'eligible') return diagnostic
+      if (recovery.kind === 'ineligible') {
+        return { ...diagnostic, nextStep: '平台不会自动重试。请在“异步操作与诊断”中核对环境当前状态；平台对这次操作没有提供恢复，请把下方诊断信息发给管理员。' }
+      }
+      if (recovery.kind === 'unreadable') {
+        return { ...diagnostic, nextStep: `平台不会自动重试。操作历史读取失败（${recovery.diagnostic.message}），暂时无法确认能否恢复；请重新读取操作历史。` }
+      }
+      return {
+        ...diagnostic,
+        nextStep: recovery.reading
+          ? '平台不会自动重试。正在读取操作历史以确认能否恢复，确认前不要重复提交重启。'
+          : '平台不会自动重试。操作历史还没有这次操作的最新结果，暂时无法确认能否恢复；请重新读取操作历史。',
+      }
+    }
     const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
-    return `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`
+    return { code: '', message: `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`, retryable: false }
   }
 
-  async function runLifecycle(data: EnvironmentInstanceSchema, action: EnvironmentLifecycleAction) {
+  /** Offers to re-read the operation history when an unknown restart's recovery is still unsettled and nothing is reading it. */
+  function canRereadRecovery(data: EnvironmentDetailSchema): boolean {
+    const recovery = currentOperationRecovery.value
+    return data.operation.state === 'failed'
+      && isRestartOutcomeUnknown(data.operation.diagnosticCode)
+      && !failedCleanup(data)
+      && (recovery.kind === 'unreadable' || (recovery.kind === 'pending' && !recovery.reading))
+  }
+
+  async function runLifecycle(data: EnvironmentDetailSchema, action: EnvironmentLifecycleAction) {
     lifecycleDiagnostic.value = null
     lastLifecycleTarget.value = { environmentId: data.id, revision: data.revision, action }
     const result = await lifecycle.act(data.id, data.revision, action)
@@ -307,7 +360,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   }
 
   /** Stop and restart interrupt sessions and change usage, so they confirm first; start never does. */
-  function requestLifecycleConfirmation(data: EnvironmentInstanceSchema, action: ConfirmedLifecycleAction) {
+  function requestLifecycleConfirmation(data: EnvironmentDetailSchema, action: ConfirmedLifecycleAction) {
     lifecycleConfirmation.value = { data, action }
   }
 
@@ -317,7 +370,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     if (pending) await runLifecycle(pending.data, pending.action)
   }
 
-  async function retryFailedOperation(data: EnvironmentInstanceSchema) {
+  async function retryFailedOperation(data: EnvironmentDetailSchema) {
     if (!canRetryFailedOperation()) return
     retryDiagnostic.value = null
     retryingEnvironment.value = true
@@ -353,7 +406,7 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     await runLifecycle(instance, target.action)
   }
 
-  function openDelete(data: EnvironmentInstanceSchema) {
+  function openDelete(data: EnvironmentDetailSchema) {
     if (!canDelete(data)) return
     deleteEnvironment.value = data
   }
@@ -387,7 +440,8 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     lifecycleActionReason,
     lifecycleActionHint,
     lifecyclePermissionHint,
-    failedEnvironmentMessage,
+    failedEnvironmentDiagnostic,
+    canRereadRecovery,
     runLifecycle,
     requestLifecycleConfirmation,
     confirmLifecycle,

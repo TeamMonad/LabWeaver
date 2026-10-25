@@ -1,9 +1,9 @@
-import type { AccessGrantSchema, EndpointGrant, EnvironmentInstanceSchema } from '@/generated/contracts'
+import type { AccessGrantSchema, EndpointGrant, EnvironmentDetailSchema } from '@/generated/contracts'
 
 export type AccessGrantWithGateway = AccessGrantSchema
 
-export type EnvironmentInstanceWithFreeze = EnvironmentInstanceSchema & {
-  freezeEvidence?: EnvironmentInstanceSchema['cleanupEvidence']
+export type EnvironmentInstanceWithFreeze = EnvironmentDetailSchema & {
+  freezeEvidence?: EnvironmentDetailSchema['cleanupEvidence']
 }
 
 /** Single-line SSH command for a VM endpoint grant. Returns null when the
