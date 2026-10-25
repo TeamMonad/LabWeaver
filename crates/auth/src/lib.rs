@@ -53,7 +53,7 @@ pub use repository::{
     RepositoryError, bounded_idle_expiry, cleanup_expired_auth_state, configured_session_expiry,
     consume_backchannel_logout, consume_oidc_transaction, create_bff_session, load_bff_session,
     load_logout_hint, load_membership_snapshot, revoke_bff_session, revoke_bff_sessions_by_sid,
-    upsert_actor, upsert_actor_with_metadata,
+    update_notification_email, upsert_actor, upsert_actor_with_metadata,
 };
 pub use resource_delegation::{
     ResourceDelegation, ResourceDelegationError, decode_resource_delegation,

@@ -1,0 +1,116 @@
+{
+  "$defs": {
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "NotificationEmailState": {
+      "enum": [
+        "disabled",
+        "pending",
+        "sent",
+        "failed",
+        "exhausted",
+        "no_verified_email",
+        "delivery_unknown"
+      ],
+      "type": "string"
+    },
+    "NotificationKind": {
+      "enum": [
+        "resource_decision",
+        "lease_changed",
+        "lease_expiry_reminder",
+        "short_lease"
+      ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "deadline": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "emailAttempts": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "emailDetail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "emailDiagnostic": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "emailState": {
+      "$ref": "#/$defs/NotificationEmailState"
+    },
+    "eventId": {
+      "$ref": "#/$defs/EventId"
+    },
+    "id": {
+      "$ref": "#/$defs/EventId"
+    },
+    "kind": {
+      "$ref": "#/$defs/NotificationKind"
+    },
+    "objectUrl": {
+      "type": "string"
+    },
+    "observedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "readAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "summary": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "eventId",
+    "projectId",
+    "kind",
+    "objectUrl",
+    "summary",
+    "observedAt",
+    "emailState",
+    "emailAttempts"
+  ],
+  "title": "Notification",
+  "type": "object"
+}

@@ -120,6 +120,13 @@ spec:
     {{- end }}
     {{- end }}
   egress:
+    {{- if and (eq $name "control-service") $root.Values.notificationSmtpEgress }}
+    {{- range $cidr := $root.Values.notificationSmtpEgress.cidrs }}
+    - to:
+        - ipBlock: {cidr: {{ $cidr | quote }}}
+      ports: [{protocol: TCP, port: {{ $root.Values.notificationSmtpEgress.port }}}]
+    {{- end }}
+    {{- end }}
     {{- if eq $name "kubevirt-console-executor" }}
     # Console frames leave only through the Kubernetes VNC subresource. DNS is
     # limited to cluster DNS so the explicitly configured API endpoint resolves.

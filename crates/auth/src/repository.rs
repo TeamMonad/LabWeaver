@@ -345,6 +345,31 @@ pub async fn upsert_actor_with_metadata(
     })
 }
 
+/// Refreshes private notification delivery metadata after a verified OIDC callback.
+/// Absence, malformed email, or withdrawal of `email_verified` explicitly clears the old address.
+pub async fn update_notification_email(
+    pool: &PgPool,
+    actor_id: Uuid,
+    verified_claims: &serde_json::Value,
+) -> Result<(), RepositoryError> {
+    let email = verified_claims
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            verified_claims
+                .get("email_verified")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && (3..=254).contains(&value.len())
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+                && value.contains('@')
+        });
+    sqlx::query("INSERT INTO access.actor_notification_emails(actor_id,verified_email) VALUES($1,$2) ON CONFLICT(actor_id) DO UPDATE SET verified_email=EXCLUDED.verified_email,updated_at=date_trunc('milliseconds',clock_timestamp())")
+        .bind(actor_id).bind(email).execute(pool).await?;
+    Ok(())
+}
+
 /// Rotates the browser session identifier and stores all secrets AEAD-encrypted.
 pub async fn create_bff_session(
     pool: &PgPool,

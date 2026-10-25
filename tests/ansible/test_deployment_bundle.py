@@ -346,7 +346,11 @@ class DeploymentBundleTests(unittest.TestCase):
         )
         for name in inputs:
             if name not in {"container-executor", "kubevirt-executor", "agent-service"}:
-                self.assertEqual(values["workloadInputs"][name], inputs[name])
+                expected = copy.deepcopy(inputs[name])
+                if name == "control-service":
+                    expected["env"]["LABWEAVER_NOTIFICATIONS_FILE"] = "/etc/labweaver/config/notifications.json"
+                    self.assertNotIn("LABWEAVER_NOTIFICATIONS_FILE", inputs[name]["env"])
+                self.assertEqual(values["workloadInputs"][name], expected)
         self.assertNotIn("workloads", values)
         del inputs["control-service"]["env"]["LABWEAVER_SERVICE_SCOPES"]
         self.save_model()

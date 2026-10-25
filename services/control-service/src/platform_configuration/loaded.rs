@@ -55,6 +55,11 @@ struct ReplicaIdentity {
 }
 
 impl LoadedConfiguration {
+    /// Lifecycle defaults from this authenticated process-loaded Bundle, not unapplied edits.
+    #[must_use]
+    pub fn expiry_reminder_seconds(&self) -> &[u64] {
+        &self.version.configuration.lifecycle.expiry_reminder_seconds
+    }
     /// Reads both private files once, validates settings and recomputes their canonical digest.
     /// Loading a replacement never mutates a previously loaded process snapshot.
     pub fn load(version_file: &Path, source_file: &Path) -> Result<Self, ConfigurationError> {

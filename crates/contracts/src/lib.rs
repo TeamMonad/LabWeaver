@@ -28,6 +28,7 @@ pub mod execution;
 pub mod foundation;
 pub mod http;
 pub mod membership_governance;
+pub mod notifications;
 pub mod object_authorization;
 pub mod platform_configuration;
 pub mod project;

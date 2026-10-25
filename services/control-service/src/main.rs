@@ -93,6 +93,37 @@ async fn main() -> Result<(), StartupError> {
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
     let loaded_configuration = load_platform_configuration()?;
+    let (smtp, reminder_windows) = if let Some(path) =
+        std::env::var_os("LABWEAVER_NOTIFICATIONS_FILE")
+    {
+        let notification = control_service::notifications::smtp::NotificationConfiguration::load(
+            std::path::Path::new(&path),
+        )?;
+        if loaded_configuration.as_ref().is_some_and(|loaded| {
+            loaded.expiry_reminder_seconds() != notification.expiry_reminder_seconds
+        }) {
+            return Err(StartupError::Configuration);
+        }
+        (
+            notification
+                .smtp
+                .map(control_service::notifications::smtp::SmtpWorker::new)
+                .transpose()?,
+            notification.expiry_reminder_seconds,
+        )
+    } else {
+        (
+            None,
+            loaded_configuration.as_ref().map_or_else(
+                || {
+                    contracts::platform_configuration::PlatformLifecycleDefaults::default()
+                        .expiry_reminder_seconds
+                },
+                |loaded| loaded.expiry_reminder_seconds().to_vec(),
+            ),
+        )
+    };
+    let email_enabled = smtp.is_some();
     let tls = http_transport::load_server_config(
         &deployment.gateway_tls.server_certificate_file,
         &deployment.gateway_tls.server_key_file,
@@ -163,6 +194,10 @@ async fn main() -> Result<(), StartupError> {
         deployment.nats.credentials_file.into(),
     )
     .await?;
+    let notification_consumer =
+        control_service::notifications::consumer::NotificationConsumer::bind(nats.clone()).await?;
+    let notification_pool = pool.clone();
+    let email_pool = pool.clone();
     let outbox = ControlOutboxDispatcher::new(
         pool,
         nats.clone(),
@@ -197,6 +232,20 @@ async fn main() -> Result<(), StartupError> {
     let authoring_consumer_evaluation = evaluation;
     let interval = std::time::Duration::from_secs(deployment.cleanup_interval_seconds);
     let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
+    let (notification_stop, stop_receiver) = tokio::sync::watch::channel(false);
+    let mut notifications = Box::pin(notification_consumer.run(
+        notification_pool,
+        reminder_windows,
+        email_enabled,
+        stop_receiver.clone(),
+    ));
+    let mut emails = Box::pin(async {
+        if let Some(worker) = smtp {
+            worker.run(email_pool, stop_receiver).await
+        } else {
+            std::future::pending().await
+        }
+    });
     tokio::select! {
         result = http_transport::serve_tls(
             listener,
@@ -209,8 +258,32 @@ async fn main() -> Result<(), StartupError> {
         result = build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent) => result?,
         result = authoring_consumer_loop(authoring_consumer, authoring_consumer_control, authoring_consumer_evaluation, authoring_consumer_agent) => result?,
         result = outbox_loop(outbox, outbox_interval) => result?,
+        result = &mut notifications => result?,
+        result = &mut emails => result?,
+        result = notification_shutdown_signal() => {
+            result?;
+            notification_stop.send_replace(true);
+            tokio::time::timeout(Duration::from_secs(20),async {
+                notifications.await?;
+                if email_enabled { emails.await?; }
+                Ok::<(),control_service::notifications::NotificationError>(())
+            }).await.map_err(|_|StartupError::Configuration)??;
+        },
     }
     Ok(())
+}
+
+async fn notification_shutdown_signal() -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! { result=tokio::signal::ctrl_c()=>result, _=terminate.recv()=>Ok(()) }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 async fn discover_service_auth()
@@ -427,6 +500,10 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
          AND to_regclass('control.image_artifact_projections') IS NOT NULL \
          AND to_regclass('control.container_build_projections') IS NOT NULL \
          AND to_regclass('control.authoring_approval_publications') IS NOT NULL \
+         AND to_regclass('control.notifications') IS NOT NULL \
+         AND to_regclass('control.notification_sources') IS NOT NULL \
+         AND to_regclass('control.notification_inbox') IS NOT NULL \
+         AND to_regclass('access.notification_recipients') IS NOT NULL \
          AND to_regclass('control.platform_image_upload_sessions') IS NOT NULL",
     )
     .fetch_one(pool)
@@ -468,6 +545,8 @@ async fn cleanup_loop(
 
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
+    #[error(transparent)]
+    Notification(#[from] control_service::notifications::NotificationError),
     #[error("LW_CONTROL_CONFIG_INVALID")]
     Configuration,
     #[error("LW_CONTROL_SCHEMA_UNAVAILABLE")]

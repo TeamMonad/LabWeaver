@@ -22,6 +22,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         };
     }
     document!(
+        "schemas/contracts/v1/notification.schema.json",
+        crate::notifications::Notification
+    );
+    document!(
+        "schemas/contracts/v1/notification-page.schema.json",
+        crate::notifications::NotificationPage
+    );
+    document!(
+        "schemas/contracts/v1/notification-unread-count.schema.json",
+        crate::notifications::NotificationUnreadCount
+    );
+    document!(
         "schemas/contracts/v1/runtime-authorization-binding.schema.json",
         crate::runtime_authorization::RuntimeAuthorizationBinding
     );
@@ -1502,6 +1514,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "listEvaluationReleases"
                 | "listOwnProjectEvaluationResults"
                 | "listSshPublicKeys"
+                | "listNotifications"
         ) {
             parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024}}));
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}));
@@ -1789,6 +1802,17 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_ACCESS_DIRECTORY_USER_DISABLED",
                 "LW_IDEMPOTENCY_CONFLICT",
                 "LW_REVISION_CONFLICT"
+            ]);
+        }
+        if matches!(
+            operation.operation_id,
+            "listNotifications" | "getNotificationUnreadCount" | "markNotificationRead"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_NOTIFICATION_INVALID",
+                "LW_NOTIFICATION_NOT_FOUND",
+                "LW_NOTIFICATION_PERSISTENCE_FAILED",
+                "LW_AUTH_SCOPE_DENIED"
             ]);
         }
         if matches!(
@@ -2452,6 +2476,9 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
+        "listNotifications" => contract_ref("notification-page"),
+        "getNotificationUnreadCount" => contract_ref("notification-unread-count"),
+        "markNotificationRead" => contract_ref("notification"),
         "getResourceRuntimeAuthorization" => contract_ref("runtime-authorization-binding"),
         "createProjectMembershipInvitation"
         | "createCourseMembershipInvitation"

@@ -351,6 +351,15 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
 
 fn control_browser_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/v1/notifications", get(proxy::forward_control))
+        .route(
+            "/api/v1/notifications/unread-count",
+            get(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/notifications/{notification_id}/read",
+            axum::routing::put(proxy::forward_control),
+        )
         .merge(project_browser_router())
         .merge(course_browser_router())
         .merge(admin_browser_router())
