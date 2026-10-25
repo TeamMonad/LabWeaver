@@ -1633,9 +1633,12 @@ def free_port() -> str:
 
 
 def verify_loopback_nip_io() -> None:
-    """Require portal and runtime convenience names to remain loopback-only."""
+    """Require the portal convenience name to remain loopback-only.
 
-    for hostname in ("127.0.0.1.nip.io", "runtime.127.0.0.1.nip.io"):
+    Runtime hosts use the browser-reserved *.localhost namespace, not public DNS.
+    """
+
+    for hostname in ("127.0.0.1.nip.io",):
         try:
             addresses = {
                 item[4][0]
@@ -3180,7 +3183,7 @@ def make_app_input(
         data=data.replace("https://keycloak.example.invalid/realms/labweaver", public_issuer)
         data=data.replace("https://keycloak.example.invalid/realms/workloads", public_issuer)
         data=data.replace("https://portal.example.invalid", portal_origin)
-        data=data.replace("https://runtime.example.invalid", f"https://runtime.127.0.0.1.nip.io:{PORTAL_PORT}")
+        data=data.replace("https://runtime.example.invalid", f"https://runtime.localhost:{PORTAL_PORT}")
         data=data.replace("https://demo.lab.example/", portal_origin + "/")
         registry_host = (
             real_build_provider.registry_host
@@ -3685,7 +3688,7 @@ http {
   }
   server {
     listen 8443 ssl;
-    server_name runtime.127.0.0.1.nip.io;
+    server_name *.runtime.localhost;
     ssl_certificate /etc/labweaver/tls/tls.crt;
     ssl_certificate_key /etc/labweaver/tls/tls.key;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -3897,7 +3900,7 @@ def up(
         portal_key, portal_crt = cert(
             work / "portal", foundation / "authority" / "ca.key",
             foundation / "authority" / "ca.crt", "portal",
-            ["DNS:127.0.0.1.nip.io", "DNS:runtime.127.0.0.1.nip.io", "DNS:localhost", "IP:127.0.0.1"],
+            ["DNS:127.0.0.1.nip.io", "DNS:*.runtime.localhost", "DNS:localhost", "IP:127.0.0.1"],
             usage="serverAuth",
         )
         deploy_local_portal(kubeconfig, work, images, portal_key, portal_crt,

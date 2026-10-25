@@ -3,6 +3,7 @@ use super::*;
 use contracts::{EndpointGrantId, environment::EnvironmentInstance};
 use environment_service::{OwnerResolver, PgEnvironmentStore, PgReleaseProjectionStore};
 use reqwest::cookie::Jar;
+use sqlx::Row;
 
 struct RuntimeFixture {
     state: Arc<AppState>,
@@ -10,6 +11,9 @@ struct RuntimeFixture {
     portal: String,
     runtime: String,
     grant: EndpointGrantId,
+    runtime_b: String,
+    grant_b: EndpointGrantId,
+    request_log: Arc<Mutex<Vec<Value>>>,
     bff: BffSession,
     upstream: Arc<Mutex<Vec<Value>>>,
     _tasks: Tasks,
@@ -88,22 +92,30 @@ impl RuntimeFixture {
             "lastDiagnosticCode":null,"failedPhase":null,"cleanupEvidence":null
         }))?;
         instance.validate()?;
-        sqlx::query("INSERT INTO environment.environment_instances(environment_id,project_id,course_id,owner_actor_id,release_id,generation,observed_generation,desired_state,observed_state,provider_binding,revision,contract) VALUES($1,$2,NULL,$3,$4,1,1,'running','ready','container-primary-v1',1,$5)")
-            .bind(environment.as_uuid()).bind(project.as_uuid()).bind(actor).bind(instance.release_id.as_uuid())
-            .bind(serde_json::to_value(&instance)?).execute(&pool).await?;
-        sqlx::query("INSERT INTO control.project_memberships(project_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','editor','active',1)")
-            .bind(project.as_uuid()).bind(actor).execute(&pool).await?;
-        sqlx::query("INSERT INTO access.access_grants(grant_id,actor_id,project_id,environment_id,environment_revision,revision,state,not_before,expires_at,contract) VALUES($1,$2,$3,$4,1,1,'active',$5,$6,$7)")
-            .bind(access_grant.as_uuid()).bind(actor).bind(project.as_uuid()).bind(environment.as_uuid())
-            .bind(now.get()).bind(deadline.get()).bind(json!({"subjectKind":"owner"})).execute(&pool).await?;
-        sqlx::query("INSERT INTO access.endpoint_grants(endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,action,health,expires_at,contract) VALUES($1,$2,$3,1,'http','connect','healthy',$4,'{}')")
-            .bind(grant.as_uuid()).bind(access_grant.as_uuid()).bind(endpoint.as_uuid()).bind(deadline.get()).execute(&pool).await?;
+        seed_runtime(&pool, &instance, grant, access_grant).await?;
+        let mut second = instance.clone();
+        second.id = contracts::EnvironmentId::new();
+        second.project_id = contracts::ProjectId::new();
+        second.endpoints[0].id = contracts::EndpointId::new();
+        let grant_b = EndpointGrantId::new();
+        seed_runtime(&pool, &second, grant_b, contracts::AccessGrantId::new()).await?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        let portal = format!("https://localhost:{}", address.port());
-        let runtime = format!("https://127.0.0.1:{}", address.port());
+        let portal = format!("https://portal.localhost:{}", address.port());
+        let runtime_base = format!("https://runtime.localhost:{}", address.port());
+        let runtime = format!(
+            "https://g-{}.runtime.localhost:{}",
+            grant.as_uuid().simple(),
+            address.port()
+        );
+        let runtime_b = format!(
+            "https://g-{}.runtime.localhost:{}",
+            grant_b.as_uuid().simple(),
+            address.port()
+        );
         let certificate = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_owned(),
+            "portal.localhost".to_owned(),
+            "*.runtime.localhost".to_owned(),
             "127.0.0.1".to_owned(),
         ])?;
         let ca = certificate.cert.pem();
@@ -155,8 +167,8 @@ impl RuntimeFixture {
         mutable
             .deployment
             .browser
-            .runtime_origin
-            .clone_from(&runtime);
+            .runtime_base_origin
+            .clone_from(&runtime_base);
         let mut config = mutable.deployment.environment_owner_resolver.clone();
         config.resolver_uri = resolver_uri;
         mutable.owner_resolver = EnvironmentOwnerResolverClient::new(
@@ -174,9 +186,16 @@ impl RuntimeFixture {
                 &format!("runtime.lw-env-{environment}.svc.cluster.local"),
                 upstream_address,
             )
+            .resolve(
+                &format!("runtime.lw-env-{}.svc.cluster.local", second.id),
+                upstream_address,
+            )
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let router = browser_router(Arc::clone(&state));
+        let request_log = Arc::new(Mutex::new(Vec::new()));
+        let router = browser_router(Arc::clone(&state)).layer(
+            axum::middleware::from_fn_with_state(Arc::clone(&request_log), record_request_uri),
+        );
         tasks.0.push(tokio::spawn(async move {
             let _ = http_transport::serve_tls(listener, router, tls).await;
         }));
@@ -192,6 +211,19 @@ impl RuntimeFixture {
             .no_proxy()
             .cookie_provider(jar)
             .add_root_certificate(reqwest::Certificate::from_pem(ca.as_bytes())?)
+            .resolve("portal.localhost", address)
+            .resolve(
+                Url::parse(&runtime)?
+                    .host_str()
+                    .ok_or("missing runtime host")?,
+                address,
+            )
+            .resolve(
+                Url::parse(&runtime_b)?
+                    .host_str()
+                    .ok_or("missing second runtime host")?,
+                address,
+            )
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
@@ -200,6 +232,9 @@ impl RuntimeFixture {
             portal,
             runtime,
             grant,
+            runtime_b,
+            grant_b,
+            request_log,
             bff,
             upstream,
             _tasks: tasks,
@@ -207,10 +242,10 @@ impl RuntimeFixture {
         })
     }
 
-    async fn handoff(&self) -> Result<String, Box<dyn Error>> {
+    async fn handoff(&self, grant: EndpointGrantId) -> Result<String, Box<dyn Error>> {
         let start = self
             .client
-            .get(format!("{}/connect/{}/", self.portal, self.grant))
+            .get(format!("{}/connect/{grant}/", self.portal))
             .send()
             .await?;
         assert_eq!(
@@ -225,14 +260,90 @@ impl RuntimeFixture {
             .send()
             .await?;
         assert_eq!(bootstrap.status(), StatusCode::SEE_OTHER);
+        let return_url = Url::parse(bootstrap.headers()[header::LOCATION].to_str()?)?;
+        let binding = return_url
+            .fragment()
+            .and_then(|fragment| fragment.strip_prefix("binding="))
+            .ok_or("missing binding fragment")?;
+        assert!(
+            !return_url
+                .query()
+                .is_some_and(|query| query.contains("binding"))
+        );
+        let page = self.client.get(return_url.as_str()).send().await?;
+        assert_eq!(page.status(), StatusCode::OK);
         let issued = self
             .client
-            .get(bootstrap.headers()[header::LOCATION].to_str()?)
+            .post(format!("{}/connect/{grant}/", self.portal))
+            .header(header::ORIGIN, &self.portal)
+            .header("X-CSRF-Token", self.bff.csrf_token.expose())
+            .json(&json!({"binding":binding}))
             .send()
             .await?;
-        assert_eq!(issued.status(), StatusCode::SEE_OTHER);
-        Ok(issued.headers()[header::LOCATION].to_str()?.to_owned())
+        assert_eq!(issued.status(), StatusCode::OK, "{}", issued.text().await?);
+        assert!(self.request_log.lock().await.iter().all(|entry| {
+            entry["target"]
+                .as_str()
+                .is_some_and(|uri| !uri.contains(binding) && !uri.contains("binding="))
+        }));
+        let document: Value = issued.json().await?;
+        Ok(document["handoffUrl"]
+            .as_str()
+            .ok_or("missing handoff URL")?
+            .to_owned())
     }
+}
+
+async fn record_request_uri(
+    State(log): State<Arc<Mutex<Vec<Value>>>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // Nginx's default $request/$request_uri sees exactly this request target, never fragments or POST bodies.
+    let headers = request.headers();
+    let cookies = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let capability = cookies
+        .split(';')
+        .find_map(|item| item.trim().strip_prefix("__Secure-labweaver_runtime="));
+    let authority = request
+        .uri()
+        .authority()
+        .map(axum::http::uri::Authority::as_str)
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|value| value.to_str().ok())
+        });
+    let record = json!({"target": request.uri().to_string(),"path":request.uri().path(),"authority":authority,
+        "site":headers.get("sec-fetch-site").and_then(|value|value.to_str().ok()),
+        "origin":headers.get(header::ORIGIN).and_then(|value|value.to_str().ok()),
+        "capabilitySha256":capability.map(|token|Sha256Digest::of_bytes(token.as_bytes()).to_string()),
+        "hasBffCookie":cookies.contains("__Host-labweaver_session=")});
+    log.lock().await.push(record);
+    next.run(request).await
+}
+
+async fn seed_runtime(
+    pool: &PgPool,
+    instance: &EnvironmentInstance,
+    grant: EndpointGrantId,
+    access: contracts::AccessGrantId,
+) -> Result<(), Box<dyn Error>> {
+    let actor = instance.owner_id.as_uuid();
+    sqlx::query("INSERT INTO environment.environment_instances(environment_id,project_id,course_id,owner_actor_id,release_id,generation,observed_generation,desired_state,observed_state,provider_binding,revision,contract) VALUES($1,$2,NULL,$3,$4,1,1,'running','ready','container-primary-v1',1,$5)")
+        .bind(instance.id.as_uuid()).bind(instance.project_id.as_uuid()).bind(actor).bind(instance.release_id.as_uuid())
+        .bind(serde_json::to_value(instance)?).execute(pool).await?;
+    sqlx::query("INSERT INTO control.project_memberships(project_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','editor','active',1)")
+        .bind(instance.project_id.as_uuid()).bind(actor).execute(pool).await?;
+    sqlx::query("INSERT INTO access.access_grants(grant_id,actor_id,project_id,environment_id,environment_revision,revision,state,not_before,expires_at,contract) VALUES($1,$2,$3,$4,1,1,'active',$5,$6,$7)")
+        .bind(access.as_uuid()).bind(actor).bind(instance.project_id.as_uuid()).bind(instance.id.as_uuid())
+        .bind(instance.operation.accepted_at.get()).bind(instance.operation.deadline_at.get()).bind(json!({"subjectKind":"owner"})).execute(pool).await?;
+    sqlx::query("INSERT INTO access.endpoint_grants(endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,action,health,expires_at,contract) VALUES($1,$2,$3,1,'http','connect','healthy',$4,'{}')")
+        .bind(grant.as_uuid()).bind(access.as_uuid()).bind(instance.endpoints[0].id.as_uuid()).bind(instance.operation.deadline_at.get()).execute(pool).await?;
+    Ok(())
 }
 
 async fn untrusted_app(
@@ -261,10 +372,48 @@ async fn untrusted_app(
 async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result<(), Box<dyn Error>>
 {
     let fixture = Box::pin(RuntimeFixture::new()).await?;
-    let handoff = fixture.handoff().await?;
+    // Hold the store lock until issuance is demonstrably waiting inside PostgreSQL.
+    // An application timestamp computed before that wait must not shorten the TTL.
+    let mut store_lock = fixture.state.pool.begin().await?;
+    sqlx::query("LOCK TABLE access.runtime_capabilities IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *store_lock)
+        .await?;
+    let issuing = fixture.handoff(fixture.grant);
+    tokio::pin!(issuing);
+    let await_store_wait = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_locks WHERE relation='access.runtime_capabilities'::regclass AND mode='RowExclusiveLock' AND NOT granted)")
+                .fetch_one(&fixture.state.pool).await?;
+            if waiting {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::select! {
+            result = &mut issuing => { let _ = result?; Err::<(), Box<dyn Error>>("issuance did not wait for PostgreSQL".into()) },
+            result = await_store_wait => result,
+        }
+    }).await??;
+    let database_release: OffsetDateTime =
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&fixture.state.pool)
+            .await?;
+    store_lock.commit().await?;
+    let handoff = issuing.await?;
+    let runtime_url = Url::parse(&fixture.runtime)?;
+    let address = std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        runtime_url.port().ok_or("missing runtime port")?,
+    ));
     let other = reqwest::Client::builder()
         .no_proxy()
         .danger_accept_invalid_certs(true)
+        .resolve(
+            runtime_url.host_str().ok_or("missing runtime host")?,
+            address,
+        )
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     assert_eq!(
@@ -279,8 +428,43 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
         fixture.client.get(crossed).send().await?.status(),
         StatusCode::FORBIDDEN
     );
-    let consumed = fixture.client.get(&handoff).send().await?;
-    assert_eq!(consumed.status(), StatusCode::SEE_OTHER);
+    let row = sqlx::query("SELECT c.issued_at,c.handoff_expires_at,c.expires_at,s.expires_at AS session_expires FROM access.runtime_capabilities c JOIN access.bff_sessions s ON s.session_id=c.bff_session_id")
+        .fetch_one(&fixture.state.pool).await?;
+    let issued_at: OffsetDateTime = row.get("issued_at");
+    assert!(
+        issued_at >= database_release,
+        "issuance must use the database clock after the store lock, not an earlier application timestamp"
+    );
+    assert_eq!(
+        row.get::<OffsetDateTime, _>("handoff_expires_at"),
+        issued_at + Duration::seconds(30)
+    );
+    assert_eq!(
+        row.get::<OffsetDateTime, _>("expires_at"),
+        std::cmp::min(
+            issued_at + Duration::seconds(300),
+            row.get("session_expires")
+        )
+    );
+    assert_eq!(issued_at.nanosecond() % 1_000_000, 0);
+    let (first, second) = tokio::join!(
+        fixture.client.get(&handoff).send(),
+        fixture.client.get(&handoff).send()
+    );
+    let first = first?;
+    let second = second?;
+    let mut statuses = [first.status().as_u16(), second.status().as_u16()];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        [303, 403],
+        "exactly one concurrent PostgreSQL redemption succeeds"
+    );
+    let consumed = if first.status() == StatusCode::SEE_OTHER {
+        first
+    } else {
+        second
+    };
     let cookie = consumed.headers()[header::SET_COOKIE].to_str()?.to_owned();
     assert!(cookie.contains("HttpOnly; Secure; SameSite=Lax"));
     assert!(cookie.contains(&format!("Path=/connect/{}/", fixture.grant)));
@@ -353,6 +537,47 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
         assert!(request["authorization"].is_null());
     }
     let requests = fixture.upstream.lock().await.len();
+    let handoff_b = fixture.handoff(fixture.grant_b).await?;
+    let consumed_b = fixture.client.get(handoff_b).send().await?;
+    assert_eq!(consumed_b.status(), StatusCode::SEE_OTHER);
+    let cookie_b = consumed_b.headers()[header::SET_COOKIE]
+        .to_str()?
+        .split(';')
+        .next()
+        .ok_or("missing capability B")?;
+    assert_eq!(
+        other
+            .get(&target)
+            .header(header::COOKIE, cookie_b)
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let target_b = format!(
+        "{}/connect/{}/cross-read",
+        fixture.runtime_b, fixture.grant_b
+    );
+    assert_eq!(
+        fixture
+            .client
+            .get(&target_b)
+            .header(header::ORIGIN, &fixture.runtime)
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fixture
+            .client
+            .post(&target_b)
+            .header(header::ORIGIN, &fixture.runtime)
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     let cap = cookie.split(';').next().ok_or("missing capability")?;
     assert_eq!(
         other
@@ -391,23 +616,23 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     .bind(fixture.bff.session_id)
     .execute(&fixture.state.pool)
     .await?;
-    let expired = fixture.handoff().await?;
-    sqlx::query("UPDATE access.runtime_capabilities SET handoff_expires_at=now()-interval '1 second' WHERE consumed_at IS NULL").execute(&fixture.state.pool).await?;
+    let expired = fixture.handoff(fixture.grant).await?;
+    sqlx::query("UPDATE access.runtime_capabilities SET issued_at=now()-interval '10 minutes',handoff_expires_at=now()-interval '9 minutes 30 seconds',expires_at=now()-interval '5 minutes' WHERE consumed_at IS NULL").execute(&fixture.state.pool).await?;
     assert_eq!(
         fixture.client.get(expired).send().await?.status(),
         StatusCode::FORBIDDEN
     );
-    sqlx::query("UPDATE access.runtime_capabilities SET expires_at=now()-interval '1 second' WHERE consumed_at IS NOT NULL").execute(&fixture.state.pool).await?;
+    sqlx::query("UPDATE access.runtime_capabilities SET issued_at=now()-interval '10 minutes',handoff_expires_at=now()-interval '9 minutes 30 seconds',expires_at=now()-interval '5 minutes' WHERE consumed_at IS NOT NULL").execute(&fixture.state.pool).await?;
     assert_eq!(
         fixture.client.get(&target).send().await?.status(),
         StatusCode::FORBIDDEN
     );
-    let renewed = fixture.handoff().await?;
+    let renewed = fixture.handoff(fixture.grant).await?;
     assert_eq!(
         fixture.client.get(renewed).send().await?.status(),
         StatusCode::SEE_OTHER
     );
-    let before_revoke = fixture.handoff().await?;
+    let before_revoke = fixture.handoff(fixture.grant).await?;
     sqlx::query("UPDATE access.access_grants SET state='revoked',revoked_at=now(),reason_code='actor_requested'")
         .execute(&fixture.state.pool)
         .await?;
@@ -422,7 +647,7 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     sqlx::query("UPDATE access.access_grants SET state='active',revoked_at=NULL,reason_code=NULL")
         .execute(&fixture.state.pool)
         .await?;
-    let before_expiry = fixture.handoff().await?;
+    let before_expiry = fixture.handoff(fixture.grant).await?;
     sqlx::query("UPDATE access.access_grants SET not_before=now()-interval '1 minute',expires_at=now()-interval '1 second'")
         .execute(&fixture.state.pool)
         .await?;
@@ -453,7 +678,7 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
     sqlx::query("UPDATE control.project_memberships SET object_role='editor'")
         .execute(&fixture.state.pool)
         .await?;
-    let before_logout = fixture.handoff().await?;
+    let before_logout = fixture.handoff(fixture.grant).await?;
     let logout = fixture
         .client
         .post(format!("{}/auth/logout", fixture.portal))
@@ -488,7 +713,7 @@ async fn chromium_runtime_script_cannot_use_portal_session() -> Result<(), Box<d
         .kill_on_drop(true)
         .spawn()?;
     let mut input = browser.stdin.take().ok_or("browser stdin unavailable")?;
-    input.write_all(format!("{}\n", json!({"portal":fixture.portal,"runtime":fixture.runtime,"grant":fixture.grant,"session":fixture.bff.session_id})).as_bytes()).await?;
+    input.write_all(format!("{}\n", json!({"portal":fixture.portal,"runtime":fixture.runtime,"grant":fixture.grant,"runtimeB":fixture.runtime_b,"grantB":fixture.grant_b,"session":fixture.bff.session_id})).as_bytes()).await?;
     drop(input);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(90),
@@ -506,6 +731,42 @@ async fn chromium_runtime_script_cannot_use_portal_session() -> Result<(), Box<d
     for request in fixture.upstream.lock().await.iter() {
         assert!(request["cookie"].is_null());
         assert!(request["authorization"].is_null());
+    }
+    assert!(fixture.upstream.lock().await.iter().all(|request| {
+        !request["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("/cross-"))
+    }));
+    let b_capability: String = sqlx::query_scalar("SELECT capability_sha256 FROM access.runtime_capabilities WHERE endpoint_grant_id=$1 AND consumed_at IS NOT NULL")
+        .bind(fixture.grant_b.as_uuid()).fetch_one(&fixture.state.pool).await?;
+    let wire = fixture.request_log.lock().await;
+    assert!(wire.iter().all(|entry| {
+        entry["target"]
+            .as_str()
+            .is_some_and(|target| !target.contains("binding="))
+    }));
+    assert!(
+        wire.iter()
+            .filter(|entry| entry["authority"]
+                .as_str()
+                .is_some_and(|authority| authority.contains(".runtime.localhost")))
+            .all(|entry| entry["hasBffCookie"] == false)
+    );
+    for suffix in ["/cross-read", "/cross-write"] {
+        let entry = wire
+            .iter()
+            .find(|entry| {
+                entry["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(suffix))
+            })
+            .ok_or("browser attack never reached Access")?;
+        assert_eq!(entry["site"].as_str(), Some("same-site"));
+        assert_eq!(entry["origin"].as_str(), Some(fixture.runtime.as_str()));
+        assert!(
+            entry["capabilitySha256"].as_str() == Some(b_capability.as_str()),
+            "B's valid host-only Cookie must be automatically attached on the rejected request"
+        );
     }
     Ok(())
 }

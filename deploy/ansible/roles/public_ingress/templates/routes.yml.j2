@@ -50,7 +50,7 @@ spec:
       namespace: {{ public_ingress_namespace }}
       sectionName: https
   hostnames:
-    - {{ public_ingress_runtime_hostname }}
+    - "*.{{ public_ingress_runtime_base_hostname }}"
   rules:
     - matches:
         - path: {type: PathPrefix, value: /connect}

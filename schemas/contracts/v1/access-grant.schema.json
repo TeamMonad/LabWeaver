@@ -47,7 +47,7 @@
           ]
         },
         "connectUrl": {
-          "description": "Portal handoff entry point, not a same-origin runtime proxy. Opening this\npath navigates to the configured isolated runtime origin using a one-time,\nbrowser-bound handoff. Present only for HTTP(S), derived from this grant ID.",
+          "description": "Portal handoff entry point, not a same-origin runtime proxy. Opening this\npath navigates to this grant's dedicated HTTPS runtime host using a one-time,\nbrowser-bound handoff. Present only for HTTP(S), derived from this grant ID.",
           "type": [
             "string",
             "null"

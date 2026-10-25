@@ -143,7 +143,7 @@ pub struct OidcFileConfig {
 pub struct BrowserFileConfig {
     pub bind_addr: String,
     pub allowed_origins: BTreeSet<String>,
-    pub runtime_origin: String,
+    pub runtime_base_origin: String,
     pub session_ttl_seconds: u64,
     pub session_idle_ttl_seconds: u64,
     pub oidc_transaction_ttl_seconds: u64,
@@ -306,13 +306,10 @@ impl AccessAuthFile {
             || !(3_600..=2_592_000).contains(&parsed.browser.session_retention_seconds)
             || parsed.browser.session_cookie_name != "__Host-labweaver_session"
             || parsed.browser.csrf_header_name != "X-CSRF-Token"
-            || !is_exact_allowed_origin(&parsed.browser.runtime_origin, parsed.transport_security)
-            || parsed.browser.allowed_origins.iter().any(|origin| {
-                let portal = url::Url::parse(origin).ok();
-                let runtime = url::Url::parse(&parsed.browser.runtime_origin).ok();
-                portal.as_ref().and_then(url::Url::host_str)
-                    == runtime.as_ref().and_then(url::Url::host_str)
-            })
+            || !isolated_runtime_base(
+                &parsed.browser.runtime_base_origin,
+                &parsed.browser.allowed_origins,
+            )
             || parsed
                 .browser
                 .bind_addr
@@ -571,6 +568,31 @@ impl AuthConfig {
         }
         Ok(url)
     }
+}
+
+fn isolated_runtime_base(value: &str, portals: &BTreeSet<String>) -> bool {
+    if !is_exact_allowed_origin(value, TransportSecurityMode::Strict) {
+        return false;
+    }
+    let Ok(base) = Url::parse(value) else {
+        return false;
+    };
+    let Some(url::Host::Domain(host)) = base.host() else {
+        return false;
+    };
+    if host.len() > 218 || !host.contains('.') || host.ends_with('.') {
+        return false;
+    }
+    portals.iter().all(|portal| {
+        Url::parse(portal).ok().is_some_and(|portal| {
+            portal.host_str().is_some_and(|portal| {
+                portal != host
+                    && !portal
+                        .strip_suffix(host)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
+        })
+    })
 }
 
 fn is_exact_allowed_origin(value: &str, mode: TransportSecurityMode) -> bool {
@@ -853,7 +875,7 @@ oidc:
 browser:
   bind_addr: 127.0.0.1:8080
   allowed_origins: [https://portal.example.test]
-  runtime_origin: https://runtime.example.test
+  runtime_base_origin: https://runtime.example.test
   session_ttl_seconds: 900
   session_idle_ttl_seconds: 300
   oidc_transaction_ttl_seconds: 300
@@ -951,7 +973,7 @@ nats:
     }
 
     #[test]
-    fn runtime_origin_is_required_https_and_has_a_separate_cookie_host() {
+    fn runtime_base_origin_requires_https_dns_and_a_separate_portal_zone() {
         let example = include_str!("../../../deploy/config/access-auth.yaml.example");
         for origin in [
             "",
@@ -959,6 +981,8 @@ nats:
             "https://portal.example.invalid",
             "https://portal.example.invalid:8443",
             "https://runtime.example.invalid/path",
+            "https://127.0.0.1",
+            "https://localhost",
         ] {
             assert!(
                 AccessAuthFile::parse_yaml(
@@ -970,7 +994,7 @@ nats:
         }
         assert!(
             AccessAuthFile::parse_yaml(&example.replace(
-                "  runtime_origin: \"https://runtime.example.invalid\"\n",
+                "  runtime_base_origin: \"https://runtime.example.invalid\"\n",
                 ""
             ))
             .is_err()

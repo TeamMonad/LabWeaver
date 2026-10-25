@@ -47,26 +47,37 @@ cargo test -p access-service --test postgres oidc_binding_is_checked_before_atom
 ## 运行时 origin 隔离与浏览器交接
 
 `EndpointGrant.connectUrl` 仍为门户相对路径 `/connect/{endpointGrantId}/`，前端继续使用
-`window.open(connectUrl)`。该入口只接受已登录浏览器的 GET，不再在门户 origin 返回任何运行时内容。
-Access 必须配置 `browser.runtime_origin`（独立 HTTPS 主机，不能只换门户端口）；缺失或与任一门户
-主机相同会拒绝启动，不回退同源。BFF 的 `__Host-labweaver_session` 不设置 Domain，只发给门户。
+`window.open(connectUrl)`。入口不在门户 origin 返回运行时内容。Access 必须配置
+`browser.runtime_base_origin`（例如 `https://runtime.example.org`），每个 endpoint grant 使用独立
+主机 `g-<grant UUID 去掉连字符>.runtime.example.org`。UUIDv7 的随机部分提供不可猜测的 DNS 安全
+标识；不能把多个 grant 放回同一 host、仅靠 Cookie Path 隔离脚本。门户主机不得等于基础域或位于
+其通配子域内；缺配置、非 HTTPS、非 DNS 基础域均拒绝启动，不回退同源。
 
-交接先导航到运行时主机的 `/runtime-bootstrap/{grant}`，设置随机的 host-only、Secure、HttpOnly、
-SameSite=Lax 绑定 Cookie，再返回门户签发 30 秒一次性交接 URL。该 URL 的散列、浏览器绑定散列、
-endpoint grant、actor、BFF session 和期限保存在 PostgreSQL；跨浏览器、跨 grant、重放和过期都拒绝。
-URL 不包含 BFF session 或其 Cookie。交接响应不缓存，使用 `Referrer-Policy: no-referrer`，并隔离 opener。
+交接先导航到该 grant 主机的 `/runtime-bootstrap/{grant}`，设置随机的 host-only、Secure、HttpOnly、
+SameSite=Lax 绑定 Cookie，再返回门户 `?handoff=true#binding=…`。绑定只在 fragment 中，不进入
+HTTP 请求目标或默认访问日志。门户可信 nonce-CSP 脚本立即清除 fragment，并以当前 BFF 会话、
+门户 Origin 和 CSRF 保护的 JSON POST 发送绑定；返回的一次性交接 URL 再由顶层导航打开。
+浏览器绑定与交接 token 仅以散列保存。PostgreSQL 同一权威时间签发 `issued_at`、至多 30 秒的
+handoff 和至多五分钟且不超过 session 截止的 capability；条件 UPDATE 原子兑换，并发与顺序重放
+都只有第一次成功。交接响应不缓存，使用 `Referrer-Policy: no-referrer`，隔离 opener。
 
 运行时 `/runtime-handoff/{grant}/{token}` 原子消费交接，设置独立的
 `__Secure-labweaver_runtime` capability Cookie：HttpOnly、Secure、SameSite=Lax，不设置 Domain，
-Path 限定为 `/connect/{grant}/`，最长 5 分钟且不超过 BFF session 绝对有效期。每个运行时请求重新
-验证 capability 的 grant/actor/session 绑定、有效 BFF session、当前 AccessGrant/EndpointGrant、
-成员动作和 Environment 权威状态。退出、授权撤销或到期后下一次请求立即拒绝，不访问运行时上游。
-capability 过期后从门户重新点击入口，不复制交接 URL 续期。
+host-only 绑定该 grant 的独立主机，Path 限定 `/connect/{grant}/`。每次请求同时校验主机中的 grant、
+路径中的 grant、capability 中的 grant/actor/session、数据库期限、有效 BFF session、当前
+AccessGrant/EndpointGrant、成员动作和真实 Environment 权威状态。退出、授权撤销或到期后下一次
+请求立即拒绝，不访问上游。capability 过期后从门户重新打开，不复制交接 URL 续期。
 
-运行时 host 不提供 `/api/v1`、`/auth` 或 Console；即使绕过 ingress 也由 Access host 边界拒绝。
-门户拒绝运行时 Origin，且不向它开放 API CORS。运行时写方法要求运行时自己的精确 Origin 和当前
-grant 的 Edit 动作，不使用门户 CSRF token。上游请求不携带 BFF/capability Cookie 或 Authorization，
-上游 Set-Cookie 不转发；根相对重定向重写到同一运行时 host 的 grant 路径，外部重定向拒绝。
+统一规范化 authority（主机小写、去尾点、去默认端口），分别判定已配置门户、精确 grant 主机或拒绝。
+HTTP/1 Host 与 HTTP/2 URI authority 冲突、缺失、未知主机一律拒绝，不信任 `X-Forwarded-Host`。
+运行时 host 不提供 `/api/v1`、`/auth` 或 Console。门户 API 拒绝运行时 Origin，不开放 CORS。
+运行时跨 origin 请求即使来自同站的另一个 grant、浏览器自动附带目标 Cookie，仍拒绝并且不访问上游；
+Fetch Metadata 同时拒绝省略 Origin 的跨主机 no-cors 资源请求，顶层交接导航仍可完成。
+写方法要求该 grant 自己的规范化 HTTPS Origin 和 Edit 动作，不使用门户 CSRF；门户交接 POST 本身
+仍须门户 CSRF。响应带 `Cross-Origin-Resource-Policy: same-origin`、opener 隔离与
+`Origin-Agent-Cluster: ?1`，运行时文档保持 origin-keyed，不依赖 Cookie Path 或同站属性隔离脚本。
+上游不接收 BFF/capability Cookie 或 Authorization，Set-Cookie 不转发；根相对重定向保持当前 host
+及 grant 路径，外部重定向拒绝。BFF `__Host-labweaver_session` 保持 host-only，只发给门户。
 
 | 条件 | HTTP | diagnosticCode |
 | --- | ---: | --- |
@@ -85,5 +96,7 @@ cargo test -p access-service chromium_runtime_script_cannot_use_portal_session -
 python -m unittest discover -s tests/ansible -p test_runtime_origin.py
 ```
 
-Chromium 用真实浏览器 Cookie 和脚本执行检查跨主机隔离，CI 的 `playwright-ci` 同样执行此显式
-浏览器门禁；普通 Rust 测试不要求安装 Node/Chromium。上述临时 TLS 夹具不代表真实 DNS/集群证书验收。
+Chromium 使用同站、不同主机的两个真实 grant（不同项目/环境），确认 A 页面脚本对 B 的读、写及
+no-cors 请求均不能访问应用上游，即使浏览器自动附带 B 的 Cookie；同时验证 HTTP/2、门户会话
+隔离和请求/访问日志目标不含 binding。CI 的 `playwright-ci` 显式执行浏览器门禁；普通 Rust 测试
+不要求 Node/Chromium。临时 TLS 夹具不能替代真实 DNS/集群证书验收。

@@ -64,6 +64,17 @@ impl Drop for Tasks {
     }
 }
 
+fn browser_router_on(state: Arc<AppState>, address: std::net::SocketAddr) -> Router {
+    // Each HTTP fixture explicitly registers its ephemeral public authority.
+    let mut state = Arc::unwrap_or_clone(state);
+    state
+        .config
+        .allowed_origins
+        .insert(format!("http://{address}"));
+    state.deployment.browser.allowed_origins = state.config.allowed_origins.clone();
+    browser_router(Arc::new(state))
+}
+
 async fn assert_problem_response(
     response: reqwest::Response,
     status: StatusCode,
@@ -139,7 +150,7 @@ async fn stale_csrf_write_returns_problem_details_without_writing_to_replacement
     );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(Arc::clone(&state));
+    let router = browser_router_on(Arc::clone(&state), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -884,7 +895,7 @@ async fn oidc_wrong_browser_cannot_consume_login_transaction() -> Result<(), Box
     let (state, _) = Box::pin(state(pool, Uuid::now_v7(), &mut tasks)).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state.clone());
+    let router = browser_router_on(state.clone(), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -1167,7 +1178,7 @@ async fn bff_logout_closes_production_console_websocket() -> Result<(), Box<dyn 
     .await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let router = browser_router(state.clone());
+    let router = browser_router_on(state.clone(), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -1299,7 +1310,7 @@ async fn browser_logout_rejects_csrf_and_returns_exact_provider_url_after_revoca
     );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state.clone());
+    let router = browser_router_on(state.clone(), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -1441,7 +1452,7 @@ async fn admin_upload_status_and_cancel_reach_control_with_session_auth()
     );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state);
+    let router = browser_router_on(state, listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -1607,7 +1618,7 @@ async fn candidate_build_status_and_cancel_reach_control_with_session_auth()
     );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state);
+    let router = browser_router_on(state, listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -1786,7 +1797,7 @@ async fn project_usage_reaches_resource_with_session_auth() -> Result<(), Box<dy
     );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state);
+    let router = browser_router_on(state, listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -1868,7 +1879,7 @@ async fn platform_admin_project_reads_reach_their_distinct_upstreams_without_mem
     let project_id = Uuid::now_v7();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state.clone());
+    let router = browser_router_on(state.clone(), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -2027,7 +2038,7 @@ async fn non_owner_membership_add_is_rejected_before_directory_resolution()
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state.clone());
+    let router = browser_router_on(state.clone(), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -2102,7 +2113,7 @@ async fn organization_directory_is_teacher_visible_and_student_denied_without_lo
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let router = browser_router(state.clone());
+    let router = browser_router_on(state.clone(), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     }));
@@ -2285,7 +2296,7 @@ async fn owned_environment_requests_use_current_control_actions_and_reject_remov
         .bind(unrelated.as_uuid()).bind(actor).execute(&pool).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
-    let app = browser_router(state.clone());
+    let app = browser_router_on(state.clone(), listener.local_addr()?);
     tasks.0.push(tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     }));

@@ -488,7 +488,7 @@ pub struct EndpointGrant {
     pub health: EndpointHealth,
     pub alias: Option<String>,
     /// Portal handoff entry point, not a same-origin runtime proxy. Opening this
-    /// path navigates to the configured isolated runtime origin using a one-time,
+    /// path navigates to this grant's dedicated HTTPS runtime host using a one-time,
     /// browser-bound handoff. Present only for HTTP(S), derived from this grant ID.
     pub connect_url: Option<String>,
     /// Public OpenSSH Gateway DNS name for SSH grants. Never a runtime target.

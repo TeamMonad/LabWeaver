@@ -186,7 +186,7 @@ export type EndpointGrant = {
     alias?: string | null;
     /**
      * Portal handoff entry point, not a same-origin runtime proxy. Opening this
-     * path navigates to the configured isolated runtime origin using a one-time,
+     * path navigates to this grant's dedicated HTTPS runtime host using a one-time,
      * browser-bound handoff. Present only for HTTP(S), derived from this grant ID.
      */
     connectUrl?: string | null;

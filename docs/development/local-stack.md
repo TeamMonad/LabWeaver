@@ -23,11 +23,15 @@ python tools/local_dev.py down
 
 入口使用 `127.0.0.1.nip.io`，启动时要求该域名仅解析到回环地址。集群内部由专用 Kind 的 DNS 将相同域名解析到入口服务，登录、上传和服务请求因此使用同一 HTTPS 地址；不修改宿主机 hosts。若网络 DNS 拒绝这类回环域名，启动会报告错误。
 
-运行时 Web 应用使用独立的 `https://runtime.127.0.0.1.nip.io:<门户端口>`，启动时同样要求它只解析
-到回环地址，本次运行的 TLS 证书覆盖两个主机。门户 `/connect/{grant}/` 只做一次性浏览器交接，
-运行时虚拟主机只提供应用代理与交接路径，不提供门户、OIDC、对象存储或 BFF API；浏览器不会把
-门户的 `__Host-labweaver_session` 发给运行时主机。无需修改宿主 hosts，也不要把运行时 origin
-加入门户允许 Origin 列表。授权或五分钟 capability 到期后从门户重新打开应用。
+运行时基础 origin 为 `https://runtime.localhost:<门户端口>`，每个 grant 使用独立的
+`g-<grant UUID 去掉连字符>.runtime.localhost`。`.localhost` 是浏览器保留的回环命名空间，当前
+Chromium 会在本地解析其任意子域，不请求外网 DNS；无需修改 hosts。使用该开发浏览器时信任本次
+本地 CA，证书包含 `*.runtime.localhost`，Nginx 用相同通配虚拟主机路由。非浏览器客户端若不实现
+`.localhost` 约定，须使用显式 `--resolve 主机:端口:127.0.0.1`，不要改用共享 runtime host 绕过隔离。
+门户 `/connect/{grant}/` 完成一次性交接：binding 通过 fragment 回到门户后立即从地址栏清除，再
+经门户 CSRF POST 发送，默认访问日志请求目标没有绑定秘密。运行时只提供应用及交接路径，不
+提供门户/OIDC/对象存储/BFF API，且不会收到门户的 `__Host-labweaver_session`。不同 grant 即使
+同站也不能读写彼此应用。授权或五分钟 capability 到期后从门户重新打开应用。
 
 HTTPS 证书由本次运行的本地 CA 签发。命令不自动修改宿主机或浏览器的全局信任设置；交互使用前，需在自己选择的开发浏览器中信任该 CA。自动化测试也应只在隔离测试环境中配置这份信任，不关闭证书或主机名校验。
 

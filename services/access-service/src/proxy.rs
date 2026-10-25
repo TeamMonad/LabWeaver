@@ -1598,7 +1598,11 @@ pub(super) async fn forward_runtime(
             "LW_ACCESS_RUNTIME_RESPONSE_TOO_LARGE",
         ));
     }
-    let mut downstream = Response::builder().status(status);
+    let mut downstream = Response::builder()
+        .status(status)
+        .header("cross-origin-resource-policy", "same-origin")
+        .header("cross-origin-opener-policy", "same-origin")
+        .header("origin-agent-cluster", "?1");
     for name in [
         header::CONTENT_TYPE,
         header::CONTENT_ENCODING,

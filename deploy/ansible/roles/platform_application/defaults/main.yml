@@ -229,9 +229,10 @@ platform_application_portal_route_name: ""
 platform_application_portal_gateway_name: ""
 platform_application_portal_gateway_listener_name: https
 platform_application_portal_hostname: ""
-platform_application_runtime_hostname: ""
+platform_application_runtime_base_hostname: ""
 platform_application_runtime_gateway_name: labweaver-runtime
 platform_application_runtime_gateway_class_name: cilium
+platform_application_runtime_tls_hostname: ""
 platform_application_runtime_tls_secret_name: ""
 platform_application_portal_tls_secret_name: labweaver-platform-tls
 platform_application_portal_tls_certificate_file: ""

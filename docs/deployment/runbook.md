@@ -41,27 +41,32 @@ export ANSIBLE_VAULT_PASSWORD_FILE="$PWD/deploy/ansible/inventories/v1/.vault-pa
 
 公网域名由 `deploy/ansible/roles/public_ingress` 的 `public_ingress_routes` 管理。Web、Keycloak、Harbor 和 OpenSSH Gateway 使用各自声明的 HTTPS/SSH 入口；用户从 HTTPS 首页开始，登录回调必须返回同一公共入口。浏览器验收保持证书校验开启，不使用内部端口、HTTP 绕过或 `LABWEAVER_IGNORE_HTTPS_ERRORS=1`。
 
-运行时 Web 应用必须使用独立 HTTPS 主机（例如 `runtime.example.org`），不能与门户共用主机或只换
-端口。在 Access 配置中设置 `browser.runtime_origin: https://runtime.example.org`；不要将此 origin
-加入 `browser.allowed_origins`、Keycloak 回调或门户 API CORS。DNS 必须指向运行时 Gateway，证书
-必须覆盖该精确主机。BFF Cookie 保持 `__Host-`、host-only，不设置父域 Domain。
+运行时 Web 应用必须为每个 endpoint grant 使用独立 HTTPS 主机，例如
+`g-<grant UUID 去掉连字符>.runtime.example.org`。在 Access 中设置
+`browser.runtime_base_origin: https://runtime.example.org`，配置 `*.runtime.example.org` 通配 DNS
+指向运行时 Gateway，并 provision 覆盖 `*.runtime.example.org` 的通配证书；只覆盖基础域的证书
+不够。不要把基础域或任一 grant origin 加入门户 allowed origins、Keycloak 回调或门户 CORS。
+门户不得位于运行时通配区内。BFF Cookie 保持 `__Host-`、host-only，不设置父域 Domain。
 
-通过 application role 发布时还须提供 `platform_application_runtime_hostname`、
+application role 输入为 `platform_application_runtime_base_hostname`、
 `platform_application_runtime_gateway_name`（独立于门户 Gateway）、
-`platform_application_runtime_gateway_class_name` 和 `platform_application_runtime_tls_secret_name`。
-TLS Secret 必须预先存在于 `platform_application_portal_route_namespace`，包含匹配主机的证书和私钥；
-Helm 的 `runtimeRoute.hostname/gatewayName/gatewayClassName/tlsSecretName` 对应这些输入。
-启用门户路由而缺少运行时主机名或 TLS Secret 名会渲染失败。运行时 Gateway 只监听 HTTPS，
-HTTPRoute 只发布 `/connect`、`/runtime-bootstrap`、`/runtime-handoff`，不发布 `/api` 或 `/auth`。
+`platform_application_runtime_gateway_class_name`、`platform_application_runtime_tls_hostname`（必须为
+`*.基础域`）及 `platform_application_runtime_tls_secret_name`。TLS Secret 须预先存在于
+`platform_application_portal_route_namespace`，含匹配通配主机的证书/私钥；Helm 对应
+`runtimeRoute.baseHostname/gatewayName/gatewayClassName/tlsHostname/tlsSecretName`。缺少基础域、
+通配 TLS 声明或 Secret 名时渲染失败。Gateway 仅 HTTPS，HTTPRoute 匹配 `*.基础域`，只发布
+`/connect`、`/runtime-bootstrap`、`/runtime-handoff`，不发布 `/api`、`/auth`。
 
-若由 `public_ingress` role 管理已有公共 Gateway，显式设置 `public_ingress_runtime_hostname`，
-保留非空 `public_ingress_certificate_secret`；role 将运行时主机加入证书 SAN，并仅在 HTTPS listener
-发布上述三个路径。选择一条路由管理路径，不同时让 Helm 和基础设施 role 管理同一运行时入口。
-升级前应用 catalog 中 Access 0009（runtime_capabilities）；多副本 Access 共用 PostgreSQL 原子消费
-交接。不要在网关访问日志中记录交接 URL 的 token、Cookie 或请求查询串。
+若由 `public_ingress` role 管理已有 Gateway，设置 `public_ingress_runtime_base_hostname` 和非空
+`public_ingress_certificate_secret`；role 自动将 `*.基础域` 加入证书 SAN，并只在 HTTPS listener
+发布运行时路由。仅选择一条路由管理路径，不让 Helm 和基础设施 role 同时管理同一入口。
+应用 Access catalog 0009；所有 Access 副本用 PostgreSQL 权威时间签发并原子消费交接。
+绑定在 fragment 中立即清除，再经门户 CSRF POST 发送，默认请求 URL 日志不再接触 binding。
+仍须禁止记录交接 token 路径、Cookie、请求/响应体及秘密响应头；本地运行时 location 禁用访问日志。
 
-部署后用受信任浏览器检查：门户登录后打开 Web 应用，最终地址应在运行时主机；运行时请求不能带
-`__Host-labweaver_session`，其脚本无法读取门户 CSRF/API；重放交接和退出后继续请求均被拒绝。
+部署后用受信任浏览器打开两个不同 grant，最终地址须有不同主机；各自应用可 GET/POST，但 A
+脚本对 B 的读/写不能到达 B 上游，且运行时不携带 BFF Cookie、无法读取门户 CSRF/API。重放、
+退出、撤销及到期后继续请求均拒绝。再检查默认访问日志不含绑定秘密。
 真实 DNS、受信任 TLS 链和集群路由必须在目标部署验收，单元或渲染测试不能替代它们。
 
 Agent 的 model gateway 监听内部 `agent-service:9460`。Provider URL、upstream key 和 HMAC

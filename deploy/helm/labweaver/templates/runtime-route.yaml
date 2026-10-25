@@ -1,5 +1,10 @@
 {{- if .Values.portalRoute.enabled }}
-{{- $hostname := required "runtimeRoute.hostname is required" .Values.runtimeRoute.hostname }}
+{{- $base := required "runtimeRoute.baseHostname is required" .Values.runtimeRoute.baseHostname }}
+{{- $hostname := printf "*.%s" $base }}
+{{- $tlsHostname := required "runtimeRoute.tlsHostname wildcard is required" .Values.runtimeRoute.tlsHostname }}
+{{- if ne $tlsHostname $hostname }}
+{{- fail "runtimeRoute.tlsHostname must cover exactly *.runtimeRoute.baseHostname" }}
+{{- end }}
 {{- $namespace := required "portalRoute.namespace is required" .Values.portalRoute.namespace }}
 {{- $gateway := required "runtimeRoute.gatewayName is required" .Values.runtimeRoute.gatewayName }}
 ---
