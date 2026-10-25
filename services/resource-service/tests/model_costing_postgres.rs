@@ -452,7 +452,11 @@ async fn model_pg_admission_is_bounded_when_agent_crashes_before_first_settlemen
         .admit_model_cost("crash-after-admission", "agent", &admission(project, call))
         .await?;
     // No Agent Unknown/settle RPC is ever issued: admission itself must have committed this state.
-    let persisted = credits.holds(project, 1, 100, 0).await?.items.remove(0);
+    let persisted = store
+        .list_credit_holds(project, &contracts::http::ResourceListQuery::default())
+        .await?
+        .items
+        .remove(0);
     assert_eq!(
         persisted.state,
         contracts::resource::credits::CreditHoldState::Unknown

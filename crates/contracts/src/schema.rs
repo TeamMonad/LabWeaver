@@ -1529,6 +1529,15 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "listProjectMembershipInvitations"
                 | "listCourseMembershipInvitations"
                 | "listIncomingMembershipInvitations"
+                | "listResourceRequests"
+                | "listResourceLeases"
+                | "listProjectResourceLeases"
+                | "listResourceRates"
+                | "listResourceGpuCatalog"
+                | "listProjectResourceCharges"
+                | "listProjectResourceUsage"
+                | "listProjectCreditLedger"
+                | "listProjectCreditHolds"
         ) {
             parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024}}));
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}));
@@ -1565,13 +1574,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if matches!(
             operation.operation_id,
-            "listProjectResourceUsage"
-                | "getProjectAgentTaskProgress"
+            "getProjectAgentTaskProgress"
                 | "getOwnProjectEvaluationTaskProgress"
                 | "getOwnProjectEvaluationTaskForSubmission"
                 | "getInternalAgentTaskProgress"
-                | "listProjectCreditLedger"
-                | "listProjectCreditHolds"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -2600,16 +2606,15 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         | "cancelTaskResource"
         | "createTaskResourceRequest"
         | "getTaskResourceRequest" => contract_ref("resource-request"),
-        "listResourceRequests" => {
-            json!({"type":"array","items":contract_ref("resource-request")})
+        "listResourceRequests" | "listProjectResourceRequests" => {
+            contract_ref("resource-request-page")
         }
-        "listProjectResourceRequests" => contract_ref("resource-request-page"),
         "listResourceGpuCatalog" => {
-            json!({"type":"array","items":contract_ref("gpu-catalog-entry")})
+            json!({"type":"object","required":["items","nextCursor"],"additionalProperties":false,"properties":{"items":{"type":"array","items":contract_ref("gpu-catalog-entry")},"nextCursor":{"type":["string","null"]}}})
         }
         "createResourceGpuCatalogEntry" => contract_ref("gpu-catalog-entry"),
         "listResourceRates" => {
-            json!({"type":"array","items":contract_ref("resource-rate")})
+            json!({"type":"object","required":["items","nextCursor"],"additionalProperties":false,"properties":{"items":{"type":"array","items":contract_ref("resource-rate")},"nextCursor":{"type":["string","null"]}}})
         }
         "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
         "listProjectCreditHolds" => contract_ref("credit-hold-page"),
@@ -2640,7 +2645,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("resource-budget")
         }
         "listProjectResourceCharges" => {
-            json!({"type":"array","items":contract_ref("resource-charge")})
+            json!({"type":"object","required":["items","nextCursor"],"additionalProperties":false,"properties":{"items":{"type":"array","items":contract_ref("resource-charge")},"nextCursor":{"type":["string","null"]}}})
         }
         "listProjectResourceUsage" => contract_ref("resource-usage-page"),
         "createProjectResourceChargeAdjustment" => contract_ref("resource-charge"),
@@ -2648,7 +2653,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("resource-lease")
         }
         "listResourceLeases" | "listProjectResourceLeases" => {
-            json!({"type":"array","items":contract_ref("resource-lease")})
+            json!({"type":"object","required":["items","nextCursor"],"additionalProperties":false,"properties":{"items":{"type":"array","items":contract_ref("resource-lease")},"nextCursor":{"type":["string","null"]}}})
         }
         "listEnvironments" => contract_ref("http/environment-summary-page"),
         "getEnvironmentOperation" => contract_ref("environment-operation-snapshot"),

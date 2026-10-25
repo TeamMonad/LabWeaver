@@ -305,3 +305,6 @@ domains:
       - id: 23
         file: resource/0023_outbox_publication_claims.sql
         sha256: 4c278cc0169006ca2e4125529abeb49d1e3ba2799f552c0f8f4da6fbaa3bbbcc
+      - id: 24
+        file: resource/0024_resource_list_ordinals.sql
+        sha256: 94357e47b18a1f8e0a20f4cf3a603288f232ac2750fb0152b56f822ba1d7d6a9

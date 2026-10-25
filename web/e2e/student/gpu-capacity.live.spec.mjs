@@ -4,6 +4,7 @@ import {
   expectJson,
   navigateFromHomeByUi,
   pollJson,
+  readAllCursorPages,
   selectProjectByUi,
 } from '../support/live.mjs'
 import {
@@ -76,9 +77,7 @@ function bytesToGiB(value, label) {
 }
 
 async function readActiveGpuCatalogEntry(request) {
-  const response = await request.get('/api/v1/resource/gpu-catalog')
-  const entries = await expectJson(response, 'LW_GPU_CAPACITY_CATALOG_READ_FAILED')
-  if (!Array.isArray(entries)) throw new Error('LW_GPU_CAPACITY_CATALOG_INVALID')
+  const entries = await readAllCursorPages(request, '/api/v1/resource/gpu-catalog', 'LW_GPU_CAPACITY_CATALOG_READ_FAILED')
   const matching = entries.filter((entry) => entry.class === INPUT.class && entry.active === true)
   if (matching.length !== 1) throw new Error(`LW_GPU_CAPACITY_CATALOG_ENTRY_AMBIGUOUS:${INPUT.class}:${matching.length}`)
   const entry = matching[0]
@@ -155,15 +154,10 @@ async function readPublishedWorkRelease(request, entry) {
 }
 
 async function readGlobalResourceState(request) {
-  const [requestsResponse, leasesResponse] = await Promise.all([
-    request.get('/api/v1/resource-requests'),
-    request.get('/api/v1/resource-leases'),
-  ])
   const [requests, leases] = await Promise.all([
-    expectJson(requestsResponse, 'LW_GPU_CAPACITY_GLOBAL_REQUEST_READ_FAILED'),
-    expectJson(leasesResponse, 'LW_GPU_CAPACITY_GLOBAL_LEASE_READ_FAILED'),
+    readAllCursorPages(request, '/api/v1/resource-requests', 'LW_GPU_CAPACITY_GLOBAL_REQUEST_READ_FAILED'),
+    readAllCursorPages(request, '/api/v1/resource-leases', 'LW_GPU_CAPACITY_GLOBAL_LEASE_READ_FAILED'),
   ])
-  if (!Array.isArray(requests) || !Array.isArray(leases)) throw new Error('LW_GPU_CAPACITY_GLOBAL_STATE_INVALID')
   return { requests, leases }
 }
 
@@ -200,15 +194,11 @@ function assertAllocationBindingIdle({ requests, leases }, catalogEntries, selec
 }
 
 async function readProjectResources(request) {
-  const [requestsResponse, leasesResponse] = await Promise.all([
-    request.get(`/api/v1/projects/${encodeURIComponent(INPUT.projectId)}/resource-requests`),
-    request.get(`/api/v1/projects/${encodeURIComponent(INPUT.projectId)}/resource-leases`),
-  ])
+  const projectPath = `/api/v1/projects/${encodeURIComponent(INPUT.projectId)}`
   const [requests, leases] = await Promise.all([
-    expectJson(requestsResponse, 'LW_GPU_CAPACITY_PROJECT_REQUEST_READ_FAILED'),
-    expectJson(leasesResponse, 'LW_GPU_CAPACITY_PROJECT_LEASE_READ_FAILED'),
+    readAllCursorPages(request, `${projectPath}/resource-requests`, 'LW_GPU_CAPACITY_PROJECT_REQUEST_READ_FAILED'),
+    readAllCursorPages(request, `${projectPath}/resource-leases`, 'LW_GPU_CAPACITY_PROJECT_LEASE_READ_FAILED'),
   ])
-  if (!Array.isArray(requests) || !Array.isArray(leases)) throw new Error('LW_GPU_CAPACITY_PROJECT_STATE_INVALID')
   return { requests, leases }
 }
 
@@ -485,12 +475,11 @@ async function cleanupOwnedResource(page, baseURL, owned, lease) {
 }
 
 async function readProjectCharges(request) {
-  const charges = await expectJson(
-    await request.get(`/api/v1/projects/${encodeURIComponent(INPUT.projectId)}/charges`),
+  return await readAllCursorPages(
+    request,
+    `/api/v1/projects/${encodeURIComponent(INPUT.projectId)}/charges`,
     'LW_GPU_CAPACITY_CHARGES_READ_FAILED',
   )
-  if (!Array.isArray(charges)) throw new Error('LW_GPU_CAPACITY_CHARGES_INVALID')
-  return charges
 }
 
 test('student enforces one exclusive GPU capacity and admits the waiting Work request after release', async ({ page, browser, baseURL }) => {

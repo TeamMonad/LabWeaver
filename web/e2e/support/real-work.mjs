@@ -8,6 +8,7 @@ import {
   expectJson,
   navigateFromHomeByUi,
   pollJson,
+  readAllCursorPages,
   uuidv7,
 } from './live.mjs'
 import { deleteEnvironmentByUi, stopEnvironmentByUi } from './environment-lifecycle.mjs'
@@ -417,44 +418,29 @@ export function selectSettledExperimentUsageCharges({
   return matches
 }
 
-export async function readProjectUsagePage(request, projectId, { page = 1, pageSize = 100, diagnosticCode = 'REAL_WORK_USAGE_READ_FAILED' } = {}) {
-  if (
-    typeof projectId !== 'string'
-    || projectId === ''
-    || !Number.isSafeInteger(page)
-    || page < 1
-    || !Number.isSafeInteger(pageSize)
-    || pageSize < 1
-    || pageSize > 100
-  ) {
-    throw new Error('LW_WORK_USAGE_PAGE_ARGUMENT_INVALID')
-  }
-  const result = await expectJson(
-    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/usage?page=${page}&pageSize=${pageSize}`),
-    diagnosticCode,
+export async function readProjectUsage(request, projectId, { limit = 100 } = {}) {
+  if (typeof projectId !== 'string' || projectId === '') throw new Error('LW_WORK_USAGE_PAGE_ARGUMENT_INVALID')
+  return await readAllCursorPages(
+    request,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/usage`,
+    'REAL_WORK_USAGE_READ_FAILED',
+    { limit },
   )
-  if (
-    !result
-    || !Array.isArray(result.items)
-    || result.page !== page
-    || result.pageSize !== pageSize
-    || typeof result.hasMore !== 'boolean'
-  ) {
-    throw new Error('LW_WORK_USAGE_PAGE_INVALID')
-  }
-  return result
 }
 
-export async function readProjectUsage(request, projectId, { pageSize = 100 } = {}) {
-  const items = []
-  let page = 1
-  for (;;) {
-    const result = await readProjectUsagePage(request, projectId, { page, pageSize })
-    items.push(...result.items)
-    if (!result.hasMore) return items
-    page += 1
-    if (page > 1000) throw new Error('LW_WORK_USAGE_PAGE_LIMIT_EXCEEDED')
-  }
+export async function readProjectCharges(request, projectId, diagnosticCode = 'REAL_WORK_CHARGES_READ_FAILED') {
+  if (typeof projectId !== 'string' || projectId === '') throw new Error(`${diagnosticCode}:project invalid`)
+  return await readAllCursorPages(request, `/api/v1/projects/${encodeURIComponent(projectId)}/charges`, diagnosticCode)
+}
+
+export async function readProjectResourceLeases(request, projectId, diagnosticCode = 'REAL_WORK_RESOURCE_LEASES_READ_FAILED') {
+  if (typeof projectId !== 'string' || projectId === '') throw new Error(`${diagnosticCode}:project invalid`)
+  return await readAllCursorPages(request, `/api/v1/projects/${encodeURIComponent(projectId)}/resource-leases`, diagnosticCode)
+}
+
+export async function readProjectResourceRequests(request, projectId, diagnosticCode = 'REAL_WORK_RESOURCE_REQUESTS_READ_FAILED') {
+  if (typeof projectId !== 'string' || projectId === '') throw new Error(`${diagnosticCode}:project invalid`)
+  return await readAllCursorPages(request, `/api/v1/projects/${encodeURIComponent(projectId)}/resource-requests`, diagnosticCode)
 }
 
 export async function readResourceRates(context, diagnosticCode = 'REAL_WORK_RATES_READ_FAILED') {
@@ -489,11 +475,7 @@ export async function waitForSettledWorkUsageCharges(browser, baseURL, {
     await expect.poll(
       async () => {
         latestUsage = await readProjectUsage(context.request, projectId)
-        latestCharges = await expectJson(
-          await context.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/charges`),
-          'REAL_WORK_CHARGES_READ_FAILED',
-        )
-        if (!Array.isArray(latestCharges)) throw new Error('LW_WORK_CHARGES_RESPONSE_INVALID')
+        latestCharges = await readProjectCharges(context.request, projectId, 'REAL_WORK_CHARGES_READ_FAILED')
         latestMatches = leases.map((lease) => selectSettledWorkUsageChargesForLease({
           usageRecords: latestUsage,
           charges: latestCharges,
@@ -542,11 +524,7 @@ export async function waitForSettledExperimentUsageCharges(browser, baseURL, {
     await expect.poll(
       async () => {
         latestUsage = await readProjectUsage(context.request, projectId)
-        latestCharges = await expectJson(
-          await context.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/charges`),
-          'LW_EXPERIMENT_CHARGES_READ_FAILED',
-        )
-        if (!Array.isArray(latestCharges)) throw new Error('LW_EXPERIMENT_CHARGES_RESPONSE_INVALID')
+        latestCharges = await readProjectCharges(context.request, projectId, 'LW_EXPERIMENT_CHARGES_READ_FAILED')
         try {
           latestMatches = selectSettledExperimentUsageCharges({
             usageRecords: latestUsage,
@@ -1260,11 +1238,7 @@ function hasPositiveRatePrice(rate) {
 }
 
 async function readResourceRatesInternal(context, diagnosticCode) {
-  const rates = await expectJson(
-    await context.request.get('/api/v1/resource/rates'),
-    diagnosticCode,
-  )
-  if (!Array.isArray(rates)) throw new Error('REAL_WORK_RATES_RESPONSE_INVALID')
+  const rates = await readAllCursorPages(context.request, '/api/v1/resource/rates', diagnosticCode)
   if (rates.some((rate) => !Number.isSafeInteger(rate?.unitQuantity) || rate.unitQuantity < 1)) {
     throw new Error('REAL_WORK_RATE_QUANTITY_INVALID')
   }
@@ -1568,11 +1542,7 @@ export async function fundAndPublishRealWork({
     }
     [gpuRate] = matchingGpuRates
   }
-  const baselineCharges = await expectJson(
-    await adminRequest.get(`/api/v1/projects/${encodeURIComponent(projectId)}/charges`),
-    'REAL_WORK_BASELINE_CHARGES_READ_FAILED',
-  )
-  if (!Array.isArray(baselineCharges)) throw new Error('REAL_WORK_BASELINE_CHARGES_INVALID')
+  const baselineCharges = await readProjectCharges(adminRequest, projectId, 'REAL_WORK_BASELINE_CHARGES_READ_FAILED')
   const baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
   if (configureBudget) await steps.configureBudget(browser, baseURL, projectId)
   await steps.ensureCredits(browser, baseURL, projectId)
@@ -1596,8 +1566,7 @@ export async function waitForRealWorkCharges(browser, baseURL, projectId, { gpu 
   try {
     let latest
     await expect.poll(async () => {
-      const response = await context.request.get(`/api/v1/projects/${projectId}/charges`)
-      latest = await expectJson(response, 'REAL_WORK_CHARGES_READ_FAILED')
+      latest = await readProjectCharges(context.request, projectId, 'REAL_WORK_CHARGES_READ_FAILED')
       try {
         assertRealWorkCharges(latest, gpu)
         return true
@@ -1737,15 +1706,12 @@ function validateRealWorkAdjustmentCharge(charge, projectId) {
 
 async function readRealWorkFinanceSnapshot(request, projectId) {
   const encodedProjectId = encodeURIComponent(projectId)
-  const [budgetResponse, chargesResponse] = await Promise.all([
-    request.get(`/api/v1/projects/${encodedProjectId}/resource-budget`),
-    request.get(`/api/v1/projects/${encodedProjectId}/charges`),
-  ])
   const [budget, charges] = await Promise.all([
-    expectJson(budgetResponse, 'REAL_WORK_FINANCE_BUDGET_READ_FAILED'),
-    expectJson(chargesResponse, 'REAL_WORK_FINANCE_CHARGES_READ_FAILED'),
+    request.get(`/api/v1/projects/${encodedProjectId}/resource-budget`)
+      .then((response) => expectJson(response, 'REAL_WORK_FINANCE_BUDGET_READ_FAILED')),
+    readProjectCharges(request, projectId, 'REAL_WORK_FINANCE_CHARGES_READ_FAILED'),
   ])
-  if (!budget || budget.projectId !== projectId || !Array.isArray(charges)) {
+  if (!budget || budget.projectId !== projectId) {
     throw new Error('REAL_WORK_FINANCE_SNAPSHOT_INVALID')
   }
   return { budget, charges }
@@ -2003,11 +1969,7 @@ export async function cleanupWorkResources(request, _baseURL, projectId, environ
   let claimId = null
   try {
     if (!leaseId && requestId) {
-      const leases = await expectJson(
-        await request.get(`/api/v1/projects/${projectId}/resource-leases`),
-        'REAL_WORK_CLEANUP_LEASE_LIST_FAILED',
-      )
-      if (!Array.isArray(leases)) throw new Error('REAL_WORK_CLEANUP_LEASE_LIST_INVALID')
+      const leases = await readProjectResourceLeases(request, projectId, 'REAL_WORK_CLEANUP_LEASE_LIST_FAILED')
       leaseId = leases.find((lease) => lease.requestId === requestId)?.id ?? null
 
       if (!leaseId) {
@@ -2036,11 +1998,7 @@ export async function cleanupWorkResources(request, _baseURL, projectId, environ
             120_000,
           )
           if (trackedRequest.state === 'active' || trackedRequest.state === 'expiring') {
-            const allocatedLeases = await expectJson(
-              await request.get(`/api/v1/projects/${projectId}/resource-leases`),
-              'REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ALLOCATION_FAILED',
-            )
-            if (!Array.isArray(allocatedLeases)) throw new Error('REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ALLOCATION_INVALID')
+            const allocatedLeases = await readProjectResourceLeases(request, projectId, 'REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ALLOCATION_FAILED')
             leaseId = allocatedLeases.find((lease) => lease.requestId === requestId)?.id ?? null
             if (!leaseId) throw new Error(`REAL_WORK_CLEANUP_LEASE_MISSING:${trackedRequest.state}`)
           }
@@ -2048,11 +2006,7 @@ export async function cleanupWorkResources(request, _baseURL, projectId, environ
           // A lease can be projected just after the request reaches its active
           // state. Re-read the authoritative project list before deciding that
           // cleanup is unsafe; never release an untracked lease by guessing.
-          const activeLeases = await expectJson(
-            await request.get(`/api/v1/projects/${projectId}/resource-leases`),
-            'REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ACTIVE_FAILED',
-          )
-          if (!Array.isArray(activeLeases)) throw new Error('REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ACTIVE_INVALID')
+          const activeLeases = await readProjectResourceLeases(request, projectId, 'REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ACTIVE_FAILED')
           leaseId = activeLeases.find((lease) => lease.requestId === requestId)?.id ?? null
           if (!leaseId) throw new Error(`REAL_WORK_CLEANUP_LEASE_MISSING:${trackedRequest.state}`)
         }

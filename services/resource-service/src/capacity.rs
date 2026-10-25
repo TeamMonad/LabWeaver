@@ -1138,13 +1138,26 @@ impl CapacityReconcileWorker {
         &self,
         shutdown: &watch::Receiver<bool>,
     ) -> Result<bool, crate::store::ResourceStoreError> {
-        let entries = self.store.list_gpu_catalog().await?;
+        let mut query = contracts::http::ResourceListQuery {
+            limit: Some(100),
+            ..Default::default()
+        };
         let mut by_provider = BTreeMap::<String, Vec<contracts::resource::GpuCatalogEntry>>::new();
-        for entry in entries.into_iter().filter(|entry| entry.active) {
-            by_provider
-                .entry(entry.provider_binding.clone())
-                .or_default()
-                .push(entry);
+        loop {
+            if *shutdown.borrow() {
+                return Ok(false);
+            }
+            let page = self.store.list_gpu_catalog(&query).await?;
+            for entry in page.items.into_iter().filter(|entry| entry.active) {
+                by_provider
+                    .entry(entry.provider_binding.clone())
+                    .or_default()
+                    .push(entry);
+            }
+            query.cursor = page.next_cursor;
+            if query.cursor.is_none() {
+                break;
+            }
         }
         if by_provider.is_empty() {
             return Ok(false);

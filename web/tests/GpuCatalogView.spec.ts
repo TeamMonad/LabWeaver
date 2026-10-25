@@ -59,7 +59,7 @@ describe('GpuCatalogView', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     vi.mocked(listResourceGpuCatalog).mockResolvedValue({
-      data: [activeEntry, retiredEntry],
+      data: { items: [activeEntry, retiredEntry], nextCursor: null },
       error: undefined as never,
     })
   })

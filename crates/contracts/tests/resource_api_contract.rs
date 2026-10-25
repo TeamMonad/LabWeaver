@@ -55,17 +55,25 @@ fn generated_openapi_types_every_resource_body_and_response()
     );
 
     let leases = &paths["/api/v1/resource-leases"]["get"];
-    assert_eq!(leases["parameters"], json!([]));
+    assert_eq!(leases["parameters"][0]["name"], "cursor");
+    assert_eq!(leases["parameters"][1]["name"], "limit");
+    assert_eq!(leases["parameters"][1]["schema"]["maximum"], 100);
     assert_eq!(
         leases["responses"]["200"]["content"]["application/json"]["schema"]["type"],
-        "array"
+        "object"
     );
     assert_eq!(
-        leases["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+        leases["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["items"]
+            ["items"]["$ref"],
         "../contracts/v1/resource-lease.schema.json"
     );
     let requests = &paths["/api/v1/resource-requests"]["get"];
-    assert_eq!(requests["parameters"], json!([]));
+    assert_eq!(requests["parameters"][0]["name"], "cursor");
+    assert_eq!(requests["parameters"][1]["name"], "limit");
+    assert_eq!(
+        requests["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/resource-request-page.schema.json"
+    );
 
     for action in ["renew", "revoke"] {
         let operation = &paths[&format!("/api/v1/resource-leases/{{leaseId}}/{action}")]["post"];
@@ -165,7 +173,8 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         "project",
     );
     assert_eq!(
-        list_lease["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+        list_lease["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["items"]
+            ["items"]["$ref"],
         "../contracts/v1/resource-lease.schema.json"
     );
     assert_eq!(
@@ -186,7 +195,8 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         "global",
     );
     assert_eq!(
-        gpu_catalog["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+        gpu_catalog["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["items"]
+            ["items"]["$ref"],
         "../contracts/v1/gpu-catalog-entry.schema.json"
     );
     let create_gpu_catalog = assert_operation(
@@ -213,7 +223,8 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         "global",
     );
     assert_eq!(
-        rates["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+        rates["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["items"]["items"]
+            ["$ref"],
         "../contracts/v1/resource-rate.schema.json"
     );
     let create_rate = assert_operation(
@@ -284,7 +295,8 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         "project",
     );
     assert_eq!(
-        charges["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+        charges["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["items"]
+            ["items"]["$ref"],
         "../contracts/v1/resource-charge.schema.json"
     );
     let usage = assert_operation(

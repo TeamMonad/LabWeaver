@@ -157,7 +157,7 @@ describe('MyLabsView', () => {
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [] } as never, error: undefined as never })
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [] } as never, error: undefined as never })
     mockRequests([])
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never } as never)
     window.localStorage.clear()
     window.sessionStorage.clear()
     useAuth().user.value = { expired: false, profile: { actor_id: 'student-1', roles: ['student'] } } as never

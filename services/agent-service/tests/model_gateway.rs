@@ -237,11 +237,11 @@ impl Fixture {
             .json(&json!({"model":"fixture-model","max_tokens":32,"messages":[{"role":"user","content":"Hello"}]}))
     }
     async fn holds(&self) -> Result<Vec<CreditHold>, Box<dyn std::error::Error>> {
-        // PgCreditStore provides the authoritative decoded hold, not the initial admission receipt.
+        // Read the authoritative current hold, not the initial admission receipt.
         Ok(self
             .billing
-            .credits
-            .holds(self.project, 1, 100, 0)
+            .store
+            .list_credit_holds(self.project, &contracts::http::ResourceListQuery::default())
             .await?
             .items)
     }

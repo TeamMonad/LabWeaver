@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE, configureProjectPolicyByUi, createProjectByUi,
-  expectJson, pollJson, selectProjectByUi, uuidv7,
+  expectJson, pollJson, readAllCursorPages, selectProjectByUi, uuidv7,
 } from '../support/live.mjs'
 import {
   addProjectStudentByUi, cancelAgentRunByUi, readActorId, snapshotProjectResourceRequestIds,
@@ -373,7 +373,7 @@ async function assertResult(page, adminPage, projectId, actorId, frozen, release
 }
 
 async function cleanupEnvironment(page, projectId, environmentId) {
-  const requests = await expectJson(await page.request.get(`/api/v1/projects/${projectId}/resource-requests`), 'CONFIG_PROBE_CLEANUP_REQUESTS_FAILED')
+  const requests = await readAllCursorPages(page.request, `/api/v1/projects/${projectId}/resource-requests`, 'CONFIG_PROBE_CLEANUP_REQUESTS_FAILED')
   const owned = requests.filter((request) => request.projectId === projectId && request.target?.kind === 'environment'
     && request.target.environmentId === environmentId)
   for (const request of owned) {

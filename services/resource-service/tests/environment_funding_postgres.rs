@@ -723,8 +723,11 @@ async fn unactivated_original_prehold_releases_when_its_exact_approval_expires()
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert!(store.reconcile_environment_funding_deadlines_once().await?);
     assert!(!store.reconcile_environment_funding_deadlines_once().await?);
-    let hold = credits
-        .holds(request.project_id, 1, 25, 0)
+    let hold = store
+        .list_credit_holds(
+            request.project_id,
+            &contracts::http::ResourceListQuery::default(),
+        )
         .await?
         .items
         .into_iter()

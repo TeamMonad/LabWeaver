@@ -238,7 +238,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Cursor page of project-scoped Resource requests.",
+  "description": "Cursor page of global or project-scoped Resource requests.",
   "properties": {
     "items": {
       "items": {

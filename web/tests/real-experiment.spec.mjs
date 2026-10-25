@@ -67,7 +67,7 @@ function adminPageFor(run, requests) {
     request: {
       get: vi.fn(async (path) => {
         if (path.includes('/agent-runs/')) return response(run)
-        if (path === '/api/v1/resource-requests') return response(requests)
+        if (path === '/api/v1/resource-requests?limit=100') return response({ items: requests, nextCursor: null })
         throw new Error(`UNEXPECTED_READ:${path}`)
       }),
     },

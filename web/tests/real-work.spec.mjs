@@ -403,31 +403,42 @@ describe('Work usage and charge association', () => {
     expect(result).toBeNull()
   })
 
-  it('reads every project usage page before matching a lease', async () => {
+  it('reads every project usage cursor page before matching a lease', async () => {
     const pages = new Map([
-      [1, { items: [{ id: 'usage-1' }], page: 1, pageSize: 2, hasMore: true }],
-      [2, { items: [{ id: 'usage-2' }], page: 2, pageSize: 2, hasMore: false }],
+      [null, { items: [{ id: 'usage-1' }], nextCursor: 'cursor-2' }],
+      ['cursor-2', { items: [{ id: 'usage-2' }], nextCursor: null }],
     ])
     const paths = []
     const request = {
       get: vi.fn(async (path) => {
         paths.push(path)
-        const page = Number(new URL(`https://portal.invalid${path}`).searchParams.get('page'))
+        const cursor = new URL(`https://portal.invalid${path}`).searchParams.get('cursor')
         return {
           ok: () => true,
           status: () => 200,
-          text: async () => JSON.stringify(pages.get(page)),
+          text: async () => JSON.stringify(pages.get(cursor)),
         }
       }),
     }
-    await expect(readProjectUsage(request, 'project', { pageSize: 2 })).resolves.toEqual([
+    await expect(readProjectUsage(request, 'project', { limit: 2 })).resolves.toEqual([
       { id: 'usage-1' },
       { id: 'usage-2' },
     ])
     expect(paths).toEqual([
-      '/api/v1/projects/project/usage?page=1&pageSize=2',
-      '/api/v1/projects/project/usage?page=2&pageSize=2',
+      '/api/v1/projects/project/usage?limit=2',
+      '/api/v1/projects/project/usage?limit=2&cursor=cursor-2',
     ])
+  })
+
+  it('rejects a repeated usage cursor instead of looping', async () => {
+    const request = {
+      get: vi.fn(async () => ({
+        ok: () => true,
+        status: () => 200,
+        text: async () => JSON.stringify({ items: [], nextCursor: 'same' }),
+      })),
+    }
+    await expect(readProjectUsage(request, 'project')).rejects.toThrow('REAL_WORK_USAGE_READ_FAILED:cursor invalid')
   })
 
   it('requires the settled GPU line to use the requested class, mode, revision and unit price', () => {
@@ -529,7 +540,7 @@ describe('Work usage and charge association', () => {
 
 describe('Work acceptance demonstration rates', () => {
   const now = Date.parse('2026-10-04T06:00:00Z')
-  const context = (rates) => ({ request: { get: vi.fn(async () => ({ ok: () => true, text: async () => JSON.stringify(rates) })) } })
+  const context = (rates) => ({ request: { get: vi.fn(async () => ({ ok: () => true, text: async () => JSON.stringify({ items: rates, nextCursor: null }) })) } })
   const rate = (target, overrides = {}) => ({
     id: 'operator-rate', revision: 1, unit: target.unit, unitQuantity: target.unitQuantity,
     gpuClass: null, gpuMode: null, unitPrice: { amount: '7.000000', currency: 'CREDITS' },
@@ -585,7 +596,7 @@ describe('Work acceptance demonstration rates', () => {
       request: {
         get: vi.fn(async () => ({
           ok: () => true,
-          text: async () => JSON.stringify(reads++ === 0 ? [future] : [active]),
+          text: async () => JSON.stringify({ items: reads++ === 0 ? [future] : [active], nextCursor: null }),
         })),
       },
     }
@@ -658,7 +669,7 @@ describe('Work acceptance funding order', () => {
     const adminRequest = {
       get: vi.fn(async () => {
         calls.push('baseline-charges')
-        return { ok: () => true, status: () => 200, text: async () => JSON.stringify([{ id: 'charge-old' }]) }
+        return { ok: () => true, status: () => 200, text: async () => JSON.stringify({ items: [{ id: 'charge-old' }], nextCursor: null }) }
       }),
     }
     const publish = vi.fn(async () => {
@@ -1065,7 +1076,7 @@ describe('real Work cleanup through visible owner controls', () => {
 
   it('cancels a pending resource request through the visible resource page', async () => {
     const request = http({
-      '/api/v1/projects/project/resource-leases': [[]],
+      '/api/v1/projects/project/resource-leases?limit=100': [{ items: [], nextCursor: null }],
       [requestPath]: [{ id: 'request', projectId: 'project', requestKey: 'run:resource', state: 'reviewing' }, { ...expiredRequest, state: 'cancelled' }],
       [environmentPath]: [deleted],
     })
@@ -1077,7 +1088,7 @@ describe('real Work cleanup through visible owner controls', () => {
 
   it('re-reads an active request lease before releasing it', async () => {
     const request = http({
-      '/api/v1/projects/project/resource-leases': [[], [activeLease]],
+      '/api/v1/projects/project/resource-leases?limit=100': [{ items: [], nextCursor: null }, { items: [activeLease], nextCursor: null }],
       [requestPath]: [
         { id: 'request', projectId: 'project', requestKey: 'run:resource', state: 'active' },
         { ...expiredRequest, requestKey: 'run:resource' },

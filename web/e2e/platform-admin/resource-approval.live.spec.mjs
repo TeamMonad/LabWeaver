@@ -9,6 +9,7 @@ import {
   expectJson,
   pollEnvironmentCandidate,
   pollJson,
+  readAllCursorPages,
   selectProjectByUi,
   uuidv7,
 } from '../support/live.mjs'
@@ -114,11 +115,11 @@ async function publishWorkTemplateByUi(teacherPage, adminPage, projectId, teache
 
     const compactRunId = acceptedRun.id.replaceAll('-', '').toLowerCase()
     const approvePendingAuthoringResources = async () => {
-      const requests = await expectJson(
-        await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`),
+      const requests = await readAllCursorPages(
+        adminPage.request,
+        `/api/v1/projects/${projectId}/resource-requests`,
         'LW_ACCEPTANCE_WORK_TEMPLATE_RESOURCE_REQUESTS_READ_FAILED',
       )
-      if (!Array.isArray(requests)) throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_RESOURCE_REQUESTS_INVALID')
       const runPrefix = `authoring-${compactRunId}-`
       for (const resourceRequest of requests.filter((item) => (
         item?.projectId === projectId

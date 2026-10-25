@@ -13,6 +13,7 @@ import {
   listEnvironments,
   listProjectCreditHolds,
   listProjectCreditLedger,
+  listProjectResourceCharges,
   listProjectResourceLeases,
   listProjectResourceRequests,
   listProjectResourceUsage,
@@ -33,6 +34,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     listEnvironments: vi.fn(),
     listProjectCreditHolds: vi.fn(),
     listProjectCreditLedger: vi.fn(),
+    listProjectResourceCharges: vi.fn(),
     listProjectResourceLeases: vi.fn(),
     listProjectResourceRequests: vi.fn(),
     listProjectResourceUsage: vi.fn(),
@@ -77,6 +79,11 @@ const routerMocks = vi.hoisted(() => ({
 
 vi.mock('@/api/client', () => ({ apiClient: api }))
 
+/** One complete cursor page as the SDK returns it. */
+function page(items: unknown[], nextCursor: string | null = null) {
+  return { data: { items, nextCursor } as never, error: undefined as never }
+}
+
 function mockCreditsEmpty() {
   vi.mocked(getProjectCredits).mockResolvedValue({
     data: {
@@ -95,11 +102,11 @@ function mockCreditsEmpty() {
     error: undefined,
   } as never)
   vi.mocked(listProjectCreditLedger).mockResolvedValue({
-    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    data: { items: [], nextCursor: null },
     error: undefined,
   } as never)
   vi.mocked(listProjectCreditHolds).mockResolvedValue({
-    data: { items: [], page: 1, pageSize: 25, hasMore: false },
+    data: { items: [], nextCursor: null },
     error: undefined,
   } as never)
   vi.mocked(createCreditAdminOperation).mockResolvedValue({ data: [], error: undefined } as never)
@@ -221,20 +228,24 @@ describe('ResourceFinanceView', () => {
     vi.mocked(listProjectResourceUsage).mockReset()
     vi.mocked(listResourceRates).mockReset()
     vi.mocked(listResourceGpuCatalog).mockReset()
-    vi.mocked(listResourceRates).mockResolvedValue({ data: [] as never, error: undefined as never })
-    vi.mocked(listResourceGpuCatalog).mockResolvedValue({ data: gpuCatalog as never, error: undefined as never })
+    vi.mocked(listProjectResourceCharges).mockReset()
+    vi.mocked(listResourceRates).mockResolvedValue(page([]))
+    vi.mocked(listResourceGpuCatalog).mockResolvedValue(page(gpuCatalog))
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [], nextCursor: null } as never, error: undefined as never })
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [] as never, error: undefined as never })
-    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [] as never[], nextCursor: null }, error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue(page([]))
+    vi.mocked(listProjectResourceRequests).mockResolvedValue(page([]))
     api.get.mockImplementation(({ url }: { url: string }) => Promise.resolve(
       url.endsWith('/resource-budget')
         ? { error: 'LW_RESOURCE_BUDGET_NOT_FOUND' }
-        : url.endsWith('/usage')
-          ? { data: { items: [], page: 1, pageSize: 25, hasMore: false } }
-          : { data: [] },
+        : { data: { items: [], nextCursor: null } },
     ))
+    // Usage and charges go through the SDK; route them to `api.get` so one mock describes every project read.
     vi.mocked(listProjectResourceUsage).mockImplementation(({ path, query }) => api.get({
       url: `/api/v1/projects/${path.projectId}/usage`,
+      query,
+    }))
+    vi.mocked(listProjectResourceCharges).mockImplementation(({ path, query }) => api.get({
+      url: `/api/v1/projects/${path.projectId}/charges`,
       query,
     }))
     routerMocks.replace.mockImplementation(({ query }: { query: Record<string, string | undefined> }) => { routerMocks.route.query = query })
@@ -279,12 +290,12 @@ describe('ResourceFinanceView', () => {
     }
     api.get.mockImplementation(({ url }: { url: string }) => {
       if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
-      if (url.endsWith('/charges')) return Promise.resolve({ data: [charge] })
-      return Promise.resolve({ data: { items: [knownUsage, unknownUsage], page: 1, pageSize: 25, hasMore: false } })
+      if (url.endsWith('/charges')) return Promise.resolve({ data: { items: [charge], nextCursor: null } })
+      return Promise.resolve({ data: { items: [knownUsage, unknownUsage], nextCursor: null } })
     })
     vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [{ id: 'env-course', displayLabel: '课程实验环境' }] } as never, error: undefined as never })
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [{ id: 'request-work', state: 'active', target: { kind: 'task', taskRunId: 'task-work' } }], nextCursor: null } as never, error: undefined as never })
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [{ id: 'lease-work', requestId: 'request-work', state: 'active' }] as never, error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [{ id: 'lease-work', requestId: 'request-work', state: 'active' }], nextCursor: null } as never, error: undefined as never })
 
     const wrapper = mountView()
     await flushPromises()
@@ -301,28 +312,102 @@ describe('ResourceFinanceView', () => {
     expect(wrapper.findAll('.charge-row details')[0].text()).toContain('charge-compute')
   })
 
-  it('requests the next usage page and keeps the page boundary visible', async () => {
+  it('walks usage pages by cursor without a total page count and returns to earlier pages', async () => {
     const pageOne = { ...knownUsage, id: 'usage-page-1' }
     const pageTwo = { ...knownUsage, id: 'usage-page-2', kind: 'storage' }
-    api.get.mockImplementation(({ url, query }: { url: string; query?: { page?: number } }) => {
+    api.get.mockImplementation(({ url, query }: { url: string; query?: { cursor?: string } }) => {
       if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
       if (url.endsWith('/usage')) {
-        const page = query?.page ?? 1
-        return Promise.resolve({ data: { items: [page === 1 ? pageOne : pageTwo], page, pageSize: 1, hasMore: page === 1 } })
+        return Promise.resolve(query?.cursor === 'usage-2'
+          ? { data: { items: [pageTwo], nextCursor: null } }
+          : { data: { items: [pageOne], nextCursor: 'usage-2' } })
       }
-      return Promise.resolve({ data: [] })
+      return Promise.resolve({ data: { items: [], nextCursor: null } })
     })
     const wrapper = mountView()
     await flushPromises()
-    expect(wrapper.get('[aria-label="项目用量分页"]').text()).toContain('第 1 页')
-    await wrapper.get('[aria-label="项目用量分页"]').findAll('button')[1].trigger('click')
+    const pager = () => wrapper.get('[aria-label="项目用量分页"]')
+    const button = (label: string) => pager().findAll('button').find((item) => item.text() === label)!
+    expect(pager().text()).toContain('第 1 页')
+    expect(pager().text()).not.toMatch(/共\s*\d+\s*页/)
+    expect(listProjectResourceUsage).toHaveBeenLastCalledWith({ path: { projectId: 'project-new' }, query: { limit: 25 } })
+    expect(button('上一页').attributes('disabled')).toBeDefined()
+
+    await button('下一页').trigger('click')
+    await flushPromises()
+    expect(pager().text()).toContain('第 2 页')
+    expect(listProjectResourceUsage).toHaveBeenLastCalledWith({ path: { projectId: 'project-new' }, query: { limit: 25, cursor: 'usage-2' } })
+    expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('存储用量')
+    // The last page has no cursor, so there is no next page to offer.
+    expect(button('下一页').attributes('disabled')).toBeDefined()
+
+    await button('上一页').trigger('click')
+    await flushPromises()
+    expect(pager().text()).toContain('第 1 页')
+    expect(listProjectResourceUsage).toHaveBeenLastCalledWith({ path: { projectId: 'project-new' }, query: { limit: 25 } })
+    expect(button('下一页').attributes('disabled')).toBeUndefined()
+  })
+
+  it('resets usage and charge cursors when the project changes', async () => {
+    api.get.mockImplementation(({ url, query }: { url: string; query?: { cursor?: string } }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      const projectId = url.split('/projects/')[1].split('/')[0]
+      if (url.endsWith('/usage')) {
+        return Promise.resolve(projectId === 'project-new' && !query?.cursor
+          ? { data: { items: [{ ...knownUsage, id: 'usage-new-1' }], nextCursor: 'usage-new-2' } }
+          : { data: { items: [{ ...knownUsage, projectId, id: `usage-${projectId}-${query?.cursor ?? 'first'}` }], nextCursor: null } })
+      }
+      return Promise.resolve({ data: { items: [], nextCursor: projectId === 'project-new' ? 'charges-new-2' : null } })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[aria-label="项目用量分页"]').findAll('button').find((item) => item.text() === '下一页')!.trigger('click')
     await flushPromises()
     expect(wrapper.get('[aria-label="项目用量分页"]').text()).toContain('第 2 页')
-    expect(listProjectResourceUsage).toHaveBeenLastCalledWith({
-      path: { projectId: 'project-new' },
-      query: { page: 2, pageSize: 1 },
+
+    await wrapper.get('.project-strip select').setValue('project-other')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目用量分页"]').text()).toContain('第 1 页')
+    expect(listProjectResourceUsage).toHaveBeenLastCalledWith({ path: { projectId: 'project-other' }, query: { limit: 25 } })
+    expect(listProjectResourceCharges).toHaveBeenLastCalledWith({ path: { projectId: 'project-other' }, query: { limit: 25 } })
+    expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('usage-project-other-first')
+    expect(wrapper.text()).not.toContain('加载更多费用')
+  })
+
+  it('appends the next charge page and keeps shown charges when a later page fails', async () => {
+    const charge = (id: string) => ({
+      id, usageRecordId: knownUsage.id, projectId: 'project-new', courseId: null,
+      lines: [{ rateId: 'rate-cpu', rateRevision: 3, unit: 'cpu_millicore_second', quantity: 3_600_000, unitQuantity: 3_600_000,
+        unitPrice: { currency: 'USD', amount: '0.010000' }, amount: { currency: 'USD', amount: '0.010000' } }],
+      total: { currency: 'USD', amount: '0.010000' }, settlement: 'pending', createdAt: '2026-10-06T01:02:00Z',
+      adjustmentOf: null, adjustmentReason: null, adjustedBy: null, diagnosticCode: null,
     })
-    expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('存储用量')
+    let failNext = false
+    api.get.mockImplementation(({ url, query }: { url: string; query?: { cursor?: string } }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      if (url.endsWith('/charges')) {
+        if (!query?.cursor) return Promise.resolve({ data: { items: [charge('charge-1')], nextCursor: 'charges-2' } })
+        if (failNext) return Promise.resolve({ error: { diagnosticCode: 'LW_RESOURCE_UNAVAILABLE', detail: '费用服务暂不可用', retryable: true } })
+        return Promise.resolve({ data: { items: [charge('charge-2')], nextCursor: null } })
+      }
+      return Promise.resolve({ data: { items: [], nextCursor: null } })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const more = () => wrapper.get('.charges-card').findAll('button').find((item) => item.text() === '加载更多费用')
+    failNext = true
+    await more()!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.charge-list').text()).toContain('charge-1')
+    expect(wrapper.get('.charges-card').text()).toContain('费用服务暂不可用')
+
+    failNext = false
+    await more()!.trigger('click')
+    await flushPromises()
+    expect(listProjectResourceCharges).toHaveBeenLastCalledWith({ path: { projectId: 'project-new' }, query: { limit: 25, cursor: 'charges-2' } })
+    expect(wrapper.get('.charge-list').text()).toContain('charge-1')
+    expect(wrapper.get('.charge-list').text()).toContain('charge-2')
+    expect(more()).toBeUndefined()
   })
 
   it('recovers project usage after a read error without inventing a zero amount', async () => {
@@ -330,8 +415,8 @@ describe('ResourceFinanceView', () => {
     api.get.mockImplementation(({ url }: { url: string }) => {
       if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
       if (url.endsWith('/usage') && usageReads++ === 0) return Promise.resolve({ error: { diagnosticCode: 'RESOURCE_USAGE_LOAD_FAILED', detail: '用量服务暂不可用', retryable: true } })
-      if (url.endsWith('/usage')) return Promise.resolve({ data: { items: [], page: 1, pageSize: 25, hasMore: false } })
-      return Promise.resolve({ data: [] })
+      if (url.endsWith('/usage')) return Promise.resolve({ data: { items: [], nextCursor: null } })
+      return Promise.resolve({ data: { items: [], nextCursor: null } })
     })
     const wrapper = mountView()
     await flushPromises()
@@ -353,17 +438,17 @@ describe('ResourceFinanceView', () => {
     const pending = new Map<string, (value: unknown) => void>()
     api.get.mockImplementation(({ url }: { url: string }) => {
       if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
-      if (url.endsWith('/charges')) return Promise.resolve({ data: [] })
+      if (url.endsWith('/charges')) return Promise.resolve({ data: { items: [], nextCursor: null } })
       const projectId = url.split('/projects/')[1].split('/')[0]
       return new Promise((resolve) => pending.set(projectId, resolve))
     })
     const wrapper = mountView()
     await wrapper.get('.project-strip select').setValue('project-other')
     await flushPromises()
-    pending.get('project-other')!({ data: { items: [{ ...knownUsage, projectId: 'project-other', id: 'usage-other' }], page: 1, pageSize: 25, hasMore: false } })
+    pending.get('project-other')!({ data: { items: [{ ...knownUsage, projectId: 'project-other', id: 'usage-other' }], nextCursor: null } })
     await flushPromises()
     expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('计算用量')
-    pending.get('project-new')!({ data: { items: [{ ...knownUsage, id: 'usage-old' }], page: 1, pageSize: 25, hasMore: false } })
+    pending.get('project-new')!({ data: { items: [{ ...knownUsage, id: 'usage-old' }], nextCursor: null } })
     await flushPromises()
     expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('usage-other')
     expect(wrapper.get('[aria-label="项目用量列表"]').text()).not.toContain('usage-old')
@@ -471,9 +556,9 @@ describe('ResourceFinanceView', () => {
   })
 
   it('estimates a build on a rated builder and shows the platform total without recomputing it', async () => {
-    vi.mocked(listResourceRates).mockResolvedValue({ data: [
+    vi.mocked(listResourceRates).mockResolvedValue(page([
       { ...existingRate, id: 'rate-build', unit: 'build_second', unitQuantity: 3600, gpuClass: null, gpuMode: null, builderBinding: 'buildkit-primary-v1', unitPrice: { currency: 'CREDITS', amount: '1.200000' } },
-    ] as never, error: undefined as never })
+    ]))
     vi.mocked(estimateProjectBuildCost).mockResolvedValue({ data: {
       projectId: 'project-new', input: { builderBinding: 'buildkit-primary-v1', from: '2030-01-01T00:00:00.000Z', maxDurationMilliseconds: 1_800_000 },
       until: '2030-01-01T00:30:00.000Z', total: { currency: 'CREDITS', amount: '0.600000' },
@@ -582,7 +667,7 @@ describe('ResourceFinanceView', () => {
       { ...existingRate, id: 'future', effectiveFrom: '2030-01-01T00:00:00Z' },
       { ...existingRate, id: 'ended', effectiveUntil: '2020-01-01T00:00:00Z' },
     ]
-    vi.mocked(listResourceRates).mockResolvedValue({ data: rates as never, error: undefined as never })
+    vi.mocked(listResourceRates).mockResolvedValue(page(rates))
     const wrapper = mountView()
     await flushPromises()
     expect(wrapper.get('.rate-list').text()).toContain('1000000 基础单位 · 1.000000 USD')
@@ -598,7 +683,7 @@ describe('ResourceFinanceView', () => {
       { ...existingRate, id: 'scheduled', effectiveUntil: '2030-01-01T00:00:00.000Z' },
       { ...existingRate, id: 'ended', effectiveUntil: '2020-01-01T00:00:00.000Z' },
     ]
-    vi.mocked(listResourceRates).mockResolvedValue({ data: rates as never, error: undefined as never })
+    vi.mocked(listResourceRates).mockResolvedValue(page(rates))
     const wrapper = mountView()
     await flushPromises()
     expect(wrapper.get('[data-testid="end-rate-rate-vgpu"]').exists()).toBe(true)
@@ -618,8 +703,8 @@ describe('ResourceFinanceView', () => {
   it('ends an open rate with the exact cutoff request and leaves project charges unchanged', async () => {
     const ended = { ...existingRate, effectiveUntil: '2030-01-01T00:00:00.000Z' }
     vi.mocked(listResourceRates)
-      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
-      .mockResolvedValueOnce({ data: [ended] as never, error: undefined as never })
+      .mockResolvedValueOnce(page([existingRate]))
+      .mockResolvedValueOnce(page([ended]))
     vi.mocked(endResourceRate).mockResolvedValue({ data: ended as never, error: undefined as never })
     const wrapper = mountView()
     await flushPromises()
@@ -638,7 +723,7 @@ describe('ResourceFinanceView', () => {
 
   it('does not submit twice when the end request is still pending', async () => {
     let resolveEnd: ((value: unknown) => void) | undefined
-    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate] as never, error: undefined as never })
+    vi.mocked(listResourceRates).mockResolvedValue(page([existingRate]))
     vi.mocked(endResourceRate).mockImplementation(() => new Promise((resolve) => { resolveEnd = resolve }))
     const wrapper = mountView()
     await flushPromises()
@@ -659,8 +744,8 @@ describe('ResourceFinanceView', () => {
   it('confirms an uncertain end from the authoritative list without replaying the POST', async () => {
     const ended = { ...existingRate, effectiveUntil: '2030-01-01T00:00:00.000Z' }
     vi.mocked(listResourceRates)
-      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
-      .mockResolvedValueOnce({ data: [ended] as never, error: undefined as never })
+      .mockResolvedValueOnce(page([existingRate]))
+      .mockResolvedValueOnce(page([ended]))
     vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
     const wrapper = mountView()
     await flushPromises()
@@ -673,7 +758,7 @@ describe('ResourceFinanceView', () => {
   })
 
   it('retries an uncertain open end with the original body and idempotency key', async () => {
-    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate] as never, error: undefined as never })
+    vi.mocked(listResourceRates).mockResolvedValue(page([existingRate]))
     vi.mocked(endResourceRate)
       .mockRejectedValueOnce(new Error('request timed out'))
       .mockResolvedValueOnce({ data: existingRate as never, error: undefined as never })
@@ -689,7 +774,7 @@ describe('ResourceFinanceView', () => {
 
   it('only retries the authoritative read when that read also fails', async () => {
     vi.mocked(listResourceRates)
-      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+      .mockResolvedValueOnce(page([existingRate]))
       .mockRejectedValueOnce(new Error('list unavailable'))
     vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
     const wrapper = mountView()
@@ -703,9 +788,9 @@ describe('ResourceFinanceView', () => {
 
   it('does not replay an accepted end when list refresh failed', async () => {
     vi.mocked(listResourceRates)
-      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+      .mockResolvedValueOnce(page([existingRate]))
       .mockRejectedValueOnce(new Error('refresh unavailable'))
-      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+      .mockResolvedValueOnce(page([existingRate]))
     vi.mocked(endResourceRate).mockResolvedValueOnce({ data: existingRate as never, error: undefined as never })
     const wrapper = mountView()
     await flushPromises()
@@ -718,7 +803,7 @@ describe('ResourceFinanceView', () => {
   })
 
   it('requires an authoritative read before a changed cutoff can follow an uncertain result', async () => {
-    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate] as never, error: undefined as never })
+    vi.mocked(listResourceRates).mockResolvedValue(page([existingRate]))
     vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
     const wrapper = mountView()
     await flushPromises()
@@ -735,7 +820,7 @@ describe('ResourceFinanceView', () => {
   })
 
   it('preserves an uncertain original intent when another rate is selected', async () => {
-    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
+    vi.mocked(listResourceRates).mockResolvedValue(page([existingRate, otherOpenRate]))
     vi.mocked(endResourceRate)
       .mockRejectedValueOnce(new Error('request timed out'))
       .mockResolvedValueOnce({ data: existingRate as never, error: undefined as never })
@@ -754,7 +839,7 @@ describe('ResourceFinanceView', () => {
 
   it('blocks another rate when confirming the original end result fails to read', async () => {
     vi.mocked(listResourceRates)
-      .mockResolvedValueOnce({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
+      .mockResolvedValueOnce(page([existingRate, otherOpenRate]))
       .mockRejectedValueOnce(new Error('rate list unavailable'))
     vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
     const wrapper = mountView()
@@ -769,9 +854,9 @@ describe('ResourceFinanceView', () => {
   it('clears an already ended original intent before creating a different rate intent', async () => {
     const ended = { ...existingRate, effectiveUntil: '2030-01-01T00:00:00.000Z' }
     vi.mocked(listResourceRates)
-      .mockResolvedValueOnce({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
-      .mockResolvedValueOnce({ data: [ended, otherOpenRate] as never, error: undefined as never })
-      .mockResolvedValueOnce({ data: [ended, otherOpenRate] as never, error: undefined as never })
+      .mockResolvedValueOnce(page([existingRate, otherOpenRate]))
+      .mockResolvedValueOnce(page([ended, otherOpenRate]))
+      .mockResolvedValueOnce(page([ended, otherOpenRate]))
     vi.mocked(endResourceRate)
       .mockRejectedValueOnce(new Error('request timed out'))
       .mockResolvedValueOnce({ data: otherOpenRate as never, error: undefined as never })
@@ -785,7 +870,7 @@ describe('ResourceFinanceView', () => {
   })
 
   it('allows a new rate intent after an explicit non-retryable end rejection', async () => {
-    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
+    vi.mocked(listResourceRates).mockResolvedValue(page([existingRate, otherOpenRate]))
     vi.mocked(endResourceRate)
       .mockResolvedValueOnce({ data: undefined as never, error: { diagnosticCode: 'RATE_END_INVALID', detail: '截止时间无效', retryable: false } as never })
       .mockResolvedValueOnce({ data: otherOpenRate as never, error: undefined as never })
@@ -799,7 +884,7 @@ describe('ResourceFinanceView', () => {
 
   it.each(['empty', 'error'])('makes an unavailable catalog %s explicit without inventing classes', async (state) => {
     vi.mocked(listResourceGpuCatalog).mockResolvedValue(state === 'empty'
-      ? { data: [] as never, error: undefined as never }
+      ? page([])
       : { data: undefined as never, error: { detail: '目录暂不可用', diagnosticCode: 'LW_RESOURCE_REQUEST_FAILED', retryable: false } as never })
     const wrapper = mountView()
     await flushPromises()
@@ -861,8 +946,8 @@ describe('ResourceFinanceView', () => {
             },
           }
         : url.endsWith('/charges')
-          ? { data: [] }
-          : { data: { items: [], page: 1, pageSize: 25, hasMore: false } },
+          ? { data: { items: [], nextCursor: null } }
+          : { data: { items: [], nextCursor: null } },
     ))
     const wrapper = mountView()
     await flushPromises()

@@ -841,15 +841,12 @@ impl ResourceUsageRecord {
     }
 }
 
-/// Bounded project usage view. `has_more` is true when another page exists;
-/// callers never need an unbounded usage query.
+/// Stable project usage history; continue with `next_cursor` until it is absent.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceUsagePage {
     pub items: Vec<ResourceUsageRecord>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }
 
 /// One immutable line in a calculated charge.

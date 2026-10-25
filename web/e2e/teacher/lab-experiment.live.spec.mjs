@@ -6,6 +6,7 @@ import {
   expectJson,
   pollEnvironmentCandidate,
   pollJson,
+  readAllCursorPages,
   selectProjectByUi,
   uuidv7,
 } from '../support/live.mjs'
@@ -743,11 +744,11 @@ test('student completes a published lab experiment through its browser entry', a
     const studentGuards = installUsabilityGuards(studentPage)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(page, project.id)
-    const baselineCharges = await expectJson(
-      await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(project.id)}/charges`),
+    const baselineCharges = await readAllCursorPages(
+      adminPage.request,
+      `/api/v1/projects/${encodeURIComponent(project.id)}/charges`,
       'LAB_EXPERIMENT_BASELINE_CHARGES_READ_FAILED',
     )
-    if (!Array.isArray(baselineCharges)) throw new Error('LAB_EXPERIMENT_BASELINE_CHARGES_INVALID')
     baselineChargeIds = new Set(baselineCharges
       .map((charge) => charge.id)
       .filter((id) => typeof id === 'string' && id !== ''))

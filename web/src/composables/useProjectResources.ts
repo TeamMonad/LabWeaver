@@ -4,31 +4,17 @@ import {
   createResourceRequest,
   getResourceLease,
   getResourceRequest,
-  listProjectResourceLeases,
-  listProjectResourceRequests,
   renewResourceLease,
   revokeResourceLease,
 } from '@/generated/contracts'
 import type { ResourceLeaseSchema, ResourceRequestSchema, WorkloadResources } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey as makeIdempotencyKey, ifMatch } from '@/utils/format'
-import { collectCursorPages } from '@/utils/cursorPagination'
+import { fetchAllProjectResourceLeases, fetchAllProjectResourceRequests } from '@/utils/resourceLists'
 
 function errorDiagnostic(error: unknown, code: string, message: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
   return makeDiagnostic(problem?.diagnosticCode ?? code, problem?.detail ?? message, problem?.retryable ?? true, problem)
-}
-
-async function listProjectRequests(projectId: string): Promise<ResourceRequestSchema[]> {
-  const page = await collectCursorPages<ResourceRequestSchema>((cursor) => listProjectResourceRequests({
-    path: { projectId },
-    query: { limit: 100, ...(cursor ? { cursor } : {}) },
-  }))
-  return page.items
-}
-
-async function listProjectLeases(projectId: string) {
-  return listProjectResourceLeases({ path: { projectId } })
 }
 
 const TRANSITIONAL_REQUEST_STATES = new Set<ResourceRequestSchema['state']>(['reviewing', 'allocating', 'active', 'expiring'])
@@ -80,7 +66,7 @@ export function useProjectResources(projectId: Ref<string | null>) {
       requests.value = { kind: 'loading', message: '加载项目资源申请…' }
       leases.value = { kind: 'loading', message: '加载项目 Lease…' }
     }
-    const [requestResult, leaseResult] = await Promise.allSettled([listProjectRequests(id), listProjectLeases(id)])
+    const [requestResult, leaseResult] = await Promise.allSettled([fetchAllProjectResourceRequests(id), fetchAllProjectResourceLeases(id)])
     if (generation !== loadGeneration) return
 
     if (requestResult.status === 'rejected') {
@@ -92,12 +78,9 @@ export function useProjectResources(projectId: Ref<string | null>) {
 
     if (leaseResult.status === 'rejected') {
       leases.value = { kind: 'error', diagnostic: errorDiagnostic(leaseResult.reason, 'PROJECT_RESOURCE_LEASES_LOAD_FAILED', '加载项目 Lease 失败') }
-    } else if (leaseResult.value.error) {
-      leases.value = { kind: 'error', diagnostic: errorDiagnostic(leaseResult.value.error, 'PROJECT_RESOURCE_LEASES_LOAD_FAILED', '加载项目 Lease 失败') }
-    } else if (!Array.isArray(leaseResult.value.data)) {
-      leases.value = { kind: 'error', diagnostic: makeDiagnostic('PROJECT_RESOURCE_LEASES_INVALID', 'Resource 返回了无法识别的 Lease 响应。', false) }
     } else {
-      leases.value = leaseResult.value.data.length > 0 ? { kind: 'success', data: leaseResult.value.data } : { kind: 'empty' }
+      const leaseItems = leaseResult.value
+      leases.value = leaseItems.length > 0 ? { kind: 'success', data: leaseItems } : { kind: 'empty' }
     }
     schedulePoll()
   }

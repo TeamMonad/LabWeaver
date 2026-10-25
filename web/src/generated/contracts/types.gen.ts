@@ -2160,10 +2160,8 @@ export type CreditAdminOperationSchemaProjectId = string;
  * CreditHoldPage
  */
 export type CreditHoldPageSchema = {
-    hasMore: boolean;
     items: Array<CreditHoldPageSchemaCreditHold>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -2328,10 +2326,8 @@ export type CreditLedgerEntrySchemaUtcTimestamp = string;
  * CreditLedgerPage
  */
 export type CreditLedgerPageSchema = {
-    hasMore: boolean;
     items: Array<CreditLedgerEntry>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -13611,7 +13607,7 @@ export type ResourceRateSchemaUtcTimestamp = string;
 /**
  * ResourceRequestPage
  *
- * Cursor page of project-scoped Resource requests.
+ * Cursor page of global or project-scoped Resource requests.
  */
 export type ResourceRequestPageSchema = {
     items: Array<ResourceRequest>;
@@ -13825,14 +13821,11 @@ export type ResourceRequestSchemaWorkloadResources = {
 /**
  * ResourceUsagePage
  *
- * Bounded project usage view. `has_more` is true when another page exists;
- * callers never need an unbounded usage query.
+ * Stable project usage history; continue with `next_cursor` until it is absent.
  */
 export type ResourceUsagePageSchema = {
-    hasMore: boolean;
     items: Array<ResourceUsageRecord>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
 };
 
 /**
@@ -19973,7 +19966,10 @@ export type ListProjectResourceChargesData = {
     path: {
         projectId: string;
     };
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/projects/{projectId}/charges';
 };
 
@@ -20030,7 +20026,10 @@ export type ListProjectResourceChargesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceChargeSchema>;
+    200: {
+        items: Array<ResourceChargeSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListProjectResourceChargesResponse = ListProjectResourceChargesResponses[keyof ListProjectResourceChargesResponses];
@@ -20181,8 +20180,8 @@ export type ListProjectCreditHoldsData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/credits/holds';
 };
@@ -20251,8 +20250,8 @@ export type ListProjectCreditLedgerData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/credits/ledger';
 };
@@ -22549,6 +22548,8 @@ export type ListProjectResourceLeasesData = {
         projectId: string;
     };
     query?: {
+        cursor?: string;
+        limit?: number;
         courseId?: string;
     };
     url: '/api/v1/projects/{projectId}/resource-leases';
@@ -22607,7 +22608,10 @@ export type ListProjectResourceLeasesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceLeaseSchema>;
+    200: {
+        items: Array<ResourceLeaseSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListProjectResourceLeasesResponse = ListProjectResourceLeasesResponses[keyof ListProjectResourceLeasesResponses];
@@ -22829,8 +22833,8 @@ export type ListProjectResourceUsageData = {
         projectId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/usage';
 };
@@ -22966,7 +22970,10 @@ export type CreateProjectWorkConfigurationRunResponse = CreateProjectWorkConfigu
 export type ListResourceLeasesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource-leases';
 };
 
@@ -23023,7 +23030,10 @@ export type ListResourceLeasesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceLeaseSchema>;
+    200: {
+        items: Array<ResourceLeaseSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListResourceLeasesResponse = ListResourceLeasesResponses[keyof ListResourceLeasesResponses];
@@ -23244,7 +23254,10 @@ export type RevokeResourceLeaseResponse = RevokeResourceLeaseResponses[keyof Rev
 export type ListResourceRequestsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource-requests';
 };
 
@@ -23301,7 +23314,7 @@ export type ListResourceRequestsResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceRequestSchema>;
+    200: ResourceRequestPageSchema;
 };
 
 export type ListResourceRequestsResponse = ListResourceRequestsResponses[keyof ListResourceRequestsResponses];
@@ -23948,7 +23961,10 @@ export type CreateCreditAdminOperationResponse = CreateCreditAdminOperationRespo
 export type ListResourceGpuCatalogData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource/gpu-catalog';
 };
 
@@ -24005,7 +24021,10 @@ export type ListResourceGpuCatalogResponses = {
     /**
      * Successful response
      */
-    200: Array<GpuCatalogEntrySchema>;
+    200: {
+        items: Array<GpuCatalogEntrySchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListResourceGpuCatalogResponse = ListResourceGpuCatalogResponses[keyof ListResourceGpuCatalogResponses];
@@ -24083,7 +24102,10 @@ export type CreateResourceGpuCatalogEntryResponse = CreateResourceGpuCatalogEntr
 export type ListResourceRatesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/api/v1/resource/rates';
 };
 
@@ -24140,7 +24162,10 @@ export type ListResourceRatesResponses = {
     /**
      * Successful response
      */
-    200: Array<ResourceRateSchema>;
+    200: {
+        items: Array<ResourceRateSchema>;
+        nextCursor: string | null;
+    };
 };
 
 export type ListResourceRatesResponse = ListResourceRatesResponses[keyof ListResourceRatesResponses];

@@ -281,7 +281,7 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
     vi.mocked(listConsoleCapabilities).mockResolvedValue({ data: consoleAvailability(['xterm']), error: undefined as never } as never)
     vi.mocked(getOwnProjectEvaluationTaskForSubmission).mockResolvedValue({
       data: undefined,
@@ -473,7 +473,7 @@ describe('EnvironmentEntryView', () => {
         }], nextCursor: null },
       } as never)
       vi.mocked(listProjectResourceLeases).mockResolvedValue({
-        data: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }],
+        data: { items: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }], nextCursor: null },
         error: undefined as never,
       } as never)
       const { wrapper } = await mountAt(
@@ -510,7 +510,7 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
     expect(wrapper.text()).not.toContain('环境正在准备')
     expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
-    expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 100 } })
     expect(getEnvironment).toHaveBeenCalledTimes(1)
   })
 
@@ -528,7 +528,7 @@ describe('EnvironmentEntryView', () => {
       }], nextCursor: null },
     } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({
-      data: [{ id: 'lease-other-project', requestId: 'request-other-project', state: 'active' }],
+      data: { items: [{ id: 'lease-other-project', requestId: 'request-other-project', state: 'active' }], nextCursor: null },
       error: undefined as never,
     } as never)
     const { wrapper } = await mountAt(
@@ -557,7 +557,7 @@ describe('EnvironmentEntryView', () => {
         state: 'rejected',
       }], nextCursor: null },
     } as never)
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
     const { wrapper } = await mountAt(
       { environmentId: 'env-1', projectId: 'project-1' },
       false,
@@ -585,7 +585,7 @@ describe('EnvironmentEntryView', () => {
       }], nextCursor: null },
     } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({
-      data: [{ id: 'lease-1', requestId: 'request-1', state: 'revoked', revokeReasonCode: 'task_owner_release' }],
+      data: { items: [{ id: 'lease-1', requestId: 'request-1', state: 'revoked', revokeReasonCode: 'task_owner_release' }], nextCursor: null },
       error: undefined as never,
     } as never)
     const { wrapper } = await mountAt(

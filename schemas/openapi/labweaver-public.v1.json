@@ -9954,6 +9954,27 @@
               "minLength": 1,
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -9961,10 +9982,26 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/resource-charge.schema.json"
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "$ref": "../contracts/v1/resource-charge.schema.json"
+                      },
+                      "type": "array"
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
                   },
-                  "type": "array"
+                  "required": [
+                    "items",
+                    "nextCursor"
+                  ],
+                  "type": "object"
                 }
               }
             },
@@ -10285,20 +10322,20 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -10400,20 +10437,20 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -14284,6 +14321,27 @@
           },
           {
             "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
             "name": "courseId",
             "required": false,
             "schema": {
@@ -14297,10 +14355,26 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/resource-lease.schema.json"
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "$ref": "../contracts/v1/resource-lease.schema.json"
+                      },
+                      "type": "array"
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
                   },
-                  "type": "array"
+                  "required": [
+                    "items",
+                    "nextCursor"
+                  ],
+                  "type": "object"
                 }
               }
             },
@@ -14764,20 +14838,20 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -14983,16 +15057,54 @@
       "get": {
         "description": "Permission: resource_lease:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "listResourceLeases",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/resource-lease.schema.json"
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "$ref": "../contracts/v1/resource-lease.schema.json"
+                      },
+                      "type": "array"
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
                   },
-                  "type": "array"
+                  "required": [
+                    "items",
+                    "nextCursor"
+                  ],
+                  "type": "object"
                 }
               }
             },
@@ -15441,16 +15553,35 @@
       "get": {
         "description": "Permission: resource_request:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "listResourceRequests",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/resource-request.schema.json"
-                  },
-                  "type": "array"
+                  "$ref": "../contracts/v1/resource-request-page.schema.json"
                 }
               }
             },
@@ -16658,16 +16789,54 @@
       "get": {
         "description": "Permission: resource_gpu_catalog:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "listResourceGpuCatalog",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/gpu-catalog-entry.schema.json"
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "$ref": "../contracts/v1/gpu-catalog-entry.schema.json"
+                      },
+                      "type": "array"
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
                   },
-                  "type": "array"
+                  "required": [
+                    "items",
+                    "nextCursor"
+                  ],
+                  "type": "object"
                 }
               }
             },
@@ -16863,16 +17032,54 @@
       "get": {
         "description": "Permission: resource_rate:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "listResourceRates",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/resource-rate.schema.json"
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "$ref": "../contracts/v1/resource-rate.schema.json"
+                      },
+                      "type": "array"
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
                   },
-                  "type": "array"
+                  "required": [
+                    "items",
+                    "nextCursor"
+                  ],
+                  "type": "object"
                 }
               }
             },

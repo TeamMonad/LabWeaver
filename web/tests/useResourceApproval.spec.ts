@@ -5,10 +5,10 @@ import { requestFingerprint, useResourceApproval } from '@/composables/useResour
 import type { GpuCatalogEntrySchema, ResourceRequestSchema } from '@/generated/contracts'
 
 const mocks = vi.hoisted(() => ({
-  apiGet: vi.fn(),
   approveResourceRequest: vi.fn(),
   getResourceLease: vi.fn(),
   getResourceRequest: vi.fn(),
+  listResourceGpuCatalog: vi.fn(),
   listResourceLeases: vi.fn(),
   listResourceRequests: vi.fn(),
   rejectResourceRequest: vi.fn(),
@@ -18,8 +18,6 @@ const mocks = vi.hoisted(() => ({
   revokeResourceLease: vi.fn(),
 }))
 
-vi.mock('@/api/client', () => ({ apiClient: { get: mocks.apiGet } }))
-
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return { ...actual, ...mocks }
@@ -27,6 +25,10 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
 
 function success<T>(data: T) {
   return { data, error: undefined as never }
+}
+
+function page(items: unknown[], nextCursor: string | null = null) {
+  return success({ items, nextCursor })
 }
 
 function taskRequest(id: string, revision = 3): ResourceRequestSchema {
@@ -83,9 +85,9 @@ describe('useResourceApproval', () => {
 
   it.each(['rejected', 'allocating', 'active'] as const)('only resubmits a rejected request, checking current %s state', async (requestState) => {
     const request = { ...taskRequest('resubmit'), state: requestState }
-    mocks.listResourceRequests.mockResolvedValue(success([request]))
-    mocks.listResourceLeases.mockResolvedValue(success([]))
-    mocks.apiGet.mockResolvedValue(success([]))
+    mocks.listResourceRequests.mockResolvedValue(page([request]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([]))
     mocks.getResourceRequest.mockResolvedValue(success(request))
     mocks.retryResourceRequest.mockResolvedValue(success({ requestId: request.id, revision: 4, statusUrl: '/resource/resubmit' }))
     const { state, wrapper } = mountApproval()
@@ -108,9 +110,9 @@ describe('useResourceApproval', () => {
   })
 
   it('offers only active GPU providers when the catalog retains inactive revisions', async () => {
-    mocks.listResourceRequests.mockResolvedValue(success([]))
-    mocks.listResourceLeases.mockResolvedValue(success([]))
-    mocks.apiGet.mockResolvedValue(success([
+    mocks.listResourceRequests.mockResolvedValue(page([]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([
       exclusiveEntry,
       { ...exclusiveEntry, id: '0197f0e0-0000-7000-8000-0000000000a2', providerBinding: 'retired-gpu-provider', revision: 1, active: false },
       {
@@ -148,9 +150,9 @@ describe('useResourceApproval', () => {
     ['malformed inactive provider', { active: false, providerBinding: '' }],
     ['malformed inactive capacity', { active: false, capacityUnits: 0 }],
   ])('rejects a catalog with %s', async (_label, fields) => {
-    mocks.listResourceRequests.mockResolvedValue(success([]))
-    mocks.listResourceLeases.mockResolvedValue(success([]))
-    mocks.apiGet.mockResolvedValue(success([exclusiveEntry, { ...exclusiveEntry, ...fields }]))
+    mocks.listResourceRequests.mockResolvedValue(page([]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([exclusiveEntry, { ...exclusiveEntry, ...fields }]))
 
     const { state, wrapper } = mountApproval()
     await vi.waitFor(() => expect(state.providerOptions.kind).toBe('error'))
@@ -160,9 +162,9 @@ describe('useResourceApproval', () => {
   })
 
   it('keeps GPU approval unavailable when every valid catalog revision is inactive', async () => {
-    mocks.listResourceRequests.mockResolvedValue(success([]))
-    mocks.listResourceLeases.mockResolvedValue(success([]))
-    mocks.apiGet.mockResolvedValue(success([{ ...exclusiveEntry, active: false }]))
+    mocks.listResourceRequests.mockResolvedValue(page([]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([{ ...exclusiveEntry, active: false }]))
 
     const { state, wrapper } = mountApproval()
     await vi.waitFor(() => expect(state.providerOptions).toEqual({ kind: 'empty' }))
@@ -172,9 +174,9 @@ describe('useResourceApproval', () => {
   it('checks every selected task request against its latest content and revision before approval', async () => {
     const first = taskRequest('one')
     const second = taskRequest('two')
-    mocks.listResourceRequests.mockResolvedValue(success([first, second]))
-    mocks.listResourceLeases.mockResolvedValue(success([]))
-    mocks.apiGet.mockResolvedValue(success([]))
+    mocks.listResourceRequests.mockResolvedValue(page([first, second]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([]))
     mocks.getResourceRequest.mockImplementation(({ path }: { path: { requestId: string } }) => (
       Promise.resolve(success(path.requestId === first.id ? first : { ...second, revision: 4 }))
     ))
@@ -232,9 +234,9 @@ describe('useResourceApproval', () => {
       requestedDurationSeconds: 3600,
       updatedAt: '2026-09-14T00:01:00.000Z',
     }
-    mocks.listResourceRequests.mockResolvedValue(success([versionOne]))
-    mocks.listResourceLeases.mockResolvedValue(success([]))
-    mocks.apiGet.mockResolvedValue(success([]))
+    mocks.listResourceRequests.mockResolvedValue(page([versionOne]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([]))
     mocks.getResourceRequest.mockResolvedValue(success(versionTwo))
 
     const { state, wrapper } = mountApproval()
@@ -262,11 +264,11 @@ describe('useResourceApproval', () => {
     vi.useFakeTimers()
     const request = taskRequest('one')
     mocks.listResourceRequests
-      .mockResolvedValueOnce(success([request]))
-      .mockResolvedValueOnce(success([request]))
+      .mockResolvedValueOnce(page([request]))
+      .mockResolvedValueOnce(page([request]))
       .mockRejectedValue(new Error('request refresh offline'))
-    mocks.listResourceLeases.mockResolvedValue(success([]))
-    mocks.apiGet.mockResolvedValue(success([]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([]))
 
     const { state, wrapper } = mountApproval()
     await vi.waitFor(() => expect(state.requests).toEqual({ kind: 'success', data: [request] }))
@@ -277,6 +279,49 @@ describe('useResourceApproval', () => {
 
     expect(state.requests).toEqual({ kind: 'success', data: [request] })
     expect(state.refreshDiagnostic?.message).toContain('RESOURCE_REQUEST_REFRESH_FAILED')
+    wrapper.unmount()
+  })
+
+  it('appends the next request page from the cursor and stops at the last page', async () => {
+    const first = taskRequest('one')
+    const second = taskRequest('two')
+    mocks.listResourceRequests
+      .mockResolvedValueOnce(page([first], 'requests-2'))
+      .mockResolvedValueOnce(page([second]))
+    mocks.listResourceLeases.mockResolvedValue(page([]))
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([]))
+
+    const { state, wrapper } = mountApproval()
+    await vi.waitFor(() => expect(state.requests).toEqual({ kind: 'success', data: [first] }))
+    expect(state.requestsNextCursor).toBe('requests-2')
+    expect(mocks.listResourceRequests).toHaveBeenCalledWith({ query: { limit: 50 } })
+
+    await state.loadMoreRequests()
+    expect(mocks.listResourceRequests).toHaveBeenLastCalledWith({ query: { limit: 50, cursor: 'requests-2' } })
+    expect(state.requests).toEqual({ kind: 'success', data: [first, second] })
+    expect(state.requestsNextCursor).toBeNull()
+
+    // The last page has no cursor; another "load more" does not read again.
+    await state.loadMoreRequests()
+    expect(mocks.listResourceRequests).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('keeps shown leases when the next lease page fails, with a reason', async () => {
+    const lease = { id: 'lease-1', requestId: 'request-1', state: 'active' }
+    mocks.listResourceRequests.mockResolvedValue(page([]))
+    mocks.listResourceLeases
+      .mockResolvedValueOnce(page([lease], 'leases-2'))
+      .mockResolvedValueOnce({ data: undefined, error: { diagnosticCode: 'LW_RESOURCE_UNAVAILABLE', detail: 'Resource unavailable', retryable: true } })
+    mocks.listResourceGpuCatalog.mockResolvedValue(page([]))
+
+    const { state, wrapper } = mountApproval()
+    await vi.waitFor(() => expect(state.leases).toEqual({ kind: 'success', data: [lease] }))
+
+    await state.loadMoreLeases()
+    expect(state.leases).toEqual({ kind: 'success', data: [lease] })
+    expect(state.leasesNextCursor).toBe('leases-2')
+    expect(state.loadMoreDiagnostic).toMatchObject({ list: 'leases', diagnostic: { code: 'LW_RESOURCE_UNAVAILABLE' } })
     wrapper.unmount()
   })
 })

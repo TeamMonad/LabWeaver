@@ -70,6 +70,9 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 #[path = "support/task_lifecycle.rs"]
 mod task_lifecycle;
 
+#[path = "support/resource_pagination.rs"]
+mod resource_pagination;
+
 #[tokio::test]
 async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_invariants()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -117,6 +120,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!("../../../migrations/resource/0021_environment_funding.sql"),
         include_str!("../../../migrations/resource/0022_model_token_rates.sql"),
         include_str!("../../../migrations/resource/0023_outbox_publication_claims.sql"),
+        include_str!("../../../migrations/resource/0024_resource_list_ordinals.sql"),
     ] {
         sqlx::raw_sql(migration).execute(&pool).await?;
     }
@@ -1249,7 +1253,10 @@ async fn gpu_catalog_seed_provisions_reviewed_class_once() -> Result<(), Box<dyn
     assert_eq!(created[0].revision, Revision::new(1)?);
     assert!(created[0].active);
 
-    let catalog = store.list_gpu_catalog().await?;
+    let catalog = store
+        .list_gpu_catalog(&contracts::http::ResourceListQuery::default())
+        .await?
+        .items;
     assert_eq!(catalog.len(), 1);
     assert_eq!(catalog[0].id, created[0].id);
     Ok(())
@@ -1269,7 +1276,10 @@ async fn gpu_catalog_seed_is_idempotent_and_never_bumps_revision()
     assert_eq!(second[0].revision, first[0].revision);
     assert_eq!(second[0].revision, Revision::new(1)?);
 
-    let catalog = store.list_gpu_catalog().await?;
+    let catalog = store
+        .list_gpu_catalog(&contracts::http::ResourceListQuery::default())
+        .await?
+        .items;
     assert_eq!(catalog.len(), 1);
     Ok(())
 }
@@ -1303,7 +1313,10 @@ async fn gpu_catalog_seed_conflict_fails_and_leaves_existing_row_untouched()
         Err(resource_service::store::ResourceStoreError::GpuCatalogSeedConflict)
     ));
 
-    let catalog = store.list_gpu_catalog().await?;
+    let catalog = store
+        .list_gpu_catalog(&contracts::http::ResourceListQuery::default())
+        .await?
+        .items;
     assert_eq!(catalog.len(), 1);
     assert_eq!(catalog[0].provider_binding, seed.provider_binding);
     assert_eq!(catalog[0].capacity_units, seed.capacity_units);
@@ -1343,7 +1356,10 @@ async fn gpu_catalog_seed_does_not_reactivate_disabled_class()
     assert!(!seeded[0].active);
     assert_eq!(seeded[0].revision, Revision::new(1)?);
 
-    let catalog = store.list_gpu_catalog().await?;
+    let catalog = store
+        .list_gpu_catalog(&contracts::http::ResourceListQuery::default())
+        .await?
+        .items;
     assert_eq!(catalog.len(), 1);
     assert!(!catalog[0].active);
     Ok(())
@@ -2999,10 +3015,10 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     assert_eq!(adjustment, adjustment_replay);
     assert_eq!(adjustment.total.amount.as_str(), "-0.250000");
     let charges = store
-        .list_charges(project_id)
+        .list_charges(project_id, &contracts::http::ResourceListQuery::default())
         .await
         .map_err(|error| format!("list charges: {error}"))?;
-    assert_eq!(charges.len(), 4);
+    assert_eq!(charges.items.len(), 4);
     let budget = store.get_budget(project_id).await?;
     assert_eq!(budget.spent.amount.as_str(), "3.250000");
     let adjustment_count: i64 = sqlx::query_scalar(
@@ -3208,7 +3224,14 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
             .await,
         Err(ResourceStoreError::RateSettledConflict)
     ));
-    assert_eq!(store.list_charges(project_id).await?.len(), 1);
+    assert_eq!(
+        store
+            .list_charges(project_id, &contracts::http::ResourceListQuery::default())
+            .await?
+            .items
+            .len(),
+        1
+    );
     assert!(matches!(
         store
             .end_rate(
@@ -3409,10 +3432,18 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
         (Err(ResourceStoreError::RateSettledConflict), Ok(Some(charge))) => {
             assert_eq!(charge.lines[0].rate_id, rate.id);
             assert_eq!(charge.total.amount.as_str(), "0.020000");
-            assert_eq!(store.list_charges(project_id).await?.len(), 1);
+            assert_eq!(
+                store
+                    .list_charges(project_id, &contracts::http::ResourceListQuery::default())
+                    .await?
+                    .items
+                    .len(),
+                1
+            );
             let current_rate = store
-                .list_rates()
+                .list_rates(&contracts::http::ResourceListQuery::default())
                 .await?
+                .items
                 .into_iter()
                 .find(|candidate| candidate.id == rate.id)
                 .ok_or("concurrent rate disappeared")?;
@@ -3854,7 +3885,10 @@ async fn activate_synthetic_environment(
         .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let from = store.current_time().await?;
     let until = UtcTimestamp::from_utc(from.get() + time::Duration::seconds(seconds))?;
-    let rates = store.list_rates().await?;
+    let rates = store
+        .list_rates(&contracts::http::ResourceListQuery::default())
+        .await?
+        .items;
     let mut synthetic_rates = Vec::new();
     for (unit, gpu_class, gpu_mode) in [
         (ResourceBillingUnit::CpuMillicoreSecond, None, None),
@@ -4103,11 +4137,25 @@ async fn work_handoff_publishes_only_the_third_failure_as_one_consistent_request
             );
             assert_eq!(
                 store
-                    .list_owned(request.requester_id, request.project_id, request.course_id)
-                    .await?,
+                    .list_project_requests_page(
+                        request.project_id,
+                        Some(request.requester_id),
+                        &ResourceRequestListQuery {
+                            course_id: request.course_id,
+                            ..Default::default()
+                        }
+                    )
+                    .await?
+                    .items,
                 vec![current.clone()]
             );
-            assert_eq!(store.list_all_requests().await?, vec![current.clone()]);
+            assert_eq!(
+                store
+                    .list_all_requests(&contracts::http::ResourceListQuery::default())
+                    .await?
+                    .items,
+                vec![current.clone()]
+            );
             let (revision, diagnostic, contract): (i64, String, Value) = sqlx::query_as(
                 "SELECT revision,diagnostic_code,contract FROM resource.resource_requests WHERE request_id=$1")
                 .bind(request.id.as_uuid()).fetch_one(&pool).await?;
@@ -4782,6 +4830,11 @@ async fn migrated_pool()
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0024_resource_list_ordinals.sql"
+    ))
+    .execute(&pool)
+    .await?;
     Ok((container, pool))
 }
 
@@ -5120,8 +5173,9 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
         .await
         .expect("resource router is infallible");
     assert_eq!(public_response.status(), StatusCode::OK);
-    let public_requests: Vec<ResourceRequest> =
+    let public_requests: contracts::http::CursorPage<ResourceRequest> =
         serde_json::from_slice(&to_bytes(public_response.into_body(), 1024 * 1024).await?)?;
+    let public_requests = public_requests.items;
     assert_eq!(public_requests.len(), 2);
     let keys = public_requests
         .iter()
@@ -5207,9 +5261,9 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
             .and_then(|value| value.to_str().ok()),
         Some("no-store")
     );
-    let project_leases: Vec<contracts::resource::ResourceLease> =
+    let project_leases: contracts::http::CursorPage<contracts::resource::ResourceLease> =
         serde_json::from_slice(&to_bytes(project_leases_response.into_body(), 1024 * 1024).await?)?;
-    assert!(project_leases.is_empty());
+    assert!(project_leases.items.is_empty());
     Ok(())
 }
 
@@ -5563,7 +5617,9 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
         .await?
         .ok_or("charge missing")?;
     assert_eq!(charge.total.amount.as_str(), "2.000000");
-    let ledger = credits.ledger(project, 1, 100, 0).await?;
+    let ledger = resource
+        .list_credit_ledger(project, &contracts::http::ResourceListQuery::default())
+        .await?;
     let settlement = ledger
         .items
         .iter()
@@ -5634,7 +5690,13 @@ async fn credits_existing_usage_settlement_and_physical_cleanup_share_the_transa
     let account = credits.account(project).await?;
     assert_eq!(account.reserved.as_str(), "0.000000");
     assert_eq!(account.unknown_count, 1);
-    assert!(credits.holds(project, 1, 25, 0).await?.items[0].measurement_unknown);
+    assert!(
+        resource
+            .list_credit_holds(project, &contracts::http::ResourceListQuery::default())
+            .await?
+            .items[0]
+            .measurement_unknown
+    );
     Ok(())
 }
 

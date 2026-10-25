@@ -362,7 +362,14 @@ async fn consent_changes_scope_and_insufficient_funds_never_leave_partial_holds(
             .await?,
         funded
     );
-    assert_eq!(credits.holds(project, 1, 100, 0).await?.items.len(), 1);
+    assert_eq!(
+        store
+            .list_credit_holds(project, &contracts::http::ResourceListQuery::default())
+            .await?
+            .items
+            .len(),
+        1
+    );
     Ok(())
 }
 #[tokio::test]

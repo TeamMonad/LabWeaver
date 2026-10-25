@@ -35,6 +35,7 @@ import type {
   ProblemDetails,
   ResourceLeaseSchema,
   ResourceLeaseState,
+  ResourceChargeSchema,
   ResourceRateSchema,
   ResourceRequestPageSchema,
   ResourceRequestSchema,
@@ -49,6 +50,8 @@ import type {
 type FixtureSuccess<T> = { data: T; error: undefined }
 type FixtureError = { data: undefined; error: unknown }
 type FixtureResult<T> = FixtureSuccess<T> | FixtureError
+/** Resource list pages (#229): one page and the cursor of the next, null on the last. */
+type CursorPage<T> = { items: T[]; nextCursor: string | null }
 
 // Platform configuration (#203) preview facts live in their own module.
 export * from './platformConfiguration'
@@ -844,10 +847,10 @@ export async function listProjectResourceRequests(options?: FixtureOptions): Pro
   if (projectId && projectId !== fixtureProjectId) return notFoundResponse('读取项目资源申请', projectId)
   return fixtureResponse({ items: projectRequests(), nextCursor: null })
 }
-export async function listProjectResourceLeases(options?: FixtureOptions): Promise<FixtureResult<ResourceLeaseSchema[]>> {
+export async function listProjectResourceLeases(options?: FixtureOptions): Promise<FixtureResult<CursorPage<ResourceLeaseSchema>>> {
   const projectId = options?.path?.projectId
   if (projectId && projectId !== fixtureProjectId) return notFoundResponse('读取项目资源授权', projectId)
-  return fixtureResponse(projectLeases())
+  return fixtureResponse({ items: projectLeases(), nextCursor: null })
 }
 
 export async function getResourceRequest(options?: FixtureOptions): Promise<FixtureResult<ResourceRequestSchema>> {
@@ -864,8 +867,8 @@ export async function getResourceLease(options?: FixtureOptions): Promise<Fixtur
   return item ? fixtureResponse(item) : notFoundResponse('读取资源授权', leaseId)
 }
 
-export async function listResourceRequests(): Promise<FixtureResult<ResourceRequestSchema[]>> { return fixtureResponse(approvalRequests()) }
-export async function listResourceLeases(): Promise<FixtureResult<ResourceLeaseSchema[]>> { return fixtureResponse(approvalLeases()) }
+export async function listResourceRequests(): Promise<FixtureResult<ResourceRequestPageSchema>> { return fixtureResponse({ items: approvalRequests(), nextCursor: null }) }
+export async function listResourceLeases(): Promise<FixtureResult<CursorPage<ResourceLeaseSchema>>> { return fixtureResponse({ items: approvalLeases(), nextCursor: null }) }
 export async function listSshPublicKeys(): Promise<FixtureResult<{ items: SshPublicKeySchema[]; nextCursor?: string | null }>> {
   return fixtureResponse({ items: [], nextCursor: null })
 }
@@ -1022,8 +1025,35 @@ export async function getProjectAgentCapability(options?: FixtureOptions): Promi
 
 export async function upgradeEnvironmentTemplate(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('升级 Work 模板') }
 
-export async function listResourceGpuCatalog(): Promise<FixtureResult<GpuCatalogEntrySchema[]>> { return fixtureResponse(gpuCatalogFixture) }
-export async function listResourceRates(_options?: FixtureOptions): Promise<FixtureResult<ResourceRateSchema[]>> { return unsupportedResponse('读取资源费率') }
+export async function listResourceGpuCatalog(): Promise<FixtureResult<CursorPage<GpuCatalogEntrySchema>>> { return fixtureResponse({ items: gpuCatalogFixture, nextCursor: null }) }
+
+const resourceRatesFixture = [
+  { id: 'rate-cpu-fixture', revision: 1, unit: 'cpu_millicore_second', unitQuantity: 1000, gpuClass: null, gpuMode: null, unitPrice: { currency: 'USD', amount: '0.000010' }, effectiveFrom: '2026-01-01T00:00:00.000Z', effectiveUntil: null },
+  { id: 'rate-gpu-fixture', revision: 1, unit: 'gpu_unit_second', unitQuantity: 1, gpuClass: 'nvidia-a10', gpuMode: 'exclusive', unitPrice: { currency: 'USD', amount: '0.000800' }, effectiveFrom: '2026-01-01T00:00:00.000Z', effectiveUntil: null },
+] satisfies ResourceRateSchema[]
+
+export async function listResourceRates(_options?: FixtureOptions): Promise<FixtureResult<CursorPage<ResourceRateSchema>>> {
+  return fixtureResponse({ items: resourceRatesFixture, nextCursor: null })
+}
+
+const resourceChargesFixture = [{
+  id: 'charge-physics-september',
+  usageRecordId: 'usage-physics-september',
+  projectId: fixtureProjectId,
+  lines: [
+    { rateId: 'rate-cpu-fixture', rateRevision: 1, unit: 'cpu_millicore_second', quantity: 720000000000, unitQuantity: 1000, unitPrice: { currency: 'USD', amount: '0.000010' }, amount: { currency: 'USD', amount: '7200.000000' } },
+    { rateId: 'rate-gpu-fixture', rateRevision: 1, unit: 'gpu_unit_second', quantity: 216000, unitQuantity: 1, unitPrice: { currency: 'USD', amount: '0.000800' }, amount: { currency: 'USD', amount: '172.800000' } },
+  ],
+  total: { currency: 'USD', amount: '7372.800000' },
+  settlement: 'pending',
+  createdAt: now,
+}] satisfies ResourceChargeSchema[]
+
+export async function listProjectResourceCharges(options?: FixtureOptions): Promise<FixtureResult<CursorPage<ResourceChargeSchema>>> {
+  const projectId = options?.path?.projectId
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取项目费用明细', projectId)
+  return fixtureResponse({ items: activeScene.value.id === 'budget-large' ? resourceChargesFixture : [], nextCursor: null })
+}
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
 export async function createResourceRate() { return unsupportedResponse('创建资源费率') }
 export async function endResourceRate() { return unsupportedResponse('结束资源费率') }
@@ -1146,9 +1176,7 @@ export async function listProjectCreditHolds(options?: FixtureOptions): Promise<
       reconciliationDueAt: '2026-10-12T10:00:00.000Z',
       expiredUnknownAt: '2026-10-12T10:00:00.000Z',
     }],
-    page: 1,
-    pageSize: 25,
-    hasMore: false,
+    nextCursor: null,
   })
 }
 
@@ -1169,9 +1197,7 @@ export async function listProjectCreditLedger(options?: FixtureOptions): Promise
       rateSnapshots: [],
       createdAt: '2026-10-12T07:00:00.000Z',
     }],
-    page: 1,
-    pageSize: 25,
-    hasMore: false,
+    nextCursor: null,
   })
 }
 

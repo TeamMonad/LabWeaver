@@ -60,8 +60,8 @@ describe('ProjectCreditsPanel', () => {
     window.sessionStorage.clear()
     authState.user.value = { profile: { roles: ['admin'], actor_id: 'actor-admin' } }
     vi.mocked(getProjectCredits).mockReset().mockResolvedValue({ data: account, error: undefined } as never)
-    vi.mocked(listProjectCreditLedger).mockReset().mockResolvedValue({ data: { items: [grantEntry, holdEntry], page: 1, pageSize: 25, hasMore: false }, error: undefined } as never)
-    vi.mocked(listProjectCreditHolds).mockReset().mockResolvedValue({ data: { items: [], page: 1, pageSize: 25, hasMore: false }, error: undefined } as never)
+    vi.mocked(listProjectCreditLedger).mockReset().mockResolvedValue({ data: { items: [grantEntry, holdEntry], nextCursor: null }, error: undefined } as never)
+    vi.mocked(listProjectCreditHolds).mockReset().mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(createCreditAdminOperation).mockReset().mockResolvedValue({ data: [], error: undefined } as never)
   })
 

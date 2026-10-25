@@ -148,7 +148,7 @@ describe('useEnvironmentInstance polling', () => {
     } as never)
     let resolveRequests: (value: unknown) => void = () => undefined
     vi.mocked(listProjectResourceRequests).mockImplementationOnce(() => new Promise((resolve) => { resolveRequests = resolve }) as never)
-    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }], error: undefined } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }], nextCursor: null }, error: undefined } as never)
     const scope = effectScope()
     const env = scope.run(() => useEnvironmentInstance(environmentId, handoff))!
     await flushPromises()

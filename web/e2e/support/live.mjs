@@ -85,6 +85,41 @@ export async function expectJson(response, label) {
   }
 }
 
+// Reads every page of a `{ items, nextCursor }` list endpoint. `path` may carry
+// its own query (for example `courseId`); `cursor` and `limit` are owned here.
+export async function readAllCursorPages(request, path, label, { limit = 100, maxPages = 1000 } = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error(`${label}:limit invalid`)
+  const url = new URL(path, 'http://labweaver.invalid')
+  const items = []
+  const seenCursors = new Set()
+  let cursor = null
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+    const query = new URLSearchParams(url.search)
+    query.set('limit', String(limit))
+    if (cursor) query.set('cursor', cursor)
+    const page = await expectJson(await request.get(`${url.pathname}?${query.toString()}`), label)
+    if (!page || !Array.isArray(page.items)) throw new Error(`${label}:page invalid`)
+    items.push(...page.items)
+    const nextCursor = page.nextCursor ?? null
+    if (nextCursor === null) return items
+    if (typeof nextCursor !== 'string' || nextCursor === '' || seenCursors.has(nextCursor)) {
+      throw new Error(`${label}:cursor invalid`)
+    }
+    seenCursors.add(nextCursor)
+    cursor = nextCursor
+  }
+  throw new Error(`${label}:page limit exceeded`)
+}
+
+export async function pollCursorPages(request, path, predicate, label, timeout = 180_000) {
+  let latest
+  await expect.poll(async () => {
+    latest = await readAllCursorPages(request, path, label)
+    return predicate(latest)
+  }, { timeout, intervals: [1000, 2000, 3000] }).toBe(true)
+  return latest
+}
+
 function formatPolicyDecimal(value, scale) {
   const integer = Number(value)
   if (!Number.isSafeInteger(integer) || integer <= 0) throw new Error('POLICY_BUDGET_VALUE_INVALID')
