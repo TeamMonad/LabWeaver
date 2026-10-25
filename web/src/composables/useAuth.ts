@@ -86,6 +86,29 @@ function sessionExpiredError(diagnostic: string): Error {
 const LOGOUT_ACTOR_CHANGED = '此浏览器的登录账号已变化，未执行退出。请刷新页面后再操作。'
 const LOGOUT_ACTOR_UNKNOWN = '暂时无法确认当前登录账号，本次退出没有执行。请稍后重试或刷新页面。'
 const LOGOUT_UNREACHABLE = '暂时无法连接登录服务，本次退出没有执行。请检查网络后重试。'
+const LOGOUT_TOKEN_INVALID = '暂时无法确认退出所需的安全令牌，本次退出没有执行。请稍后重试。'
+
+/** A refusal with this message; the technical reason stays out of the text. */
+function logoutRefused(message: string, cause: unknown): Error {
+  const refused = new Error(message)
+  Object.defineProperty(refused, 'cause', { value: cause, enumerable: false })
+  return refused
+}
+
+/** The token and issuing actor of a 200 CSRF answer, or a readable refusal for a body that is not one. */
+async function logoutCsrf(response: Response): Promise<{ csrfToken: string; actorId: string }> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch (failure) {
+    throw logoutRefused(LOGOUT_TOKEN_INVALID, failure)
+  }
+  const csrf = (body && typeof body === 'object' ? body : {}) as Partial<Record<keyof CsrfTokenResponseSchema, unknown>>
+  if (typeof csrf.csrfToken !== 'string' || !csrf.csrfToken || typeof csrf.actorId !== 'string' || !csrf.actorId) {
+    throw logoutRefused(LOGOUT_TOKEN_INVALID, 'BFF returned an invalid CSRF response')
+  }
+  return { csrfToken: csrf.csrfToken, actorId: csrf.actorId }
+}
 
 /** A session read that does not answer in time leaves the identity unknown instead of holding writes. */
 export const SESSION_READ_TIMEOUT_MS = 15_000
@@ -177,9 +200,7 @@ async function signOutInitiatingActor(requireConfirmedSession: boolean): Promise
     credentials: 'include',
     headers: { Accept: 'application/json, application/problem+json' },
   }).catch((failure: unknown) => {
-    const unreachable = new Error(LOGOUT_UNREACHABLE)
-    Object.defineProperty(unreachable, 'cause', { value: failure, enumerable: false })
-    throw unreachable
+    throw logoutRefused(LOGOUT_UNREACHABLE, failure)
   })
   if (csrfResponse.status === 401) {
     // The session has already ended: there is nothing to sign out.
@@ -187,13 +208,8 @@ async function signOutInitiatingActor(requireConfirmedSession: boolean): Promise
     resolveSessionActorDoubt()
     throw sessionExpiredError(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
   }
-  if (!csrfResponse.ok) {
-    const unreachable = new Error(LOGOUT_UNREACHABLE)
-    Object.defineProperty(unreachable, 'cause', { value: `BFF CSRF lookup failed with HTTP ${csrfResponse.status}`, enumerable: false })
-    throw unreachable
-  }
-  const csrf = await csrfResponse.json() as Partial<Record<keyof CsrfTokenResponseSchema, unknown>>
-  if (typeof csrf.csrfToken !== 'string' || !csrf.csrfToken) throw new Error('BFF returned an invalid CSRF token')
+  if (!csrfResponse.ok) throw logoutRefused(LOGOUT_UNREACHABLE, `BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
+  const csrf = await logoutCsrf(csrfResponse)
 
   // The final check, synchronous, with nothing awaited before the POST starts.
   if (sessionEpoch.value !== initiatingEpoch || sessionActor() !== initiatingActor) throw new Error(LOGOUT_ACTOR_CHANGED)

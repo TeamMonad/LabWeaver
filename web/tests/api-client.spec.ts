@@ -1,6 +1,6 @@
 import axios, { AxiosError, AxiosHeaders } from 'axios'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createLabWeaverApiClient } from '@/api/client'
+import { createLabWeaverApiClient, type CsrfTokenRequest } from '@/api/client'
 import { recordSessionActor } from '@/api/session'
 import { createClient } from '@/generated/contracts/client'
 import { diagnosticFromError, extractProblemDetails, makeDiagnostic } from '@/types/async'
@@ -400,6 +400,168 @@ describe('browser session changes (#198)', () => {
 
       expect(await write).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
       expect(adapter).toHaveBeenCalledTimes(0)
+    })
+  })
+
+  describe('a write is checked against the epoch its SDK call was entered in', () => {
+    it('does not send a write whose epoch ended between the call and the transport interceptor', async () => {
+      const { session, client, axios: transportAxios } = await freshTransport()
+      session.recordSessionActor('actor-a')
+      // Actor B gets a valid token of its own: only the call's epoch tells A's write apart.
+      const csrfGet = vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-b', 'token-of-b'))
+      const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+      const adapter = installSuccessfulAdapter(api)
+
+      const result = await api.post({
+        url: '/api/v1/projects',
+        body: { name: 'A 的项目' },
+        // The SDK's own async phase: after the call was entered, before any interceptor runs.
+        requestValidator: async () => { session.recordSessionActor('actor-b') },
+      })
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+      expect(adapter).toHaveBeenCalledTimes(0)
+      expect(csrfGet).not.toHaveBeenCalled()
+    })
+
+    it('stamps generated SDK functions on the default client the same way', async () => {
+      const { session, client, axios: transportAxios } = await freshTransport()
+      await client.initializeSdkClient()
+      const { client: sdkClient } = await import('@/generated/contracts/client.gen')
+      const { createProject } = await import('@/generated/contracts')
+      session.recordSessionActor('actor-a')
+      vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-b', 'token-of-b'))
+      const transport = sdkClient.getConfig().axios
+      if (!transport || 'Axios' in transport) throw new Error('SDK transport not initialized')
+      const adapter = vi.fn(async (config) => ({ data: {}, status: 201, statusText: 'Created', headers: {}, config }))
+      transport.defaults.adapter = adapter
+
+      const result = await createProject({
+        body: { name: 'A 的项目' } as never,
+        requestValidator: async () => { session.recordSessionActor('actor-b') },
+      })
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+      expect(adapter).toHaveBeenCalledTimes(0)
+
+      // A call entered in the current epoch is sent.
+      expect((await createProject({ body: { name: 'B 的项目' } as never })).error).toBeUndefined()
+      expect(adapter).toHaveBeenCalledOnce()
+    })
+  })
+
+  describe('the CSRF lookup is bounded by the write\'s deadline and its caller\'s cancellation', () => {
+    it('rejects a write promptly as timed out when a custom provider hangs, and aborts the provider\'s signal', async () => {
+      const { session, client } = await freshTransport()
+      session.recordSessionActor('actor-a')
+      const requests: CsrfTokenRequest[] = []
+      const api = client.createLabWeaverApiClient({
+        baseUrl: '/',
+        authentication: {
+          mode: 'bff',
+          csrfToken: (request) => {
+            requests.push(request)
+            return new Promise<never>(() => undefined)
+          },
+        },
+        timeoutMilliseconds: 20,
+      })
+      const adapter = installSuccessfulAdapter(api)
+      const started = Date.now()
+
+      const result = await api.post({ url: '/api/v1/projects', body: { name: '项目' } })
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_TIMEOUT' })
+      expect(Date.now() - started).toBeLessThan(1_000)
+      expect(adapter).toHaveBeenCalledTimes(0)
+      expect(requests).toHaveLength(1)
+      expect(requests[0].signal.aborted).toBe(true)
+      expect(requests[0].deadline).toBeGreaterThanOrEqual(started + 20)
+      expect(requests[0].deadline).toBeLessThanOrEqual(Date.now())
+    })
+
+    it('aborts the default provider\'s lookup when the write times out', async () => {
+      const { session, client, axios: transportAxios } = await freshTransport()
+      session.recordSessionActor('actor-a')
+      const lookups: (AbortSignal | undefined)[] = []
+      vi.spyOn(transportAxios, 'get').mockImplementation(((_url: string, config?: { signal?: AbortSignal }) => {
+        lookups.push(config?.signal)
+        return new Promise(() => undefined)
+      }) as never)
+      const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' }, timeoutMilliseconds: 20 })
+      const adapter = installSuccessfulAdapter(api)
+
+      const result = await api.post({ url: '/api/v1/projects', body: { name: '项目' } })
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_TIMEOUT' })
+      expect(adapter).toHaveBeenCalledTimes(0)
+      expect(lookups).toHaveLength(1)
+      expect(lookups[0]?.aborted).toBe(true)
+    })
+
+    it('rejects a write whose caller signal is already aborted as cancelled, without a lookup', async () => {
+      const { session, client, axios: transportAxios } = await freshTransport()
+      session.recordSessionActor('actor-a')
+      const csrfGet = vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-a', 'token-of-a'))
+      const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+      const adapter = installSuccessfulAdapter(api)
+      const caller = new AbortController()
+      caller.abort()
+
+      const result = await api.post({ url: '/api/v1/projects', body: { name: '项目' }, signal: caller.signal })
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_CANCELLED' })
+      expect(adapter).toHaveBeenCalledTimes(0)
+      expect(csrfGet).not.toHaveBeenCalled()
+    })
+
+    it('aborts the default lookup when the only waiting write is cancelled', async () => {
+      const { session, client, axios: transportAxios } = await freshTransport()
+      session.recordSessionActor('actor-a')
+      const lookups: (AbortSignal | undefined)[] = []
+      vi.spyOn(transportAxios, 'get').mockImplementation(((_url: string, config?: { signal?: AbortSignal }) => {
+        lookups.push(config?.signal)
+        return new Promise(() => undefined)
+      }) as never)
+      const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+      const adapter = installSuccessfulAdapter(api)
+      const caller = new AbortController()
+
+      const write = api.post({ url: '/api/v1/projects', body: { name: '项目' }, signal: caller.signal })
+      await vi.waitFor(() => expect(lookups).toHaveLength(1))
+      caller.abort()
+
+      expect(await write).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_CANCELLED' })
+      expect(adapter).toHaveBeenCalledTimes(0)
+      expect(lookups[0]?.aborted).toBe(true)
+    })
+
+    it('keeps a shared lookup for the writes still waiting when another one is cancelled', async () => {
+      const { session, client, axios: transportAxios } = await freshTransport()
+      session.recordSessionActor('actor-a')
+      const csrf = deferred<unknown>()
+      const lookups: (AbortSignal | undefined)[] = []
+      vi.spyOn(transportAxios, 'get').mockImplementation(((_url: string, config?: { signal?: AbortSignal }) => {
+        lookups.push(config?.signal)
+        return csrf.promise
+      }) as never)
+      const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+      const adapter = installSuccessfulAdapter(api)
+      const caller = new AbortController()
+
+      const cancelled = api.post({ url: '/api/v1/projects', body: { name: '取消' }, signal: caller.signal })
+      const kept = api.post({ url: '/api/v1/projects', body: { name: '保留' } })
+      await vi.waitFor(() => expect(lookups).toHaveLength(1))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      caller.abort()
+      expect(await cancelled).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_CANCELLED' })
+      expect(lookups[0]?.aborted).toBe(false)
+
+      csrf.resolve(csrfFor('actor-a', 'token-of-a'))
+      expect((await kept).error).toBeUndefined()
+      expect(lookups).toHaveLength(1)
+      expect(adapter).toHaveBeenCalledOnce()
+      expect(JSON.parse(String(adapter.mock.calls[0][0].data))).toEqual({ name: '保留' })
     })
   })
 

@@ -383,6 +383,13 @@ describe('BFF session epoch (#198)', () => {
   const csrfOf = (actorId: string) => new Response(JSON.stringify({ csrfToken: `token-of-${actorId}`, actorId }), { status: 200 })
   const failedRead = async (): Promise<Response> => { throw new TypeError('Failed to fetch') }
 
+  const LOGOUT_TOKEN_INVALID = '暂时无法确认退出所需的安全令牌，本次退出没有执行。请稍后重试。'
+  const invalidCsrfAnswers: Array<[string, () => Response]> = [
+    ['malformed JSON', () => new Response('{"csrfToken":', { status: 200 })],
+    ['no csrfToken', () => new Response(JSON.stringify({ actorId: actorA }), { status: 200 })],
+    ['a token of the wrong shape', () => new Response(JSON.stringify({ csrfToken: 42, actorId: actorA }), { status: 200 })],
+  ]
+
   it('(c) sends no logout when the actor goes A→B→A while the logout waits for its CSRF token', async () => {
     let answerCsrf!: (response: Response) => void
     const { posts } = routedFetch(
@@ -453,5 +460,31 @@ describe('BFF session epoch (#198)', () => {
       expect(navigate).not.toHaveBeenCalled()
       expect(auth.error.value?.message).toBe('暂时无法连接登录服务，本次退出没有执行。请检查网络后重试。')
     })
+
+    it.each(invalidCsrfAnswers)('sends nothing and names no account for a 200 CSRF answer with %s', async (_case, answer) => {
+      const { auth, posts, navigate } = await unknownIdentity(async () => answer())
+
+      await auth.endBrowserSession()
+
+      expect(posts).toEqual([])
+      expect(navigate).not.toHaveBeenCalled()
+      expect(auth.error.value?.message).toBe(LOGOUT_TOKEN_INVALID)
+    })
+  })
+
+  it.each(invalidCsrfAnswers)('refuses the logout of a confirmed actor readably for a 200 CSRF answer with %s', async (_case, answer) => {
+    const { posts } = routedFetch([async () => sessionOf(actorA)], async () => answer())
+    const navigate = vi.fn()
+    const { useAuth } = await import('@/composables/useAuth')
+    const auth = useAuth(navigate)
+    await auth.loadUser()
+
+    await auth.logout()
+
+    expect(posts).toEqual([])
+    expect(navigate).not.toHaveBeenCalled()
+    expect(auth.error.value?.message).toBe(LOGOUT_TOKEN_INVALID)
+    // An unreadable answer says nothing about who holds the session.
+    expect(auth.isAuthenticated.value).toBe(true)
   })
 })
