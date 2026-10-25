@@ -389,7 +389,12 @@ pub(crate) fn container_security_context(
         .runtime_authorization
         .as_ref()
         .ok_or(crate::ReleaseProjectionError::IdentityMismatch)?;
-    let digest = Sha256Digest::of_canonical(&projection.environment_spec)
+    let digest =
+        if projection.environment_spec.class == contracts::authoring::EnvironmentClass::Work {
+            Sha256Digest::of_canonical(&projection.environment_spec.permission_projection())
+        } else {
+            Sha256Digest::of_canonical(&projection.environment_spec)
+        }
         .map_err(|_| crate::ReleaseProjectionError::ContractInvalid)?;
     receipt
         .validate_for(

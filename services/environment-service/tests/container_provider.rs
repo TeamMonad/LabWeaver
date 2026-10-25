@@ -1116,6 +1116,7 @@ fn existing_namespace_plan_scopes_work_objects_and_preserves_operator_policies()
     );
     let mut second = instance.clone();
     second.id = contracts::EnvironmentId::new();
+    configure_work(&mut second, &projection);
     let other = provider
         .plan(&second, &resolved(projection), ReconcileAction::Provision)
         .expect("second Work");

@@ -91,6 +91,38 @@ pub(super) async fn exercise(
             family.clone(),
             "LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL",
         ),
+        (
+            "additional-capability",
+            {
+                let mut spec = source.environment_spec.clone();
+                spec.security
+                    .capabilities
+                    .insert(contracts::platform_configuration::LinuxCapability::NetRaw);
+                spec
+            },
+            family.clone(),
+            "LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL",
+        ),
+        (
+            "runtime-user",
+            {
+                let mut spec = source.environment_spec.clone();
+                spec.security.run_as_user = Some(1000);
+                spec
+            },
+            family.clone(),
+            "LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL",
+        ),
+        (
+            "root-filesystem",
+            {
+                let mut spec = source.environment_spec.clone();
+                spec.security.read_only_root_filesystem = true;
+                spec
+            },
+            family.clone(),
+            "LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL",
+        ),
     ] {
         let changed = publish(pool, store, instance, &spec, &target_family, label).await?;
         project(&releases, &changed).await?;
