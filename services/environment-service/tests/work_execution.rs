@@ -63,11 +63,13 @@ async fn start_checks_admission_and_durably_fences_before_backend_execution()
         admission,
         backend.clone(),
     );
+    let background = service.background_tasks();
+    let _background_guard = background.guard();
 
     let accepted = service.start(request.clone()).await?;
     assert_eq!(accepted.state, ContainerWorkExecutionState::Running);
-    // Blocked holds the backend's return. The detached worker may enter execute as soon as
-    // start returns, so synchronize on its entry instead of relying on executor scheduling.
+    // The owned worker may enter execute as soon as start returns; the receipt does not
+    // mean the supervising process may abandon the still-running backend.
     backend.execute_started.notified().await;
     assert!(backend.durable_before_execute.load(Ordering::SeqCst));
     assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
@@ -88,6 +90,13 @@ async fn start_checks_admission_and_durably_fences_before_backend_execution()
     assert_eq!(replay.execution_id, accepted.execution_id);
     assert_eq!(admission_calls.load(Ordering::SeqCst), 1);
     assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
+    let draining = background.drain();
+    tokio::pin!(draining);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+            .await
+            .is_err()
+    );
 
     backend.release_execute.notify_one();
     let terminal = wait_for_state(
@@ -99,6 +108,7 @@ async fn start_checks_admission_and_durably_fences_before_backend_execution()
     .await?;
     assert_eq!(terminal.exit_code, Some(0));
     assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(1), draining).await?;
     Ok(())
 }
 

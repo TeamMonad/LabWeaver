@@ -499,6 +499,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         ModelInputAuthorizationClient::from_env(Arc::clone(&service_token_client))
             .map_err(|_| StartupError::Configuration)?;
     let gateway_state = GatewayState {
+        background: service_runtime::BackgroundTasks::default(),
         upstream: gateway_upstream,
         upstream_key: gateway_key,
         pool: store.pool().clone(),
@@ -603,12 +604,13 @@ async fn run_agent_service() -> Result<(), StartupError> {
                 .map_err(StartupError::from)
         },
         async {
-            tokio::select! {
-                result = &mut sandbox_cleanup_worker => {
-                    result.map_err(|_| StartupError::SandboxCleanupWorker)?;
-                    Err(StartupError::SandboxCleanupWorker)
-                }
-                () = service_runtime::wait_for_shutdown() => Ok(()),
+            (&mut sandbox_cleanup_worker)
+                .await
+                .map_err(|_| StartupError::SandboxCleanupWorker)?;
+            if service_runtime::is_stopping() {
+                Ok(())
+            } else {
+                Err(StartupError::SandboxCleanupWorker)
             }
         },
         build_command_loop(build_consumer, build_store),

@@ -148,6 +148,8 @@ enum RuntimeKind {
 async fn run_environment_service() -> Result<(), MainError> {
     let process = environment_service::EnvironmentProcessRuntime::from_env().await?;
     let readiness = process.readiness();
+    let background = process.work_execution_tasks();
+    let _background_guard = background.guard();
     let owner_resolver =
         environment_service::OwnerResolverRuntime::from_env(process.api_state()).await?;
     tokio::try_join!(
@@ -159,6 +161,7 @@ async fn run_environment_service() -> Result<(), MainError> {
         async { owner_resolver.serve().await.map_err(MainError::Resolver) },
         async { Box::pin(process.serve()).await.map_err(MainError::Process) },
     )?;
+    background.drain().await;
     Ok(())
 }
 

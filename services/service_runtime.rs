@@ -23,6 +23,74 @@ const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 static SHUTDOWN: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
 
+/// Background continuations belonging to one concrete runtime, not to an HTTP connection.
+/// Gateway settlement and Environment backend execution share this same `JoinSet` ownership.
+#[derive(Clone, Default)]
+pub struct BackgroundTasks {
+    inner: Arc<std::sync::Mutex<BackgroundTaskState>>,
+}
+
+#[derive(Default)]
+struct BackgroundTaskState {
+    closed: bool,
+    tasks: tokio::task::JoinSet<()>,
+}
+
+impl BackgroundTasks {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BackgroundTaskState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Retains the continuation after its initiating HTTP handler returns or disconnects.
+    pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut owner = self.lock();
+        if owner.closed {
+            return;
+        }
+        while let Some(result) = owner.tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::error!(event = "service.background_task_failed", error = %error);
+            }
+        }
+        owner.tasks.spawn(task);
+    }
+
+    /// Keeps abort ownership in the supervising runtime, including when its future is dropped.
+    #[must_use]
+    pub fn guard(&self) -> BackgroundTaskGuard<'_> {
+        BackgroundTaskGuard(self)
+    }
+
+    /// Called after HTTP acquisition and worker loops end. Descendant continuations may still
+    /// enqueue work while their parents drain, so never hold the mutex across a join.
+    pub async fn drain(&self) {
+        loop {
+            let mut batch = std::mem::take(&mut self.lock().tasks);
+            if batch.is_empty() {
+                return;
+            }
+            while let Some(result) = batch.join_next().await {
+                if let Err(error) = result {
+                    tracing::error!(event = "service.background_task_failed", error = %error);
+                }
+            }
+        }
+    }
+}
+
+/// The owner is held by the runtime future, never by its background children.
+pub struct BackgroundTaskGuard<'a>(&'a BackgroundTasks);
+
+impl Drop for BackgroundTaskGuard<'_> {
+    fn drop(&mut self) {
+        let mut owner = self.0.lock();
+        owner.closed = true;
+        owner.tasks.abort_all();
+    }
+}
+
 fn shutdown_sender() -> &'static tokio::sync::watch::Sender<bool> {
     &SHUTDOWN
 }
@@ -305,5 +373,72 @@ mod tests {
                 .to_string()
                 .starts_with("LW_CONFIG_BIND_ADDR_MISSING")
         );
+    }
+
+    #[tokio::test]
+    async fn background_drain_waits_for_descendant_continuations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tasks = super::BackgroundTasks::default();
+        let _owner = tasks.guard();
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let started = entered.clone();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        let descendants = tasks.clone();
+        tasks.spawn(async move {
+            descendants.spawn(async move {
+                started.notify_one();
+                let _ = wait.await;
+            });
+        });
+        entered.notified().await;
+        let draining = tasks.drain();
+        tokio::pin!(draining);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+                .await
+                .is_err()
+        );
+        resume
+            .send(())
+            .map_err(|()| "descendant was abandoned before drain deadline")?;
+        tokio::time::timeout(std::time::Duration::from_secs(1), draining).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn abandoning_runtime_cancels_background_tasks_without_completing_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let tasks = super::BackgroundTasks::default();
+        let owner = tasks.guard();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = Dropped(dropped.clone());
+        let (started, entered) = tokio::sync::oneshot::channel();
+        tasks.spawn(async move {
+            let _marker = marker;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        entered.await?;
+        let mut draining = Box::pin(tasks.drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+                .await
+                .is_err()
+        );
+        drop(draining);
+        drop(owner);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !dropped.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        Ok(())
     }
 }

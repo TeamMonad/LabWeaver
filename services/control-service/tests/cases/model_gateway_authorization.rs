@@ -148,6 +148,7 @@ async fn sandbox_tools_and_each_model_request_recheck_original_authority() -> Re
         Duration::from_mins(2),
     );
     let app = GatewayState {
+        background: agent_service::service_runtime::BackgroundTasks::default(),
         upstream: upstream_url,
         upstream_key: "provider-secret-kept-in-agent".to_owned(),
         issuer: runtime.issuer.clone(),

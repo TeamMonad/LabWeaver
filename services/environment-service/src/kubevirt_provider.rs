@@ -896,17 +896,18 @@ impl PgKubeVirtExecutorFenceStore {
         let now: time::OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&self.pool)
             .await?;
-        let code = if now >= previous.deadline_at {
-            ProviderFailureCode::Timeout
-        } else {
-            ProviderFailureCode::Cancelled
-        };
-        let response = KubeVirtExecutorResponse::Failed {
-            failure: ProviderFailure {
-                code,
+        // A verified replacement PID1 proves the previous process is gone, not that a user
+        // cancelled its operation. Replay the same request as unavailable until the domain
+        // owner schedules a fenced retry; do not repeat its uncertain backend effect here.
+        let failure = if now >= previous.deadline_at {
+            ProviderFailure {
+                code: ProviderFailureCode::Timeout,
                 retryable: false,
-            },
+            }
+        } else {
+            unavailable()
         };
+        let response = KubeVirtExecutorResponse::Failed { failure };
         let affected = sqlx::query(
             "UPDATE environment.kubevirt_executor_fences SET last_response=$8, \
              updated_at=clock_timestamp() WHERE environment_id=$1 AND highest_generation=$2 \
@@ -1167,7 +1168,6 @@ pub struct FencedKubeVirtExecutor<B> {
     runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
     instance: KubeVirtExecutionInstance,
     active: Mutex<std::collections::BTreeMap<Uuid, ActiveKubeVirtExecution>>,
-    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
@@ -1183,7 +1183,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
             runtime_admission: None,
             instance,
             active: Mutex::new(std::collections::BTreeMap::new()),
-            shutdown: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -1196,10 +1195,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
     /// Called once before listening, after the production PID1/PodSpec startup check.
     pub async fn prepare_startup(&self) -> Result<(), KubeVirtExecutorFenceError> {
         self.store.recover_previous_boot(&self.instance).await
-    }
-
-    fn cancel_active(&self) {
-        self.shutdown.send_replace(true);
     }
 
     async fn finish_terminals(&self) -> Result<(), KubeVirtExecutorFenceError> {
@@ -1227,9 +1222,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         envelope: KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponseEnvelope, KubeVirtExecutorFenceError> {
         validate_kubevirt_executor_request(&envelope)?;
-        if *self.shutdown.borrow() {
-            return Err(KubeVirtExecutorFenceError::Cancelled);
-        }
         let fence = &envelope.fence;
         let previous = {
             let mut active = self
@@ -1400,10 +1392,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         envelope: &KubeVirtExecutorRequestEnvelope,
         permit: &KubeVirtExecutionPermit,
     ) -> KubeVirtExecutorResponse {
-        let mut shutdown = self.shutdown.subscribe();
-        if *shutdown.borrow() {
-            return execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled);
-        }
         let remaining = match permit.check().await {
             Ok(remaining) => remaining,
             Err(error) => return execution_terminal_failure(&error),
@@ -1424,7 +1412,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
             };
             tokio::select! {
                 response = &mut work => response,
-                _ = shutdown.changed() => execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled),
                 error = watch_authority => execution_terminal_failure(&error),
                 () = tokio::time::sleep(remaining) => execution_terminal_failure(&KubeVirtExecutorFenceError::DeadlineExceeded),
             }
@@ -1564,7 +1551,8 @@ impl<B: KubeVirtExecutorBackend + 'static> NatsKubeVirtExecutorServer<B> {
         };
         // Dropping the subscription rejects new work; accepted tasks still retain their exact owner.
         drop(subscriber);
-        self.executor.cancel_active();
+        // Process shutdown is not user cancellation. The outer process supervisor bounds this
+        // drain; expiry drops the owned JoinSet without fabricating a terminal VM response.
         let mut task_failed = false;
         while let Some(task) = tasks.join_next().await {
             task_failed |= task.is_err();
@@ -3713,20 +3701,207 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn process_shutdown_does_not_become_non_retryable_user_cancellation() {
-        let response = execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled);
-        assert!(
-            !matches!(
-                response,
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the real VM process restart regression keeps admission, signal, persistence, and replay witnesses together"
+    )]
+    async fn process_shutdown_does_not_become_non_retryable_user_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers::{
+            GenericImage,
+            core::{IntoContainerPort, WaitFor},
+            runners::AsyncRunner,
+        };
+        struct GatedBackend {
+            entered: Arc<tokio::sync::Notify>,
+            resume: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl KubeVirtExecutorBackend for GatedBackend {
+            async fn execute(
+                &self,
+                _: &KubeVirtBackendFence,
+                _: &KubeVirtExecutorRequest,
+                _: &KubeVirtExecutionPermit,
+            ) -> KubeVirtExecutorResponse {
+                self.entered.notify_one();
+                self.resume.notified().await;
                 KubeVirtExecutorResponse::Failed {
-                    failure: ProviderFailure {
-                        code: ProviderFailureCode::Cancelled,
-                        retryable: false,
-                    }
+                    failure: unavailable(),
                 }
-            ),
-            "process shutdown must preserve durable recovery rather than persist user cancellation"
+            }
+        }
+        if std::env::var_os("LW_VM_DRAIN_HELPER").is_none() {
+            let output = tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "kubevirt_provider::tests::process_shutdown_does_not_become_non_retryable_user_cancellation", "--nocapture"])
+                .env("LW_VM_DRAIN_HELPER", "1").kill_on_drop(true).output()).await??;
+            assert!(
+                output.status.success(),
+                "VM process shutdown regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+        let authority = crate::test_support::requested_instance();
+        let mut fence = KubeVirtBackendFence::for_action(&authority, ReconcileAction::Stop)
+            .map_err(|error| format!("{error:?}"))?;
+        let (_postgres, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
+        sqlx::query("DELETE FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid())
+            .execute(&permit.pool)
+            .await?;
+        let request = KubeVirtExecutorRequest::Stop {
+            plan: KubeVirtCleanupPlan {
+                environment_id: authority.id,
+                project_id: authority.project_id,
+                namespace: format!("lw-env-{}", authority.id),
+                virtual_machine_name: "runtime".into(),
+                plan_sha256: Sha256Digest::of_bytes(b"shutdown-stop"),
+            },
+        };
+        let fence = bind_kubevirt_executor_request(fence, &request)
+            .map_err(|error| format!("{error:?}"))?;
+        let nats = GenericImage::new("nats", "2.11.8-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .start()
+            .await?;
+        let client = async_nats::connect(format!(
+            "nats://127.0.0.1:{}",
+            nats.get_host_port_ipv4(4222).await?
+        ))
+        .await?;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let executor = FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(permit.pool.clone()),
+            GatedBackend {
+                entered: entered.clone(),
+                resume: resume.clone(),
+            },
+            permit.instance.clone(),
         );
+        let server = NatsKubeVirtExecutorServer::new(
+            client.clone(),
+            "fixture.vm.shutdown".into(),
+            executor,
+        )?;
+        let mut server_tasks = tokio::task::JoinSet::new();
+        let server_task = server_tasks.spawn(crate::service_runtime::supervise(
+            "kubevirt-test",
+            server.serve(crate::service_runtime::subscribe_shutdown()),
+        ));
+        let envelope = KubeVirtExecutorRequestEnvelope {
+            fence: fence.clone(),
+            request,
+        };
+        let request_client = client.clone();
+        let mut request_tasks = tokio::task::JoinSet::new();
+        request_tasks.spawn(async move {
+            loop {
+                match request_client
+                    .request("fixture.vm.shutdown", serde_json::to_vec(&envelope)?.into())
+                    .await
+                {
+                    Ok(response) => {
+                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response);
+                    }
+                    Err(error) if error.kind() == async_nats::RequestErrorKind::NoResponders => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+        assert!(
+            tokio::process::Command::new("kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()
+                .await?
+                .success()
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::service_runtime::wait_for_shutdown(),
+        )
+        .await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while !server_task.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "shutdown must drain the actual VM operation, not cancel it"
+        );
+        let terminal: Option<Value> = sqlx::query_scalar("SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1").bind(fence.environment_id.as_uuid()).fetch_one(&permit.pool).await?;
+        assert!(
+            terminal.is_none(),
+            "process shutdown must not persist Cancelled"
+        );
+        resume.notify_one();
+        server_tasks
+            .join_next()
+            .await
+            .ok_or("server task missing")???;
+        let response = request_tasks
+            .join_next()
+            .await
+            .ok_or("request task missing")??
+            .map_err(|error| error.to_string())?;
+        let response: KubeVirtExecutorResponseEnvelope = serde_json::from_slice(&response.payload)?;
+        assert!(matches!(
+            response.response,
+            KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::Unavailable,
+                    retryable: true
+                }
+            }
+        ));
+        let mut next_boot = permit.instance;
+        next_boot.boot_token = Uuid::new_v4();
+        let restarted = FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(permit.pool.clone()),
+            UnstartedBackend(std::sync::atomic::AtomicUsize::new(0)),
+            next_boot,
+        );
+        restarted.prepare_startup().await?;
+        let replay = restarted
+            .execute(KubeVirtExecutorRequestEnvelope {
+                fence,
+                request: KubeVirtExecutorRequest::Stop {
+                    plan: KubeVirtCleanupPlan {
+                        environment_id: authority.id,
+                        project_id: authority.project_id,
+                        namespace: format!("lw-env-{}", authority.id),
+                        virtual_machine_name: "runtime".into(),
+                        plan_sha256: Sha256Digest::of_bytes(b"shutdown-stop"),
+                    },
+                },
+            })
+            .await?;
+        assert!(matches!(
+            replay.response,
+            KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::Unavailable,
+                    retryable: true
+                }
+            }
+        ));
+        assert_eq!(
+            restarted
+                .backend
+                .0
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "restart replays the persisted response without repeating the backend effect"
+        );
+        Ok(())
     }
 }

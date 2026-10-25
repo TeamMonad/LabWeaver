@@ -106,6 +106,7 @@ pub struct ContainerWorkExecutionService {
     pool: PgPool,
     admission: Arc<dyn WorkAdmissionResolver>,
     backend: Arc<dyn ContainerWorkExecutionBackend>,
+    background: crate::service_runtime::BackgroundTasks,
 }
 
 impl ContainerWorkExecutionService {
@@ -137,7 +138,14 @@ impl ContainerWorkExecutionService {
             pool,
             admission: Arc::new(admission),
             backend,
+            background: crate::service_runtime::BackgroundTasks::default(),
         }
+    }
+
+    /// Shares the task set with the process owner, which drains it after HTTP acquisition ends.
+    #[must_use]
+    pub fn background_tasks(&self) -> crate::service_runtime::BackgroundTasks {
+        self.background.clone()
     }
 
     /// Accepts one request.  The durable row is committed before the backend is called.
@@ -221,7 +229,7 @@ impl ContainerWorkExecutionService {
         }
         let service = self.clone();
         let background_receipt = receipt.clone();
-        tokio::spawn(async move {
+        self.background.spawn(async move {
             if let Err(error) = service
                 .run_backend(request, target, background_receipt)
                 .await

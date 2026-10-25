@@ -333,6 +333,12 @@ impl EnvironmentProcessRuntime {
         Arc::clone(&self.readiness)
     }
 
+    /// Returns the concrete background task owner retained by the process entrypoint.
+    #[must_use]
+    pub fn work_execution_tasks(&self) -> crate::service_runtime::BackgroundTasks {
+        self.work_executions.background_tasks()
+    }
+
     /// Clones only the owner dependencies required by the authenticated public API.
     #[must_use]
     pub fn api_state(&self) -> crate::EnvironmentApiState {
