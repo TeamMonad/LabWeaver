@@ -4,6 +4,7 @@
     identity_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') }}"
     identity_secret_locator: "{{ lookup('env', 'LABWEAVER_IDENTITY_SECRET_LOCATOR') }}"
     identity_lock: "{{ (lookup('file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml).identity_foundation }}"
+    identity_ha_lock: "{{ (lookup('file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml).high_availability }}"
     identity_run_suffix: "{{ lookup('env', 'LABWEAVER_RUN_ID') | hash('sha256') | truncate(12, true, '') }}"
 
 - name: Reject incomplete or mutable identity-foundation configuration
@@ -29,6 +30,10 @@
       - identity_lock.keycloak == '26.7.0'
       - identity_lock.postgres == '17.6-alpine'
       - identity_lock.images.values() | reject('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 0
+      - identity_ha_lock.cnpg.postgres_image is match('^.+@sha256:[0-9a-f]{64}$')
+      - identity_postgres_storage is match('^[1-9][0-9]*(Gi|Ti)$')
+      - identity_keycloak_replicas is integer
+      - identity_keycloak_replicas == 2
     fail_msg: IDENTITY_CONFIGURATION_INVALID
 
 - name: Hash the selected private identity secret locator
@@ -226,6 +231,41 @@
     - not (identity_foundation_verify_only | bool)
     - not (identity_foundation_realm_roles_only | bool)
   block:
+    - name: Validate the independent identity backup profile on the controller
+      ansible.builtin.command:
+        argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/../../../tools/ha_foundation.py", identity]
+        stdin: "{{ identity_foundation_ha | to_json }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      register: identity_ha_validation
+
+    - name: Bind the validated identity backup defaults
+      ansible.builtin.set_fact:
+        identity_foundation_ha: "{{ identity_ha_validation.stdout | from_json }}"
+
+    - name: Require independent identity backup credentials
+      ansible.builtin.assert:
+        that:
+          - identity_secrets.backup_access_key | default('') | length > 0
+          - identity_secrets.backup_secret_key | default('') | length > 0
+          - identity_secrets.backup_ca_crt | default('') is search('BEGIN CERTIFICATE')
+        fail_msg: IDENTITY_BACKUP_CREDENTIALS_REQUIRED
+      no_log: true
+
+    - name: Require the platform CNPG and Barman CRDs before identity installation
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - wait
+          - "crd/{{ item }}"
+          - --for=condition=Established
+          - --timeout=60s
+      loop: [clusters.postgresql.cnpg.io, objectstores.barmancloud.cnpg.io, scheduledbackups.postgresql.cnpg.io]
+      changed_when: false
+
     - name: Install the locked Kubernetes Python client on the control plane
       ansible.builtin.dnf:
         name: "{{ identity_lock.python_kubernetes_rpm }}"
@@ -239,6 +279,24 @@
       register: identity_python_kubernetes_rpm
       failed_when: identity_python_kubernetes_rpm.stdout != identity_lock.python_kubernetes_rpm
       when: identity_controller_manage_python_kubernetes | bool
+
+    - name: Reject an unapproved standalone identity database cutover
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        api_version: "{{ item.api }}"
+        kind: "{{ item.kind }}"
+        namespace: "{{ identity_namespace }}"
+        name: identity-postgres
+      loop:
+        - {api: apps/v1, kind: StatefulSet}
+        - {api: v1, kind: Service}
+      register: identity_legacy_database
+
+    - name: Require an explicit identity database data cutover window
+      ansible.builtin.assert:
+        that:
+          - identity_legacy_database.results | map(attribute='resources') | flatten | length == 0
+        fail_msg: IDENTITY_CNPG_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION
 
     - name: Create the restricted identity namespace
       kubernetes.core.k8s:
@@ -324,11 +382,18 @@
           apiVersion: v1
           kind: Secret
           metadata: {name: "{{ item.name }}", namespace: "{{ identity_namespace }}"}
-          type: Opaque
+          type: "{{ item.type | default('Opaque') }}"
           stringData: "{{ item.data }}"
       loop:
-        - {name: "{{ identity_database_secret_name }}", data: {password: "{{ identity_secrets.database_password }}"}}
+        - name: "{{ identity_database_secret_name }}"
+          type: kubernetes.io/basic-auth
+          data: {username: keycloak, password: "{{ identity_secrets.database_password }}"}
         - {name: "{{ identity_bootstrap_secret_name }}", data: {username: platform-bootstrap, password: "{{ identity_secrets.bootstrap_admin_password }}"}}
+        - name: identity-backup-secrets
+          data:
+            access-key: "{{ identity_secrets.backup_access_key }}"
+            secret-key: "{{ identity_secrets.backup_secret_key }}"
+            ca.crt: "{{ identity_secrets.backup_ca_crt }}"
       no_log: true
 
     - name: Install identity service client credentials from the root-only locator
@@ -351,7 +416,33 @@
         label: "{{ item.client_id }}"
       no_log: true
 
-    - name: Apply PostgreSQL and Keycloak workloads
+    - name: Apply identity network policies before database bootstrap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', 'policy.yml.j2') | from_yaml_all | list }}"
+
+    - name: Apply the independent identity CNPG cluster and backup configuration
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', 'database.yml.j2') | from_yaml_all | list }}"
+
+    - name: Wait for the identity database primary and replicas before starting Keycloak
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - wait
+          - cluster/identity-postgres
+          - --for=condition=Ready
+          - --timeout=15m
+      changed_when: false
+
+    - name: Apply Keycloak workloads after the identity database is ready
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
@@ -370,7 +461,7 @@
           - "{{ item }}"
           - --timeout=15m
       changed_when: false
-      loop: [statefulset/identity-postgres, "deployment/{{ identity_name }}"]
+      loop: ["deployment/{{ identity_name }}"]
 
     - name: Provision the LabWeaver service OIDC clients and roles
       kubernetes.core.k8s:
@@ -392,12 +483,12 @@
           - "--timeout={{ (identity_provision_job_active_deadline_seconds | int) + 300 }}s"
       changed_when: false
 
-    - name: Apply the internal Gateway and network policy
+    - name: Apply the internal Gateway
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
         definition: "{{ lookup('template', item) | from_yaml_all | list }}"
-      loop: [gateway.yml.j2, policy.yml.j2]
+      loop: [gateway.yml.j2]
 
     - name: Read existing Keycloak DNS records
       ansible.builtin.command:

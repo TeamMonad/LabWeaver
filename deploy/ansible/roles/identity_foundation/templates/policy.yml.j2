@@ -51,3 +51,29 @@ spec:
         - ports: [{port: "8080", protocol: TCP}]
 {% endfor %}
 {% endif %}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: identity-cnpg, namespace: {{ identity_namespace }}}
+spec:
+  endpointSelector: {matchLabels: {cnpg.io/cluster: identity-postgres}}
+  ingress:
+    - fromEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: "{{ identity_namespace }}"}
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: cnpg-system}
+      toPorts:
+        - ports: [{port: '5432', protocol: TCP}, {port: '8000', protocol: TCP}]
+    - fromEntities: [host, remote-node]
+  egress:
+    - toEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: "{{ identity_namespace }}"}
+    - toEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s:k8s-app: kube-dns}
+      toPorts:
+        - ports: [{port: '53', protocol: ANY}]
+          rules: {dns: [{matchPattern: '*'}]}
+    - toEntities: [kube-apiserver]
+    - toFQDNs:
+        - matchName: {{ identity_foundation_ha.backup.endpoint | urlsplit('hostname') | to_json }}
+      toPorts:
+        - ports: [{port: "{{ identity_foundation_ha.backup.endpoint | urlsplit('port') | default(443, true) }}", protocol: TCP}]

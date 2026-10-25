@@ -360,6 +360,7 @@ pathlib.Path(__import__('sys').argv[1]).write_text('ok')
             "schema_version": 1,
             "cilium": {"sentinel": sentinel},
             "identity_foundation": {"sentinel": sentinel},
+            "high_availability": {"sentinel": sentinel},
             "platform_foundation": {"admin_tools": {"sentinel": sentinel}},
             "harbor": {
                 "chart_archive_sha256": "b" * 64,
@@ -402,6 +403,7 @@ pathlib.Path(__import__('sys').argv[1]).write_text('ok')
         checks = [
             "cluster_network_cilium_lock.sentinel == 'bundle-only-version'",
             "identity_lock.sentinel == 'bundle-only-version'",
+            "identity_ha_lock.sentinel == 'bundle-only-version'",
             "platform_admin_tools_lock.sentinel == 'bundle-only-version'",
             "platform_foundation_lock.cilium.sentinel == 'bundle-only-version'",
             "platform_buildkit_lock.cilium.sentinel == 'bundle-only-version'",

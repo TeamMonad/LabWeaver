@@ -253,6 +253,8 @@ inventory 的 `file` 引用只接受 `secrets/` 文件。密码类值必须使�
 
 `identitySecretFile` 使用原 identity 角色的 bootstrap YAML。工具派生摘要和本地 locator 标记，角色在受限控制器目录读取 `0600` 文件，并继续使用现有字段校验。无需把该 locator 预先复制到路由器。未指定时，identity playbook 因缺少 locator 明确失败。其旧非 Bundle 调用者继续使用原 root locator。
 
+启用 `identity_foundation_enabled` 或生产 `platform_foundation_ha` 时，还必须在 inventory 的 `all.vars` 提供独立 `identity_foundation_ha`。配置键、默认频率/保留期和故障域约束见[高可用基线](high-availability.md)。身份 locator 增加 `backup_access_key`、`backup_secret_key`、`backup_ca_crt`，只用于身份 namespace 的独立备份 Secret；身份和业务库不得共用/嵌套同一对象归档前缀。Bundle 校验在执行 Ansible 前拒绝缺失的身份备份目标、凭据、非法 WAL 超时（>300 秒）、非每日 base backup 或小于 7 天的保留期。身份库固定使用 CNPG 三实例和 Ceph；先运行 platform foundation 安装 operator，再运行 identity foundation。
+
 Harbor 和 ACME 公网入口也从同一目录读取 locator。将现有 inventory 变量设为文件引用：
 
 ```yaml

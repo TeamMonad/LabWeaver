@@ -1,46 +1,4 @@
 apiVersion: v1
-kind: Service
-metadata: {name: identity-postgres, namespace: {{ identity_namespace }}}
-spec:
-  selector: {app.kubernetes.io/name: identity-postgres}
-  ports: [{name: postgres, port: 5432, targetPort: 5432}]
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata: {name: identity-postgres, namespace: {{ identity_namespace }}}
-spec:
-  serviceName: identity-postgres
-  replicas: 1
-  selector: {matchLabels: {app.kubernetes.io/name: identity-postgres}}
-  template:
-    metadata: {labels: {app.kubernetes.io/name: identity-postgres, app.kubernetes.io/part-of: labweaver-identity}}
-    spec:
-      automountServiceAccountToken: false
-      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}, fsGroup: 70, fsGroupChangePolicy: OnRootMismatch}
-      containers:
-        - name: postgres
-          image: {{ identity_lock.images.postgres }}
-          imagePullPolicy: IfNotPresent
-          env:
-            - {name: POSTGRES_DB, value: keycloak}
-            - {name: POSTGRES_USER, value: keycloak}
-            - name: POSTGRES_PASSWORD
-              valueFrom: {secretKeyRef: {name: {{ identity_database_secret_name }}, key: password}}
-            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
-          ports: [{name: postgres, containerPort: 5432}]
-          readinessProbe: {exec: {command: [pg_isready, -U, keycloak, -d, keycloak]}, initialDelaySeconds: 10, periodSeconds: 10}
-          livenessProbe: {exec: {command: [pg_isready, -U, keycloak, -d, keycloak]}, initialDelaySeconds: 30, periodSeconds: 20}
-          resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
-          securityContext: {runAsUser: 70, runAsGroup: 70, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
-  volumeClaimTemplates:
-    - metadata: {name: data}
-      spec:
-        accessModes: [ReadWriteOnce]
-        storageClassName: {{ identity_storage_class }}
-        resources: {requests: {storage: {{ identity_postgres_storage }}}}
----
-apiVersion: v1
 kind: ConfigMap
 metadata: {name: identity-realm-bootstrap, namespace: {{ identity_namespace }}}
 data:
@@ -59,17 +17,28 @@ kind: Deployment
 metadata: {name: {{ identity_name }}, namespace: {{ identity_namespace }}}
 spec:
   replicas: {{ identity_keycloak_replicas }}
-  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1, maxSurge: 0}}
   selector: {matchLabels: {app.kubernetes.io/name: {{ identity_name }}}}
   template:
     metadata: {labels: {app.kubernetes.io/name: {{ identity_name }}, app.kubernetes.io/part-of: labweaver-identity}}
     spec:
       automountServiceAccountToken: false
       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {app.kubernetes.io/name: {{ identity_name }}}}
+              topologyKey: kubernetes.io/hostname
       initContainers:
         - name: wait-for-database
           image: {{ identity_lock.images.postgres }}
-          command: [sh, -ec, "until pg_isready -h identity-postgres -U keycloak -d keycloak; do sleep 2; done"]
+          command: [sh, -ec, "until psql -h identity-postgres-rw -U keycloak -d keycloak -v ON_ERROR_STOP=1 -Atc 'SELECT 1'; do sleep 2; done"]
+          env:
+            - name: PGPASSWORD
+              valueFrom: {secretKeyRef: {name: {{ identity_database_secret_name }}, key: password}}
+            - {name: PGSSLMODE, value: verify-full}
+            - {name: PGSSLROOTCERT, value: /etc/identity-postgres-ca/ca.crt}
+          volumeMounts: [{name: database-ca, mountPath: /etc/identity-postgres-ca, readOnly: true}]
           securityContext: {runAsUser: 70, runAsGroup: 70, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {cpu: 100m, memory: 128Mi}}
       containers:
@@ -79,7 +48,8 @@ spec:
           args: [start, --import-realm]
           env:
             - {name: KC_DB, value: postgres}
-            - {name: KC_DB_URL_HOST, value: identity-postgres}
+            - {name: KC_DB_URL_HOST, value: identity-postgres-rw}
+            - {name: KC_DB_URL_PROPERTIES, value: "?sslmode=verify-full&sslrootcert=/etc/identity-postgres-ca/ca.crt"}
             - {name: KC_DB_URL_DATABASE, value: keycloak}
             - {name: KC_DB_USERNAME, value: keycloak}
             - name: KC_DB_PASSWORD
@@ -100,8 +70,15 @@ spec:
           livenessProbe: {httpGet: {path: /health/live, port: management}, periodSeconds: 20}
           resources: {requests: {cpu: 500m, memory: 768Mi}, limits: {cpu: "2", memory: 2Gi}}
           securityContext: {runAsUser: 1000, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-          volumeMounts: [{name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}]
-      volumes: [{name: realm, configMap: {name: identity-realm-bootstrap}}]
+          volumeMounts:
+            - {name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}
+            - {name: database-ca, mountPath: /etc/identity-postgres-ca, readOnly: true}
+      volumes:
+        - {name: realm, configMap: {name: identity-realm-bootstrap}}
+        - name: database-ca
+          secret:
+            secretName: identity-postgres-ca
+            items: [{key: ca.crt, path: ca.crt}]
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
